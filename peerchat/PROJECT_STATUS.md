@@ -35,7 +35,8 @@
   cryptographic device identity. Actual subnet masks decide whether a private candidate is local.
 - Deterministic logical message ordering in protocol/storage with stable duplicate handling and
   legacy-history compatibility.
-- One Private-network-only inbound TCP firewall rule scoped to the packaged client and listener port.
+- One installation-wide, Private-network-only inbound TCP firewall rule scoped to the exact packaged
+  client and listener port; matching rules are silently reused across profiles without elevation.
 - Debugging Tools back up the protected profile, reset by moving the live profile into a timestamped
   backup, and restore with an automatic safety backup. Server data is never modified.
 - Startup selects a stable-ID local profile before constructing/starting the native core. Profile
@@ -79,6 +80,9 @@
 - Profile-manager and native-adapter coverage passes idempotent legacy migration, preserved Peer ID,
   trust and readable encrypted history, distinct A/B identities, no A state in B, A → B → A
   restoration, and B-only reset/restore.
+- `tests\test-profile-bootstrap.ps1`: passed the real packaged chooser for existing/new profiles,
+  clean A → B → A process replacement, exact selected-profile startup, and installation firewall
+  reuse with no rule update during either switch.
 - The packaged friend test now continues direct messaging after both discovery event channels stop.
 - Physical LAN firewall testing previously passed: one Private-only rule reused without repeat UAC.
 
@@ -107,5 +111,5 @@ in-process switching must preserve this same boundary and may not keep two cores
 - Voice, video, screen sharing, groups, file transfer, updater, disappearing messages, Discord
   integration, and multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest implementation checkpoint: `Add isolated local profiles and safe legacy migration`
-  (after `Document PeerChat account isolation gate` and the stabilized networking baseline).
+- Latest implementation checkpoint: `Fix packaged profile bootstrap and firewall reuse`
+  (after `Add isolated local profiles and safe legacy migration`).

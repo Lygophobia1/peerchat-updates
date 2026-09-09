@@ -50,8 +50,10 @@ after native Ready. An unavailable server leaves the profile in Offline / Direct
 manual connections and saved direct reconnects available.
 
 v0.3-beta switching is restart-based. The active client stops discovery events/heartbeats, P2P
-sessions and listener, joins/releases the native worker, flushes/closes SQLite, and then starts the
-chooser in a replacement process. Only one selected profile is opened. In-memory friend state,
+sessions and listener, joins/releases the native worker off the UI thread, flushes/closes SQLite,
+and only then starts the chooser in a replacement process using the current executable path and
+installation root. The temporary chooser uses an explicit WPF lifetime so closing it cannot end
+the application before the selected profile's main window opens. Only one selected profile is opened. In-memory friend state,
 unread counts, endpoint caches, connection generations, and pending trust prompts therefore cannot
 cross the switch. Profile removal is confirmed and recoverable under `RemovedProfiles`.
 
@@ -131,8 +133,13 @@ or certificates.
 
 After the native Ready event reveals the actual P2P listener port, the client ensures one inbound
 TCP rule named `PeerChat P2P (Private)`, scoped to the packaged executable and Private networks.
-It never enables Public-network access. Firewall/TCP diagnostics remain separate from TLS and
-identity failures.
+The rule belongs to the installation, not a profile. A hidden, non-elevated query first validates
+its enabled state, inbound direction, Private-only scope, TCP protocol, Allow action, exact current
+executable path, and listener port. An exact match is reused without running an elevated modify
+command; elevation occurs only when the rule is missing or stale. Successful verification is
+recorded in install-wide `firewall-state.dat`, but the live Windows rule remains authoritative.
+It never enables Public-network access or disables Windows Firewall. Firewall/TCP diagnostics
+remain separate from TLS and identity failures.
 
 ## Repository and release layout
 
