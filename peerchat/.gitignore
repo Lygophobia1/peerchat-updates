@@ -1,0 +1,9 @@
+*.exe
+*.key
+__pycache__/
+*.o
+*.dll
+build/
+releases/
+*.sqlite*
+.tools/

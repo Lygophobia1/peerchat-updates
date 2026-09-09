@@ -1,0 +1,32 @@
+using System;
+using PeerChatDesktop;
+
+namespace PeerChat.ServerTests {
+class DiscoveryIntegrationTest {
+    static void Require(bool value,string message){if(!value)throw new Exception(message);}
+    static bool Fails(Action action){try{action();return false;}catch{return true;}}
+    public static int Main(string[] args){
+        try {
+            string host=args[0],pin=args[1];int port=Int32.Parse(args[2]);
+            if(args.Length>3&&args[3]=="--after-restart") { var aliceAfterRestart=new DiscoveryClient(host,port,pin);aliceAfterRestart.Login("alice-7f3k","correct horse battery staple");var bobAfterRestart=aliceAfterRestart.Search("bob-4m2q");Require(bobAfterRestart.PublicIdentity=="peer-public-fingerprint-bob-0123456789","server restart lost registered device identity");Require(aliceAfterRestart.GetFriendState().Friends.Exists(x=>x.AccountId==bobAfterRestart.AccountId),"server restart lost friendship");Console.WriteLine("PASS: durable account, device, search, and friendship state survived server restart.");return 0; }
+            var alice=new DiscoveryClient(host,port,pin);alice.Register("alice-7f3k","correct horse battery staple","peer-public-fingerprint-alice-0123456789");alice.ReportPresence("peer-public-fingerprint-alice-0123456789");
+            Require(Fails(()=>{var duplicate=new DiscoveryClient(host,port,pin);duplicate.Register("alice-7f3k","other-password","peer-public-fingerprint-duplicate-0123456789");}),"duplicate username accepted");
+            Require(Fails(()=>{var invalid=new DiscoveryClient(host,port,pin);invalid.Login("alice-7f3k","wrong password");}),"invalid login accepted");
+            var bob=new DiscoveryClient(host,port,pin);bob.Register("bob-4m2q","another correct password","peer-public-fingerprint-bob-0123456789");bob.ReportPresence("peer-public-fingerprint-bob-0123456789");
+            // The account exists but deliberately has no active discovery session or presence.
+            // Pending requests must survive until this offline recipient signs in later.
+            var offlineCreator=new DiscoveryClient(host,port,pin);offlineCreator.Register("offline-2m2","offline account password","peer-public-fingerprint-offline-0123456789");
+            var offlineIdentity=bob.Search("offline-2m2");Require(!offlineIdentity.Online,"offline account unexpectedly appeared online");Require(bob.SendFriendRequest(offlineIdentity.AccountId)=="pending","offline recipient request was not pending");Require(bob.CancelFriendRequest(offlineIdentity.AccountId)=="cancelled","outgoing request cancellation failed");
+            var offlineRecipient=new DiscoveryClient(host,port,pin);offlineRecipient.Login("offline-2m2","offline account password");var bobForOffline=offlineRecipient.Search("bob-4m2q");Require(offlineRecipient.GetFriendState().Incoming.Count==0,"cancelled request remained for offline recipient");Require(bob.SendFriendRequest(offlineIdentity.AccountId)=="pending","offline recipient request could not be resent");Require(offlineRecipient.GetFriendState().Incoming.Exists(x=>x.AccountId==bobForOffline.AccountId),"offline recipient did not recover pending request after login");Require(offlineRecipient.RespondToFriendRequest(bobForOffline.AccountId,false)=="rejected","offline recipient could not reject recovered request");
+            var found=bob.Search("alice-7f3k");Require(found.Username=="alice-7f3k","wrong username returned");Require(found.PublicIdentity=="peer-public-fingerprint-alice-0123456789","wrong public identity returned");Require(found.Online,"presence was not returned");
+            var suggestions=bob.Suggest("ALICE");Require(suggestions.Count==1&&suggestions[0].Username=="alice-7f3k","case-insensitive prefix suggestions failed");
+            Require(Fails(()=>bob.Search("bob-4m2q")),"exact discovery returned the signed-in account");Require(bob.Suggest("bob").Count==0,"suggestions returned the signed-in account");
+            var bobIdentity=alice.Search("bob-4m2q");Require(bob.SendFriendRequest(found.AccountId)=="pending","friend request was not pending");Require(Fails(()=>bob.SendFriendRequest(found.AccountId)),"duplicate friend request accepted");Require(alice.GetFriendState().Incoming.Exists(x=>x.AccountId==bobIdentity.AccountId),"offline-safe incoming request was not returned");Require(alice.RespondToFriendRequest(bobIdentity.AccountId,true)=="friends","friend request acceptance failed");Require(alice.GetFriendState().Friends.Exists(x=>x.AccountId==bobIdentity.AccountId&&x.Online),"accepted friendship or online presence missing for recipient");Require(bob.GetFriendState().Friends.Exists(x=>x.AccountId==found.AccountId&&x.Online),"accepted friendship or online presence missing for sender");
+            Require(alice.RemoveFriend(bobIdentity.AccountId)=="removed","friend removal failed");Require(bob.SendFriendRequest(found.AccountId)=="pending","second friend request was not pending");Require(alice.SendFriendRequest(bobIdentity.AccountId)=="accepted_crossed","crossed request did not become friendship");Require(alice.SetBlocked(bobIdentity.AccountId,true)=="blocked","block failed");Require(Fails(()=>bob.SendFriendRequest(found.AccountId)),"blocked user could send a friend request");Require(Fails(()=>bob.Search("alice-7f3k")),"blocked account remained visible to exact discovery");Require(bob.Suggest("alice").Count==0,"blocked account remained visible to suggestions");Require(alice.SetBlocked(bobIdentity.AccountId,false)=="unblocked","unblock failed");Require(bob.SendFriendRequest(found.AccountId)=="pending","request after unblock failed");Require(alice.RespondToFriendRequest(bobIdentity.AccountId,false)=="rejected","reject failed");
+            Require(bob.SendFriendRequest(found.AccountId)=="pending","rejected request could not be resent");Require(alice.RespondToFriendRequest(bobIdentity.AccountId,true)=="friends","final friendship acceptance failed");
+            Require(Fails(()=>{var reusedDevice=new DiscoveryClient(host,port,pin);reusedDevice.Register("reuse-9q","password","peer-public-fingerprint-bob-0123456789");}),"duplicate public device identity accepted");
+            Require(Fails(()=>bob.Search("bad space")),"malformed search accepted");Console.WriteLine("PASS: account/authentication, public identity, presence/search, friend request, accept/reject, crossed requests, remove, block/unblock, and authoritative friend state.");return 0;
+        }catch(Exception error){Console.Error.WriteLine("FAIL: "+error.Message);return 1;}
+    }
+}
+}

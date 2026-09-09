@@ -1,0 +1,56 @@
+// Packaged WPF friend-system exercise. This test opens two real DesktopApplication windows
+// backed by two isolated native profiles and a real TLS discovery server. It exercises the same
+// Find Friends and Friend Requests controls that a user sees; it does not seed friend UI state.
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Threading;
+using PeerChatDesktop;
+
+class FriendUiSmoke {
+    static void Require(bool value,string message){if(!value)throw new Exception(message);}
+    static Window WindowOf(DesktopApplication desktop){return (Window)typeof(DesktopApplication).GetField("window",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(desktop);}
+    static ChatViewModel ModelOf(DesktopApplication desktop){return (ChatViewModel)typeof(DesktopApplication).GetField("model",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(desktop);}
+    static void SetDiscovery(DesktopApplication desktop,DiscoveryClient client){typeof(DesktopApplication).GetField("discovery",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(desktop,client);typeof(DesktopApplication).GetField("discoveryRestored",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(desktop,true);}
+    static void RefreshFriends(DesktopApplication desktop){typeof(DesktopApplication).GetMethod("RefreshFriendState",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,null);}
+    static void Press(Window window,string name){((Button)window.FindName(name)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));}
+    static T FindVisual<T>(DependencyObject root) where T:DependencyObject {if(root is T)return (T)root;for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var found=FindVisual<T>(VisualTreeHelper.GetChild(root,i));if(found!=null)return found;}return null;}
+    static Button FindButton(DependencyObject root,string text){for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);var button=child as Button;if(button!=null&&String.Equals(Convert.ToString(button.Content),text,StringComparison.Ordinal))return button;var nested=FindButton(child,text);if(nested!=null)return nested;}return null;}
+    static bool ContainsText(DependencyObject root,string value){var text=root as TextBlock;if(text!=null&&text.Text!=null&&text.Text.IndexOf(value,StringComparison.OrdinalIgnoreCase)>=0)return true;for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++)if(ContainsText(VisualTreeHelper.GetChild(root,i),value))return true;return false;}
+    static Window Owned(Window owner,string title){return owner.OwnedWindows.Cast<Window>().FirstOrDefault(item=>item.Title==title);}
+    static void DriveFind(Window sender,string targetUsername){bool submitted=false;DateTime deadline=DateTime.UtcNow.AddSeconds(10);var timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(75)};timer.Tick+=(s,e)=>{var dialog=Owned(sender,"Find Friends");if(dialog==null)return;if(DateTime.UtcNow>deadline){timer.Stop();dialog.Close();return;}var query=FindVisual<TextBox>(dialog);if(query==null)return;if(query.Text!=targetUsername){query.Text=targetUsername;return;}var add=FindButton(dialog,"Add Friend");if(add==null)return;submitted=true;timer.Stop();add.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));dialog.Close();};timer.Start();Press(sender,"FindFriend");Require(submitted,"Find Friends did not expose a usable Add Friend result card");}
+    static Task DriveAccept(Window recipient){var completion=new TaskCompletionSource<bool>();DateTime deadline=DateTime.UtcNow.AddSeconds(10);var timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(75)};timer.Tick+=(s,e)=>{var dialog=Owned(recipient,"Friend Requests");if(dialog==null)return;if(DateTime.UtcNow>deadline){timer.Stop();dialog.Close();completion.SetException(new Exception("Incoming Friend Request did not expose an Accept action"));return;}var accept=FindButton(dialog,"Accept");if(accept==null)return;timer.Stop();accept.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));completion.SetResult(true);};timer.Start();Press(recipient,"FriendRequests");return completion.Task;}
+    static Task VerifyFriendVisible(Window owner,string username){var completion=new TaskCompletionSource<bool>();DateTime deadline=DateTime.UtcNow.AddSeconds(10);var timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(75)};timer.Tick+=(s,e)=>{var dialog=Owned(owner,"Friend Requests");if(dialog==null)return;if(DateTime.UtcNow>deadline){timer.Stop();dialog.Close();completion.SetException(new Exception("Accepted friend was not visibly listed in the packaged Friend Requests UI"));return;}if(!ContainsText(dialog,username)||FindButton(dialog,"Remove")==null)return;timer.Stop();dialog.Close();completion.SetResult(true);};timer.Start();Press(owner,"FriendRequests");return completion.Task;}
+    static Task DriveMessage(Window owner){var completion=new TaskCompletionSource<bool>();DateTime deadline=DateTime.UtcNow.AddSeconds(10);var timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(75)};timer.Tick+=(s,e)=>{var dialog=Owned(owner,"Friend Requests");if(dialog==null)return;if(DateTime.UtcNow>deadline){timer.Stop();dialog.Close();completion.SetException(new Exception("Accepted friend did not expose a Message action"));return;}var message=FindButton(dialog,"Message");if(message==null)return;timer.Stop();message.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));dialog.Close();completion.SetResult(true);};timer.Start();Press(owner,"FriendRequests");return completion.Task;}
+    static Task AutoTrust(Window owner){var completion=new TaskCompletionSource<bool>();DateTime deadline=DateTime.UtcNow.AddSeconds(15);var timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(75)};timer.Tick+=(s,e)=>{if(DateTime.UtcNow>deadline){timer.Stop();completion.SetException(new Exception("P2P trust prompt did not appear"));return;}foreach(Window dialog in owner.OwnedWindows){var trust=FindButton(dialog,"Trust peer");if(trust!=null){trust.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));timer.Stop();completion.SetResult(true);return;}}};timer.Start();return completion.Task;}
+    static bool Ready(DesktopApplication desktop){var model=ModelOf(desktop);return model.Selected!=null&&model.Selected.Online&&model.Selected.Contact!=null&&model.Selected.Contact.verified;}
+    static async Task Run(string[] args){
+        string dataA=args[0];string dataB=args[1];string host=args[2];string pin=args[3];int port=Int32.Parse(args[4]);
+        var first=new DesktopApplication(dataA,29441);var second=new DesktopApplication(dataB,29442);var firstWindow=WindowOf(first);var secondWindow=WindowOf(second);
+        foreach(var window in new[]{firstWindow,secondWindow}){window.ShowInTaskbar=false;window.ShowActivated=false;window.WindowStartupLocation=WindowStartupLocation.Manual;window.Left=-20000;window.Show();}
+        await Task.Delay(2500);string alphaIdentity="",betaIdentity="",startupStatus="";firstWindow.Dispatcher.Invoke(()=>{var firstModel=ModelOf(first);var secondModel=ModelOf(second);alphaIdentity=firstModel.OwnId;betaIdentity=secondModel.OwnId;startupStatus=firstModel.Status+" / "+secondModel.Status;});Require(alphaIdentity.Length>0&&betaIdentity.Length>0,"Native profile identities did not open: "+startupStatus);
+        var trust=new Func<string,int,string,bool,bool>((h,p,f,r)=>true);
+        var alpha=new DiscoveryClient(host,port,pin,trust);var beta=new DiscoveryClient(host,port,pin,trust);
+        alpha.Register("ui-alpha-2m2","friend smoke password alpha",alphaIdentity);alpha.ReportPresence(alphaIdentity,"127.0.0.1",29441);
+        beta.Register("ui-beta-2m2","friend smoke password beta",betaIdentity);beta.ReportPresence(betaIdentity,"127.0.0.1",29442);
+        firstWindow.Dispatcher.Invoke(()=>{SetDiscovery(first,alpha);RefreshFriends(first);});secondWindow.Dispatcher.Invoke(()=>{SetDiscovery(second,beta);RefreshFriends(second);});await Task.Delay(500);
+        secondWindow.Dispatcher.Invoke(()=>DriveFind(secondWindow,"ui-alpha-2m2"));await Task.Delay(700);
+        Require(alpha.GetFriendState().Incoming.Any(item=>item.Username=="ui-beta-2m2"),"Request sent through packaged Find Friends UI did not reach the recipient");
+        var acceptTask=firstWindow.Dispatcher.Invoke(()=>DriveAccept(firstWindow));await acceptTask;await Task.Delay(800);
+        Require(alpha.GetFriendState().Friends.Any(item=>item.Username=="ui-beta-2m2"),"Accepted friend is missing for recipient");Require(beta.GetFriendState().Friends.Any(item=>item.Username=="ui-alpha-2m2"),"Accepted friend is missing for sender");
+        secondWindow.Dispatcher.Invoke(()=>RefreshFriends(second));await Task.Delay(500);var visibleTask=secondWindow.Dispatcher.Invoke(()=>VerifyFriendVisible(secondWindow,"ui-alpha-2m2"));await visibleTask;
+        var messageTask=secondWindow.Dispatcher.Invoke(()=>DriveMessage(secondWindow));await messageTask;var trustAlpha=firstWindow.Dispatcher.Invoke(()=>AutoTrust(firstWindow));var trustBeta=secondWindow.Dispatcher.Invoke(()=>AutoTrust(secondWindow));await Task.WhenAll(trustAlpha,trustBeta);
+        DateTime readyDeadline=DateTime.UtcNow.AddSeconds(15);while(DateTime.UtcNow<readyDeadline){if(firstWindow.Dispatcher.Invoke(()=>Ready(first))&&secondWindow.Dispatcher.Invoke(()=>Ready(second)))break;await Task.Delay(100);}Require(firstWindow.Dispatcher.Invoke(()=>Ready(first))&&secondWindow.Dispatcher.Invoke(()=>Ready(second)),"Friend Message action did not establish a verified direct P2P session");
+        string text="Friend-to-chat packaged P2P smoke";secondWindow.Dispatcher.Invoke(()=>{var input=(TextBox)secondWindow.FindName("Composer");Require(input.IsEnabled,"Friend composer was not enabled after direct authentication");input.Text=text;Press(secondWindow,"Send");});await Task.Delay(1500);Require(firstWindow.Dispatcher.Invoke(()=>ModelOf(first).Selected.Messages.Any(item=>item.Text==text&&!item.Outgoing)),"Friend-to-chat message did not arrive over direct P2P");
+        firstWindow.Dispatcher.Invoke(()=>firstWindow.Close());secondWindow.Dispatcher.Invoke(()=>secondWindow.Close());
+        // Closing is intentionally asynchronous while each native node drains and stops. Let the
+        // real WPF close handlers finish before the harness shuts down its dispatcher.
+        await Task.Delay(1200);
+    }
+    [STAThread] public static int Main(string[] args){int result=0;var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var run=Run(args);run.ContinueWith(task=>app.Dispatcher.BeginInvoke(new Action(()=>{if(task.IsFaulted){result=1;Console.Error.WriteLine("FAIL: "+task.Exception.GetBaseException());}else Console.WriteLine("PASS: two packaged WPF clients found, requested, accepted, opened a DM, authenticated direct P2P, and exchanged a message.");app.Shutdown();})));app.Run();Environment.Exit(result);return result;}
+}
