@@ -10,7 +10,7 @@
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
 **Current Milestone:** Milestone 3 — Automatic Direct Connection + Message Ordering  
-**Current Priority:** packaged two-computer validation of the profile-isolated Internet identity path
+**Current Priority:** remaining identity-change/restart acceptance and visible legacy-profile upgrade validation
 
 ## Current builds
 
@@ -84,21 +84,25 @@
   clean A → B → A process replacement, exact selected-profile startup, and installation firewall
   reuse with no rule update during either switch.
 - The packaged friend test now continues direct messaging after both discovery event channels stop.
-- Physical LAN firewall testing previously passed: one Private-only rule reused without repeat UAC.
+- Manual packaged acceptance passed local-network and separate-network/hotspot direct P2P using a
+  fresh account/device, fresh-machine firewall approval, and successfully authenticated chat.
+- Physical LAN firewall testing also passed one Private-only rule reused without repeat UAC.
 
 ## Current blocker / next action
 
-Automated and local packaged coverage is green. Remaining acceptance evidence requires two physical
-computers on separate Internet connections: verify the authorized public candidate and P2P port,
-accept one identity-change prompt after Fresh Client reset, exchange messages, restart without
-another prompt, then stop discovery and confirm the established direct chat continues.
+Automated and local packaged coverage is green. Physical local-network and separate-network/hotspot
+direct P2P, fresh account/device setup, fresh-machine firewall approval, and authenticated chat are
+manually accepted. Remaining physical acceptance is to confirm one identity-change prompt after a
+Fresh Client reset, restart without another prompt, then stop discovery and confirm the established
+direct chat continues.
 
 Also run one manual upgrade against a disposable copy of a real pre-profile client state: confirm
 the profile-card chooser, legacy Peer ID/history, add/rename/recoverable-remove actions, restart-based
 switch, and selected-profile-only backup/reset/restore. Automated DPAPI/ciphertext migration is green,
 but this visible packaged upgrade acceptance has not been performed on a user's real legacy state.
 
-Milestone 3 must not advance to NAT traversal or relay until that physical test passes.
+Milestone 3 must not advance to NAT traversal or relay until the remaining identity-change and
+discovery-independence checks pass.
 
 The account-isolation startup gate is implemented with restart-based switching for v0.3-beta.
 Discovery/events and P2P sessions stop, the native worker closes SQLite and clears identity state,
@@ -111,5 +115,5 @@ in-process switching must preserve this same boundary and may not keep two cores
 - Voice, video, screen sharing, groups, file transfer, updater, disappearing messages, Discord
   integration, and multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest implementation checkpoint: `Fix packaged profile bootstrap and firewall reuse`
-  (after `Add isolated local profiles and safe legacy migration`).
+- Latest project checkpoint: `Record physical P2P acceptance`
+  (after `Fix packaged profile bootstrap and firewall reuse`).
