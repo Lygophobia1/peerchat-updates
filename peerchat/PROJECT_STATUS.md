@@ -79,6 +79,12 @@ another prompt, then stop discovery and confirm the established direct chat cont
 
 Milestone 3 must not advance to NAT traversal or relay until that physical test passes.
 
+The next independent account-isolation stage requires a deliberate startup boundary: select or
+authenticate an account profile before the native core opens identity/history storage, then migrate
+the existing legacy profile once. Implementing account switching after the current native profile
+has already opened would risk cross-account identity, trust, and history leakage, so that partial
+approach was intentionally not added during stabilization.
+
 ## Known/deferred work
 
 - NAT traversal/STUN/ICE and relay are Milestones 4/5.
