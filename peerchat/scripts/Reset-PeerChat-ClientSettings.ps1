@@ -1,54 +1,33 @@
-param(
-    [switch]$FreshProfile,
-    [switch]$KeepBackup
-)
-
+param([switch]$FreshProfile,[switch]$FullInstall,[string]$ProfileId,[switch]$KeepBackup)
 $ErrorActionPreference = 'Stop'
-$profilePath = Join-Path $env:LOCALAPPDATA 'PeerChat'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$backupPath = Join-Path ([Environment]::GetFolderPath('Desktop')) ("PeerChat-backup-" + $stamp)
+$installRoot = Join-Path $env:LOCALAPPDATA 'PeerChat'
+$catalogPath = Join-Path $installRoot 'profiles.json'
+$backupPath = Join-Path ([Environment]::GetFolderPath('Desktop')) ("PeerChat-backup-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
-Write-Host "PeerChat client profile: $profilePath"
-Write-Host "A backup will be created at: $backupPath"
-if (-not $FreshProfile) {
-    Write-Host "Mode: reset discovery endpoint/session only; identity, contacts, and encrypted history stay intact."
+if ($FullInstall) {
+    $targetPath=$installRoot; $backupName='PeerChatInstall'; $mode='FULL INSTALL reset: every profile will be backed up and removed.'
+} elseif (Test-Path -LiteralPath $catalogPath) {
+    $catalog=Get-Content -Raw -LiteralPath $catalogPath | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace($ProfileId)) {$ProfileId=$catalog.SelectedProfileId}
+    $profile=@($catalog.Profiles | Where-Object {$_.Id -ceq $ProfileId})
+    if ($profile.Count -ne 1 -or $ProfileId -notmatch '^[0-9a-f]{32}$') {throw 'The requested stable local profile ID was not found.'}
+    $targetPath=Join-Path (Join-Path $installRoot 'Profiles') $ProfileId; $backupName='PeerChatProfile'
+    $mode=if($FreshProfile){"reset only '$($profile[0].Name)' ($ProfileId); other profiles are untouched."}else{"clear only discovery settings/session for '$($profile[0].Name)' ($ProfileId)."}
 } else {
-    Write-Host "Mode: fresh disposable profile; the existing profile will be moved into the backup."
+    $targetPath=$installRoot; $backupName='PeerChat'; $mode=if($FreshProfile){'reset the legacy single profile.'}else{'clear only legacy discovery settings/session.'}
 }
-$answer = Read-Host 'Type RESET to continue'
-if ($answer -cne 'RESET') { Write-Host 'Cancelled.'; exit 0 }
-
-Get-Process -Name 'PeerChat.Desktop' -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+Write-Host "Target: $targetPath"; Write-Host "Mode: $mode"; Write-Host "Backup: $backupPath"
+if ((Read-Host 'Type RESET to continue') -cne 'RESET') {Write-Host 'Cancelled.'; exit 0}
+Get-Process -Name 'PeerChat.Desktop' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
-
-if (-not (Test-Path -LiteralPath $profilePath)) {
-    Write-Host 'No existing client profile was found. The packaged bootstrap will be used on next launch.'
-    exit 0
-}
-
+if (-not (Test-Path -LiteralPath $targetPath)) {Write-Host 'The requested profile state does not exist.'; exit 0}
 New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
-
-if ($FreshProfile) {
-    # Moving the directory preserves a complete recovery copy, including the DPAPI-protected
-    # identity and encrypted SQLite history. The next launch creates a new profile directory.
-    Move-Item -LiteralPath $profilePath -Destination (Join-Path $backupPath 'PeerChat')
-    Write-Host 'Fresh profile prepared. The old identity/history is preserved in the backup.'
+if ($FullInstall -or $FreshProfile) {
+    Move-Item -LiteralPath $targetPath -Destination (Join-Path $backupPath $backupName)
+    if (-not $FullInstall) {New-Item -ItemType Directory -Path $targetPath -Force | Out-Null}
+    Write-Host 'Reset complete. The next open generates a new Peer ID for this profile only.'
 } else {
-    foreach ($name in @('discovery-service.dat','discovery-session.dat')) {
-        $source = Join-Path $profilePath $name
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -LiteralPath $source -Destination $backupPath -Force
-            Remove-Item -LiteralPath $source -Force
-            Write-Host "Removed saved setting: $name"
-        } else {
-            Write-Host "Setting not present: $name"
-        }
-    }
-    Write-Host 'Peer ID, contacts, and encrypted local history were retained.'
+    foreach($name in @('discovery-service.dat','discovery-session.dat')) {$source=Join-Path $targetPath $name;if(Test-Path -LiteralPath $source){Move-Item -LiteralPath $source -Destination $backupPath -Force;Write-Host "Removed saved setting: $name"}}
+    Write-Host 'Peer ID, trust, contacts, endpoints, unread state, and encrypted history were retained.'
 }
-
-if (-not $KeepBackup) {
-    Write-Host "Backup retained at $backupPath. Remove it manually after testing if no longer needed."
-}
-
+if (-not $KeepBackup) {Write-Host "Backup retained at $backupPath"}

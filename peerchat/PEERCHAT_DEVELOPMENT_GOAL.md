@@ -115,6 +115,14 @@ Used for:
 - presence
 - future device registration
 
+## Local Profile
+
+A stable local workspace selected before native-core startup. Its internal ID and directory do
+not change when an account username changes. A local profile exclusively owns its device Peer ID,
+private key, trust, encrypted history, contacts, endpoints, unread/pending UI state, relevant
+settings, discovery/friend cache, and protected account session. Different local profiles do not
+share a private device identity by default.
+
 ## Cryptographic Device / Peer Identity
 
 Used for:
@@ -136,6 +144,11 @@ Do NOT upload private peer/device identity keys to the server.
 A username alone is not proof of cryptographic identity.
 
 IP addresses and ports are connection information, NOT identity.
+
+The relationship is: an **account** is a social/server identity, a **local profile** is one
+installation's account workspace, a **device Peer ID** is cryptographic identity, **trust** is an
+explicit account/device association, an **endpoint** is only a temporary route candidate, and the
+**server** coordinates discovery but is not required to open local state or use Direct P2P.
 
 Design the account/device relationship so multiple authorized devices per account can be supported later without replacing the identity model.
 

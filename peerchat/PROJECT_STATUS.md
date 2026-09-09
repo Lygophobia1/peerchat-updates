@@ -10,7 +10,7 @@
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
 **Current Milestone:** Milestone 3 — Automatic Direct Connection + Message Ordering  
-**Current Priority:** packaged two-computer validation of the stabilized Internet identity path
+**Current Priority:** packaged two-computer validation of the profile-isolated Internet identity path
 
 ## Current builds
 
@@ -38,6 +38,14 @@
 - One Private-network-only inbound TCP firewall rule scoped to the packaged client and listener port.
 - Debugging Tools back up the protected profile, reset by moving the live profile into a timestamped
   backup, and restore with an automatic safety backup. Server data is never modified.
+- Startup selects a stable-ID local profile before constructing/starting the native core. Profile
+  cards support add, rename, recoverable remove, last-used state, and opening the selected profile;
+  the main profile bubble reopens the chooser through a clean restart.
+- Each profile isolates device identity/Peer ID, trust, encrypted history, contacts/endpoints/outbox,
+  discovery configuration/session, account/friend runtime state, unread state, and pending prompts.
+- Legacy state is copied to recovery and staging locations, SHA-256 verified, marked complete, and
+  atomically cataloged. Original files remain recoverable and ciphertext is not re-encrypted.
+- Backup, reset, and restore affect the selected profile. Reset gives only it a new Peer ID.
 
 ## Stabilization changes
 
@@ -68,6 +76,10 @@
   Send/Attachment state, history, reconnect, and bidirectional delivery.
 - `tests\test-friend-ui.ps1`: passed two packaged clients finding, requesting, accepting,
   opening an authenticated direct DM, and exchanging a message.
+- Profile-manager and native-adapter coverage passes idempotent legacy migration, preserved Peer ID,
+  trust and readable encrypted history, distinct A/B identities, no A state in B, A → B → A
+  restoration, and B-only reset/restore.
+- The packaged friend test now continues direct messaging after both discovery event channels stop.
 - Physical LAN firewall testing previously passed: one Private-only rule reused without repeat UAC.
 
 ## Current blocker / next action
@@ -77,13 +89,17 @@ computers on separate Internet connections: verify the authorized public candida
 accept one identity-change prompt after Fresh Client reset, exchange messages, restart without
 another prompt, then stop discovery and confirm the established direct chat continues.
 
+Also run one manual upgrade against a disposable copy of a real pre-profile client state: confirm
+the profile-card chooser, legacy Peer ID/history, add/rename/recoverable-remove actions, restart-based
+switch, and selected-profile-only backup/reset/restore. Automated DPAPI/ciphertext migration is green,
+but this visible packaged upgrade acceptance has not been performed on a user's real legacy state.
+
 Milestone 3 must not advance to NAT traversal or relay until that physical test passes.
 
-The next independent account-isolation stage requires a deliberate startup boundary: select or
-authenticate an account profile before the native core opens identity/history storage, then migrate
-the existing legacy profile once. Implementing account switching after the current native profile
-has already opened would risk cross-account identity, trust, and history leakage, so that partial
-approach was intentionally not added during stabilization.
+The account-isolation startup gate is implemented with restart-based switching for v0.3-beta.
+Discovery/events and P2P sessions stop, the native worker closes SQLite and clears identity state,
+and the replacement process selects exactly one profile before constructing its core. Later
+in-process switching must preserve this same boundary and may not keep two cores open.
 
 ## Known/deferred work
 
@@ -91,5 +107,5 @@ approach was intentionally not added during stabilization.
 - Voice, video, screen sharing, groups, file transfer, updater, disappearing messages, Discord
   integration, and multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- The first scoped PeerChat source checkpoint is the commit named
-  `Stabilize PeerChat v0.3 networking and identity`.
+- Latest implementation checkpoint: `Add isolated local profiles and safe legacy migration`
+  (after `Document PeerChat account isolation gate` and the stabilized networking baseline).

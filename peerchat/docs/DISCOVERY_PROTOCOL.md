@@ -21,6 +21,11 @@ never logged or persisted by clients.
 
 ## Account/session operations
 
+Client session tokens are scoped to the selected stable local profile. Profile selection and native
+device-identity loading happen before any operation in this section. Switching closes the event
+channel and discards account/friend/presence runtime state before another profile authenticates.
+The server never receives the local profile ID.
+
 - `register`: `username`, `password`, `publicIdentity`; returns session token, account ID,
   normalized username, and lifetime.
 - `login`: `username`, `password`; returns the same session fields.
@@ -73,6 +78,10 @@ Events notify clients to update or reconcile; they are not a second source of tr
 a full snapshot at login and event-channel reconnect. The bounded fallback is three minutes while
 events are healthy and one minute while reconnecting. Event reconnect uses backoff and direct P2P
 sessions continue independently.
+
+If initial authentication, presence, or events are unavailable, the selected encrypted profile
+remains open in Offline / Direct P2P mode. Manual/saved direct connections do not require this
+protocol, and established direct sessions are not closed when discovery disconnects.
 
 ## Security and privacy
 

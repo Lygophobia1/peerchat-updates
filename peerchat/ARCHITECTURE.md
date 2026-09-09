@@ -22,10 +22,12 @@ not require the Admin application.
 ## Identity and trust boundaries
 
 - **Account identity:** username, login, friend relationships, discovery, and presence.
+- **Local profile:** stable-ID local account workspace selected before native-core initialization.
 - **Device/Peer ID:** persistent public cryptographic identity derived from the device TLS key.
-- **Local trust:** the peer fingerprint/public key explicitly accepted on this installation.
+- **Local trust:** an explicit account/device association stored only in the selected profile.
 - **Endpoint candidate:** a temporary network route. An IP address is never an identity.
 - **Local history:** encrypted client-side messages and delivery/order metadata.
+- **Server:** optional social/discovery coordination; it is not required for local profile access.
 
 The server receives public device identity only. Private device keys, plaintext messages, chat
 keys, password plaintext, and local history never leave the client. Passwords produce salted
@@ -37,6 +39,25 @@ account. Friends receive that current identity as the expected identity for a di
 If TLS presents a different identity, the client shows one explicit verification prompt keyed by
 expected identity, presented identity, and connection generation. Acceptance persists the new
 local trust; rejection suppresses repeats for that attempt only.
+
+## Profile bootstrap and lifecycle
+
+Normal startup reads `%LOCALAPPDATA%\PeerChat\profiles.json`, shows profile cards, and resolves the
+selected stable ID to `Profiles\<profile-id>`. Only after selection does the desktop construct/start
+the C++ adapter. The native core opens that directory's identity, trust, encrypted SQLite history,
+contacts/outbox, endpoints, and settings. Account-session restore and discovery authentication occur
+after native Ready. An unavailable server leaves the profile in Offline / Direct P2P mode with
+manual connections and saved direct reconnects available.
+
+v0.3-beta switching is restart-based. The active client stops discovery events/heartbeats, P2P
+sessions and listener, joins/releases the native worker, flushes/closes SQLite, and then starts the
+chooser in a replacement process. Only one selected profile is opened. In-memory friend state,
+unread counts, endpoint caches, connection generations, and pending trust prompts therefore cannot
+cross the switch. Profile removal is confirmed and recoverable under `RemovedProfiles`.
+
+Account ID and device Peer ID remain separate fields so several devices per account can be added
+later. The current profile owns one protected account session and one device identity; multi-device
+synchronization and automatic trust transfer are not implemented.
 
 ## Endpoint model
 
@@ -85,14 +106,22 @@ A separate 60-second presence heartbeat updates the current device/candidates on
 identical heartbeat does not broadcast another friend event. Presence expires after 90 seconds and
 the server emits an offline notification.
 
-## Storage, reset, and backup
+## Storage, migration, reset, and backup
 
-The client profile under LocalAppData contains identity, DPAPI-protected configuration/session
+Each stable profile under LocalAppData contains identity, DPAPI-protected configuration/session
 state, trusted contacts, encrypted SQLite history/WAL/SHM, outbox, message metadata, and unread
-state. Backup copies the complete protected profile beneath a timestamped `PeerChat` directory.
-Reset stops the client and moves the complete live profile into that backup before restart, leaving
-no adjacent live-profile remnants. Restore moves the current profile into an automatic safety
-backup, copies the chosen profile, and restarts. Backups are not decrypted and contain no passwords.
+state. Installation metadata contains profile IDs/names/last-used state, but no keys or messages.
+
+First profile-aware startup copies legacy root state to a timestamped `LegacyBackups` recovery
+location and a staging profile. File lists, lengths, and SHA-256 hashes are verified before a
+completion marker and stable directory are activated. Catalog replacement is atomic; a completion
+marker repairs interrupted catalog activation. Source state is not deleted, ciphertext is copied
+without decrypt/re-encrypt, logs contain no secret values, and no server is contacted.
+
+Backup copies exactly the selected protected profile to `PeerChatProfile`. Reset backs up and
+replaces only that stable directory, so only it gets a new Peer ID. Restore stages/verifies the
+backup, moves current state to a safety backup, and swaps only the selected directory. Other
+profiles are untouched. Full-install reset requires explicit selection.
 
 Server runtime data remains under the configured ProgramData directory; certificate private keys
 remain in `CurrentUser\My`. Client reset never modifies server accounts, friendships, databases,
