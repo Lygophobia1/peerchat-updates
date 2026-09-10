@@ -9,8 +9,8 @@
 
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
-**Current Milestone:** Group Text Stage 1 — client-owned peer-replicated groups
-**Current Priority:** manual friend/reconnect validation, then packaged 3+ client group acceptance; voice remains paused
+**Current Milestone:** v0.3-beta profile/account binding stabilization
+**Current Priority:** manual packaged account-binding acceptance; voice remains paused
 
 ## Current builds
 
@@ -25,8 +25,17 @@
 
 ## What currently works
 
-- Milestone 1 account creation/login, DPAPI-protected sessions, public device registration,
-  presence, case-insensitive search/suggestions, and restart-persistent discovery data.
+- Each stable local profile now has one durable server-account binding and DPAPI-protected optional
+  session credential. Opening the profile automatically validates/restores its own account session;
+  server failure leaves the local core, history, trust, groups, and Direct P2P available offline.
+- New unlinked profiles offer Sign In, Create Account, or Continue Offline after their isolated local
+  identity opens. Profile/account bubbles show the linked account and online/offline state. A linked
+  profile cannot silently authenticate as another account, and an unreadable binding fails closed.
+- Server logout revokes only that profile's presented session. Local sign-out preserves the account
+  binding, identity, trust, groups, and history. Device presence cannot reassign one Peer ID to a
+  different account.
+- Milestone 1 account creation/login, protected sessions, public device registration, presence,
+  case-insensitive search/suggestions, and restart-persistent discovery data.
 - Milestone 2 friend request, accept/reject/cancel, persistent friendship, remove, block/unblock,
   offline recovery, and authenticated event notifications.
 - Manual server-independent P2P, mutual Schannel TLS, explicit peer verification, reconnect,
@@ -87,23 +96,24 @@
   deduplication, malformed transport isolation, a signed group-ledger test with eight identities,
   and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
   convergence, and restart persistence.
-- `tests\test-discovery.ps1`: passed authentication, identity, presence/search, friend lifecycle,
-  authoritative snapshots, and database restart persistence.
-- `tests\test-desktop.ps1`: passed managed/native adapter, direct-message workflow, stable
+- `tests\test-discovery.ps1`: passed authentication, session-scoped logout, device/account ownership,
+  presence/search, friend lifecycle, authoritative snapshots, and database restart persistence.
+- `tests\test-desktop.ps1`: passed protected profile-account binding/session persistence, A/B
+  mismatch rejection, profile-scoped sign-out, unreadable-binding detection, managed/native adapter,
+  direct-message workflow, stable
   account-conversation persistence/isolation, old/new device history merge, name reconciliation,
   explicit changed-device verification, group creation, membership convergence, and group text.
 - `tests\test-desktop-ui.ps1`: passed two release-packaged WPF clients, manual P2P, composer,
   history/reconnect, compact connection status, Copy Details, the read-only bounded log, bidirectional
   delivery, and Groups/DM draft isolation.
-- `tests\test-friend-ui.ps1`: passed two packaged clients finding, requesting, accepting,
-  opening an authenticated direct DM, and exchanging a message.
+- `tests\test-friend-ui.ps1`: passed two packaged clients finding/accepting, authenticated direct DM,
+  protected-session restart restore, correct A → B → A account/device selection, A-only sign-out and
+  server revocation, retained local trust/history, and server-unavailable Offline / Direct P2P startup.
 - Profile-manager and native-adapter coverage passes idempotent legacy migration, preserved Peer ID,
   trust and readable encrypted history, distinct A/B identities, no A state in B, A → B → A
   restoration, and B-only reset/restore.
-- `tests\test-profile-bootstrap.ps1`: the latest run passed existing/new selection and clean exact
-  A → B → A process replacement. Its final firewall-reuse assertion is pending one local rule repair:
-  an older in-process WPF harness had pointed the machine rule at `UiSmoke.exe`; current test hosts
-  are now explicitly prevented from provisioning installation firewall state.
+- `tests\test-profile-bootstrap.ps1 -ListenerPort 7777`: passed existing/new selection, clean exact
+  A → B → A process replacement, and silent reuse of the correct packaged-client Private firewall rule.
 - The packaged friend test now continues direct messaging after both discovery event channels stop.
 - Manual packaged acceptance passed local-network and separate-network/hotspot direct P2P using a
   fresh account/device, fresh-machine firewall approval, and successfully authenticated chat.
@@ -111,16 +121,15 @@
 
 ## Current blocker / next action
 
-The friend/account conversation mapping, reconnect diagnostics, native transport, managed bridge,
-and release package are automated-test green. Before voice resumes, manually restart two signed-in
-clients, confirm the friendship and single DM survive, exercise Try Reconnect/Copy Details/View Log,
-and verify a real changed-device acceptance updates the same social conversation.
+The profile/account binding, friend conversation mapping, reconnect diagnostics, native transport,
+managed bridge, and release package are automated-test green. Before voice resumes, manually verify
+with the packaged client: create/link two profiles, restart for automatic sign-in, switch A → B → A,
+sign out one profile, and open it with discovery unavailable. Confirm each account is correct and
+local history/trust remain visible after sign-out.
 
-Restore the local Windows rule to the packaged client once with administrator approval, then rerun
-the profile-bootstrap firewall-reuse assertion. This is test-machine state, not a profile data or
-restart failure; the A → B → A process/selection portion passed.
-
-Then run the required manual packaged acceptance with at least three real clients: create a group,
+Also manually restart two signed-in clients, confirm the friendship and single DM survive, exercise
+Try Reconnect/Copy Details/View Log, and verify a real changed-device acceptance updates the same
+social conversation. Then run the required manual packaged acceptance with at least three real clients: create a group,
 invite/accept members, exchange concurrent text, change roles/name, remove and leave, restart/reconnect,
 and then stop discovery while direct connectivity remains. Confirm all replicas converge and no DM,
 profile, identity, or history state crosses profiles. Three clients prove group behavior but are not
@@ -143,5 +152,5 @@ in-process switching must preserve this same boundary and may not keep two cores
   video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Stabilize friend conversation identity and reconnect diagnostics`
-  (after `Add client-owned peer-replicated group text foundation`).
+- Latest project checkpoint: `Bind local profiles to server accounts`
+  (after `Stabilize friend conversation identity and reconnect diagnostics`).

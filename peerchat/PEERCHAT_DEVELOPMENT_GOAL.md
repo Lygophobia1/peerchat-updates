@@ -78,9 +78,9 @@ If the service is unavailable, users should still be able to:
 A normal user should eventually be able to:
 
 1. Install PeerChat.
-2. Launch the application.
-3. Create a PeerChat account or sign in.
-4. Automatically connect to the PeerChat public service.
+2. Launch the application and choose a local profile.
+3. Create/sign in to the account bound to a new profile, or automatically restore the account already bound to an existing profile.
+4. Open the local profile even when the public service is unavailable, using Offline / Direct P2P mode.
 5. See friends and online/offline status.
 6. Search for another user by username or friend code.
 7. Send a friend request.
@@ -120,8 +120,12 @@ Used for:
 A stable local workspace selected before native-core startup. Its internal ID and directory do
 not change when an account username changes. A local profile exclusively owns its device Peer ID,
 private key, trust, encrypted history, contacts, endpoints, unread/pending UI state, relevant
-settings, discovery/friend cache, and protected account session. Different local profiles do not
-share a private device identity by default.
+settings, discovery/friend cache, one associated server account ID, and a DPAPI-protected renewable
+session credential. Different local profiles do not share a private device identity or account
+session by default. Normal account switching is profile switching. A linked profile must never
+silently authenticate as another account; relinking, if added later, requires a distinct confirmed
+operation. Signing out invalidates only that profile's server session and leaves its local identity,
+trust, groups, and encrypted history available.
 
 ## Cryptographic Device / Peer Identity
 

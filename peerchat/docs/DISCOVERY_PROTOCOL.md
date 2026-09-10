@@ -22,14 +22,16 @@ never logged or persisted by clients.
 ## Account/session operations
 
 Client session tokens are scoped to the selected stable local profile. Profile selection and native
-device-identity loading happen before any operation in this section. Switching closes the event
-channel and discards account/friend/presence runtime state before another profile authenticates.
-The server never receives the local profile ID.
+device-identity loading happen before any operation in this section. The client validates a restored
+session with `session_info` and accepts it only when its account ID matches the profile's durable
+binding. Switching closes the event channel and discards account/friend/presence runtime state before
+another profile authenticates. The server never receives the local profile ID.
 
 - `register`: `username`, `password`, `publicIdentity`; returns session token, account ID,
   normalized username, and lifetime.
 - `login`: `username`, `password`; returns the same session fields.
 - `session_info`: authenticated account ID and username for restoring older saved sessions.
+- `logout`: revokes only the presented session token; other profile/device sessions remain valid.
 - `search`: exact case-insensitive public username lookup excluding the signed-in/blocked user.
 - `suggest`: case-insensitive prefix lookup, limited to 15 public profiles.
 
@@ -60,7 +62,8 @@ For a same-host client whose discovery connection is loopback, the server may us
 `SelfHostedPublicP2PHost` only when the submitted LAN address belongs to a local server interface.
 It still combines that address with the client's advertised P2P listener port.
 
-The response echoes the authoritative account/username, registered device identity, LAN/public
+The server binds a public device identity to its first authenticated account and rejects a presence
+attempt that presents the same identity from a different account. The response echoes the authoritative account/username, registered device identity, LAN/public
 candidates, `publicCandidateSource`, and `observedAddressClassification`. Friend-state candidate
 records include those fields plus `candidateSeenUtc`. Presence is considered fresh for 90 seconds;
 clients heartbeat every 60 seconds.

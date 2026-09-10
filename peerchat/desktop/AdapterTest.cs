@@ -19,9 +19,17 @@ class AdapterTest {
         view.Apply(new CoreEvent{kind=6,peer=newPeer,messages=new[]{new MessageData{id="new",sender=newPeer,text="online",logical=2}}});Require(same.Messages.Count==2&&Object.ReferenceEquals(view.FindByPeer(oldPeer),view.FindByPeer(newPeer)),"Old and new device history did not merge into one social conversation");
         var log=new ConnectionDiagnosticLog(profileA);for(int i=0;i<600;i++)log.Record("tcp",42,"account:42",newPeer,newPeer,"192.0.2.1:7777","discovery","LAN","TCP timeout");Require(new FileInfo(Path.Combine(profileA,"connection.log")).Length<=160000,"Connection log was not bounded");
     }
+    static void TestProfileAccountBinding(string root){
+        Func<byte[],byte[]> identity=data=>data;string aPath=Path.Combine(root,"account-A"),bPath=Path.Combine(root,"account-B");
+        var a=new ProfileAccountStore(aPath,identity,identity);a.SaveSession(1001,"account-a","localhost",7443,"pin-a","token-a");var loaded=new ProfileAccountStore(aPath,identity,identity).Load();Require(loaded.AccountId==1001&&loaded.Username=="account-a"&&loaded.SessionToken=="token-a","Protected profile account session did not survive reload");
+        bool mismatch=false;try{a.SaveSession(2002,"account-b","localhost",7443,"pin-b","token-b");}catch(InvalidOperationException){mismatch=true;}Require(mismatch&&a.Load().AccountId==1001,"A profile silently changed to B account");
+        var b=new ProfileAccountStore(bPath,identity,identity);b.SaveSession(2002,"account-b","localhost",7443,"pin-b","token-b");a.ClearSession();Require(a.Load().AccountId==1001&&!a.Load().HasSession,"Signing out removed the durable A account binding");Require(b.Load().AccountId==2002&&b.Load().SessionToken=="token-b","Signing out A altered B profile's session");
+        string damagedPath=Path.Combine(root,"account-damaged");Directory.CreateDirectory(damagedPath);File.WriteAllText(Path.Combine(damagedPath,"account-link.dat"),"damaged");var damaged=new ProfileAccountStore(damagedPath,identity,identity);bool damagedRefused=false;try{damaged.SaveSession(3003,"account-c","localhost",7443,"pin-c","token-c");}catch(InvalidOperationException){damagedRefused=true;}Require(damaged.Exists&&damaged.Load()==null&&damagedRefused,"An unreadable account binding was mistaken for a new unlinked profile");
+    }
     static int Main(){try{
         string root=Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","desktop-"+Guid.NewGuid().ToString("N"));
         TestFriendConversationIdentity(root);
+        TestProfileAccountBinding(root);
         var a=new CoreAdapter();var b=new CoreAdapter();var av=new ChatViewModel();var bv=new ChatViewModel();
         Action pump=()=>{foreach(var pair in new[]{Tuple.Create(a,av),Tuple.Create(b,bv)})foreach(var e in pair.Item1.Poll()){if(e.kind==8)throw new Exception(e.text);pair.Item2.Apply(e);if(e.kind==2)pair.Item1.Approve(e.peer,true);}};
         try{

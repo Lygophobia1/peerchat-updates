@@ -32,7 +32,10 @@ not require the Admin application.
 The server receives public device identity only. Private device keys, plaintext messages, chat
 keys, password plaintext, and local history never leave the client. Passwords produce salted
 PBKDF2-SHA256 server verifiers and are never chat-encryption keys. Session tokens are random,
-stored hashed on the server, and DPAPI-protected on the client.
+stored hashed on the server, and DPAPI-protected per local profile on the client. The protected
+`account-link.dat` stores the durable account ID/username binding and optional current session; a
+sign-out clears the session while preserving the binding. An unreadable binding fails closed in
+Offline / Direct P2P mode instead of being treated as a new unlinked profile.
 
 A Fresh Client reset creates a new device identity. Presence registers it for the signed-in
 account. Friends receive that current identity as the expected identity for a direct connection.
@@ -46,8 +49,10 @@ Normal startup reads `%LOCALAPPDATA%\PeerChat\profiles.json`, shows profile card
 selected stable ID to `Profiles\<profile-id>`. Only after selection does the desktop construct/start
 the C++ adapter. The native core opens that directory's identity, trust, encrypted SQLite history,
 contacts/outbox, endpoints, and settings. Account-session restore and discovery authentication occur
-after native Ready. An unavailable server leaves the profile in Offline / Direct P2P mode with
-manual connections and saved direct reconnects available.
+after native Ready and must resolve to the account ID already bound to that profile. A valid protected
+session automatically signs in; an unlinked new profile offers Sign In, Create Account, or Continue
+Offline. An unavailable server leaves the profile in Offline / Direct P2P mode with local history,
+manual connections, and saved direct reconnects available.
 
 v0.3-beta switching is restart-based. The active client stops discovery events/heartbeats, P2P
 sessions and listener, joins/releases the native worker off the UI thread, flushes/closes SQLite,
@@ -58,8 +63,9 @@ unread counts, endpoint caches, connection generations, and pending trust prompt
 cross the switch. Profile removal is confirmed and recoverable under `RemovedProfiles`.
 
 Account ID and device Peer ID remain separate fields so several devices per account can be added
-later. The current profile owns one protected account session and one device identity; multi-device
-synchronization and automatic trust transfer are not implemented.
+later. The server refuses to attach a device Peer ID already owned by one account to another account.
+The current profile owns one durable account binding, one optional protected session, and one device
+identity; multi-device synchronization and automatic trust transfer are not implemented.
 
 ## Client-owned group state
 
