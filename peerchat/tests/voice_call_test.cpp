@@ -35,10 +35,14 @@ int main(){
 
         std::string declined=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==declined;},"Second call did not ring");require(nodes[1].declineVoiceCall(declined),"Decline command was rejected");wait([&]{return state(0,L"Idle")&&state(1,L"Idle");},"Decline did not clear both call states");
 
+        std::string timedOut=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==timedOut;},"Timeout test did not ring");wait([&]{return state(0,L"Idle")&&state(1,L"Idle");},"Unanswered call did not time out on both peers");
+
+        std::string abandoned=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==abandoned;},"Disconnect-during-ringing test did not ring");nodes[1].stop();wait([&]{return state(0,L"Idle");},"Peer disappearance during ringing did not clean the caller");ready[1]=online[1]=false;calls[1]={};nodes[1].start((root/L"1").wstring());wait([&]{return ready[1]&&identities[1].size()==64&&online[0]&&online[1];},"Stopped profile did not restart and reconnect after ringing cleanup");
+
         std::string left=nodes[0].startVoiceCall(identities[1]);std::string right=nodes[1].startVoiceCall(identities[0]);require(left!=right,"Independent simultaneous calls reused an ID");wait([&]{return (state(0,L"Incoming")&&state(1,L"Outgoing"))||(state(1,L"Incoming")&&state(0,L"Outgoing"));},"Simultaneous calls did not converge to one ringing call");size_t receiver=state(0,L"Incoming")?0:1;std::string surviving=calls[receiver].callId;require(nodes[receiver].answerVoiceCall(surviving),"Simultaneous-call winner could not be answered");wait([&]{return state(0,L"Connected")&&state(1,L"Connected");},"Simultaneous call resolution did not connect");
 
         nodes[1].stop();wait([&]{return state(0,L"Idle");},"Peer disappearance did not clean the active call");nodes[0].stop();
-        require(calls[0].connectedCount>=2&&calls[0].idleCount>=3,"Call lifecycle events were incomplete");
-        std::cout<<"PASS: verified-peer voice signaling, ring/answer/decline/hang-up, simultaneous-call convergence, text coexistence, disconnect and shutdown cleanup.\n";return 0;
+        require(calls[0].connectedCount>=2&&calls[0].idleCount>=5,"Call lifecycle events were incomplete");
+        std::cout<<"PASS: verified-peer WebRTC voice, ring/answer/decline/timeout/hang-up, ringing disconnect/restart, simultaneous-call convergence, text coexistence, active disconnect and shutdown cleanup.\n";return 0;
     }catch(const std::exception& error){for(auto& node:nodes)node.stop();std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

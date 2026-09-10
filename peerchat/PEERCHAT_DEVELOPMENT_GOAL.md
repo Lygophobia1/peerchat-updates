@@ -840,6 +840,10 @@ Do not create confusing candidate/modern/latest/test release directories.
 
 One clearly versioned packaged release should be the version used for real testing.
 
+Packaged clients must be self-contained: native third-party/toolchain runtime dependencies are
+statically linked where appropriate or shipped beside the executable, and release verification must
+not rely on compiler installations or development-machine `PATH` entries.
+
 Future versions should continue this versioned release approach.
 
 ---

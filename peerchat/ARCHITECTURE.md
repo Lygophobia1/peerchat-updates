@@ -224,3 +224,8 @@ rewrite the machine-wide rule for their harness executable path.
 build scripts expect them. `tests`, `docs`, and `scripts` contain their named support files.
 `build\v0.3-beta` is replaceable output, `releases\v0.3-beta` is the active package, and
 `releases\v0.1-beta` is the immutable fallback. `shared/VersionInfo.cs` centralizes the version.
+The packaged `PeerChat.Core.dll` statically contains the pinned native media/security dependencies
+and MinGW support runtimes; it may dynamically import only Windows inbox DLLs. The managed bridge
+preloads the exact adjacent core with DLL search restricted to its directory and System32, reports
+the Windows loader code/message on failure, and does not rely on `PATH`. Packaging fails unless an
+import-table audit and restricted-search native load smoke both pass.

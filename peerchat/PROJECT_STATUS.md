@@ -10,7 +10,7 @@
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
 **Current Milestone:** v0.3-beta one-to-one voice
-**Current Priority:** packaged two-PC voice hardware acceptance
+**Current Priority:** clean-PC launch retest, then packaged two-PC voice hardware acceptance
 
 ## Current builds
 
@@ -78,6 +78,9 @@
   ECDSA DTLS-SRTP, RTP jitter handling, and Opus 1.5.2 media run in native C/C++; WPF exposes Call,
   Answer/Decline, state/duration, microphone/output selection, Mute, Deafen, and Hang Up. Media
   devices and networking remain closed while Idle. Audio is never recorded or persisted.
+- The packaged native core now statically links the remaining TDM-GCC stack-protector runtime.
+  Release packaging rejects non-Windows DLL imports and performs a restricted-search load smoke, so
+  the client does not depend on a compiler installation or development-machine `PATH`.
 
 ## Stabilization changes
 
@@ -102,7 +105,8 @@
   mutual TLS, 15 direct links, Unicode messages, ACKs, reconnect, offline outbox, restart,
   deduplication, malformed transport isolation, a signed group-ledger test with eight identities,
   and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
-  convergence, restart persistence, real two-peer direct WebRTC/DTLS-SRTP negotiation, call cleanup,
+  convergence, restart persistence, real two-peer direct WebRTC/DTLS-SRTP negotiation, unanswered
+  timeout, disappearance while ringing, stopped-profile restart/reconnect, active-call cleanup,
   device-free Opus encode/decode, and native audio queue/mixer bounds.
 - `tests\test-discovery.ps1`: passed authentication, session-scoped logout, device/account ownership,
   presence/search, friend lifecycle, authoritative snapshots, and database restart persistence.
@@ -123,6 +127,10 @@
   restoration, and B-only reset/restore.
 - `tests\test-profile-bootstrap.ps1 -ListenerPort 7777`: passed existing/new selection, clean exact
   A → B → A process replacement, and silent reuse of the correct packaged-client Private firewall rule.
+- `scripts\verify-client-native-dependencies.ps1`: passed the final package import audit and native
+  load with DLL resolution restricted to the package directory and System32. Final core imports are
+  `advapi32`, `bcrypt`, `crypt32`, `iphlpapi`, `kernel32`, `msvcrt`, `ncrypt`, `secur32`, `winmm`,
+  and `ws2_32`; no WebRTC/Opus/MbedTLS/libSRTP/MinGW runtime DLL remains dynamic.
 - The packaged friend test now continues direct messaging after both discovery event channels stop.
 - Manual packaged acceptance passed local-network and separate-network/hotspot direct P2P using a
   fresh account/device, fresh-machine firewall approval, and successfully authenticated chat.
@@ -130,7 +138,9 @@
 
 ## Current blocker / next action
 
-Automated voice signaling, direct ICE/DTLS-SRTP negotiation, Opus loopback, device enumeration,
+The package-side fix for the clean-PC `0x8007007E` startup failure is verified locally; the original
+second Windows PC still needs one copy-and-launch retest. Automated voice signaling, direct
+ICE/DTLS-SRTP negotiation, Opus loopback, device enumeration,
 managed controls, shutdown, and existing regressions are green. The test host has no microphone or
 speaker, so the remaining gate is manual two-PC packaged audio acceptance: ring/answer, bidirectional
 audio, mute, deafen, either-side hang-up, normal text during/after the call, and no retained device
@@ -165,4 +175,4 @@ in-process switching must preserve this same boundary and may not keep two cores
 - 1-to-1 voice awaits physical packaged acceptance. Group voice, video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Add direct WebRTC Opus voice calls` (this checkpoint).
+- Latest project checkpoint: `Fix packaged native dependency portability` (this checkpoint).

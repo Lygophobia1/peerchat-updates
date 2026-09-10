@@ -512,7 +512,7 @@ public class DesktopApplication {
             // packaged host explicitly so dormant WPF infrastructure cannot leave a windowless
             // process that collides with a restart replacement.
             Environment.Exit(0);return 0;
-        }catch(Exception error){try{TraceStartup(startupRoot,"startup-failed type="+error.GetType().Name);}catch{}MessageBox.Show(error.ToString(),"PeerChat startup error");return 1;}
+        }catch(Exception error){try{TraceStartup(startupRoot,"startup-failed type="+error.GetType().Name+" message="+(error.Message??"").Replace('\r',' ').Replace('\n',' '));}catch{}MessageBox.Show(error.ToString(),"PeerChat startup error");return 1;}
     }
 }
 }

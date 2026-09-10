@@ -1,4 +1,6 @@
 using System;
+using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 
@@ -7,6 +9,9 @@ namespace PeerChatDesktop {
 // and are copied before another native call. Never pass C++ objects across ABI.
 public sealed class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
+    const uint LoadLibrarySearchDllLoadDir=0x00000100;
+    const uint LoadLibrarySearchSystem32=0x00000800;
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string fileName,IntPtr file,uint flags);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_create();
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_destroy(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_start(IntPtr handle,string directory,ushort port,string name);
@@ -36,9 +41,18 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_share(IntPtr handle,string host,ushort port,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_add(IntPtr handle,string invite,string ownPeer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr handle);
-    IntPtr handle=ui_create();
+    readonly IntPtr nativeModule;
+    IntPtr handle;
     readonly JavaScriptSerializer serializer=new JavaScriptSerializer { MaxJsonLength=32*1024*1024 };
-    public CoreAdapter(){if(handle==IntPtr.Zero)throw new InvalidOperationException("Could not create the peer core.");}
+    public CoreAdapter(){
+        string nativePath=Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,Library));
+        nativeModule=LoadLibraryEx(nativePath,IntPtr.Zero,LoadLibrarySearchDllLoadDir|LoadLibrarySearchSystem32);
+        if(nativeModule==IntPtr.Zero){
+            int code=Marshal.GetLastWin32Error();
+            throw new DllNotFoundException("Could not load native PeerChat core at '"+nativePath+"'. Windows loader error "+code+": "+new Win32Exception(code).Message+". A named module in this message is the missing or incompatible dependency when Windows provides one; otherwise verify the complete PeerChat client package and x64 architecture.");
+        }
+        handle=ui_create();if(handle==IntPtr.Zero)throw new InvalidOperationException("Could not create the peer core.");
+    }
     public void Start(string directory,ushort port,string name){if(ui_start(handle,directory,port,name)==0)throw new InvalidOperationException("Could not start the peer core.");}
     public void Connect(string host,ushort port,string peer){if(ui_connect(handle,host,port,peer)==0)throw new InvalidOperationException("Invalid connection details.");}
     public void Approve(string peer,bool accepted){ui_approve(handle,peer,accepted?1:0);}
@@ -66,7 +80,7 @@ public sealed class CoreAdapter : IDisposable {
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}
     public string Add(string invite,string ownPeer){return Marshal.PtrToStringUni(ui_add(handle,invite,ownPeer));}
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
-    public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}}
+    public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
 public class CoreEvent { public int kind; public string peer,text,detail; public ushort port; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
