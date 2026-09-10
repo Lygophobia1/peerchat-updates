@@ -2,6 +2,7 @@
 // One owner calls this adapter serially; Node owns its existing worker thread.
 #include "node.hpp"
 #include "share_id.hpp"
+#include "audio.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <map>
@@ -36,6 +37,10 @@ UI_API const wchar_t* ui_voice_call(void* handle,const wchar_t* peer){auto& brid
 UI_API int ui_voice_answer(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.answerVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API int ui_voice_decline(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.declineVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API int ui_voice_end(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.endVoiceCall(identity(call));}catch(...){return 0;}}
+UI_API int ui_voice_mute(void* handle,int muted){try{return static_cast<UiBridge*>(handle)->node.setVoiceMuted(muted!=0);}catch(...){return 0;}}
+UI_API int ui_voice_deafen(void* handle,int deafened){try{return static_cast<UiBridge*>(handle)->node.setVoiceDeafened(deafened!=0);}catch(...){return 0;}}
+UI_API int ui_voice_devices_select(void* handle,int input,int output){try{return static_cast<UiBridge*>(handle)->node.setVoiceDevices(input,output);}catch(...){return 0;}}
+UI_API const wchar_t* ui_voice_devices(void* handle){auto& bridge=*static_cast<UiBridge*>(handle);try{std::wostringstream out;out<<L"{\"inputs\":[";bool first=true;for(const auto& device:peerchat::Audio::inputDevices()){if(!first)out<<L',';first=false;out<<L"{\"id\":"<<device.id<<L",\"name\":"<<quote(device.name)<<L'}';}out<<L"],\"outputs\":[";first=true;for(const auto& device:peerchat::Audio::outputDevices()){if(!first)out<<L',';first=false;out<<L"{\"id\":"<<device.id<<L",\"name\":"<<quote(device.name)<<L'}';}out<<L"]}";bridge.output=out.str();}catch(...){bridge.output=L"{\"inputs\":[],\"outputs\":[]}";}return bridge.output.c_str();}
 UI_API const wchar_t* ui_share(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=peerchat::encodeShareId({host,port,identity(peer)});}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API const wchar_t* ui_add(void* handle,const wchar_t* invite,const wchar_t* ownPeer){auto& bridge=*static_cast<UiBridge*>(handle);try{
     peerchat::SharedContact shared;std::wstring error;

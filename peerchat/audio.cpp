@@ -143,7 +143,9 @@ struct Audio::Impl {
     bool started = false;
     audio_detail::Mixer mixer;
     std::deque<audio_detail::Frame> captured;
+    std::function<void(const std::vector<unsigned char>&)> captureHandler;
     std::wstring pendingError;
+    int inputDevice = -1, outputDevice = -1;
 
     // Called with the lock held, never while a worker touches these headers.
     void closeInput() {
@@ -184,7 +186,7 @@ struct Audio::Impl {
         for (;;) {
             const DWORD wait = WaitForMultipleObjects(3, events, FALSE, INFINITE);
             if (wait == WAIT_OBJECT_0) return;
-            std::lock_guard<std::mutex> lock(mutex);
+            std::unique_lock<std::mutex> lock(mutex);
             if (!started) return;
             if (wait == WAIT_FAILED) {
                 pendingError = L"Audio processing stopped because a Windows event failed.";
@@ -200,6 +202,12 @@ struct Audio::Impl {
                 if (buffer.header.dwBytesRecorded == audio_detail::frameBytes) {
                     if (captured.size() == audio_detail::maxQueuedFrames) captured.pop_front();
                     captured.push_back(buffer.data);
+                    auto handler = captureHandler;
+                    std::vector<unsigned char> frame(buffer.data.begin(), buffer.data.end());
+                    lock.unlock();
+                    if (handler) handler(frame);
+                    lock.lock();
+                    if (!started) return;
                 }
                 buffer.header.dwBytesRecorded = 0;
                 const MMRESULT result = waveInAddBuffer(input, &buffer.header, sizeof(WAVEHDR));
@@ -249,7 +257,7 @@ bool Audio::start(std::wstring& error) {
         return false;
     }
     WAVEFORMATEX format = audio_detail::pcmFormat();
-    MMRESULT result = waveOutOpen(&state.output, WAVE_MAPPER, &format,
+    MMRESULT result = waveOutOpen(&state.output, state.outputDevice<0?WAVE_MAPPER:static_cast<UINT>(state.outputDevice), &format,
         reinterpret_cast<DWORD_PTR>(state.outputEvent), 0, CALLBACK_EVENT);
     if (result != MMSYSERR_NOERROR) {
         error = audio_detail::deviceError(L"Could not open the default speaker", result, false);
@@ -306,7 +314,7 @@ bool Audio::setMuted(bool muted, std::wstring& error) {
     }
     if (state.input) return true;
     WAVEFORMATEX format = audio_detail::pcmFormat();
-    MMRESULT result = waveInOpen(&state.input, WAVE_MAPPER, &format,
+    MMRESULT result = waveInOpen(&state.input, state.inputDevice<0?WAVE_MAPPER:static_cast<UINT>(state.inputDevice), &format,
         reinterpret_cast<DWORD_PTR>(state.inputEvent), 0, CALLBACK_EVENT);
     if (result != MMSYSERR_NOERROR) {
         error = audio_detail::deviceError(L"Could not open the default microphone", result, true);
@@ -345,6 +353,28 @@ std::vector<std::vector<unsigned char>> Audio::takeCaptured() {
     for (const auto& frame : impl_->captured) frames.emplace_back(frame.begin(), frame.end());
     impl_->captured.clear();
     return frames;
+}
+
+void Audio::setCaptureHandler(std::function<void(const std::vector<unsigned char>&)> handler) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->captureHandler = std::move(handler);
+}
+
+void Audio::setDevices(int inputId, int outputId) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->started) { impl_->inputDevice=inputId;impl_->outputDevice=outputId; }
+}
+
+std::vector<Audio::Device> Audio::inputDevices() {
+    std::vector<Device> devices{{-1,L"Windows default microphone"}};
+    for(UINT id=0;id<waveInGetNumDevs();++id){WAVEINCAPSW caps{};if(waveInGetDevCapsW(id,&caps,sizeof(caps))==MMSYSERR_NOERROR)devices.push_back({static_cast<int>(id),caps.szPname});}
+    return devices;
+}
+
+std::vector<Audio::Device> Audio::outputDevices() {
+    std::vector<Device> devices{{-1,L"Windows default output"}};
+    for(UINT id=0;id<waveOutGetNumDevs();++id){WAVEOUTCAPSW caps{};if(waveOutGetDevCapsW(id,&caps,sizeof(caps))==MMSYSERR_NOERROR)devices.push_back({static_cast<int>(id),caps.szPname});}
+    return devices;
 }
 
 std::wstring Audio::takeError() {

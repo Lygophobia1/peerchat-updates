@@ -43,6 +43,9 @@ public:
     bool answerVoiceCall(const std::string& callId);
     bool declineVoiceCall(const std::string& callId);
     bool endVoiceCall(const std::string& callId);
+    bool setVoiceMuted(bool muted);
+    bool setVoiceDeafened(bool deafened);
+    bool setVoiceDevices(int inputDevice, int outputDevice);
     std::vector<NodeEvent> poll();
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

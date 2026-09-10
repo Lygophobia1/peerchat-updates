@@ -8,6 +8,7 @@
 #include "node.hpp"
 #include "tls.hpp"
 #include "protocol.hpp"
+#include "voice_media.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -51,7 +52,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd };
+    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name;std::uint16_t port=0;bool accepted=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -63,7 +64,9 @@ struct Node::Impl {
     std::vector<std::unique_ptr<Resolver>> resolvers;
     std::map<std::string,Clock::time_point> reconnect;
     enum class VoiceState { Idle,Outgoing,Ringing,Connecting,Connected,Ending };
-    VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
+    VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId,voiceOffer;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
+    std::unique_ptr<VoiceMedia> voiceMedia;std::vector<std::pair<std::string,std::string>> voiceCandidates;
+    int voiceInputDevice=-1,voiceOutputDevice=-1;
     std::deque<std::string> finishedVoiceCalls;
     SOCKET listener=INVALID_SOCKET;
     ~Impl(){stop();}
@@ -74,7 +77,24 @@ struct Node::Impl {
     Connection* voiceConnection(const std::string& peer){for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();return nullptr;}
     void rememberVoiceCall(const std::string& id){if(id.empty())return;finishedVoiceCalls.push_back(id);while(finishedVoiceCalls.size()>64)finishedVoiceCalls.pop_front();}
     bool finishedVoiceCall(const std::string& id)const{return std::find(finishedVoiceCalls.begin(),finishedVoiceCalls.end(),id)!=finishedVoiceCalls.end();}
-    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle)return;voiceEvent(VoiceState::Ending,reason);rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
+    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle)return;voiceEvent(VoiceState::Ending,reason);if(voiceMedia)voiceMedia->stop();voiceMedia.reset();rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOffer.clear();voiceCandidates.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
+    void mediaEvents(){
+        if(!voiceMedia||voiceState==VoiceState::Idle)return;
+        auto connection=voiceConnection(voicePeerId);
+        for(auto& event:voiceMedia->poll()){
+            if(event.kind==VoiceMedia::EventKind::Description){
+                if(!connection){clearVoice(L"Peer disconnected");return;}
+                protocol::Writer signal(event.detail=="offer"?protocol::CallOffer:protocol::CallAnswer);signal.string(voiceCallId);signal.string(event.value);packet(*connection,signal);
+            }else if(event.kind==VoiceMedia::EventKind::Candidate){
+                if(connection){protocol::Writer signal(protocol::CallCandidate);signal.string(voiceCallId);signal.string(event.value);signal.string(event.detail);packet(*connection,signal);}
+            }else if(event.kind==VoiceMedia::EventKind::Connected){
+                voiceDeadline={};voiceEvent(VoiceState::Connected,L"Direct WebRTC · Opus · DTLS-SRTP");
+                if(connection){protocol::Writer ready(protocol::CallConnected);ready.string(voiceCallId);packet(*connection,ready);}
+            }else if(event.kind==VoiceMedia::EventKind::AudioError){
+                notice(NodeEvent::Kind::Error,L"Voice audio device error: "+std::wstring(event.value.begin(),event.value.end()),voicePeerId);
+            }else {if(connection){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}clearVoice(event.kind==VoiceMedia::EventKind::Failed?L"Secure media connection failed":L"Media disconnected");return;}
+        }
+    }
     void tcpFailure(Connection& c,int error){
         if(error==WSAECONNREFUSED)notice(NodeEvent::Kind::Error,L"TCP connection refused: the peer is not listening on this port or Firewall blocked it.",c.expected);
         else if(error==WSAETIMEDOUT)notice(NodeEvent::Kind::Error,L"TCP connection timeout: the peer or Firewall did not respond.",c.expected);
@@ -183,14 +203,15 @@ struct Node::Impl {
         if(r.type()==protocol::Accepted){r.end();protocol::check(!c.remoteApproved);c.remoteApproved=true;online(c);return;}
         protocol::check(c.online);
         if(r.type()==protocol::CallOffer){
-            auto callId=r.string();r.end();protocol::check(c.voiceCalls&&protocol::id(callId,32));if(finishedVoiceCall(callId))return;
-            if(voiceState==VoiceState::Idle){voiceCallId=callId;voicePeerId=c.peerId;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing);return;}
+            auto callId=r.string();auto sdp=r.string();r.end();protocol::check(c.voiceCalls&&protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);if(finishedVoiceCall(callId))return;
+            if(voiceState==VoiceState::Idle){voiceCallId=callId;voicePeerId=c.peerId;voiceOffer=sdp;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing);return;}
             if(voiceCallId==callId&&voicePeerId==c.peerId)return;
-            if(voiceState==VoiceState::Outgoing&&voicePeerId==c.peerId&&profile.peerId>c.peerId){auto abandoned=voiceCallId;protocol::Writer end(protocol::CallEnd);end.string(abandoned);packet(c,end);rememberVoiceCall(abandoned);voiceCallId=callId;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing,L"simultaneous call resolved");return;}
+            if(voiceState==VoiceState::Outgoing&&voicePeerId==c.peerId&&profile.peerId>c.peerId){auto abandoned=voiceCallId;protocol::Writer end(protocol::CallEnd);end.string(abandoned);packet(c,end);if(voiceMedia)voiceMedia->stop();voiceMedia.reset();rememberVoiceCall(abandoned);voiceCallId=callId;voiceOffer=sdp;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing,L"simultaneous call resolved");return;}
             protocol::Writer busy(protocol::CallBusy);busy.string(callId);packet(c,busy);return;
         }
-        if(r.type()==protocol::CallAnswer){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceState==VoiceState::Outgoing&&voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId){voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);protocol::Writer connected(protocol::CallConnected);connected.string(callId);packet(c,connected);voiceDeadline={};voiceEvent(VoiceState::Connected);}return;}
-        if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceState==VoiceState::Connecting&&!voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId){voiceDeadline={};voiceEvent(VoiceState::Connected);}return;}
+        if(r.type()==protocol::CallAnswer){auto callId=r.string();auto sdp=r.string();r.end();protocol::check(protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);if(voiceState==VoiceState::Outgoing&&voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId&&voiceMedia){std::wstring error;if(!voiceMedia->setAnswer(sdp,error)){clearVoice(error);return;}voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);}return;}
+        if(r.type()==protocol::CallCandidate){auto callId=r.string();auto candidate=r.string();auto mid=r.string();r.end();protocol::check(protocol::id(callId,32)&&candidate.size()<=4096&&mid.size()<=64);if(voiceCallId==callId&&voicePeerId==c.peerId){if(voiceMedia){std::wstring error;if(!voiceMedia->addCandidate(candidate,mid,error))notice(NodeEvent::Kind::Error,error,voicePeerId);}else if(voiceCandidates.size()<64)voiceCandidates.emplace_back(std::move(candidate),std::move(mid));}return;}
+        if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));return;}
         if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceCallId==callId&&voicePeerId==c.peerId){clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");}else rememberVoiceCall(callId);return;}
         if(r.type()==protocol::Text){
             StoredMessage m;m.id=r.string();if(c.logicalOrdering)m.logicalOrder=r.number();m.utcMilliseconds=r.number();m.text=r.text();r.end();protocol::check(protocol::id(m.id,32));m.sender=c.peerId;m.recipient=profile.peerId;m.delivery=Delivery::Delivered;store->observeLogicalOrder(m.logicalOrder);
@@ -271,13 +292,13 @@ struct Node::Impl {
                 if(contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify this peer before calling");
                 auto connection=voiceConnection(command.peer);
                 if(!connection)throw std::runtime_error("The verified peer is not connected or does not support voice calls");
-                voiceCallId=command.id;voicePeerId=command.peer;voiceOutgoing=true;voiceDeadline=Clock::now()+std::chrono::seconds(30);
-                protocol::Writer offer(protocol::CallOffer);offer.string(voiceCallId);packet(*connection,offer);voiceEvent(VoiceState::Outgoing);
+                voiceCallId=command.id;voicePeerId=command.peer;voiceOutgoing=true;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice);std::wstring error;
+                if(!voiceMedia->startOffer(error)){clearVoice(error);continue;}voiceEvent(VoiceState::Outgoing);
             }else if(command.action==Action::VoiceAnswer){
                 if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)throw std::runtime_error("That incoming call is no longer available");
                 auto connection=voiceConnection(voicePeerId);if(!connection){clearVoice(L"Peer disconnected");continue;}
-                voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);
-                protocol::Writer answer(protocol::CallAnswer);answer.string(voiceCallId);packet(*connection,answer);
+                voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice);std::wstring error;
+                if(!voiceMedia->startAnswer(voiceOffer,error)){clearVoice(error);continue;}for(const auto& candidate:voiceCandidates)voiceMedia->addCandidate(candidate.first,candidate.second,error);voiceCandidates.clear();
             }else if(command.action==Action::VoiceDecline){
                 if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)continue;
                 if(auto connection=voiceConnection(voicePeerId)){protocol::Writer decline(protocol::CallDecline);decline.string(voiceCallId);packet(*connection,decline);}
@@ -286,6 +307,9 @@ struct Node::Impl {
                 if(voiceState==VoiceState::Idle||voiceCallId!=command.id)continue;
                 if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}
                 clearVoice(L"Call ended");
+            }else if(command.action==Action::VoiceMute){std::wstring error;if(!voiceMedia||!voiceMedia->setMuted(command.accepted,error))notice(NodeEvent::Kind::Error,error.empty()?L"No connected voice call.":L"Voice audio device error: "+error,voicePeerId);
+            }else if(command.action==Action::VoiceDeafen){if(voiceMedia)voiceMedia->setDeafened(command.accepted);
+            }else if(command.action==Action::VoiceDevices){if(voiceState==VoiceState::Idle){voiceInputDevice=static_cast<int>(command.port)-1;voiceOutputDevice=static_cast<int>(command.before);}
             }
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
             else if(command.action==Action::GroupAccount){if(command.accountId==0||command.name.empty()||command.name.size()>64)throw std::runtime_error("Invalid group account binding");if(groupAccount.accountId&&groupAccount.accountId!=command.accountId)throw std::runtime_error("This profile is already bound to another group account");groupAccount={command.accountId,command.name};store->saveGroupAccount(groupAccount);publishGroups();}
@@ -328,7 +352,7 @@ struct Node::Impl {
             // saved fingerprint reference into a verified contact.
             for(const auto& c:contacts)if(!c.second.endpoints.empty())reconnect[c.first]=Clock::now();
             while(running){
-                drain();resolved();
+                drain();resolved();mediaEvents();
                 if(voiceState!=VoiceState::Idle&&voiceDeadline!=Clock::time_point{}&&Clock::now()>=voiceDeadline){if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}clearVoice(L"Call timed out");}
                 for(auto& retry:reconnect)if(retry.second<=Clock::now()&&!exists(retry.first)){auto it=contacts.find(retry.first);if(it!=contacts.end()&&!it->second.endpoints.empty()){auto e=it->second.endpoints.front();try{resolve(e.host,e.port,retry.first);}catch(...){} }retry.second=Clock::now()+std::chrono::seconds(5);}
                 fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);FD_SET(listener,&reads);
@@ -374,5 +398,8 @@ std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(pee
 bool Node::answerVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceAnswer;command.id=callId;return impl_->command(std::move(command));}
 bool Node::declineVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceDecline;command.id=callId;return impl_->command(std::move(command));}
 bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceEnd;command.id=callId;return impl_->command(std::move(command));}
+bool Node::setVoiceMuted(bool muted){Impl::Command command{};command.action=Impl::Action::VoiceMute;command.accepted=muted;return impl_->command(std::move(command));}
+bool Node::setVoiceDeafened(bool deafened){Impl::Command command{};command.action=Impl::Action::VoiceDeafen;command.accepted=deafened;return impl_->command(std::move(command));}
+bool Node::setVoiceDevices(int inputDevice,int outputDevice){if(inputDevice < -1||outputDevice < -1)return false;Impl::Command command{};command.action=Impl::Action::VoiceDevices;command.port=static_cast<std::uint16_t>(inputDevice+1);command.before=outputDevice;return impl_->command(std::move(command));}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}
 }

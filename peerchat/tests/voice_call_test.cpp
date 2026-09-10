@@ -21,7 +21,7 @@ int main(){
         else if(event.kind==NodeEvent::Kind::Connected)online[index]=true;
         else if(event.kind==NodeEvent::Kind::Disconnected)online[index]=false;
         else if(event.kind==NodeEvent::Kind::Message)textReceived+=static_cast<int>(event.messages.size());
-        else if(event.kind==NodeEvent::Kind::VoiceCall){calls[index].state=event.text;calls[index].callId.assign(event.detail.begin(),event.detail.end());calls[index].peer=event.peerId;if(event.text.rfind(L"Connected",0)==0)calls[index].connectedCount++;if(event.text.rfind(L"Idle",0)==0)calls[index].idleCount++;}
+        else if(event.kind==NodeEvent::Kind::VoiceCall){calls[index].state=event.text;calls[index].callId.assign(event.detail.begin(),event.detail.end());calls[index].peer=event.peerId;std::wcerr<<L"Voice test peer "<<index<<L" state: "<<event.text<<L'\n';if(event.text.rfind(L"Connected",0)==0)calls[index].connectedCount++;if(event.text.rfind(L"Idle",0)==0)calls[index].idleCount++;}
         else if(event.kind==NodeEvent::Kind::Error)std::wcerr<<L"Voice test peer "<<index<<L": "<<event.text<<L'\n';
     }};
     auto wait=[&](auto predicate,const char* failure){auto deadline=Clock::now()+std::chrono::seconds(20);while(Clock::now()<deadline){collect();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(20));}throw std::runtime_error(failure);};

@@ -29,6 +29,10 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_answer(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_decline(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_end(IntPtr handle,string call);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_mute(IntPtr handle,int muted);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_deafen(IntPtr handle,int deafened);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_devices(IntPtr handle);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_devices_select(IntPtr handle,int input,int output);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_share(IntPtr handle,string host,ushort port,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_add(IntPtr handle,string invite,string ownPeer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr handle);
@@ -55,6 +59,10 @@ public sealed class CoreAdapter : IDisposable {
     public bool AnswerVoiceCall(string call){return ui_voice_answer(handle,call)!=0;}
     public bool DeclineVoiceCall(string call){return ui_voice_decline(handle,call)!=0;}
     public bool EndVoiceCall(string call){return ui_voice_end(handle,call)!=0;}
+    public bool SetVoiceMuted(bool muted){return ui_voice_mute(handle,muted?1:0)!=0;}
+    public bool SetVoiceDeafened(bool deafened){return ui_voice_deafen(handle,deafened?1:0)!=0;}
+    public VoiceDevices VoiceDevices(){return serializer.Deserialize<VoiceDevices>(Marshal.PtrToStringUni(ui_voice_devices(handle)));}
+    public bool SelectVoiceDevices(int input,int output){return ui_voice_devices_select(handle,input,output)!=0;}
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}
     public string Add(string invite,string ownPeer){return Marshal.PtrToStringUni(ui_add(handle,invite,ownPeer));}
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
@@ -66,4 +74,6 @@ public class MessageData { public string id,sender,text; public long time,logica
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }
 public class GroupMemberData { public long account; public string peer,name; public int role; }
 public class GroupEventData { public string id,group,sender,text; public long account,time,logical; }
+public class VoiceDevices { public VoiceDevice[] inputs,outputs; }
+public class VoiceDevice { public int id; public string name; public override string ToString(){return name;} }
 }

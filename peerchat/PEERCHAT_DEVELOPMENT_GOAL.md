@@ -1008,15 +1008,15 @@ Reassess detailed requirements before implementation.
 
 Everything above defines PeerChat's architectural direction.
 
-**Milestones 1–3, the first client-owned group-text foundation, and the verified one-to-one call
-signaling/state boundary are implemented in code; remaining voice media integration and
-packaged/manual acceptance is tracked in `PROJECT_STATUS.md`.**
+**Milestones 1–3, the first client-owned group-text foundation, and native one-to-one direct
+WebRTC/DTLS-SRTP + Opus calls are implemented in code; physical packaged voice acceptance is
+tracked in `PROJECT_STATUS.md`.**
 
 The current development target is:
 
-# GROUP TEXT ACCEPTANCE → 1-TO-1 VOICE
+# 1-TO-1 VOICE PACKAGED ACCEPTANCE
 
-Focus now on verifying the packaged 3+ client group workflow, then implement:
+Focus now on verifying the packaged two-client voice workflow:
 
 **WPF call state** → **C ABI lifecycle** → **native WebRTC/Opus media** → **authenticated 1-to-1 voice**
 

@@ -154,7 +154,7 @@ A separate 60-second presence heartbeat updates the current device/candidates on
 identical heartbeat does not broadcast another friend event. Presence expires after 90 seconds and
 the server emits an offline notification.
 
-## One-to-one voice signaling boundary
+## One-to-one voice boundary
 
 Voice call signaling is carried only after the existing direct peer connection has completed mutual
 TLS, expected Peer ID verification, and explicit local trust. Protocol capability negotiation gates
@@ -164,11 +164,18 @@ Incoming Ringing, Connecting, Connected, Ending, then Idle. It handles answer, d
 busy, timeout, deterministic simultaneous-call convergence, peer disconnect, and profile shutdown.
 Duplicate or completed call IDs are bounded in memory for replay suppression.
 
-The stable C ABI exposes call commands and events; WPF only orchestrates the Call, Answer, Decline,
-and Hang Up controls and displays state/duration. Profile switching disposes the old native core,
-which ends the call before identity/database state is released. Signaling does not require the
-discovery server once the authenticated direct peer session exists. The WebRTC/DTLS-SRTP and Opus
-media layer remains the next implementation step; raw PCM is not a production network format.
+The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
+the call ID. `VoiceMedia` is a one-call native boundary: libdatachannel 0.24.3 owns direct ICE,
+ECDSA DTLS-SRTP, RTP and jitter handling; libopus 1.5.2 encodes 16 kHz mono 20 ms capture frames;
+the event-driven WinMM engine owns selected capture/playback devices. Only Opus/RTP crosses the
+media transport. Raw PCM stays in memory and is never logged, persisted, or written to temporary files.
+
+Callbacks from libdatachannel and capture are reduced to bounded native queues/events consumed by
+the existing node worker. The stable C ABI exposes call lifecycle, device enumeration/selection,
+mute, and deafen; WPF orchestrates controls and duration. Profile switching disposes the old core,
+closes peer connection/audio devices, then releases identity/database state. Discovery is not in the
+established media path. The current implementation uses host candidates only; STUN/TURN/privacy
+relay remain future transport additions and cannot become call authority.
 
 ## Storage, migration, reset, and backup
 

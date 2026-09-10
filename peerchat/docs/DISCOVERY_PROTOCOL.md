@@ -107,11 +107,12 @@ availability must not turn the service into the source of truth or change the lo
 ## Voice signaling boundary
 
 The discovery/account protocol does not own calls and stores no call state or voice content. Once
-two friends have an authenticated direct peer session, call offer, answer, connected, decline, busy,
-and end signals travel on that verified mutual-TLS channel. Each signal carries an ephemeral random
+two friends have an authenticated direct peer session, call offer/answer SDP, trickled ICE candidates,
+connected, decline, busy, and end signals travel on that verified mutual-TLS channel. Each signal carries an ephemeral random
 call ID and is accepted only from the already authenticated device Peer ID. One active call is
 allowed per selected profile in v0.3-beta. Discovery loss does not deliberately terminate a call;
-peer transport loss or profile shutdown does.
+peer transport loss or profile shutdown does. Media is direct ICE with DTLS-SRTP and Opus; neither
+SDP/ICE coordination nor media packets create server-owned call state.
 
 Future ICE/TURN signaling may use coordination infrastructure, but it must remain authenticated to
 the same account/device trust relationship and must not make the server a call authority or content
