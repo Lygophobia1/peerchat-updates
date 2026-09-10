@@ -83,6 +83,19 @@ If initial authentication, presence, or events are unavailable, the selected enc
 remains open in Offline / Direct P2P mode. Manual/saved direct connections do not require this
 protocol, and established direct sessions are not closed when discovery disconnects.
 
+## Group and relay authority boundary
+
+This discovery protocol has no authoritative group operations. It does not create or allocate Group
+IDs, names, metadata, memberships, roles, invitations, removals, leave state, or history. Friend and
+presence results may help a client locate a verified account/device before the client signs and sends
+a group invitation directly, but that lookup does not give the service authority over the group.
+
+Group state is a client-owned signed event ledger replicated between members. Existing groups and
+their direct text transport continue when this service is unavailable. A future service version may
+relay opaque encrypted group-state or message envelopes for `Automatic — prefer P2P, relay fallback`
+or `Relay / Privacy Mode`; `Direct Only` remains available. Relay acceptance, ordering, storage, or
+availability must not turn the service into the source of truth or change the logical group.
+
 ## Security and privacy
 
 The service never receives private device keys, plaintext chat messages, encrypted history,

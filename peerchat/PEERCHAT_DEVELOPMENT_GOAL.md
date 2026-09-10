@@ -549,18 +549,28 @@ Disappearing messages reduce retained data but cannot guarantee that a recipient
 
 ---
 
-# FUTURE GROUPS AND MEDIA
+# GROUPS AND MEDIA DIRECTION
 
-PeerChat will eventually support:
+PeerChat now has a client-owned, peer-replicated group-text foundation. Group IDs, names, metadata,
+membership, roles, invitations, removals, leave state, and history are signed client state; the
+discovery service is not authoritative for any of them. Groups must continue over direct P2P when
+the service is unavailable. A future optional relay may carry the same encrypted envelopes without
+changing the logical group or its authority.
 
-- group conversations
-- voice
+Group membership is an arbitrary collection. Three clients are the minimum acceptance test, never
+a product or architecture limit. Any future practical limit must be configurable policy rather than
+a hard-coded schema, protocol, storage, routing, authorization, or UI assumption.
+
+The next media stage is production-oriented 1-to-1 voice through the existing WPF → C ABI → native
+C/C++ boundary, using established WebRTC/Opus components rather than inventing media security or
+transport. Later directions still include:
+
 - group voice
 - screen sharing
 - webcam video
 - file transfer
 
-Do NOT implement these during the current phase.
+Do not begin group voice, screen sharing, webcam video, or file transfer during the current phase.
 
 Avoid architectural assumptions that permanently restrict conversations to exactly two participants.
 
@@ -989,15 +999,16 @@ Reassess detailed requirements before implementation.
 
 Everything above defines PeerChat's architectural direction.
 
-**Milestones 1 and 2 are complete.**
+**Milestones 1–3 and the first client-owned group-text foundation are implemented in code; remaining
+packaged/manual acceptance is tracked in `PROJECT_STATUS.md`.**
 
 The current development target is:
 
-# MILESTONE 3 — AUTOMATIC DIRECT CONNECTION + MESSAGE ORDERING
+# GROUP TEXT ACCEPTANCE → 1-TO-1 VOICE
 
-Focus now on:
+Focus now on verifying the packaged 3+ client group workflow, then implement:
 
-**friend DM** → **authorized candidate lookup** → **authenticated direct connection** → **deterministically ordered local encrypted chat**
+**WPF call state** → **C ABI lifecycle** → **native WebRTC/Opus media** → **authenticated 1-to-1 voice**
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and
 encrypted-history behavior. Current implementation details and test state belong in
@@ -1009,9 +1020,7 @@ Do NOT begin:
 - relay implementation
 - updater implementation
 - disappearing messages
-- group networking
 - Discord bridge
-- voice
 - video
 - screen sharing
 - file transfer
@@ -1027,8 +1036,9 @@ Preserve:
 - modern WPF UI
 - Server Admin/headless-server separation
 
-Work incrementally and test both same-LAN and public forwarded-port direct connections before
-declaring Milestone 3 complete.
+Keep group state client-owned and transport-independent. Implement voice incrementally with device
+selection, ringing/accept/reject/end, mute/deafen, failure states, profile-switch teardown, and tests
+that do not weaken peer identity or message isolation.
 
 ---
 

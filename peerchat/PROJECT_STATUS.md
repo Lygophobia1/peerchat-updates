@@ -9,8 +9,8 @@
 
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
-**Current Milestone:** Milestone 3 — Automatic Direct Connection + Message Ordering  
-**Current Priority:** remaining identity-change/restart acceptance and visible legacy-profile upgrade validation
+**Current Milestone:** Group Text Stage 1 — client-owned peer-replicated groups
+**Current Priority:** packaged 3+ client group acceptance, then 1-to-1 voice foundation
 
 ## Current builds
 
@@ -47,6 +47,15 @@
 - Legacy state is copied to recovery and staging locations, SHA-256 verified, marked complete, and
   atomically cataloged. Original files remain recoverable and ciphertext is not re-encrypted.
 - Backup, reset, and restore affect the selected profile. Reset gives only it a new Peer ID.
+- Client-owned group text now uses random stable Group IDs and signed event ledgers for create,
+  rename, invite/accept/decline, leave/remove, owner/admin/member roles, and messages. Group state and
+  encrypted history persist per profile and replicate over authenticated direct P2P connections.
+- The group implementation uses arbitrary member collections and general peer fanout; there is no
+  three-member schema, protocol, routing, storage, authorization, or WPF limit. Three clients remain
+  the minimum manual acceptance case, not a product cap.
+- The WPF Groups tab lists groups/unread state, retains independent drafts, sends group text, displays
+  a scrollable member list, and exposes role-appropriate rename, invite, accept/decline, promote,
+  demote, remove, and leave actions.
 
 ## Stabilization changes
 
@@ -69,12 +78,15 @@
 
 - `scripts\run-tests.ps1`: passed six encrypted profiles, DPAPI storage/tamper rejection,
   mutual TLS, 15 direct links, Unicode messages, ACKs, reconnect, offline outbox, restart,
-  deduplication, and malformed transport isolation.
+  deduplication, malformed transport isolation, a signed group-ledger test with eight identities,
+  and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
+  convergence, and restart persistence.
 - `tests\test-discovery.ps1`: passed authentication, identity, presence/search, friend lifecycle,
   authoritative snapshots, and database restart persistence.
-- `tests\test-desktop.ps1`: passed managed/native adapter and direct-message workflow.
-- `tests\test-desktop-ui.ps1`: passed two packaged WPF clients, manual P2P, composer,
-  Send/Attachment state, history, reconnect, and bidirectional delivery.
+- `tests\test-desktop.ps1`: passed managed/native adapter, direct-message workflow, group creation,
+  signed invitation/acceptance, membership convergence, and group text across the native ABI.
+- `tests\test-desktop-ui.ps1`: passed two release-packaged WPF clients, manual P2P, composer,
+  Send/Attachment state, history, reconnect, bidirectional delivery, and Groups/DM draft isolation.
 - `tests\test-friend-ui.ps1`: passed two packaged clients finding, requesting, accepting,
   opening an authenticated direct DM, and exchanging a message.
 - Profile-manager and native-adapter coverage passes idempotent legacy migration, preserved Peer ID,
@@ -90,19 +102,16 @@
 
 ## Current blocker / next action
 
-Automated and local packaged coverage is green. Physical local-network and separate-network/hotspot
-direct P2P, fresh account/device setup, fresh-machine firewall approval, and authenticated chat are
-manually accepted. Remaining physical acceptance is to confirm one identity-change prompt after a
-Fresh Client reset, restart without another prompt, then stop discovery and confirm the established
-direct chat continues.
+The group backend, native transport, managed bridge, and release package are automated-test green.
+Next, run the required manual packaged acceptance with at least three real clients: create a group,
+invite/accept members, exchange concurrent text, change roles/name, remove and leave, restart/reconnect,
+and then stop discovery while direct connectivity remains. Confirm all replicas converge and no DM,
+profile, identity, or history state crosses profiles. Three clients prove group behavior but are not
+a product limit.
 
-Also run one manual upgrade against a disposable copy of a real pre-profile client state: confirm
-the profile-card chooser, legacy Peer ID/history, add/rename/recoverable-remove actions, restart-based
-switch, and selected-profile-only backup/reset/restore. Automated DPAPI/ciphertext migration is green,
-but this visible packaged upgrade acceptance has not been performed on a user's real legacy state.
-
-Milestone 3 must not advance to NAT traversal or relay until the remaining identity-change and
-discovery-independence checks pass.
+The remaining pre-group physical checks are one identity-change prompt after Fresh Client reset and
+one visible upgrade against a disposable copy of real pre-profile state. Automated coverage remains
+green, but those two manual checks have not been recorded as complete.
 
 The account-isolation startup gate is implemented with restart-based switching for v0.3-beta.
 Discovery/events and P2P sessions stop, the native worker closes SQLite and clears identity state,
@@ -111,9 +120,11 @@ in-process switching must preserve this same boundary and may not keep two cores
 
 ## Known/deferred work
 
-- NAT traversal/STUN/ICE and relay are Milestones 4/5.
-- Voice, video, screen sharing, groups, file transfer, updater, disappearing messages, Discord
-  integration, and multi-device synchronization remain deferred.
+- NAT traversal/STUN/ICE and optional encrypted relay remain future transport work. Neither may
+  become group authority.
+- 1-to-1 voice is the next implementation stage after packaged group acceptance. Group voice,
+  video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
+  multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Record physical P2P acceptance`
-  (after `Fix packaged profile bootstrap and firewall reuse`).
+- Latest project checkpoint: `Add client-owned peer-replicated group text foundation`
+  (after `Record physical P2P acceptance`).

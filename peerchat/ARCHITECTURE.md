@@ -12,7 +12,7 @@
 `desktop/App.cs` owns the WPF presentation. `desktop/CoreAdapter.cs` calls the C-compatible
 exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native core owns
 P2P sockets, Schannel sessions, peer trust, reconnect, delivery acknowledgements, logical ordering,
-offline outbox, contacts, identity keys, and encrypted local history.
+offline outbox, contacts, identity keys, encrypted local history, and the client-owned group ledger.
 
 `server/PeerChat.Server.cs` is the headless account/discovery service. The separate
 `PeerChat.Server.Admin.exe` creates/reuses a development certificate, launches the server,
@@ -60,6 +60,39 @@ cross the switch. Profile removal is confirmed and recoverable under `RemovedPro
 Account ID and device Peer ID remain separate fields so several devices per account can be added
 later. The current profile owns one protected account session and one device identity; multi-device
 synchronization and automatic trust transfer are not implemented.
+
+## Client-owned group state
+
+The native `GroupLedger` is the authority for each local group replica. A random 128-bit Group ID is
+created on the owner client and never derived from a name or issued by the discovery service. Create,
+rename, invite, accept/decline, leave, remove, role, and message operations are content-addressed,
+ECDSA-signed events. Authorization is evaluated against the deterministically reconstructed prior
+state, ordered by `(logicalOrder, eventId)`. The same authenticated event set therefore converges to
+the same metadata, membership, roles, and message order even when peers receive concurrent or causal
+events in different orders. Duplicate event IDs are replay-safe; conflicting or invalid signatures
+do not alter visible state.
+
+Membership and invitations are maps keyed by account ID, with a verified device Peer ID and public
+key attached to each current member record. Owner, admin, and member permissions are checked for each
+event. Collections, fanout, storage, and the WPF member list do not encode a three-member limit. Any
+future practical size/rate policy must remain configurable resource policy rather than a protocol or
+schema assumption.
+
+Accepted events are stored in the selected profile's DPAPI-encrypted SQLite database. A per-peer
+group outbox survives disconnect/restart and sends signed group envelopes only over authenticated
+mutual-TLS peer connections that advertise the signed-groups capability. Inviting a verified friend
+queues the accepted ledger history to that device; later accepted events fan out across current
+members/invitees, so connected members can forward events to temporarily indirect peers. Pending
+causal events are reconsidered when predecessors arrive. Only one profile/core/ledger set is open,
+and group keys, events, outboxes, and account binding are cleared with the rest of native state on a
+profile restart.
+
+The WPF layer invokes groups through the existing C ABI and renders replicated state; it does not
+become an authority. Discovery may help locate a friend's account/device endpoint for an invitation,
+but the server creates no Group ID, membership row, role, metadata, invite, removal, or history. If
+discovery disappears, persisted groups and direct group messaging continue. A future relay may carry
+the same encrypted signed envelopes in Direct Only, Automatic, or Relay / Privacy transport modes,
+but transport choice cannot change the logical group or its client authority.
 
 ## Endpoint model
 

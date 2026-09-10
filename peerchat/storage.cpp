@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "storage.hpp"
+#include "group.hpp"
 #include <windows.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
@@ -151,7 +152,11 @@ struct Storage::Impl {
                     "CREATE TABLE IF NOT EXISTS messages(id TEXT UNIQUE NOT NULL,peer TEXT NOT NULL,b BLOB NOT NULL);"
                     "CREATE INDEX IF NOT EXISTS conversation_index ON messages(peer);");
             // Separate outbox index contains identifiers only, never message text.
-            execute("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL);");
+            execute("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL);"
+                    "CREATE TABLE IF NOT EXISTS group_events(event_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,logical_order INTEGER NOT NULL,b BLOB NOT NULL);"
+                    "CREATE INDEX IF NOT EXISTS group_event_order ON group_events(group_id,logical_order,event_id);"
+                    "CREATE TABLE IF NOT EXISTS group_outbox(event_id TEXT NOT NULL REFERENCES group_events(event_id) ON DELETE CASCADE,peer_id TEXT NOT NULL,PRIMARY KEY(event_id,peer_id));"
+                    "CREATE INDEX IF NOT EXISTS group_outbox_peer ON group_outbox(peer_id,event_id);");
         }catch(...){sql.close(db);db=nullptr;throw;}
     }
     ~Impl(){if(db)sql.close(db);}
@@ -269,4 +274,28 @@ std::vector<StoredMessage> Storage::pending(const std::string& conversation,int 
     while(s.row()){auto id=s.text(0);Secret plain{protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Outbox identity mismatch");result.push_back(std::move(m));}
     return result;
 }
+bool Storage::appendGroupEvent(const GroupEvent& event) {
+    require(identifier(event.groupId,32)&&identifier(event.eventId)&&event.logicalOrder>0&&event.logicalOrder<=static_cast<std::uint64_t>(INT64_MAX),"Invalid group event identity");
+    Blob plain=encodeGroupEvent(event);Transaction transaction(impl_->sql,impl_->db);
+    Statement existing(impl_->sql,impl_->db,"SELECT group_id,b FROM group_events WHERE event_id=?");existing.text(1,event.eventId);
+    if(existing.row()){
+        require(existing.text(0)==event.groupId,"Group event ID reused in another group");
+        Secret saved{protect(existing.bytes(1),"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,false)};
+        require(saved.data==plain,"Conflicting duplicate group event ID");transaction.commit();return false;
+    }
+    Blob encrypted=protect(plain,"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,true);
+    Statement insert(impl_->sql,impl_->db,"INSERT INTO group_events(event_id,group_id,logical_order,b) VALUES(?,?,?,?)");insert.text(1,event.eventId);insert.text(2,event.groupId);insert.number(3,static_cast<std::int64_t>(event.logicalOrder));insert.blob(4,encrypted);insert.row();transaction.commit();return true;
+}
+std::vector<GroupEvent> Storage::groupEvents(const std::string& groupId) {
+    require(identifier(groupId,32),"Invalid Group ID");Statement statement(impl_->sql,impl_->db,"SELECT event_id,b FROM group_events WHERE group_id=? ORDER BY logical_order,event_id");statement.text(1,groupId);std::vector<GroupEvent> events;
+    while(statement.row()){std::string eventId=statement.text(0);Secret plain{protect(statement.bytes(1),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Stored group event identity mismatch");events.push_back(std::move(event));}return events;
+}
+std::vector<std::string> Storage::groupIds() {
+    Statement statement(impl_->sql,impl_->db,"SELECT DISTINCT group_id FROM group_events ORDER BY group_id");std::vector<std::string> groups;while(statement.row()){auto id=statement.text(0);require(identifier(id,32),"Invalid stored Group ID");groups.push_back(std::move(id));}return groups;
+}
+GroupAccount Storage::groupAccount(){Blob saved=impl_->get("group-account");if(saved.empty())return {};Reader reader(saved);GroupAccount account;account.accountId=reader.number();account.name=reader.text();reader.end();require(account.accountId>0&&!account.name.empty()&&account.name.size()<=64,"Invalid group account binding");return account;}
+void Storage::saveGroupAccount(const GroupAccount& account){require(account.accountId>0&&!account.name.empty()&&account.name.size()<=64,"Invalid group account binding");Writer writer;writer.number(account.accountId);writer.text(account.name);impl_->put("group-account",writer.data);}
+void Storage::queueGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery identity");Statement statement(impl_->sql,impl_->db,"INSERT OR IGNORE INTO group_outbox(event_id,peer_id) VALUES(?,?)");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
+void Storage::acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery acknowledgement");Statement statement(impl_->sql,impl_->db,"DELETE FROM group_outbox WHERE event_id=? AND peer_id=?");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
+std::vector<GroupEvent> Storage::pendingGroupEvents(const std::string& peerId,int limit){require(identifier(peerId)&&limit>0&&limit<=256,"Invalid group outbox request");Statement statement(impl_->sql,impl_->db,"SELECT e.event_id,e.group_id,e.b FROM group_outbox o JOIN group_events e ON e.event_id=o.event_id WHERE o.peer_id=? ORDER BY e.logical_order,e.event_id LIMIT ?");statement.text(1,peerId);statement.number(2,limit);std::vector<GroupEvent> events;while(statement.row()){auto eventId=statement.text(0),groupId=statement.text(1);Secret plain{protect(statement.bytes(2),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Group outbox identity mismatch");events.push_back(std::move(event));}return events;}
 }

@@ -6,6 +6,8 @@
 
 namespace peerchat {
 using Blob = std::vector<unsigned char>;
+struct GroupEvent;
+struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
 struct Profile {
     std::string peerId;
     std::wstring name = L"You";
@@ -54,6 +56,14 @@ public:
     std::vector<StoredMessage> history(const std::string& conversation,
         int limit=100, std::int64_t beforeSequence=INT64_MAX);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
+    bool appendGroupEvent(const GroupEvent& event);
+    std::vector<GroupEvent> groupEvents(const std::string& groupId);
+    std::vector<std::string> groupIds();
+    GroupAccount groupAccount();
+    void saveGroupAccount(const GroupAccount& account);
+    void queueGroupDelivery(const std::string& eventId,const std::string& peerId);
+    void acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId);
+    std::vector<GroupEvent> pendingGroupEvents(const std::string& peerId,int limit=64);
     static std::string newMessageId();
     static std::string publicKeyId(const Blob& publicKey);
 private:

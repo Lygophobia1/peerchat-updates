@@ -1,0 +1,38 @@
+#include "../group.hpp"
+#include "../protocol.hpp"
+#include <algorithm>
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
+
+using namespace peerchat;
+static void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+static GroupEvent base(const GroupLedger& ledger,const Profile& actor,std::uint64_t account,GroupEventKind kind){GroupEvent event;event.groupId=ledger.state().groupId;event.logicalOrder=ledger.state().maxLogicalOrder+1;event.createdMilliseconds=event.logicalOrder*1000;event.kind=kind;event.actorAccountId=account;event.actorPeerId=actor.peerId;return event;}
+static GroupEvent create(const Profile& owner,std::uint64_t account,const std::wstring& user,const std::wstring& name){GroupEvent event;event.groupId=newGroupId();event.logicalOrder=1;event.createdMilliseconds=1;event.kind=GroupEventKind::Create;event.actorAccountId=event.subjectAccountId=account;event.actorPeerId=event.subjectPeerId=owner.peerId;event.subjectName=user;event.subjectPublicKey=owner.publicKey;event.value=name;signGroupEvent(event,owner);return event;}
+static GroupEvent invite(const GroupLedger& ledger,const Profile& actor,std::uint64_t actorAccount,const Profile& target,std::uint64_t targetAccount,const std::wstring& name){auto event=base(ledger,actor,actorAccount,GroupEventKind::Invite);event.subjectAccountId=targetAccount;event.subjectPeerId=target.peerId;event.subjectName=name;event.subjectPublicKey=target.publicKey;signGroupEvent(event,actor);return event;}
+static GroupEvent self(const GroupLedger& ledger,const Profile& actor,std::uint64_t account,GroupEventKind kind){auto event=base(ledger,actor,account,kind);event.subjectAccountId=account;event.subjectPeerId=actor.peerId;signGroupEvent(event,actor);return event;}
+
+int main(int argc,char** argv){
+    try{
+        require(argc==2,"group test needs a temporary directory");std::filesystem::path root(argv[1]);std::filesystem::create_directories(root);
+        std::vector<Profile> devices;for(int i=0;i<8;i++){Storage store((root/std::to_wstring(i)).wstring());devices.push_back(store.profile());}
+        GroupLedger owner;auto genesis=create(devices[0],1,L"Owner",L"Weekend plans");require(owner.append(genesis),"create rejected");require(owner.state().groupId.size()==32,"Group ID is not independent random ID");
+        std::vector<GroupEvent> history{genesis};
+        // Eight members demonstrates collection-based behavior beyond the three-client minimum.
+        for(std::uint64_t account=2;account<=8;account++){auto add=invite(owner,devices[0],1,devices[account-1],account,L"Member "+std::to_wstring(account));require(owner.append(add),"owner invite rejected");history.push_back(add);auto accept=self(owner,devices[account-1],account,GroupEventKind::Accept);require(owner.append(accept),"invitation acceptance rejected");history.push_back(accept);}
+        require(owner.state().members.size()==8&&owner.state().invitations.empty(),"membership collection was capped or incomplete");
+        auto promote=base(owner,devices[0],1,GroupEventKind::SetRole);promote.subjectAccountId=2;promote.value=L"admin";signGroupEvent(promote,devices[0]);require(owner.append(promote),"owner promotion rejected");history.push_back(promote);require(owner.state().members.at(2).role==GroupRole::Admin,"admin role not applied");
+        auto unauthorized=base(owner,devices[2],3,GroupEventKind::Rename);unauthorized.value=L"Hijacked";signGroupEvent(unauthorized,devices[2]);require(!owner.append(unauthorized)&&owner.state().name==L"Weekend plans","member renamed group without authorization");
+        auto ownerRename=base(owner,devices[0],1,GroupEventKind::Rename);ownerRename.value=L"Autumn plans";signGroupEvent(ownerRename,devices[0]);auto adminRename=base(owner,devices[1],2,GroupEventKind::Rename);adminRename.value=L"Road trip";signGroupEvent(adminRename,devices[1]);require(owner.append(ownerRename),"owner rename rejected");require(owner.append(adminRename),"admin concurrent rename rejected");history.push_back(ownerRename);history.push_back(adminRename);
+        auto firstMessage=base(owner,devices[1],2,GroupEventKind::Message);firstMessage.message=L"Message from admin";signGroupEvent(firstMessage,devices[1]);auto secondMessage=base(owner,devices[2],3,GroupEventKind::Message);secondMessage.message=L"Message from member";signGroupEvent(secondMessage,devices[2]);require(owner.append(secondMessage)&&owner.append(firstMessage),"simultaneous group messages rejected");history.push_back(secondMessage);history.push_back(firstMessage);require(owner.state().messages.size()==2,"group messages missing");require(owner.state().messages[0].eventId<owner.state().messages[1].eventId,"simultaneous messages lack deterministic tie break");
+        Blob encoded=encodeGroupEvent(firstMessage);auto decoded=decodeGroupEvent(encoded);require(decoded.eventId==firstMessage.eventId&&verifyGroupEventSignature(decoded,devices[1].publicKey),"group wire event did not retain signature");decoded.message=L"tampered";require(!verifyGroupEventSignature(decoded,devices[1].publicKey),"tampered group event signature accepted");
+        // A replica receiving events in reverse arrival order converges once predecessors arrive.
+        GroupLedger replica;for(auto it=history.rbegin();it!=history.rend();++it)replica.append(*it);require(replica.state().members.size()==owner.state().members.size()&&replica.state().name==owner.state().name,"reverse delivery did not converge");
+        require(replica.append(firstMessage),"identical replay changed acceptance");require(replica.state().messages.size()==2,"duplicate group delivery was not suppressed");
+        auto remove=base(owner,devices[1],2,GroupEventKind::Remove);remove.subjectAccountId=3;signGroupEvent(remove,devices[1]);require(owner.append(remove)&&owner.state().members.count(3)==0,"admin could not remove member");
+        auto leave=self(owner,devices[3],4,GroupEventKind::Leave);require(owner.append(leave)&&owner.state().members.count(4)==0,"member leave failed");auto ownerLeave=self(owner,devices[0],1,GroupEventKind::Leave);require(!owner.append(ownerLeave)&&owner.state().members.count(1)==1,"owner left without ownership transfer");
+        auto persistentPath=(root/L"persistent").wstring();{Storage storage(persistentPath);for(const auto& event:owner.events())storage.appendGroupEvent(event);require(storage.groupIds()==std::vector<std::string>{genesis.groupId},"stored Group ID index mismatch");}
+        GroupLedger restarted;{Storage storage(persistentPath);for(const auto& event:storage.groupEvents(genesis.groupId))restarted.append(event);}require(restarted.state().name==owner.state().name&&restarted.state().members.size()==owner.state().members.size()&&restarted.state().messages.size()==2,"encrypted group ledger did not survive restart");
+        std::cout<<"PASS: signed client-owned encrypted group ledger, arbitrary membership, roles, deterministic convergence/order, replay rejection, remove, leave, and restart.\n";return 0;
+    }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<"\n";return 1;}
+}

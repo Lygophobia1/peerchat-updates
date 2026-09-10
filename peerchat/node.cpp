@@ -29,13 +29,14 @@ using Clock=std::chrono::steady_clock;
 constexpr size_t MaxConnections=128,MaxQueue=1024*1024;
 struct Connection {
     SOCKET socket=INVALID_SOCKET;
-    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false;
+    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false;
     std::wstring host,name;std::uint16_t port=0;
     std::string expected,peerId;
     std::unique_ptr<TlsSession> tls;
     Blob output,input;size_t sent=0;
     Clock::time_point began=Clock::now(),lastProgress=Clock::now();
     std::set<std::string> inflight;
+    std::set<std::string> groupInflight;
     ~Connection(){if(socket!=INVALID_SOCKET)closesocket(socket);}
 };
 struct Resolver {
@@ -50,12 +51,14 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name };
-    struct Command{Action action;std::string peer,id;std::wstring text;std::uint16_t port=0;bool accepted=false;std::int64_t before=INT64_MAX;Contact contact;};
+    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name;std::uint16_t port=0;bool accepted=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
     std::map<std::string,Contact> contacts;
+    std::map<std::string,GroupLedger> groups;
+    GroupAccount groupAccount;
     std::vector<std::unique_ptr<Connection>> connections;
     std::vector<std::unique_ptr<Resolver>> resolvers;
     std::map<std::string,Clock::time_point> reconnect;
@@ -71,6 +74,7 @@ struct Node::Impl {
     }
     bool command(Command c){std::lock_guard<std::mutex> lock(commandMutex);if(!running||commands.size()>=512)return false;commands.push_back(std::move(c));return true;}
     void publishContacts(){NodeEvent e;e.kind=NodeEvent::Kind::Contacts;for(const auto& item:contacts)e.contacts.push_back(item.second);emit(std::move(e));}
+    void publishGroups(){NodeEvent event;event.kind=NodeEvent::Kind::Groups;if(groupAccount.accountId)for(const auto& item:groups){const auto& state=item.second.state();if(state.members.count(groupAccount.accountId)||state.invitations.count(groupAccount.accountId))event.groups.push_back(state);}emit(std::move(event));}
     void stop(){running=false;if(worker.joinable())worker.join();std::lock_guard<std::mutex> lock(commandMutex);commands.clear();}
     bool exists(const std::string& id)const {for(const auto& c:connections)if(!c->dead&&((!id.empty()&&c->peerId==id)||(!id.empty()&&c->expected==id)))return true;for(const auto& r:resolvers)if(!id.empty()&&r->expected==id)return true;return false;}
     void resolve(const std::wstring& host,std::uint16_t port,const std::string& expected){
@@ -110,6 +114,7 @@ struct Node::Impl {
     }
     void collect(Connection& c){auto bytes=c.tls->takeOutput();if(c.output.size()-c.sent+bytes.size()>MaxQueue)throw std::runtime_error("Peer is not consuming outgoing data");if(c.sent){c.output.erase(c.output.begin(),c.output.begin()+c.sent);c.sent=0;}c.output.insert(c.output.end(),bytes.begin(),bytes.end());}
     void packet(Connection& c,protocol::Writer& w){c.tls->send(w.frame());collect(c);}
+    void packet(Connection& c,const Blob& value){c.tls->send(protocol::frame(value));collect(c);}
     void outbox(Connection& c){
         if(!c.online)return;
         for(const auto& m:store->pending(c.peerId,100)) {
@@ -118,12 +123,24 @@ struct Node::Impl {
             protocol::Writer w(protocol::Text);w.string(m.id);if(c.logicalOrdering)w.number(m.logicalOrder);w.number(m.utcMilliseconds);w.text(m.text);packet(c,w);c.inflight.insert(m.id);
         }
     }
+    std::set<std::string> groupPeers(const GroupState& state){std::set<std::string> peers;for(const auto& member:state.members)peers.insert(member.second.peerId);for(const auto& invitation:state.invitations)peers.insert(invitation.second.peerId);peers.erase(profile.peerId);return peers;}
+    void persistAccepted(GroupLedger& ledger){for(const auto& event:ledger.events())if(ledger.accepted(event.eventId))store->appendGroupEvent(event);}
+    void queueGroupEvent(const GroupEvent& event,const std::set<std::string>& peers){for(const auto& peer:peers)if(protocol::id(peer)&&peer!=profile.peerId)store->queueGroupDelivery(event.eventId,peer);}
+    void queueGroupSync(const GroupLedger& ledger,const std::string& peer){for(const auto& event:ledger.events())if(ledger.accepted(event.eventId))store->queueGroupDelivery(event.eventId,peer);}
+    void groupOutbox(Connection& connection){
+        if(!connection.online||!connection.signedGroups)return;
+        for(const auto& event:store->pendingGroupEvents(connection.peerId,64)){
+            if(connection.groupInflight.count(event.eventId))continue;
+            if(connection.inflight.size()+connection.groupInflight.size()>=16||connection.output.size()-connection.sent>MaxQueue/2)break;
+            packet(connection,encodeGroupEvent(event));connection.groupInflight.insert(event.eventId);
+        }
+    }
     void online(Connection& c){
         if(c.online||!c.approved||!c.remoteApproved)return;
         for(auto& other:connections)if(other.get()!=&c&&!other->dead&&other->online&&other->peerId==c.peerId){
             if(c.incoming==(profile.peerId<c.peerId)){c.dead=true;return;}other->dead=true;
         }
-        c.online=true;reconnect.erase(c.peerId);notice(NodeEvent::Kind::Connected,c.name,c.peerId);outbox(c);
+        c.online=true;reconnect.erase(c.peerId);notice(NodeEvent::Kind::Connected,c.name,c.peerId);outbox(c);groupOutbox(c);
     }
     void approve(Connection& c){
         c.approved=true;protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
@@ -132,7 +149,7 @@ struct Node::Impl {
         protocol::Reader r(frame);
         if(!c.hello){
             protocol::check(r.type()==protocol::Hello);auto capabilities=r.number();auto port=r.number();c.name=r.text();r.end();
-            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.hello=true;
+            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.hello=true;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty())c.host=observedAddress(c.socket);
             // A changed identity is a security-relevant verification event, not a silent
@@ -164,6 +181,26 @@ struct Node::Impl {
             auto id=r.string();r.end();protocol::check(protocol::id(id,32));
             // A peer can acknowledge only an ID actually sent on this connection.
             if(c.inflight.erase(id)){store->acknowledge(id,Delivery::Delivered);NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=c.peerId;StoredMessage m;m.id=id;m.delivery=Delivery::Delivered;e.messages.push_back(m);emit(std::move(e));outbox(c);}
+        }else if(r.type()==protocol::GroupEvent){
+            auto event=decodeGroupEvent(frame);protocol::check(protocol::id(event.groupId,32)&&protocol::id(event.eventId));
+            auto found=groups.find(event.groupId);
+            if(found==groups.end()){
+                // An unknown group enters local state only through its valid signed creation
+                // event. Invitations and later events may then arrive in any order.
+                if(event.kind!=GroupEventKind::Create)return;
+                GroupLedger candidate;if(!candidate.append(event))return;
+                found=groups.emplace(event.groupId,std::move(candidate)).first;
+            }
+            auto& ledger=found->second;std::set<std::string> acceptedBefore,messageBefore;
+            for(const auto& known:ledger.events()){if(ledger.accepted(known.eventId))acceptedBefore.insert(known.eventId);if(ledger.accepted(known.eventId)&&known.kind==GroupEventKind::Message)messageBefore.insert(known.eventId);}
+            bool accepted=ledger.append(event);if(!accepted)return;
+            persistAccepted(ledger);auto peers=groupPeers(ledger.state());peers.erase(c.peerId);bool acknowledgedCurrent=false;
+            for(const auto& newlyAccepted:ledger.events())if(ledger.accepted(newlyAccepted.eventId)&&!acceptedBefore.count(newlyAccepted.eventId)){queueGroupEvent(newlyAccepted,peers);protocol::Writer ack(protocol::GroupAck);ack.string(newlyAccepted.eventId);packet(c,ack);if(newlyAccepted.eventId==event.eventId)acknowledgedCurrent=true;}
+            if(!acknowledgedCurrent){protocol::Writer ack(protocol::GroupAck);ack.string(event.eventId);packet(c,ack);}
+            publishGroups();for(const auto& messageEvent:ledger.state().messages)if(!messageBefore.count(messageEvent.eventId)){NodeEvent message;message.kind=NodeEvent::Kind::GroupMessage;message.peerId=event.groupId;message.groupEvents.push_back(messageEvent);emit(std::move(message));}
+            for(auto& connection:connections)if(connection->online&&!connection->dead)groupOutbox(*connection);
+        }else if(r.type()==protocol::GroupAck){
+            auto eventId=r.string();r.end();protocol::check(protocol::id(eventId));if(c.groupInflight.erase(eventId)){store->acknowledgeGroupDelivery(eventId,c.peerId);NodeEvent delivered;delivered.kind=NodeEvent::Kind::GroupDelivered;delivered.peerId=eventId;emit(std::move(delivered));groupOutbox(c);}
         }else throw std::runtime_error("Unknown peer packet type");
     }
     void receive(Connection& c){
@@ -172,13 +209,23 @@ struct Node::Impl {
         c.lastProgress=Clock::now();c.tls->receive(Blob(buffer,buffer+n));collect(c);if(c.tls->closed()){c.dead=true;return;}
         if(c.tls->ready()&&!c.hello&&c.peerId.empty()) {
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());
-            protocol::Writer hello(protocol::Hello);hello.number(protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
+            protocol::Writer hello(protocol::Hello);hello.number(protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|protocol::CapabilitySignedGroups);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
         auto plain=c.tls->takePlaintext();protocol::check(c.input.size()+plain.size()<=256*1024);c.input.insert(c.input.end(),plain.begin(),plain.end());
         while(c.input.size()>=4&&!c.dead){size_t length=(size_t(c.input[0])<<24)|(size_t(c.input[1])<<16)|(size_t(c.input[2])<<8)|c.input[3];protocol::check(length>=4&&length<=protocol::MaxPacket);if(c.input.size()<length+4)break;
             Blob frame(c.input.begin()+4,c.input.begin()+4+length);c.input.erase(c.input.begin(),c.input.begin()+4+length);process(c,frame);}
     }
     void flush(Connection& c){if(c.sent>=c.output.size())return;int n=::send(c.socket,reinterpret_cast<const char*>(c.output.data()+c.sent),static_cast<int>(std::min<size_t>(16384,c.output.size()-c.sent)),0);if(n>0){c.sent+=n;c.lastProgress=Clock::now();if(c.sent==c.output.size()){c.output.clear();c.sent=0;}}else if(n==0||WSAGetLastError()!=WSAEWOULDBLOCK)c.dead=true;}
+    GroupEvent localGroupEvent(GroupLedger& ledger,GroupEventKind kind){
+        if(!groupAccount.accountId)throw std::runtime_error("Sign in before changing a group");
+        GroupEvent event;event.groupId=ledger.state().groupId;event.kind=kind;event.logicalOrder=ledger.state().maxLogicalOrder+1;event.createdMilliseconds=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());event.actorAccountId=groupAccount.accountId;event.actorPeerId=profile.peerId;return event;
+    }
+    void commitLocalGroupEvent(GroupLedger& ledger,GroupEvent event,const std::set<std::string>& beforePeers,bool synchronizeInvite=false){
+        signGroupEvent(event,profile);if(!ledger.append(event))throw std::runtime_error("Group change is not authorized by the current signed state");persistAccepted(ledger);auto peers=beforePeers;auto after=groupPeers(ledger.state());peers.insert(after.begin(),after.end());queueGroupEvent(event,peers);
+        if(synchronizeInvite&&!event.subjectPeerId.empty())queueGroupSync(ledger,event.subjectPeerId);
+        if(event.kind==GroupEventKind::Message){NodeEvent message;message.kind=NodeEvent::Kind::GroupMessage;message.peerId=event.groupId;message.groupEvents.push_back(event);emit(std::move(message));}
+        publishGroups();for(auto& connection:connections)if(connection->online&&!connection->dead)groupOutbox(*connection);
+    }
     void drain(){
         std::deque<Command> batch;{std::lock_guard<std::mutex> lock(commandMutex);batch.swap(commands);}
         for(auto& command:batch)try{
@@ -200,6 +247,23 @@ struct Node::Impl {
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
+            else if(command.action==Action::GroupAccount){if(command.accountId==0||command.name.empty()||command.name.size()>64)throw std::runtime_error("Invalid group account binding");if(groupAccount.accountId&&groupAccount.accountId!=command.accountId)throw std::runtime_error("This profile is already bound to another group account");groupAccount={command.accountId,command.name};store->saveGroupAccount(groupAccount);publishGroups();}
+            else if(command.action==Action::GroupCreate){
+                if(!groupAccount.accountId||command.group.empty()||command.text.empty()||command.text.size()>80)throw std::runtime_error("Invalid group creation");
+                GroupEvent event;event.groupId=command.group;event.kind=GroupEventKind::Create;event.logicalOrder=1;event.createdMilliseconds=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());event.actorAccountId=event.subjectAccountId=groupAccount.accountId;event.actorPeerId=event.subjectPeerId=profile.peerId;event.subjectName=groupAccount.name;event.subjectPublicKey=profile.publicKey;event.value=command.text;auto& ledger=groups[event.groupId];commitLocalGroupEvent(ledger,std::move(event),{});
+            }else if(command.action==Action::Groups){publishGroups();for(const auto& item:groups){const auto& state=item.second.state();if(!groupAccount.accountId||(!state.members.count(groupAccount.accountId)&&!state.invitations.count(groupAccount.accountId)))continue;NodeEvent history;history.kind=NodeEvent::Kind::GroupHistory;history.peerId=item.first;history.groupEvents=state.messages;emit(std::move(history));}}
+            else {
+                auto found=groups.find(command.group);if(found==groups.end())throw std::runtime_error("Unknown Group ID");auto& ledger=found->second;auto peers=groupPeers(ledger.state());GroupEvent event;
+                if(command.action==Action::GroupRename){event=localGroupEvent(ledger,GroupEventKind::Rename);event.value=command.text;}
+                else if(command.action==Action::GroupInvite){auto contact=contacts.find(command.peer);if(contact==contacts.end()||!contact->second.verified||contact->second.publicKey.empty())throw std::runtime_error("Verify this friend before inviting them");event=localGroupEvent(ledger,GroupEventKind::Invite);event.subjectAccountId=command.accountId;event.subjectPeerId=command.peer;event.subjectName=command.name;event.subjectPublicKey=contact->second.publicKey;}
+                else if(command.action==Action::GroupRespond){event=localGroupEvent(ledger,command.accepted?GroupEventKind::Accept:GroupEventKind::Decline);event.subjectAccountId=groupAccount.accountId;event.subjectPeerId=profile.peerId;}
+                else if(command.action==Action::GroupLeave){event=localGroupEvent(ledger,GroupEventKind::Leave);}
+                else if(command.action==Action::GroupRemove){event=localGroupEvent(ledger,GroupEventKind::Remove);event.subjectAccountId=command.accountId;}
+                else if(command.action==Action::GroupRole){event=localGroupEvent(ledger,GroupEventKind::SetRole);event.subjectAccountId=command.accountId;event.value=command.accepted?L"admin":L"member";}
+                else if(command.action==Action::GroupSend){event=localGroupEvent(ledger,GroupEventKind::Message);event.message=command.text;}
+                else throw std::runtime_error("Unsupported group action");
+                commitLocalGroupEvent(ledger,std::move(event),peers,command.action==Action::GroupInvite);
+            }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
     }
     void run(const std::wstring& directory,std::uint16_t listeningPortOverride,const std::wstring& displayNameOverride){
@@ -213,10 +277,11 @@ struct Node::Impl {
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
+            groupAccount=store->groupAccount();groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(listener==INVALID_SOCKET)throw std::runtime_error("Cannot create listener");nonblocking(listener);BOOL exclusive=TRUE;setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<char*>(&exclusive),sizeof(exclusive));
             sockaddr_in bindAddress{};bindAddress.sin_family=AF_INET;bindAddress.sin_port=htons(profile.listenPort);bindAddress.sin_addr.s_addr=htonl(INADDR_ANY);
             if(bind(listener,reinterpret_cast<sockaddr*>(&bindAddress),sizeof(bindAddress))||listen(listener,16))throw std::runtime_error("Cannot listen on saved port; choose a free port in your profile");
-            NodeEvent ready;ready.kind=NodeEvent::Kind::Ready;ready.peerId=profile.peerId;ready.text=profile.name;ready.port=profile.listenPort;emit(std::move(ready));publishContacts();
+            NodeEvent ready;ready.kind=NodeEvent::Kind::Ready;ready.peerId=profile.peerId;ready.text=profile.name;ready.port=profile.listenPort;emit(std::move(ready));publishContacts();publishGroups();
             // Pending friend IDs are intentionally reconnectable too. The first
             // successful TLS handshake supplies the public key that turns the
             // saved fingerprint reference into a verified contact.
@@ -240,7 +305,7 @@ struct Node::Impl {
                 for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){std::string id=(*it)->peerId.empty()?(*it)->expected:(*it)->peerId;it=connections.erase(it);if(!id.empty()&&!exists(id)){notice(NodeEvent::Kind::Disconnected,L"Peer disconnected. Reconnecting if it is a saved contact.",id);if(contacts.count(id)&&!contacts[id].endpoints.empty())reconnect[id]=Clock::now()+std::chrono::seconds(5);}}else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        running=false;resolvers.clear();connections.clear();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();if(winsock)WSACleanup();
+        running=false;resolvers.clear();connections.clear();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -253,5 +318,15 @@ void Node::approve(const std::string& peer,bool accepted){Impl::Command c{};c.ac
 std::string Node::send(const std::string& peer,const std::wstring& text){if(!protocol::id(peer)||text.empty()||text.size()>16384)return {};Impl::Command c{};c.action=Impl::Action::Send;c.peer=peer;c.text=text;c.id=Storage::newMessageId();auto id=c.id;return impl_->command(std::move(c))?id:std::string{};}
 void Node::loadHistory(const std::string& peer,std::int64_t before){Impl::Command c{};c.action=Impl::Action::History;c.peer=peer;c.before=before;impl_->command(std::move(c));}
 void Node::setName(const std::wstring& name){if(name.empty()||name.size()>64)return;Impl::Command c{};c.action=Impl::Action::Name;c.text=name;impl_->command(std::move(c));}
+void Node::setGroupAccount(std::uint64_t accountId,const std::wstring& accountName){if(!accountId||accountName.empty()||accountName.size()>64)return;Impl::Command c{};c.action=Impl::Action::GroupAccount;c.accountId=accountId;c.name=accountName;impl_->command(std::move(c));}
+std::string Node::createGroup(const std::wstring& name){if(name.empty()||name.size()>80)return {};Impl::Command c{};c.action=Impl::Action::GroupCreate;c.group=newGroupId();c.text=name;auto id=c.group;return impl_->command(std::move(c))?id:std::string{};}
+bool Node::renameGroup(const std::string& groupId,const std::wstring& name){if(!protocol::id(groupId,32)||name.empty()||name.size()>80)return false;Impl::Command c{};c.action=Impl::Action::GroupRename;c.group=groupId;c.text=name;return impl_->command(std::move(c));}
+bool Node::inviteToGroup(const std::string& groupId,std::uint64_t accountId,const std::string& peerId,const std::wstring& name){if(!protocol::id(groupId,32)||!accountId||!protocol::id(peerId)||name.empty()||name.size()>64)return false;Impl::Command c{};c.action=Impl::Action::GroupInvite;c.group=groupId;c.accountId=accountId;c.peer=peerId;c.name=name;return impl_->command(std::move(c));}
+bool Node::respondToGroupInvite(const std::string& groupId,bool accept){if(!protocol::id(groupId,32))return false;Impl::Command c{};c.action=Impl::Action::GroupRespond;c.group=groupId;c.accepted=accept;return impl_->command(std::move(c));}
+bool Node::leaveGroup(const std::string& groupId){if(!protocol::id(groupId,32))return false;Impl::Command c{};c.action=Impl::Action::GroupLeave;c.group=groupId;return impl_->command(std::move(c));}
+bool Node::removeGroupMember(const std::string& groupId,std::uint64_t accountId){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRemove;c.group=groupId;c.accountId=accountId;return impl_->command(std::move(c));}
+bool Node::setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRole;c.group=groupId;c.accountId=accountId;c.accepted=admin;return impl_->command(std::move(c));}
+bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!protocol::id(groupId,32)||text.empty()||text.size()>16384)return false;Impl::Command c{};c.action=Impl::Action::GroupSend;c.group=groupId;c.text=text;return impl_->command(std::move(c));}
+void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}
 }
