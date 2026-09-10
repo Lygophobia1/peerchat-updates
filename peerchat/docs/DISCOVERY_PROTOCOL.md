@@ -79,6 +79,11 @@ a full snapshot at login and event-channel reconnect. The bounded fallback is th
 events are healthy and one minute while reconnecting. Event reconnect uses backoff and direct P2P
 sessions continue independently.
 
+The client maps each authoritative friend account to one profile-local conversation and treats the
+snapshot's device Peer ID and endpoint fields as current attachments/candidates. A device change may
+update that mapping only through the normal explicit peer-verification boundary; server friendship
+state never grants cryptographic trust by itself.
+
 If initial authentication, presence, or events are unavailable, the selected encrypted profile
 remains open in Offline / Direct P2P mode. Manual/saved direct connections do not require this
 protocol, and established direct sessions are not closed when discovery disconnects.

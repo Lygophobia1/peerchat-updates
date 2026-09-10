@@ -125,6 +125,13 @@ candidate against every active local IPv4 interface using that interface's real 
 Same-subnet candidates are preferred; otherwise a valid public candidate is selected. A LAN route
 failure may fall through to public promptly. TLS or identity failures do not trigger route fallback.
 
+The WPF conversation identity is `account:<account-id>`, not an endpoint, session, presence state,
+or device Peer ID. A DPAPI-protected index inside the selected profile attaches current and known
+device Peer IDs to that one social conversation, allowing encrypted native histories for those
+devices to merge in the same view. An authoritative friend snapshot updates the existing name and
+current candidates. A changed current Peer ID remains unverified until the existing native trust
+flow explicitly accepts it; old trust is never transferred silently.
+
 The chosen endpoint is passed through the existing adapter to the C++ P2P transport with the
 friend's expected Peer ID. TCP, TLS, peer authentication, and explicit trust remain distinct
 states. Once authenticated, direct chat no longer depends on discovery. Advanced → Direct P2P
@@ -144,8 +151,14 @@ the server emits an offline notification.
 ## Storage, migration, reset, and backup
 
 Each stable profile under LocalAppData contains identity, DPAPI-protected configuration/session
-state, trusted contacts, encrypted SQLite history/WAL/SHM, outbox, message metadata, and unread
-state. Installation metadata contains profile IDs/names/last-used state, but no keys or messages.
+state, protected account/device conversation mappings, bounded safe connection diagnostics, trusted
+contacts, encrypted SQLite history/WAL/SHM, outbox, message metadata, and unread state. Installation
+metadata contains profile IDs/names/last-used state, but no keys or messages.
+
+Connection recovery remains event-driven through the existing candidate selection and native
+session path. The UI records only account/device identifiers, candidates/source/route, TCP/TLS/trust
+results, retry outcomes, and timestamps. It never records credentials, keys, TLS secrets, or message
+text, and trims the per-profile log rather than allowing unbounded growth.
 
 First profile-aware startup copies legacy root state to a timestamped `LegacyBackups` recovery
 location and a staging profile. File lists, lengths, and SHA-256 hashes are verified before a
@@ -173,6 +186,8 @@ command; elevation occurs only when the rule is missing or stale. Successful ver
 recorded in install-wide `firewall-state.dat`, but the live Windows rule remains authoritative.
 It never enables Public-network access or disables Windows Firewall. Firewall/TCP diagnostics
 remain separate from TLS and identity failures.
+In-process UI test hosts have no profile manager/install boundary and therefore never provision or
+rewrite the machine-wide rule for their harness executable path.
 
 ## Repository and release layout
 

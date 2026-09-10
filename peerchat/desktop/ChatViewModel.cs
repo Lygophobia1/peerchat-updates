@@ -13,6 +13,13 @@ public abstract class ObservableModel : INotifyPropertyChanged {
 }
 public class ConversationModel : ObservableModel {
     public ContactData Contact;
+    public string ConversationId="";
+    public long AccountId;
+    public string AccountName="";
+    public bool IsFriend;
+    public string PreviousVerifiedPeerId="";
+    public readonly HashSet<string> KnownPeerIds=new HashSet<string>(StringComparer.Ordinal);
+    public readonly HashSet<string> RequestedPeerHistory=new HashSet<string>(StringComparer.Ordinal);
     public readonly ObservableCollection<MessageModel> Messages=new ObservableCollection<MessageModel>();
     public string Draft="";
     public bool Online,RequestedHistory;
@@ -21,7 +28,7 @@ public class ConversationModel : ObservableModel {
     // separate from account/friend state so a direct P2P chat can work offline.
     public string ConnectionState="Offline";
     public int Unread;
-    public string Name {get{return Contact.name;}}
+    public string Name {get{return !String.IsNullOrEmpty(AccountName)?AccountName:Contact.name;}}
     public string Initial {get{return String.IsNullOrEmpty(Name)?"?":System.Globalization.StringInfo.GetNextTextElement(Name).ToUpperInvariant();}}
     public Brush Presence {get{return new SolidColorBrush(Online?Color.FromRgb(54,216,115):Color.FromRgb(107,121,135));}}
     public string Preview {get{return Messages.Count>0?Messages.Last().Text:(Contact.verified?"Start a conversation":"Awaiting verification");}}
@@ -62,20 +69,38 @@ public class MessageModel : ObservableModel {
 // online/trust/delivery state. Switching views retains drafts and history.
 public class ChatViewModel {
     public readonly Dictionary<string,ConversationModel> Conversations=new Dictionary<string,ConversationModel>();
+    readonly Dictionary<string,ConversationModel> conversationsByPeer=new Dictionary<string,ConversationModel>(StringComparer.Ordinal);
     public readonly Dictionary<string,GroupModel> GroupChats=new Dictionary<string,GroupModel>();
     public string OwnId="",Name="You",Status="Opening your encrypted profile…";
     public ushort Port=7777;
     public bool Listening,Groups;
     public ConversationModel Selected;
     public GroupModel SelectedGroup;
-    public ConversationModel Get(string peer){ConversationModel result;if(!Conversations.TryGetValue(peer,out result)){result=new ConversationModel {Contact=new ContactData{peer=peer,name="Friend",host=""}};Conversations.Add(peer,result);}return result;}
+    public ConversationModel Get(string peer){ConversationModel result;if(!String.IsNullOrEmpty(peer)&&conversationsByPeer.TryGetValue(peer,out result))return result;string key="peer:"+(peer??"");result=new ConversationModel{ConversationId=key,Contact=new ContactData{peer=peer,name="Friend",host=""}};if(!String.IsNullOrEmpty(peer)){result.KnownPeerIds.Add(peer);conversationsByPeer[peer]=result;}Conversations[key]=result;return result;}
+    public ConversationModel FindByPeer(string peer){ConversationModel result;return !String.IsNullOrEmpty(peer)&&conversationsByPeer.TryGetValue(peer,out result)?result:null;}
+    public ConversationModel BindFriend(long accountId,string username,string currentPeer,IEnumerable<string> knownPeers,out bool reused){
+        if(accountId<=0)throw new ArgumentOutOfRangeException("accountId");string key="account:"+accountId;ConversationModel conversation;reused=Conversations.TryGetValue(key,out conversation);
+        ConversationModel peerConversation=null;if(!String.IsNullOrEmpty(currentPeer))conversationsByPeer.TryGetValue(currentPeer,out peerConversation);
+        if(!reused&&peerConversation!=null){conversation=peerConversation;Conversations.Remove(conversation.ConversationId);reused=true;}
+        if(!reused){conversation=new ConversationModel{Contact=new ContactData{peer=currentPeer,name=username,host=""}};}
+        if(peerConversation!=null&&peerConversation!=conversation){foreach(var message in peerConversation.Messages)if(!conversation.Messages.Any(existing=>existing.Data.id==message.Data.id))conversation.Messages.Add(message);foreach(var peer in peerConversation.KnownPeerIds){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}if(String.IsNullOrEmpty(conversation.Draft))conversation.Draft=peerConversation.Draft;conversation.Unread+=peerConversation.Unread;Conversations.Remove(peerConversation.ConversationId);}
+        conversation.ConversationId=key;conversation.AccountId=accountId;conversation.AccountName=username??"";conversation.IsFriend=true;Conversations[key]=conversation;
+        if(knownPeers!=null)foreach(var peer in knownPeers)if(!String.IsNullOrEmpty(peer)){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}
+        if(conversation.Contact==null)conversation.Contact=new ContactData{peer=currentPeer,name=username,host=""};
+        string previous=conversation.Contact.peer??"";bool changed=!String.IsNullOrEmpty(previous)&&!String.IsNullOrEmpty(currentPeer)&&previous!=currentPeer;
+        if(changed&&conversation.Contact.verified)conversation.PreviousVerifiedPeerId=previous;
+        if(!String.IsNullOrEmpty(currentPeer)){conversation.KnownPeerIds.Add(currentPeer);conversationsByPeer[currentPeer]=conversation;if(changed)conversation.Contact=new ContactData{peer=currentPeer,name=username,host="",verified=false};else{conversation.Contact.peer=currentPeer;conversation.Contact.name=username;}}
+        conversation.Refresh();return conversation;
+    }
+    public void ReconcileFriends(ISet<long> activeAccounts){foreach(var conversation in Conversations.Values)if(conversation.AccountId>0)conversation.IsFriend=activeAccounts.Contains(conversation.AccountId);}
+    public void RemoveConversation(ConversationModel conversation){if(conversation==null)return;Conversations.Remove(conversation.ConversationId);foreach(var peer in conversation.KnownPeerIds.ToArray())if(conversationsByPeer.ContainsKey(peer)&&conversationsByPeer[peer]==conversation)conversationsByPeer.Remove(peer);}
     static void OrderMessages(ObservableCollection<MessageModel> messages){
         var ordered=messages.OrderBy(m=>m.Data.logical).ThenBy(m=>m.Data.sender,StringComparer.Ordinal).ThenBy(m=>m.Data.id,StringComparer.Ordinal).ToList();
         for(int index=0;index<ordered.Count;index++){int current=messages.IndexOf(ordered[index]);if(current!=index)messages.Move(current,index);}
     }
     public void Apply(CoreEvent e){
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}
-        if(e.kind==1&&e.contacts!=null)foreach(var contact in e.contacts){var item=Get(contact.peer);item.Contact=contact;item.Refresh();}
+        if(e.kind==1&&e.contacts!=null)foreach(var contact in e.contacts){var item=Get(contact.peer);item.KnownPeerIds.Add(contact.peer);if(item.AccountId==0||item.Contact==null||item.Contact.peer==contact.peer){string accountName=item.AccountName;item.Contact=contact;if(!String.IsNullOrEmpty(accountName))item.Contact.name=accountName;if(contact.verified)item.PreviousVerifiedPeerId="";}item.Refresh();}
         if(e.kind==3){var item=Get(e.peer);item.Online=true;item.ConnectionState="Ready";item.Refresh();Status=e.text+" connected";}
         if(e.kind==4){var item=Get(e.peer);item.Online=false;item.ConnectionState="Retrying";item.Refresh();Status="Peer disconnected. Reconnect is available.";}
         if(e.kind==2){var item=Get(e.peer);if(e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];item.ConnectionState="Awaiting peer verification";item.Online=false;item.Refresh();}

@@ -8,7 +8,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Core adapter build failed' }
     $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $references = @('System.dll','System.Core.dll','System.Xaml.dll','System.Web.Extensions.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:' + (Join-Path $framework $_) }
-    & "$framework\csc.exe" /nologo /target:winexe /platform:x64 /optimize+ "/out:$OutputDirectory\PeerChat.Desktop.exe" /win32manifest:desktop\app.manifest /win32icon:desktop\Assets\Icons\peerchat-client.ico /resource:desktop\Main.xaml,Main.xaml $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FirewallRules.cs .\desktop\LocalProfiles.cs .\desktop\App.cs
+    & "$framework\csc.exe" /nologo /target:winexe /platform:x64 /optimize+ "/out:$OutputDirectory\PeerChat.Desktop.exe" /win32manifest:desktop\app.manifest /win32icon:desktop\Assets\Icons\peerchat-client.ico /resource:desktop\Main.xaml,Main.xaml $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\FirewallRules.cs .\desktop\LocalProfiles.cs .\desktop\App.cs
     if ($LASTEXITCODE -ne 0) { throw 'WPF desktop build failed' }
     Copy-Item desktop/App.config "$OutputDirectory/PeerChat.Desktop.exe.config" -Force
     Copy-Item desktop/Assets/Icons/peerchat-client.ico "$OutputDirectory/peerchat-client.ico" -Force

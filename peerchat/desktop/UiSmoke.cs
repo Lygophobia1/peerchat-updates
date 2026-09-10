@@ -42,8 +42,11 @@ class UiSmoke {
   bool received=false,delivered=false;
   for(int attempt=0;attempt<100;attempt++){await Task.Delay(100);foreach(MessageModel message in messages.Items){if(message.Outgoing&&message.Text==uniqueText&&message.Data.delivery==2)delivered=true;if(!message.Outgoing&&message.Text.Contains(args[3]))received=true;}if(received&&delivered)break;}
   Require(received,"Did not receive the other WPF process's new message");Require(delivered,"New message delivery state not displayed");await Task.Delay(1000);
+  Require(window.FindName("CompactConnectionStatus") is TextBlock&&window.FindName("LastConnectionFailure") is TextBlock,"Compact connection status is missing");Require(window.FindName("CopyConnectionDetails") is Button&&window.FindName("ViewConnectionLog") is Button,"Connection diagnostics actions are missing");
+  if(args[1]=="29431"){Press(window,"CopyConnectionDetails");await Task.Delay(300);Require(Clipboard.GetText().StartsWith("PeerChat connection details"),"Copy Details did not copy a safe troubleshooting block");}
+  bool logOpened=false;var logTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};logTimer.Tick+=(sender,args2)=>{var logWindow=window.OwnedWindows.Cast<Window>().FirstOrDefault(w=>w.Title=="Connection Log");if(logWindow==null)return;logOpened=true;logTimer.Stop();logWindow.Close();};logTimer.Start();Press(window,"ViewConnectionLog");Require(logOpened,"Read-only connection log did not open");
   Press(window,"Older");Press(window,"Reconnect");await Task.Delay(300);Capture(window,args[2]+"-full.png");window.Width=1120;window.Height=740;await Task.Delay(300);Capture(window,args[2]+"-compact.png");
-  File.WriteAllText(args[2]+".txt","PASS: packaged WPF controls; Advanced Direct P2P dialog, composer input state, Send/Attachment vector icons and honest attachment state, saved contacts/history, Groups and DM draft retention, search, Copy My ID, bidirectional send/receive, delivered state, load older, reconnect, full/compact renders, normal close.");
+  File.WriteAllText(args[2]+".txt","PASS: packaged WPF controls; direct P2P messaging, reconnect, compact status, safe Copy Details, bounded read-only connection log, profile history, and normal close.");
  }catch(Exception error){result=1;File.WriteAllText(args[2]+".txt","FAIL: "+error);}finally{window.Close();}};
  app.Run(window);return result;
  }

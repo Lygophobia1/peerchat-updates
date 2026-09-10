@@ -256,6 +256,11 @@ Friend acceptance is a social/account relationship, not permission to silently r
 
 If a friend's cryptographic identity changes unexpectedly, PeerChat must still warn about the change.
 
+A direct-message conversation is keyed by the stable friend/account identity. Current and previous
+device Peer IDs may attach to that conversation, but endpoints, sessions, presence, and device changes
+must not create duplicate social threads. Offline and live history must reconcile into that same view,
+while a new device identity still requires explicit verification.
+
 The existing modern WPF friend-search/request UI should be wired to authoritative server state rather than replaced.
 
 Do not display successful friend state unless the server operation actually succeeded.

@@ -10,7 +10,7 @@
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
 **Current Milestone:** Group Text Stage 1 — client-owned peer-replicated groups
-**Current Priority:** packaged 3+ client group acceptance, then 1-to-1 voice foundation
+**Current Priority:** manual friend/reconnect validation, then packaged 3+ client group acceptance; voice remains paused
 
 ## Current builds
 
@@ -33,6 +33,12 @@
   delivery acknowledgements, offline outbox, and locally encrypted SQLite history.
 - Automatic friend DM connection using authorized, fresh LAN/public candidates and an expected
   cryptographic device identity. Actual subnet masks decide whether a private candidate is local.
+- Friend DMs now use stable account conversation IDs. A protected per-profile account-to-device
+  index merges offline history and later live traffic into one conversation, updates display names
+  in place, and retains explicit verification when the account presents a different device Peer ID.
+- The Connection card exposes event-driven Try Reconnect, compact state/last-failure text, a safe
+  troubleshooting block, and a bounded per-profile read-only connection log. Reconnect reuses the
+  selected conversation's current identity/candidates and never creates another contact or trust path.
 - Deterministic logical message ordering in protocol/storage with stable duplicate handling and
   legacy-history compatibility.
 - One installation-wide, Private-network-only inbound TCP firewall rule scoped to the exact packaged
@@ -83,18 +89,21 @@
   convergence, and restart persistence.
 - `tests\test-discovery.ps1`: passed authentication, identity, presence/search, friend lifecycle,
   authoritative snapshots, and database restart persistence.
-- `tests\test-desktop.ps1`: passed managed/native adapter, direct-message workflow, group creation,
-  signed invitation/acceptance, membership convergence, and group text across the native ABI.
+- `tests\test-desktop.ps1`: passed managed/native adapter, direct-message workflow, stable
+  account-conversation persistence/isolation, old/new device history merge, name reconciliation,
+  explicit changed-device verification, group creation, membership convergence, and group text.
 - `tests\test-desktop-ui.ps1`: passed two release-packaged WPF clients, manual P2P, composer,
-  Send/Attachment state, history, reconnect, bidirectional delivery, and Groups/DM draft isolation.
+  history/reconnect, compact connection status, Copy Details, the read-only bounded log, bidirectional
+  delivery, and Groups/DM draft isolation.
 - `tests\test-friend-ui.ps1`: passed two packaged clients finding, requesting, accepting,
   opening an authenticated direct DM, and exchanging a message.
 - Profile-manager and native-adapter coverage passes idempotent legacy migration, preserved Peer ID,
   trust and readable encrypted history, distinct A/B identities, no A state in B, A → B → A
   restoration, and B-only reset/restore.
-- `tests\test-profile-bootstrap.ps1`: passed the real packaged chooser for existing/new profiles,
-  clean A → B → A process replacement, exact selected-profile startup, and installation firewall
-  reuse with no rule update during either switch.
+- `tests\test-profile-bootstrap.ps1`: the latest run passed existing/new selection and clean exact
+  A → B → A process replacement. Its final firewall-reuse assertion is pending one local rule repair:
+  an older in-process WPF harness had pointed the machine rule at `UiSmoke.exe`; current test hosts
+  are now explicitly prevented from provisioning installation firewall state.
 - The packaged friend test now continues direct messaging after both discovery event channels stop.
 - Manual packaged acceptance passed local-network and separate-network/hotspot direct P2P using a
   fresh account/device, fresh-machine firewall approval, and successfully authenticated chat.
@@ -102,8 +111,16 @@
 
 ## Current blocker / next action
 
-The group backend, native transport, managed bridge, and release package are automated-test green.
-Next, run the required manual packaged acceptance with at least three real clients: create a group,
+The friend/account conversation mapping, reconnect diagnostics, native transport, managed bridge,
+and release package are automated-test green. Before voice resumes, manually restart two signed-in
+clients, confirm the friendship and single DM survive, exercise Try Reconnect/Copy Details/View Log,
+and verify a real changed-device acceptance updates the same social conversation.
+
+Restore the local Windows rule to the packaged client once with administrator approval, then rerun
+the profile-bootstrap firewall-reuse assertion. This is test-machine state, not a profile data or
+restart failure; the A → B → A process/selection portion passed.
+
+Then run the required manual packaged acceptance with at least three real clients: create a group,
 invite/accept members, exchange concurrent text, change roles/name, remove and leave, restart/reconnect,
 and then stop discovery while direct connectivity remains. Confirm all replicas converge and no DM,
 profile, identity, or history state crosses profiles. Three clients prove group behavior but are not
@@ -122,9 +139,9 @@ in-process switching must preserve this same boundary and may not keep two cores
 
 - NAT traversal/STUN/ICE and optional encrypted relay remain future transport work. Neither may
   become group authority.
-- 1-to-1 voice is the next implementation stage after packaged group acceptance. Group voice,
+- 1-to-1 voice remains paused until friend/reconnect manual acceptance and packaged group acceptance. Group voice,
   video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Add client-owned peer-replicated group text foundation`
-  (after `Record physical P2P acceptance`).
+- Latest project checkpoint: `Stabilize friend conversation identity and reconnect diagnostics`
+  (after `Add client-owned peer-replicated group text foundation`).

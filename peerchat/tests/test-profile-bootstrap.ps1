@@ -1,4 +1,4 @@
-param([string]$ApplicationDirectory='releases\v0.3-beta\Client',[string]$OutputDirectory='build\tests\profile-bootstrap')
+param([string]$ApplicationDirectory='releases\v0.3-beta\Client',[string]$OutputDirectory='build\tests\profile-bootstrap',[uint16]$ListenerPort=29642)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -11,6 +11,6 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Packaged profile-bootstrap test build failed'}
     $application=(Resolve-Path (Join-Path $ApplicationDirectory 'PeerChat.Desktop.exe')).Path
     $runtime=Join-Path (Resolve-Path 'build\tests\runtime').Path ('bootstrap-'+[Guid]::NewGuid().ToString('N'))
-    & $harness $application $runtime
+    & $harness $application $runtime $ListenerPort
     if($LASTEXITCODE -ne 0){throw 'Packaged profile-bootstrap regression failed'}
 } finally {Pop-Location}
