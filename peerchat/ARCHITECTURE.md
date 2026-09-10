@@ -143,6 +143,13 @@ friend's expected Peer ID. TCP, TLS, peer authentication, and explicit trust rem
 states. Once authenticated, direct chat no longer depends on discovery. Advanced → Direct P2P
 remains a permanent server-independent fallback.
 
+Each native outbound attempt has an ID plus expected Peer ID, concrete endpoint, candidate source,
+and route. Saved-contact failures use exponential retry backoff with per-attempt jitter from five
+seconds up to a five-minute cap. A changed presence/candidate or Try Reconnect can request an
+immediate attempt without clearing trust or failure history. If an endpoint presents a different
+Peer ID, that attempt remains behind explicit verification; rejection suspends automatic retry for
+that endpoint until a manual retry or candidate update.
+
 ## Discovery events and presence
 
 Login/reconnect fetches one authoritative friend snapshot, then opens a long-lived authenticated
@@ -185,9 +192,11 @@ contacts, encrypted SQLite history/WAL/SHM, outbox, message metadata, and unread
 metadata contains profile IDs/names/last-used state, but no keys or messages.
 
 Connection recovery remains event-driven through the existing candidate selection and native
-session path. The UI records only account/device identifiers, candidates/source/route, TCP/TLS/trust
-results, retry outcomes, and timestamps. It never records credentials, keys, TLS secrets, or message
-text, and trims the per-profile log rather than allowing unbounded growth.
+session path. Native attempt/schedule/failure events carry their own expected identity and route
+metadata; WPF stores presentation state per expected peer rather than in a global current-attempt
+slot. The UI records only account/device identifiers, candidates/source/route, TCP/TLS/trust results,
+retry outcomes, and timestamps. It never records credentials, keys, TLS secrets, or message text,
+and trims the per-profile log rather than allowing unbounded growth.
 
 First profile-aware startup copies legacy root state to a timestamped `LegacyBackups` recovery
 location and a staging profile. File lists, lengths, and SHA-256 hashes are verified before a

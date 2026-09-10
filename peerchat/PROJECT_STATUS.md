@@ -48,6 +48,11 @@
 - The Connection card exposes event-driven Try Reconnect, compact state/last-failure text, a safe
   troubleshooting block, and a bounded per-profile read-only connection log. Reconnect reuses the
   selected conversation's current identity/candidates and never creates another contact or trust path.
+- Saved-contact reconnect now uses jittered exponential backoff from five seconds to a five-minute
+  cap. Presence/candidate changes and Try Reconnect can trigger one immediate attempt. Native events
+  carry attempt/expected-peer/candidate/source/route metadata into per-peer WPF diagnostics, so two
+  failing friends cannot overwrite each other's details. Rejected wrong-identity endpoints pause
+  automatic retry without being trusted or rebound.
 - Deterministic logical message ordering in protocol/storage with stable duplicate handling and
   legacy-history compatibility.
 - One installation-wide, Private-network-only inbound TCP firewall rule scoped to the exact packaged
@@ -107,14 +112,17 @@
   and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
   convergence, restart persistence, real two-peer direct WebRTC/DTLS-SRTP negotiation, unanswered
   timeout, disappearance while ringing, stopped-profile restart/reconnect, active-call cleanup,
-  device-free Opus encode/decode, and native audio queue/mixer bounds.
+  device-free Opus encode/decode, native audio queue/mixer bounds, two simultaneous failing peers,
+  capped exponential reconnect jitter, immediate manual/candidate retry, endpoint metadata, and
+  wrong-identity retry suspension.
 - `tests\test-discovery.ps1`: passed authentication, session-scoped logout, device/account ownership,
   presence/search, friend lifecycle, authoritative snapshots, and database restart persistence.
 - `tests\test-desktop.ps1`: passed protected profile-account binding/session persistence, A/B
   mismatch rejection, profile-scoped sign-out, unreadable-binding detection, managed/native adapter,
   direct-message workflow, stable
   account-conversation persistence/isolation, old/new device history merge, name reconciliation,
-  explicit changed-device verification, group creation, membership convergence, group text, secure
+  explicit changed-device verification, isolated per-account attempt diagnostics, wrong-identity
+  no-rebind behavior, group creation, membership convergence, group text, secure
   voice negotiation, device selection, mute/deafen, and hang-up through the managed/native bridge.
 - `tests\test-desktop-ui.ps1`: passed two release-packaged WPF clients, manual P2P, composer,
   history/reconnect, compact connection status, Copy Details, the read-only bounded log, bidirectional
@@ -175,4 +183,4 @@ in-process switching must preserve this same boundary and may not keep two cores
 - 1-to-1 voice awaits physical packaged acceptance. Group voice, video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Fix packaged native dependency portability` (this checkpoint).
+- Latest project checkpoint: `Stabilize reconnect backoff and diagnostics` (this checkpoint).

@@ -56,4 +56,18 @@ public sealed class ConnectionDiagnosticLog {
     }
     public string Read(){lock(gate){try{return File.Exists(path)?File.ReadAllText(path):"No connection attempts have been recorded for this profile.";}catch(IOException){return "The connection log is temporarily unavailable.";}}}
 }
+
+public sealed class ConnectionAttemptDetails {
+    public long AttemptId;
+    public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="local/direct",Route="None",TransportState="Offline",TrustState="No verification pending",Failure="None";
+}
+
+// Connection facts are keyed by the expected cryptographic peer identity. An event for one
+// friend can therefore never borrow candidate/trust/failure state from another friend.
+public sealed class ConnectionAttemptTracker {
+    readonly Dictionary<string,ConnectionAttemptDetails> attempts=new Dictionary<string,ConnectionAttemptDetails>(StringComparer.Ordinal);
+    static string Key(CoreEvent e,ConversationModel conversation){if(e!=null&&!String.IsNullOrEmpty(e.expected))return e.expected;if(conversation!=null&&conversation.Contact!=null&&!String.IsNullOrEmpty(conversation.Contact.peer))return conversation.Contact.peer;if(e!=null&&!String.IsNullOrEmpty(e.peer))return e.peer;return conversation==null?"":conversation.ConversationId;}
+    public ConnectionAttemptDetails For(ConversationModel conversation){string key=Key(null,conversation);ConnectionAttemptDetails value;return !String.IsNullOrEmpty(key)&&attempts.TryGetValue(key,out value)?value:new ConnectionAttemptDetails();}
+    public ConnectionAttemptDetails Update(CoreEvent e,ConversationModel conversation,string transport=null,string trust=null,string failure=null){string key=Key(e,conversation);ConnectionAttemptDetails value;if(!attempts.TryGetValue(key,out value)){value=new ConnectionAttemptDetails();attempts[key]=value;}if(e!=null){if(e.kind==14){value.PresentedPeer="";value.Failure="None";}if(e.attempt>0)value.AttemptId=e.attempt;if(!String.IsNullOrEmpty(e.expected))value.ExpectedPeer=e.expected;if(!String.IsNullOrEmpty(e.peer)&&(e.peer!=e.expected||e.kind==3))value.PresentedPeer=e.peer;if(!String.IsNullOrEmpty(e.candidate))value.Candidate=e.candidate;if(!String.IsNullOrEmpty(e.source))value.Source=e.source;if(!String.IsNullOrEmpty(e.route))value.Route=e.route;}if(!String.IsNullOrEmpty(transport))value.TransportState=transport;if(!String.IsNullOrEmpty(trust))value.TrustState=trust;if(!String.IsNullOrEmpty(failure))value.Failure=failure;return value;}
+}
 }

@@ -5,12 +5,18 @@
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled };
     Kind kind=Kind::Error;
     std::string peerId;
+    std::string expectedPeerId;
     std::wstring text;
     std::wstring detail;
+    std::wstring candidate;
+    std::wstring candidateSource;
+    std::wstring route;
     std::uint16_t port=0;
+    std::uint64_t attemptId=0;
+    std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;
     std::vector<GroupState> groups;
@@ -22,7 +28,7 @@ public:
     Node(const Node&)=delete;Node& operator=(const Node&)=delete;
     void start(const std::wstring& dataDirectory,std::uint16_t listeningPortOverride=0,const std::wstring& displayNameOverride={});
     void stop();
-    void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={});
+    void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={},const std::wstring& candidateSource=L"Direct",const std::wstring& route=L"manual",bool forceImmediate=false);
     void saveContact(const Contact& contact);
     void removeContact(const std::string& peerId);
     void approve(const std::string& peerId,bool accepted);

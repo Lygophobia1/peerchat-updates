@@ -103,13 +103,13 @@ public class ChatViewModel {
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}
         if(e.kind==1&&e.contacts!=null)foreach(var contact in e.contacts){var item=Get(contact.peer);item.KnownPeerIds.Add(contact.peer);if(item.AccountId==0||item.Contact==null||item.Contact.peer==contact.peer){string accountName=item.AccountName;item.Contact=contact;if(!String.IsNullOrEmpty(accountName))item.Contact.name=accountName;if(contact.verified)item.PreviousVerifiedPeerId="";}item.Refresh();}
         if(e.kind==3){var item=Get(e.peer);item.Online=true;item.ConnectionState="Ready";item.Refresh();Status=e.text+" connected";}
-        if(e.kind==4){var item=Get(e.peer);item.Online=false;item.ConnectionState="Retrying";item.Refresh();Status="Peer disconnected. Reconnect is available.";}
-        if(e.kind==2){var item=Get(e.peer);if(e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];item.ConnectionState="Awaiting peer verification";item.Online=false;item.Refresh();}
+        if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);item.Online=false;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}
+        if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];item.ConnectionState="Awaiting peer verification";item.Online=false;item.Refresh();}}
         if(e.kind==9)Status=e.text;
         if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
         if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Data.id==receipt.id);if(match!=null)match.Delivered();}
-        if(e.kind==8){var item=String.IsNullOrEmpty(e.peer)?null:Get(e.peer);if(item!=null){item.Online=false;item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
+        if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null){item.Online=false;item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
         if(e.kind==9&&e.groups!=null){
             var visible=new HashSet<string>(e.groups.Select(group=>group.id));
             foreach(var old in GroupChats.Keys.Where(id=>!visible.Contains(id)).ToList())GroupChats.Remove(old);

@@ -656,7 +656,8 @@ Avoid:
 - excessive logs
 - continuous redraw/animation while minimized or hidden
 
-Use reasonable retry backoff.
+Use bounded exponential retry backoff with jitter. Authoritative candidate/presence changes and an
+explicit user retry may bypass the current delay, but neither may reset or bypass identity trust.
 
 The headless server should not use GPU resources.
 

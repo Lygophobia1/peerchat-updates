@@ -71,6 +71,11 @@ clients heartbeat every 60 seconds.
 Candidates are route hints, never identities. They are released only to authenticated friends and
 must still complete the native mutual-TLS Peer ID verification.
 
+When an authoritative friend event/snapshot changes online state or candidate data, the client may
+retry that expected Peer ID immediately. This only updates transport scheduling: it does not grant
+trust, rebind a social conversation, or accept a different device identity. Unchanged presence does
+not reset native reconnect backoff.
+
 ## Event stream
 
 `events` authenticates once, returns `events_ready`, and keeps the TLS socket open. The server

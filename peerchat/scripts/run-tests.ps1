@@ -20,6 +20,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Group network test build failed' }
     & g++ -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test build failed' }
+    & g++ -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\reconnect_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\reconnect-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    if ($LASTEXITCODE -ne 0) { throw 'Reconnect/diagnostics test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\audio_test.cpp -o "$outputDirectory\audio-test.exe" -lwinmm
     if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test build failed' }
     & g++ -Ibuild\native\install\include -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\opus_voice_test.cpp -Lbuild\native\install\lib -lopus -lssp -o "$outputDirectory\opus-voice-test.exe"
@@ -36,6 +38,7 @@ try {
     & ".\$outputDirectory\group-test.exe" (Join-Path $PWD ('build\tests\runtime\group-'+[Guid]::NewGuid().ToString('N'))); if ($LASTEXITCODE -ne 0) { throw 'Group ledger test failed' }
     & ".\$outputDirectory\group-node-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Group network test failed' }
     & ".\$outputDirectory\voice-call-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test failed' }
+    & ".\$outputDirectory\reconnect-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Reconnect/diagnostics test failed' }
     & ".\$outputDirectory\audio-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test failed' }
     & ".\$outputDirectory\opus-voice-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Opus voice test failed' }
     & ".\$outputDirectory\tls-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'TLS test failed' }
