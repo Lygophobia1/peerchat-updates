@@ -92,7 +92,13 @@ int main() {
         require(audio.takeError().empty(), "Unexpected worker error");
         audio.stop();
         audio.stop();
-        std::cout << "PASS: PCM mixing, four peers, jitter, clipping, bounded queues, stale frames, closed lifecycle. No audio devices opened.\n";
+        const auto defaults = deviceCandidates(-1, true);
+        require(!defaults.empty() && defaults.front() == WAVE_MAPPER,
+                "Default capture fallback must try the Windows mapper first");
+        const auto stale = deviceCandidates(12345, false);
+        require(stale.size() >= 2 && stale[0] == 12345 && stale[1] == WAVE_MAPPER,
+                "A stale selected output must fall back to the Windows mapper");
+        std::cout << "PASS: PCM mixing, four peers, jitter, clipping, bounded queues, stale frames/devices, closed lifecycle. No audio devices opened.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace peerchat {
 namespace audio_detail {
@@ -114,6 +115,18 @@ WAVEFORMATEX pcmFormat() {
     format.nBlockAlign = 2;
     format.nAvgBytesPerSec = 32000;
     return format;
+}
+
+std::vector<UINT> deviceCandidates(int selected, bool input) {
+    std::vector<UINT> result;
+    auto add = [&](UINT id) {
+        if (std::find(result.begin(), result.end(), id) == result.end()) result.push_back(id);
+    };
+    if (selected >= 0) add(static_cast<UINT>(selected));
+    add(WAVE_MAPPER);
+    const UINT count = input ? waveInGetNumDevs() : waveOutGetNumDevs();
+    for (UINT id = 0; id < count; ++id) add(id);
+    return result;
 }
 
 struct Buffer {
@@ -257,8 +270,12 @@ bool Audio::start(std::wstring& error) {
         return false;
     }
     WAVEFORMATEX format = audio_detail::pcmFormat();
-    MMRESULT result = waveOutOpen(&state.output, state.outputDevice<0?WAVE_MAPPER:static_cast<UINT>(state.outputDevice), &format,
-        reinterpret_cast<DWORD_PTR>(state.outputEvent), 0, CALLBACK_EVENT);
+    MMRESULT result = MMSYSERR_BADDEVICEID;
+    for (UINT device : audio_detail::deviceCandidates(state.outputDevice, false)) {
+        result = waveOutOpen(&state.output, device, &format,
+            reinterpret_cast<DWORD_PTR>(state.outputEvent), 0, CALLBACK_EVENT);
+        if (result == MMSYSERR_NOERROR) break;
+    }
     if (result != MMSYSERR_NOERROR) {
         error = audio_detail::deviceError(L"Could not open the default speaker", result, false);
         state.closeDevices();
@@ -314,8 +331,12 @@ bool Audio::setMuted(bool muted, std::wstring& error) {
     }
     if (state.input) return true;
     WAVEFORMATEX format = audio_detail::pcmFormat();
-    MMRESULT result = waveInOpen(&state.input, state.inputDevice<0?WAVE_MAPPER:static_cast<UINT>(state.inputDevice), &format,
-        reinterpret_cast<DWORD_PTR>(state.inputEvent), 0, CALLBACK_EVENT);
+    MMRESULT result = MMSYSERR_BADDEVICEID;
+    for (UINT device : audio_detail::deviceCandidates(state.inputDevice, true)) {
+        result = waveInOpen(&state.input, device, &format,
+            reinterpret_cast<DWORD_PTR>(state.inputEvent), 0, CALLBACK_EVENT);
+        if (result == MMSYSERR_NOERROR) break;
+    }
     if (result != MMSYSERR_NOERROR) {
         error = audio_detail::deviceError(L"Could not open the default microphone", result, true);
         state.closeInput();

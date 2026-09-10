@@ -173,13 +173,22 @@ Duplicate or completed call IDs are bounded in memory for replay suppression.
 
 The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
 the call ID. `VoiceMedia` is a one-call native boundary: libdatachannel 0.24.3 owns direct ICE,
-ECDSA DTLS-SRTP, RTP and jitter handling; libopus 1.5.2 encodes 16 kHz mono 20 ms capture frames;
-the event-driven WinMM engine owns selected capture/playback devices. Only Opus/RTP crosses the
+ECDSA DTLS-SRTP, RTP and jitter handling; libopus 1.5.2 encodes 16 kHz mono 20 ms capture frames
+with the required 48 kHz RTP clock advanced by 960 ticks per frame; the event-driven WinMM engine
+owns selected capture/playback devices and falls back safely when a selected/default device ID is
+stale. Only Opus/RTP crosses the
 media transport. Raw PCM stays in memory and is never logged, persisted, or written to temporary files.
 
+libdatachannel represents the negotiated audio m-line as one reused bidirectional `sendrecv` track.
+PeerChat installs receive/RTCP handling and open/closed callbacks directly on that track; it does not
+assume the library will report a second remote track. Capture may begin with the peer connection, but
+Opus submission is gated on the negotiated track being open.
+
 Callbacks from libdatachannel and capture are reduced to bounded native queues/events consumed by
-the existing node worker. The stable C ABI exposes call lifecycle, device enumeration/selection,
-mute, and deafen; WPF orchestrates controls and duration. Profile switching disposes the old core,
+the existing node worker. The stable C ABI exposes call lifecycle, refreshable device enumeration/
+selection, mute, deafen, and an on-demand bounded diagnostic snapshot. That snapshot contains only
+safe call state, device labels, media counters, timestamps, and the latest error; it never contains
+audio or cryptographic/session secrets. WPF orchestrates controls and duration. Profile switching disposes the old core,
 closes peer connection/audio devices, then releases identity/database state. Discovery is not in the
 established media path. The current implementation uses host candidates only; STUN/TURN/privacy
 relay remain future transport additions and cannot become call authority.

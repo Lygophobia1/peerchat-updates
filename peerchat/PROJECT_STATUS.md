@@ -81,7 +81,12 @@
   hang-up, busy, timeout, deterministic simultaneous-call resolution, disconnect, and shutdown cleanup.
   The authenticated channel carries WebRTC SDP/ICE signaling for libdatachannel 0.24.3. Direct ICE,
   ECDSA DTLS-SRTP, RTP jitter handling, and Opus 1.5.2 media run in native C/C++; WPF exposes Call,
-  Answer/Decline, state/duration, microphone/output selection, Mute, Deafen, and Hang Up. Media
+  Answer/Decline, state/duration, refreshable microphone/output selection, Mute, Deafen, Hang Up,
+  and bounded Copy Voice Diagnostics. Stale/default WinMM device IDs fall back through available
+  devices, Opus RTP timestamps advance correctly, and audio-device failures remain visibly attached
+  to the call instead of being overwritten by Connected. The reused negotiated `sendrecv` track owns
+  both RTP submission and receive callbacks, fixing the physical-test symptom where both peers
+  submitted Opus frames but neither received a remote track callback. Media
   devices and networking remain closed while Idle. Audio is never recorded or persisted.
 - The packaged native core now statically links the remaining TDM-GCC stack-protector runtime.
   Release packaging rejects non-Windows DLL imports and performs a restricted-search load smoke, so
@@ -112,7 +117,8 @@
   and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
   convergence, restart persistence, real two-peer direct WebRTC/DTLS-SRTP negotiation, unanswered
   timeout, disappearance while ringing, stopped-profile restart/reconnect, active-call cleanup,
-  device-free Opus encode/decode, native audio queue/mixer bounds, two simultaneous failing peers,
+  device-free Opus encode/decode, bidirectional injected PCM through real local ICE/DTLS-SRTP into
+  both remote decode/playback queues, native audio queue/mixer and stale-device fallback bounds, two simultaneous failing peers,
   capped exponential reconnect jitter, immediate manual/candidate retry, endpoint metadata, and
   wrong-identity retry suspension.
 - `tests\test-discovery.ps1`: passed authentication, session-scoped logout, device/account ownership,
@@ -123,7 +129,8 @@
   account-conversation persistence/isolation, old/new device history merge, name reconciliation,
   explicit changed-device verification, isolated per-account attempt diagnostics, wrong-identity
   no-rebind behavior, group creation, membership convergence, group text, secure
-  voice negotiation, device selection, mute/deafen, and hang-up through the managed/native bridge.
+  voice negotiation, device selection/refresh, privacy-safe current/recent call diagnostics,
+  mute/deafen, and hang-up through the managed/native bridge.
 - `tests\test-desktop-ui.ps1`: passed two release-packaged WPF clients, manual P2P, composer,
   history/reconnect, compact connection status, Copy Details, the read-only bounded log, bidirectional
   delivery, and Groups/DM draft isolation.
@@ -146,9 +153,9 @@
 
 ## Current blocker / next action
 
-The package-side fix for the clean-PC `0x8007007E` startup failure is verified locally; the original
-second Windows PC still needs one copy-and-launch retest. Automated voice signaling, direct
-ICE/DTLS-SRTP negotiation, Opus loopback, device enumeration,
+The package-side fix for the clean-PC `0x8007007E` startup failure is verified locally. Automated
+voice signaling, direct ICE/DTLS-SRTP negotiation, Opus loopback with correct RTP clocking,
+refreshable device enumeration and stale-device fallback,
 managed controls, shutdown, and existing regressions are green. The test host has no microphone or
 speaker, so the remaining gate is manual two-PC packaged audio acceptance: ring/answer, bidirectional
 audio, mute, deafen, either-side hang-up, normal text during/after the call, and no retained device
@@ -183,4 +190,4 @@ in-process switching must preserve this same boundary and may not keep two cores
 - 1-to-1 voice awaits physical packaged acceptance. Group voice, video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Stabilize reconnect backoff and diagnostics` (this checkpoint).
+- Latest project checkpoint: `Fix voice audio transfer and diagnostics` (this checkpoint).

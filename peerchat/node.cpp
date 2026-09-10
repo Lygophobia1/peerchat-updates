@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <future>
 #include <map>
 #include <mutex>
 #include <set>
@@ -60,8 +61,8 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;};
+    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
@@ -75,7 +76,7 @@ struct Node::Impl {
     std::uint64_t nextAttemptId=1;
     enum class VoiceState { Idle,Outgoing,Ringing,Connecting,Connected,Ending };
     VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId,voiceOffer;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
-    std::unique_ptr<VoiceMedia> voiceMedia;std::vector<std::pair<std::string,std::string>> voiceCandidates;
+    std::unique_ptr<VoiceMedia> voiceMedia;std::vector<std::pair<std::string,std::string>> voiceCandidates;std::wstring lastVoiceDiagnostics=L"media_state=idle\nice_dtls_srtp_state=idle\ntrack_open=false\ncodec=Opus not active\ntransport=not active\ncapture_frames=0\nencoded_frames=0\nopus_submitted=0\nsend_api_accepted=0\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets=0\npayload_delivered=0\nreceived_packets=0\ndecoded_frames=0\nplayback_frames=0\nlatest_audio_error=none\nlatest_media_error=none";
     int voiceInputDevice=-1,voiceOutputDevice=-1;
     std::deque<std::string> finishedVoiceCalls;
     SOCKET listener=INVALID_SOCKET;
@@ -96,7 +97,7 @@ struct Node::Impl {
     Connection* voiceConnection(const std::string& peer){for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();return nullptr;}
     void rememberVoiceCall(const std::string& id){if(id.empty())return;finishedVoiceCalls.push_back(id);while(finishedVoiceCalls.size()>64)finishedVoiceCalls.pop_front();}
     bool finishedVoiceCall(const std::string& id)const{return std::find(finishedVoiceCalls.begin(),finishedVoiceCalls.end(),id)!=finishedVoiceCalls.end();}
-    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle)return;voiceEvent(VoiceState::Ending,reason);if(voiceMedia)voiceMedia->stop();voiceMedia.reset();rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOffer.clear();voiceCandidates.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
+    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle)return;voiceEvent(VoiceState::Ending,reason);if(voiceMedia){lastVoiceDiagnostics=voiceMedia->diagnostics();voiceMedia->stop();}voiceMedia.reset();rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOffer.clear();voiceCandidates.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
     void mediaEvents(){
         if(!voiceMedia||voiceState==VoiceState::Idle)return;
         auto connection=voiceConnection(voicePeerId);
@@ -327,6 +328,7 @@ struct Node::Impl {
             }else if(command.action==Action::VoiceMute){std::wstring error;if(!voiceMedia||!voiceMedia->setMuted(command.accepted,error))notice(NodeEvent::Kind::Error,error.empty()?L"No connected voice call.":L"Voice audio device error: "+error,voicePeerId);
             }else if(command.action==Action::VoiceDeafen){if(voiceMedia)voiceMedia->setDeafened(command.accepted);
             }else if(command.action==Action::VoiceDevices){if(voiceState==VoiceState::Idle){voiceInputDevice=static_cast<int>(command.port)-1;voiceOutputDevice=static_cast<int>(command.before);}
+            }else if(command.action==Action::VoiceDiagnostics){if(command.response)command.response->set_value(voiceMedia?voiceMedia->diagnostics():lastVoiceDiagnostics);
             }
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
             else if(command.action==Action::GroupAccount){if(command.accountId==0||command.name.empty()||command.name.size()>64)throw std::runtime_error("Invalid group account binding");if(groupAccount.accountId&&groupAccount.accountId!=command.accountId)throw std::runtime_error("This profile is already bound to another group account");groupAccount={command.accountId,command.name};store->saveGroupAccount(groupAccount);publishGroups();}
@@ -418,5 +420,6 @@ bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))r
 bool Node::setVoiceMuted(bool muted){Impl::Command command{};command.action=Impl::Action::VoiceMute;command.accepted=muted;return impl_->command(std::move(command));}
 bool Node::setVoiceDeafened(bool deafened){Impl::Command command{};command.action=Impl::Action::VoiceDeafen;command.accepted=deafened;return impl_->command(std::move(command));}
 bool Node::setVoiceDevices(int inputDevice,int outputDevice){if(inputDevice < -1||outputDevice < -1)return false;Impl::Command command{};command.action=Impl::Action::VoiceDevices;command.port=static_cast<std::uint16_t>(inputDevice+1);command.before=outputDevice;return impl_->command(std::move(command));}
+std::wstring Node::voiceDiagnostics(){auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command command{};command.action=Impl::Action::VoiceDiagnostics;command.response=response;if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return L"media_state=unavailable\nlatest_audio_error=diagnostic request timed out";return result.get();}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}
 }

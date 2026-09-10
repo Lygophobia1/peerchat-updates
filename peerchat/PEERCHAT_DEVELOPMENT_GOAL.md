@@ -98,6 +98,10 @@ Manual direct connection remains available under:
 
 for troubleshooting, development, and server-independent fallback use.
 
+Voice diagnostics remain local and privacy-safe: current/recent call state, selected device labels,
+media counters, and errors may be copied for troubleshooting, but audio content and secret key or
+session material must never be recorded or included.
+
 ---
 
 # ACCOUNT AND IDENTITY MODEL

@@ -111,7 +111,8 @@ availability must not turn the service into the source of truth or change the lo
 
 ## Voice signaling boundary
 
-The discovery/account protocol does not own calls and stores no call state or voice content. Once
+The discovery/account protocol does not own calls and stores no call state, voice diagnostics, or
+voice content. Local bounded voice diagnostics are never uploaded by this protocol. Once
 two friends have an authenticated direct peer session, call offer/answer SDP, trickled ICE candidates,
 connected, decline, busy, and end signals travel on that verified mutual-TLS channel. Each signal carries an ephemeral random
 call ID and is accepted only from the already authenticated device Peer ID. One active call is

@@ -52,6 +52,7 @@ public:
     bool setVoiceMuted(bool muted);
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
+    std::wstring voiceDiagnostics();
     std::vector<NodeEvent> poll();
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

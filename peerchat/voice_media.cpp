@@ -10,6 +10,7 @@
 #include <deque>
 #include <mutex>
 #include <random>
+#include <sstream>
 
 namespace peerchat {
 namespace {
@@ -44,7 +45,10 @@ struct VoiceMedia::Impl {
     OpusEncoder* encoder = nullptr;
     OpusDecoder* decoder = nullptr;
     int pc = -1, sendTrack = -1, receiveTrack = -1;
-    std::atomic<bool> stopping{false}, deafened{false};
+    std::atomic<bool> stopping{false}, deafened{false}, trackOpen{false};
+    std::atomic<std::uint64_t> capturedFrames{0}, encodedFrames{0}, submittedFrames{0};
+    std::atomic<std::uint64_t> receivedPackets{0}, decodedFrames{0}, playbackFrames{0};
+    std::string mediaState="created", latestAudioError="none", latestMediaError="none";
     int inputDevice=-1,outputDevice=-1;
 
     void push(EventKind kind, std::string value = {}, std::string detail = {}) {
@@ -59,24 +63,37 @@ struct VoiceMedia::Impl {
     static void candidate(int, const char* cand, const char* mid, void* ptr) {
         if (ptr && cand) static_cast<Impl*>(ptr)->push(EventKind::Candidate, cand, mid ? mid : "0");
     }
+    static void opened(int, void* ptr) { if (ptr) static_cast<Impl*>(ptr)->trackOpen=true; }
+    static void closed(int, void* ptr) { if (ptr) static_cast<Impl*>(ptr)->trackOpen=false; }
     static void state(int, rtcState state, void* ptr) {
         if (!ptr) return;
         auto& self = *static_cast<Impl*>(ptr);
         if (state == RTC_CONNECTED) {
+            { std::lock_guard<std::mutex> lock(self.mutex); self.mediaState="connected"; }
             std::wstring error;
-            if (!self.audio->start(error) || !self.audio->setMuted(false, error))
+            if (!self.audio->start(error) || !self.audio->setMuted(false, error)) {
+                { std::lock_guard<std::mutex> lock(self.mutex); self.latestAudioError=std::string(error.begin(),error.end()); }
                 self.push(EventKind::AudioError, std::string(error.begin(), error.end()));
+            }
             self.push(EventKind::Connected);
-        } else if (state == RTC_DISCONNECTED || state == RTC_CLOSED) self.push(EventKind::Disconnected);
-        else if (state == RTC_FAILED) self.push(EventKind::Failed, "ICE/DTLS-SRTP media connection failed");
+        } else if (state == RTC_DISCONNECTED || state == RTC_CLOSED) {
+            { std::lock_guard<std::mutex> lock(self.mutex); self.mediaState="disconnected"; }
+            self.push(EventKind::Disconnected);
+        } else if (state == RTC_FAILED) {
+            { std::lock_guard<std::mutex> lock(self.mutex); self.mediaState="failed"; self.latestMediaError="ICE/DTLS-SRTP media connection failed"; }
+            self.push(EventKind::Failed, "ICE/DTLS-SRTP media connection failed");
+        }
     }
     static void track(int, int tr, void* ptr) {
         if (!ptr || tr < 0) return;
         auto& self = *static_cast<Impl*>(ptr);
         self.receiveTrack = tr;
+        if (tr == self.sendTrack) return; // The local sendrecv track is already configured below.
         rtcSetUserPointer(tr, ptr);
         rtcSetMessageCallback(tr, &Impl::message);
         rtcChainRtcpReceivingSession(tr);
+        rtcSetOpenCallback(tr, &Impl::opened);
+        rtcSetClosedCallback(tr, &Impl::closed);
     }
     static void message(int, const char* packet, int size, void* ptr) {
         if (!ptr || size <= 0) return;
@@ -84,9 +101,11 @@ struct VoiceMedia::Impl {
         if (self.deafened || !self.decoder) return;
         const unsigned char* payload = nullptr; int payloadSize = 0;
         if (!rtpPayload(packet, size, payload, payloadSize)) return;
+        ++self.receivedPackets;
         std::vector<opus_int16> pcm(960);
         int samples = opus_decode(self.decoder, payload, payloadSize, pcm.data(), static_cast<int>(pcm.size()), 0);
         if (samples != 320) return;
+        ++self.decodedFrames;
         std::vector<unsigned char> bytes(static_cast<size_t>(samples) * 2);
         for (int i = 0; i < samples; ++i) {
             auto bits = static_cast<std::uint16_t>(pcm[i]);
@@ -94,14 +113,25 @@ struct VoiceMedia::Impl {
             bytes[2 * i + 1] = static_cast<unsigned char>(bits >> 8);
         }
         self.audio->play(0, bytes);
+        ++self.playbackFrames;
     }
     void captured(const std::vector<unsigned char>& bytes) {
         if (stopping || sendTrack < 0 || !encoder || bytes.size() != 640) return;
+        ++capturedFrames;
         opus_int16 pcm[320];
         for (int i = 0; i < 320; ++i) pcm[i] = static_cast<opus_int16>(bytes[2*i] | (bytes[2*i+1] << 8));
         unsigned char encoded[4000];
         int size = opus_encode(encoder, pcm, 320, encoded, sizeof(encoded));
-        if (size > 0) rtcSendMessage(sendTrack, reinterpret_cast<const char*>(encoded), size);
+        if (size > 0) ++encodedFrames;
+        if (size > 0 && trackOpen && rtcIsOpen(sendTrack)) {
+            ++submittedFrames;
+            if (rtcSendMessage(sendTrack, reinterpret_cast<const char*>(encoded), size) < 0) return;
+            // Opus uses a 48 kHz RTP clock even when decoding to 16 kHz PCM.
+            // The packetizer does not advance this value for raw C API sends.
+            std::uint32_t timestamp = 0;
+            if (rtcGetCurrentTrackTimestamp(sendTrack, &timestamp) >= 0)
+                rtcSetTrackRtpTimestamp(sendTrack, timestamp + 960);
+        }
     }
     bool create(std::wstring& error) {
         stopping = false;
@@ -133,14 +163,21 @@ struct VoiceMedia::Impl {
         sendTrack = rtcAddTrackEx(pc, &track);
         if (sendTrack < 0) { error = L"Could not create the Opus media track."; return false; }
         rtcPacketizerInit packetizer{};packetizer.ssrc=track.ssrc;packetizer.cname="peerchat";packetizer.payloadType=111;packetizer.clockRate=48000;
-        if (rtcSetOpusPacketizer(sendTrack, &packetizer) < 0 || rtcChainRtcpSrReporter(sendTrack) < 0) { error=L"Could not configure Opus RTP.";return false; }
+        if (rtcSetOpusPacketizer(sendTrack, &packetizer) < 0 || rtcChainRtcpSrReporter(sendTrack) < 0 || rtcChainRtcpReceivingSession(sendTrack) < 0) { error=L"Could not configure Opus RTP.";return false; }
+        // rtcAddTrackEx creates one bidirectional sendrecv Track for this m-line.
+        // When the answer reuses it, rtcSetTrackCallback does not create a second
+        // remote Track, so receive handling must be installed on this same Track.
+        rtcSetUserPointer(sendTrack, this);
+        rtcSetMessageCallback(sendTrack, &Impl::message);
+        rtcSetOpenCallback(sendTrack, &Impl::opened);
+        rtcSetClosedCallback(sendTrack, &Impl::closed);
         return true;
     }
     void close() {
         stopping = true;
         if (audio) audio->stop();
         if (pc >= 0) { rtcSetUserPointer(pc, nullptr); rtcClosePeerConnection(pc); rtcDeletePeerConnection(pc); pc=-1; }
-        sendTrack=receiveTrack=-1;
+        trackOpen=false;sendTrack=receiveTrack=-1;
         if (encoder) opus_encoder_destroy(encoder);
         encoder=nullptr;
         if (decoder) opus_decoder_destroy(decoder);
@@ -158,7 +195,11 @@ bool VoiceMedia::setAnswer(const std::string& answer,std::wstring& error){if(imp
 bool VoiceMedia::addCandidate(const std::string& candidate,const std::string& mid,std::wstring& error){if(impl_->pc<0||rtcAddRemoteCandidate(impl_->pc,candidate.c_str(),mid.c_str())<0){error=L"The remote ICE candidate was invalid.";return false;}return true;}
 bool VoiceMedia::setMuted(bool muted,std::wstring& error){return impl_->audio&&impl_->audio->setMuted(muted,error);}
 void VoiceMedia::setDeafened(bool value){impl_->deafened=value;}
-std::vector<VoiceMedia::Event> VoiceMedia::poll(){std::lock_guard<std::mutex> lock(impl_->mutex);std::vector<Event> out;while(!impl_->events.empty()){out.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return out;}
+std::wstring VoiceMedia::diagnostics(){std::lock_guard<std::mutex> lock(impl_->mutex);std::wostringstream out;out<<L"media_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_dtls_srtp_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\ntrack_open="<<(impl_->trackOpen?L"true":L"false")<<L"\ncodec=Opus 16 kHz mono, 20 ms frames, 48 kHz RTP clock\ntransport=WebRTC ICE / DTLS-SRTP\ncapture_frames="<<impl_->capturedFrames.load()<<L"\nencoded_frames="<<impl_->encodedFrames.load()<<L"\nopus_submitted="<<impl_->submittedFrames.load()<<L"\nsend_api_accepted="<<impl_->submittedFrames.load()<<L"\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets="<<impl_->receivedPackets.load()<<L"\npayload_delivered="<<impl_->receivedPackets.load()<<L"\nreceived_packets="<<impl_->receivedPackets.load()<<L"\ndecoded_frames="<<impl_->decodedFrames.load()<<L"\nplayback_frames="<<impl_->playbackFrames.load()<<L"\nlatest_audio_error="<<std::wstring(impl_->latestAudioError.begin(),impl_->latestAudioError.end())<<L"\nlatest_media_error="<<std::wstring(impl_->latestMediaError.begin(),impl_->latestMediaError.end());return out.str();}
+#ifdef PEERCHAT_TEST_VOICE_FRAMES
+void VoiceMedia::testInjectPcm(const std::vector<unsigned char>& pcm){impl_->captured(pcm);}
+#endif
+std::vector<VoiceMedia::Event> VoiceMedia::poll(){if(impl_->audio){auto error=impl_->audio->takeError();if(!error.empty()){std::string safe(error.begin(),error.end());{std::lock_guard<std::mutex> lock(impl_->mutex);impl_->latestAudioError=safe;}impl_->push(EventKind::AudioError,std::move(safe));}}std::lock_guard<std::mutex> lock(impl_->mutex);std::vector<Event> out;while(!impl_->events.empty()){out.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return out;}
 void VoiceMedia::stop(){impl_->close();}
 
 } // namespace peerchat
