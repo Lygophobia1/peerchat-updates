@@ -1008,7 +1008,8 @@ Reassess detailed requirements before implementation.
 
 Everything above defines PeerChat's architectural direction.
 
-**Milestones 1–3 and the first client-owned group-text foundation are implemented in code; remaining
+**Milestones 1–3, the first client-owned group-text foundation, and the verified one-to-one call
+signaling/state boundary are implemented in code; remaining voice media integration and
 packaged/manual acceptance is tracked in `PROJECT_STATUS.md`.**
 
 The current development target is:

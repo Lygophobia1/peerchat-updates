@@ -9,8 +9,8 @@
 
 **Known Good Baseline:** v0.1-beta  
 **Current Development Version:** v0.3-beta  
-**Current Milestone:** v0.3-beta profile/account binding stabilization
-**Current Priority:** manual packaged account-binding acceptance; voice remains paused
+**Current Milestone:** v0.3-beta one-to-one voice
+**Current Priority:** integrate native WebRTC/DTLS-SRTP + Opus media behind the verified call-state boundary
 
 ## Current builds
 
@@ -71,6 +71,11 @@
 - The WPF Groups tab lists groups/unread state, retains independent drafts, sends group text, displays
   a scrollable member list, and exposes role-appropriate rename, invite, accept/decline, promote,
   demote, remove, and leave actions.
+- Native one-to-one call signaling now uses the verified mutual-TLS friend connection and a negotiated
+  voice capability. One active call per profile supports outgoing/incoming ringing, answer, decline,
+  hang-up, busy, timeout, deterministic simultaneous-call resolution, disconnect, and shutdown cleanup.
+  The C bridge and WPF expose Call, incoming Answer/Decline, state, duration, and Hang Up without a
+  second identity system. Media devices remain unopened while Idle.
 
 ## Stabilization changes
 
@@ -95,7 +100,8 @@
   mutual TLS, 15 direct links, Unicode messages, ACKs, reconnect, offline outbox, restart,
   deduplication, malformed transport isolation, a signed group-ledger test with eight identities,
   and a four-client direct group test covering roles, unauthorized changes, fanout, offline delivery,
-  convergence, and restart persistence.
+  convergence, restart persistence, verified voice signaling lifecycle, and device-free native audio
+  queue/mixer bounds.
 - `tests\test-discovery.ps1`: passed authentication, session-scoped logout, device/account ownership,
   presence/search, friend lifecycle, authoritative snapshots, and database restart persistence.
 - `tests\test-desktop.ps1`: passed protected profile-account binding/session persistence, A/B
@@ -122,7 +128,12 @@
 ## Current blocker / next action
 
 The profile/account binding, friend conversation mapping, reconnect diagnostics, native transport,
-managed bridge, and release package are automated-test green. Before voice resumes, manually verify
+managed bridge, and release package are automated-test green. The verified voice call-state/bridge/UI
+foundation is green, but it is not yet a working audio call. The current TDM-GCC 10.3 build has no
+installed CMake, libdatachannel, or libopus. Reproducibly integrate libdatachannel media plus libopus,
+then connect native capture/playback, device selection, mute/deafen, levels, and failure events.
+
+Before final voice acceptance, manually verify
 with the packaged client: create/link two profiles, restart for automatic sign-in, switch A → B → A,
 sign out one profile, and open it with discovery unavailable. Confirm each account is correct and
 local history/trust remain visible after sign-out.
@@ -148,9 +159,7 @@ in-process switching must preserve this same boundary and may not keep two cores
 
 - NAT traversal/STUN/ICE and optional encrypted relay remain future transport work. Neither may
   become group authority.
-- 1-to-1 voice remains paused until friend/reconnect manual acceptance and packaged group acceptance. Group voice,
-  video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
+- 1-to-1 voice media integration is in progress. Group voice, video, screen sharing, file transfer, updater, disappearing messages, Discord integration, and
   multi-device synchronization remain deferred.
 - Build emits existing non-fatal C# warnings for intentionally fire-and-forget WPF actions.
-- Latest project checkpoint: `Bind local profiles to server accounts`
-  (after `Stabilize friend conversation identity and reconnect diagnostics`).
+- Latest project checkpoint after the next commit: `Add verified one-to-one call signaling foundation`.

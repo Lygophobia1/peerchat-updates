@@ -16,8 +16,8 @@ namespace peerchat::protocol {
 constexpr size_t MaxPacket=70000;
 inline void check(bool condition){if(!condition)throw std::runtime_error("Invalid peer message");}
 inline bool id(const std::string& s,size_t n=64){if(s.size()!=n)return false;for(auto c:s)if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))return false;return true;}
-enum Type:unsigned char { Hello=1,Text=2,Ack=3,Accepted=4,GroupEvent=5,GroupAck=6 };
-constexpr std::uint64_t CapabilityMutualTls=1,CapabilityLogicalOrdering=2,CapabilitySignedGroups=4;
+enum Type:unsigned char { Hello=1,Text=2,Ack=3,Accepted=4,GroupEvent=5,GroupAck=6,CallOffer=7,CallAnswer=8,CallDecline=9,CallEnd=10,CallBusy=11,CallConnected=12 };
+constexpr std::uint64_t CapabilityMutualTls=1,CapabilityLogicalOrdering=2,CapabilitySignedGroups=4,CapabilityVoiceCalls=8;
 inline Blob frame(const Blob& data){check(data.size()<=MaxPacket);Blob out;for(int i=3;i>=0;i--)out.push_back(static_cast<unsigned char>(data.size()>>(8*i)));out.insert(out.end(),data.begin(),data.end());return out;}
 struct Writer {
     Blob data;

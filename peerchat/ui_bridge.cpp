@@ -32,6 +32,10 @@ UI_API int ui_group_remove_member(void* handle,const wchar_t* group,unsigned lon
 UI_API int ui_group_role(void* handle,const wchar_t* group,unsigned long long account,int admin){try{return static_cast<UiBridge*>(handle)->node.setGroupAdmin(identity(group),account,admin!=0);}catch(...){return 0;}}
 UI_API int ui_group_send(void* handle,const wchar_t* group,const wchar_t* text){try{return static_cast<UiBridge*>(handle)->node.sendGroup(identity(group),text?text:L"");}catch(...){return 0;}}
 UI_API int ui_groups(void* handle){try{static_cast<UiBridge*>(handle)->node.loadGroups();return 1;}catch(...){return 0;}}
+UI_API const wchar_t* ui_voice_call(void* handle,const wchar_t* peer){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=widen(bridge.node.startVoiceCall(identity(peer)));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
+UI_API int ui_voice_answer(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.answerVoiceCall(identity(call));}catch(...){return 0;}}
+UI_API int ui_voice_decline(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.declineVoiceCall(identity(call));}catch(...){return 0;}}
+UI_API int ui_voice_end(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.endVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API const wchar_t* ui_share(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=peerchat::encodeShareId({host,port,identity(peer)});}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API const wchar_t* ui_add(void* handle,const wchar_t* invite,const wchar_t* ownPeer){auto& bridge=*static_cast<UiBridge*>(handle);try{
     peerchat::SharedContact shared;std::wstring error;
@@ -52,7 +56,7 @@ UI_API const wchar_t* ui_poll(void* handle){auto& bridge=*static_cast<UiBridge*>
         if(event.kind==peerchat::NodeEvent::Kind::Contacts){bridge.contacts.clear();for(const auto& contact:event.contacts)bridge.contacts[contact.peerId]=contact;}
         if(!first)out<<L',';
         first=false;
-        out<<L"{\"kind\":"<<int(event.kind)<<L",\"peer\":"<<quote(widen(event.peerId))<<L",\"text\":"<<quote(event.text)<<L",\"port\":"<<event.port<<L",\"contacts\":[";
+        out<<L"{\"kind\":"<<int(event.kind)<<L",\"peer\":"<<quote(widen(event.peerId))<<L",\"text\":"<<quote(event.text)<<L",\"detail\":"<<quote(event.detail)<<L",\"port\":"<<event.port<<L",\"contacts\":[";
         bool firstContact=true;for(const auto& contact:event.contacts){if(!firstContact)out<<L',';firstContact=false;
             out<<L"{\"peer\":"<<quote(widen(contact.peerId))<<L",\"name\":"<<quote(contact.name)<<L",\"verified\":"<<(contact.verified?L"true":L"false")<<L",\"host\":"<<quote(contact.endpoints.empty()?L"":contact.endpoints.front().host)<<L",\"port\":"<<(contact.endpoints.empty()?0:contact.endpoints.front().port)<<L'}';}
         out<<L"],\"messages\":[";bool firstMessage=true;for(const auto& message:event.messages){if(!firstMessage)out<<L',';firstMessage=false;

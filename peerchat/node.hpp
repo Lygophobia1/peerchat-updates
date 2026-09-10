@@ -5,7 +5,7 @@
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall };
     Kind kind=Kind::Error;
     std::string peerId;
     std::wstring text;
@@ -39,6 +39,10 @@ public:
     bool setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin);
     bool sendGroup(const std::string& groupId,const std::wstring& text);
     void loadGroups();
+    std::string startVoiceCall(const std::string& peerId);
+    bool answerVoiceCall(const std::string& callId);
+    bool declineVoiceCall(const std::string& callId);
+    bool endVoiceCall(const std::string& callId);
     std::vector<NodeEvent> poll();
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

@@ -29,7 +29,7 @@ using Clock=std::chrono::steady_clock;
 constexpr size_t MaxConnections=128,MaxQueue=1024*1024;
 struct Connection {
     SOCKET socket=INVALID_SOCKET;
-    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false;
+    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false;
     std::wstring host,name;std::uint16_t port=0;
     std::string expected,peerId;
     std::unique_ptr<TlsSession> tls;
@@ -51,7 +51,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups };
+    enum class Action { Connect,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name;std::uint16_t port=0;bool accepted=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -62,10 +62,19 @@ struct Node::Impl {
     std::vector<std::unique_ptr<Connection>> connections;
     std::vector<std::unique_ptr<Resolver>> resolvers;
     std::map<std::string,Clock::time_point> reconnect;
+    enum class VoiceState { Idle,Outgoing,Ringing,Connecting,Connected,Ending };
+    VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
+    std::deque<std::string> finishedVoiceCalls;
     SOCKET listener=INVALID_SOCKET;
     ~Impl(){stop();}
     void emit(NodeEvent e){std::lock_guard<std::mutex> lock(eventMutex);if(events.size()>=4096)events.pop_front();events.push_back(std::move(e));}
     void notice(NodeEvent::Kind kind,const std::wstring& text,const std::string& peer={}){NodeEvent e;e.kind=kind;e.text=text;e.peerId=peer;emit(std::move(e));}
+    static const wchar_t* voiceStateName(VoiceState state){switch(state){case VoiceState::Idle:return L"Idle";case VoiceState::Outgoing:return L"Outgoing / Ringing";case VoiceState::Ringing:return L"Incoming / Ringing";case VoiceState::Connecting:return L"Connecting";case VoiceState::Connected:return L"Connected";case VoiceState::Ending:return L"Ending";}return L"Idle";}
+    void voiceEvent(VoiceState state,const std::wstring& reason={}){voiceState=state;NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.peerId=voicePeerId;event.detail=std::wstring(voiceCallId.begin(),voiceCallId.end());event.text=voiceStateName(state);if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
+    Connection* voiceConnection(const std::string& peer){for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();return nullptr;}
+    void rememberVoiceCall(const std::string& id){if(id.empty())return;finishedVoiceCalls.push_back(id);while(finishedVoiceCalls.size()>64)finishedVoiceCalls.pop_front();}
+    bool finishedVoiceCall(const std::string& id)const{return std::find(finishedVoiceCalls.begin(),finishedVoiceCalls.end(),id)!=finishedVoiceCalls.end();}
+    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle)return;voiceEvent(VoiceState::Ending,reason);rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
     void tcpFailure(Connection& c,int error){
         if(error==WSAECONNREFUSED)notice(NodeEvent::Kind::Error,L"TCP connection refused: the peer is not listening on this port or Firewall blocked it.",c.expected);
         else if(error==WSAETIMEDOUT)notice(NodeEvent::Kind::Error,L"TCP connection timeout: the peer or Firewall did not respond.",c.expected);
@@ -149,7 +158,7 @@ struct Node::Impl {
         protocol::Reader r(frame);
         if(!c.hello){
             protocol::check(r.type()==protocol::Hello);auto capabilities=r.number();auto port=r.number();c.name=r.text();r.end();
-            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.hello=true;
+            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.hello=true;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty())c.host=observedAddress(c.socket);
             // A changed identity is a security-relevant verification event, not a silent
@@ -173,6 +182,16 @@ struct Node::Impl {
         }
         if(r.type()==protocol::Accepted){r.end();protocol::check(!c.remoteApproved);c.remoteApproved=true;online(c);return;}
         protocol::check(c.online);
+        if(r.type()==protocol::CallOffer){
+            auto callId=r.string();r.end();protocol::check(c.voiceCalls&&protocol::id(callId,32));if(finishedVoiceCall(callId))return;
+            if(voiceState==VoiceState::Idle){voiceCallId=callId;voicePeerId=c.peerId;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing);return;}
+            if(voiceCallId==callId&&voicePeerId==c.peerId)return;
+            if(voiceState==VoiceState::Outgoing&&voicePeerId==c.peerId&&profile.peerId>c.peerId){auto abandoned=voiceCallId;protocol::Writer end(protocol::CallEnd);end.string(abandoned);packet(c,end);rememberVoiceCall(abandoned);voiceCallId=callId;voiceOutgoing=false;voiceDeadline=Clock::now()+std::chrono::seconds(30);voiceEvent(VoiceState::Ringing,L"simultaneous call resolved");return;}
+            protocol::Writer busy(protocol::CallBusy);busy.string(callId);packet(c,busy);return;
+        }
+        if(r.type()==protocol::CallAnswer){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceState==VoiceState::Outgoing&&voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId){voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);protocol::Writer connected(protocol::CallConnected);connected.string(callId);packet(c,connected);voiceDeadline={};voiceEvent(VoiceState::Connected);}return;}
+        if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceState==VoiceState::Connecting&&!voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId){voiceDeadline={};voiceEvent(VoiceState::Connected);}return;}
+        if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceCallId==callId&&voicePeerId==c.peerId){clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");}else rememberVoiceCall(callId);return;}
         if(r.type()==protocol::Text){
             StoredMessage m;m.id=r.string();if(c.logicalOrdering)m.logicalOrder=r.number();m.utcMilliseconds=r.number();m.text=r.text();r.end();protocol::check(protocol::id(m.id,32));m.sender=c.peerId;m.recipient=profile.peerId;m.delivery=Delivery::Delivered;store->observeLogicalOrder(m.logicalOrder);
             if(store->append(c.peerId,m)){NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=c.peerId;e.messages.push_back(m);emit(std::move(e));}
@@ -209,7 +228,7 @@ struct Node::Impl {
         c.lastProgress=Clock::now();c.tls->receive(Blob(buffer,buffer+n));collect(c);if(c.tls->closed()){c.dead=true;return;}
         if(c.tls->ready()&&!c.hello&&c.peerId.empty()) {
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());
-            protocol::Writer hello(protocol::Hello);hello.number(protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|protocol::CapabilitySignedGroups);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
+            protocol::Writer hello(protocol::Hello);hello.number(protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|protocol::CapabilitySignedGroups|protocol::CapabilityVoiceCalls);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
         auto plain=c.tls->takePlaintext();protocol::check(c.input.size()+plain.size()<=256*1024);c.input.insert(c.input.end(),plain.begin(),plain.end());
         while(c.input.size()>=4&&!c.dead){size_t length=(size_t(c.input[0])<<24)|(size_t(c.input[1])<<16)|(size_t(c.input[2])<<8)|c.input[3];protocol::check(length>=4&&length<=protocol::MaxPacket);if(c.input.size()<length+4)break;
@@ -246,6 +265,28 @@ struct Node::Impl {
                 store->append(command.peer,m);NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
+            else if(command.action==Action::VoiceStart){
+                if(voiceState!=VoiceState::Idle)throw std::runtime_error("A voice call is already active");
+                auto contact=contacts.find(command.peer);
+                if(contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify this peer before calling");
+                auto connection=voiceConnection(command.peer);
+                if(!connection)throw std::runtime_error("The verified peer is not connected or does not support voice calls");
+                voiceCallId=command.id;voicePeerId=command.peer;voiceOutgoing=true;voiceDeadline=Clock::now()+std::chrono::seconds(30);
+                protocol::Writer offer(protocol::CallOffer);offer.string(voiceCallId);packet(*connection,offer);voiceEvent(VoiceState::Outgoing);
+            }else if(command.action==Action::VoiceAnswer){
+                if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)throw std::runtime_error("That incoming call is no longer available");
+                auto connection=voiceConnection(voicePeerId);if(!connection){clearVoice(L"Peer disconnected");continue;}
+                voiceDeadline=Clock::now()+std::chrono::seconds(20);voiceEvent(VoiceState::Connecting);
+                protocol::Writer answer(protocol::CallAnswer);answer.string(voiceCallId);packet(*connection,answer);
+            }else if(command.action==Action::VoiceDecline){
+                if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)continue;
+                if(auto connection=voiceConnection(voicePeerId)){protocol::Writer decline(protocol::CallDecline);decline.string(voiceCallId);packet(*connection,decline);}
+                clearVoice(L"Declined");
+            }else if(command.action==Action::VoiceEnd){
+                if(voiceState==VoiceState::Idle||voiceCallId!=command.id)continue;
+                if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}
+                clearVoice(L"Call ended");
+            }
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
             else if(command.action==Action::GroupAccount){if(command.accountId==0||command.name.empty()||command.name.size()>64)throw std::runtime_error("Invalid group account binding");if(groupAccount.accountId&&groupAccount.accountId!=command.accountId)throw std::runtime_error("This profile is already bound to another group account");groupAccount={command.accountId,command.name};store->saveGroupAccount(groupAccount);publishGroups();}
             else if(command.action==Action::GroupCreate){
@@ -288,6 +329,7 @@ struct Node::Impl {
             for(const auto& c:contacts)if(!c.second.endpoints.empty())reconnect[c.first]=Clock::now();
             while(running){
                 drain();resolved();
+                if(voiceState!=VoiceState::Idle&&voiceDeadline!=Clock::time_point{}&&Clock::now()>=voiceDeadline){if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}clearVoice(L"Call timed out");}
                 for(auto& retry:reconnect)if(retry.second<=Clock::now()&&!exists(retry.first)){auto it=contacts.find(retry.first);if(it!=contacts.end()&&!it->second.endpoints.empty()){auto e=it->second.endpoints.front();try{resolve(e.host,e.port,retry.first);}catch(...){} }retry.second=Clock::now()+std::chrono::seconds(5);}
                 fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);FD_SET(listener,&reads);
                 for(auto& c:connections)if(!c->dead){if(!c->connecting)FD_SET(c->socket,&reads);if(c->connecting||c->sent<c->output.size())FD_SET(c->socket,&writes);FD_SET(c->socket,&errors);}
@@ -302,10 +344,10 @@ struct Node::Impl {
                     auto age=Clock::now()-c->began;if(!c->online&&age>std::chrono::seconds(c->hello?120:10)){notice(NodeEvent::Kind::Error,L"TCP connection timeout: the peer did not respond in time.",c->peerId.empty()?c->expected:c->peerId);c->dead=true;}
                     if(c->output.size()>c->sent&&Clock::now()-c->lastProgress>std::chrono::seconds(15))c->dead=true;
                 }catch(const std::exception& error){c->dead=true;std::string detail=error.what();std::wstring safeDetail(detail.begin(),detail.end());std::wstring stage=!c->hello?L"TLS handshake failure: ":L"Peer identity/trust failure: ";notice(NodeEvent::Kind::Error,stage+safeDetail,c->peerId.empty()?c->expected:c->peerId);}
-                for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){std::string id=(*it)->peerId.empty()?(*it)->expected:(*it)->peerId;it=connections.erase(it);if(!id.empty()&&!exists(id)){notice(NodeEvent::Kind::Disconnected,L"Peer disconnected. Reconnecting if it is a saved contact.",id);if(contacts.count(id)&&!contacts[id].endpoints.empty())reconnect[id]=Clock::now()+std::chrono::seconds(5);}}else ++it;
+                for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){std::string id=(*it)->peerId.empty()?(*it)->expected:(*it)->peerId;it=connections.erase(it);if(!id.empty()&&!exists(id)){if(voiceState!=VoiceState::Idle&&voicePeerId==id)clearVoice(L"Network connection lost");notice(NodeEvent::Kind::Disconnected,L"Peer disconnected. Reconnecting if it is a saved contact.",id);if(contacts.count(id)&&!contacts[id].endpoints.empty())reconnect[id]=Clock::now()+std::chrono::seconds(5);}}else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        running=false;resolvers.clear();connections.clear();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");running=false;resolvers.clear();connections.clear();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();finishedVoiceCalls.clear();if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -328,5 +370,9 @@ bool Node::removeGroupMember(const std::string& groupId,std::uint64_t accountId)
 bool Node::setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRole;c.group=groupId;c.accountId=accountId;c.accepted=admin;return impl_->command(std::move(c));}
 bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!protocol::id(groupId,32)||text.empty()||text.size()>16384)return false;Impl::Command c{};c.action=Impl::Action::GroupSend;c.group=groupId;c.text=text;return impl_->command(std::move(c));}
 void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
+std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(peerId))return {};Impl::Command command{};command.action=Impl::Action::VoiceStart;command.peer=peerId;command.id=Storage::newMessageId();auto id=command.id;return impl_->command(std::move(command))?id:std::string{};}
+bool Node::answerVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceAnswer;command.id=callId;return impl_->command(std::move(command));}
+bool Node::declineVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceDecline;command.id=callId;return impl_->command(std::move(command));}
+bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceEnd;command.id=callId;return impl_->command(std::move(command));}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}
 }

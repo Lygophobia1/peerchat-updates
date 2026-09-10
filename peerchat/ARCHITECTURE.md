@@ -154,6 +154,22 @@ A separate 60-second presence heartbeat updates the current device/candidates on
 identical heartbeat does not broadcast another friend event. Presence expires after 90 seconds and
 the server emits an offline notification.
 
+## One-to-one voice signaling boundary
+
+Voice call signaling is carried only after the existing direct peer connection has completed mutual
+TLS, expected Peer ID verification, and explicit local trust. Protocol capability negotiation gates
+voice support. Random 128-bit call IDs identify ephemeral calls; they are not social identities and
+are never persisted. The native core owns the one-call-per-profile state machine: Idle, Outgoing or
+Incoming Ringing, Connecting, Connected, Ending, then Idle. It handles answer, decline, hang-up,
+busy, timeout, deterministic simultaneous-call convergence, peer disconnect, and profile shutdown.
+Duplicate or completed call IDs are bounded in memory for replay suppression.
+
+The stable C ABI exposes call commands and events; WPF only orchestrates the Call, Answer, Decline,
+and Hang Up controls and displays state/duration. Profile switching disposes the old native core,
+which ends the call before identity/database state is released. Signaling does not require the
+discovery server once the authenticated direct peer session exists. The WebRTC/DTLS-SRTP and Opus
+media layer remains the next implementation step; raw PCM is not a production network format.
+
 ## Storage, migration, reset, and backup
 
 Each stable profile under LocalAppData contains identity, DPAPI-protected configuration/session

@@ -16,6 +16,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Group ledger test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\group_node_test.cpp node.cpp tls.cpp storage.cpp group.cpp -o "$outputDirectory\group-node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Group network test build failed' }
+    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test build failed' }
+    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\audio_test.cpp -o "$outputDirectory\audio-test.exe" -lwinmm
+    if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\share_id_test.cpp share_id.cpp -o "$outputDirectory\share-id-test.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Share ID test build failed' }
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
@@ -27,6 +31,8 @@ try {
     & ".\$outputDirectory\storage-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Storage test failed' }
     & ".\$outputDirectory\group-test.exe" (Join-Path $PWD ('build\tests\runtime\group-'+[Guid]::NewGuid().ToString('N'))); if ($LASTEXITCODE -ne 0) { throw 'Group ledger test failed' }
     & ".\$outputDirectory\group-node-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Group network test failed' }
+    & ".\$outputDirectory\voice-call-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test failed' }
+    & ".\$outputDirectory\audio-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test failed' }
     & ".\$outputDirectory\tls-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'TLS test failed' }
     & ".\$outputDirectory\node-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Node test failed' }
     & python .\tests\test_six_processes.py; if ($LASTEXITCODE -ne 0) { throw 'Six-process test failed' }
