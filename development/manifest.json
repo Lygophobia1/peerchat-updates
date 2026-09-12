@@ -2,12 +2,12 @@
   "SchemaVersion": 1,
   "Product": "PeerChat",
   "Channel": "development",
-  "Version": "4.0.0-dev.1",
+  "Version": "4.0.0-dev.2",
   "MinimumCurrentVersion": "0.3.0-beta",
-  "PackageUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/download/v4-dev.1/PeerChat-v4-dev.1.zip",
-  "PackageSha256": "a44205c54f623db3e902d74fe6ec529b1a6767cd373b46d2f06ddc5e99d8b363",
-  "PackageSize": 2905471,
+  "PackageUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/download/v4-dev.2/PeerChat-4.0.0-dev.2.zip",
+  "PackageSha256": "6be679f7dbcfa2bf8f0fb511e90844d0c99d3ee5fc0a75ae2abed211d72df24d",
+  "PackageSize": 2906782,
   "EntryExecutable": "PeerChat.Desktop.exe",
-  "ReleaseNotesUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4-dev.1",
-  "PublishedUtc": "2026-09-12T10:21:31.6091476Z"
+  "ReleaseNotesUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4-dev.2",
+  "PublishedUtc": "2026-09-12T12:06:02.1694207Z"
 }
