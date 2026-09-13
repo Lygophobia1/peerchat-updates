@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 3 direct-session continuity ownership complete after targeted gates.
-**Next action:** await separate authorization for Stage 4 delivery-above-sockets work; do not begin it implicitly.
+**Current stage:** Stage 4 durable delivery ownership above connections complete after targeted gates.
+**Next action:** await separate authorization and protocol review for Stage 5; do not begin it implicitly.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -29,6 +29,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `f7259595da9e4d19847f2f71c038b6bfc6980800` (`Introduce Stage 2 direct transport wrapper`).
 - Stage 3 implementation checkpoint on `refactor/session-transport`:
   `38e6a4ea4f5778bfe31def98e95e5980703b8e79` (`Centralize Stage 3 session continuity ownership`).
+- Stage 3 documentation checkpoint and Stage 4 starting point on `refactor/session-transport`:
+  `6b5934dc196b56431a9480167f5c4fc1eea1e2b3` (`Record Stage 3 implementation checkpoint`).
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -85,7 +87,7 @@ separate; no publication, final tag, key change or package rebuild in this docum
 
 ## Current recovery limits relevant to the refactor
 
-These are the current boundaries after Stage 3.
+These are the current boundaries after Stage 4.
 
 - WPF still observes Windows network/friend changes and selects discovery candidates, but it sends
   immutable recovery intents and the current network generation to the native boundary. The native
@@ -97,8 +99,12 @@ These are the current boundaries after Stage 3.
 - Duplicate arbitration remains immediate and deterministic. The manager records the winning
   transport instance and rejects or retires losers; retry work remains dormant while a usable winner
   exists. Physical sockets still run on the existing Node worker.
-- Storage outbox is durable, but DM/group inflight ACK eligibility still belongs to individual
-  connections. Coordinated overlap and draining ACK ownership are not implemented.
+- The profile-scoped `DeliveryManager` owns DM/group pending retrieval, authenticated transport
+  submission eligibility, destination-scoped ACK authorization, resend after transport retirement,
+  and incoming DM deduplication. Individual connections no longer own inflight message/event sets.
+- A draining transport can acknowledge only IDs it submitted to its authenticated destination and
+  cannot accept new application sends. Current duplicate losers are still immediately retired, so
+  Stage 4 adds the ownership rule but no overlap interval or make-before-break lifecycle.
 - TCP control/text and WebRTC media are separate live paths; current call teardown still depends
   on control disconnect/invalidation. Logical call/control/media lifetime separation is planned.
 - Native/managed events now carry complete profile/session epoch and monotonically revisioned session
@@ -142,7 +148,21 @@ These are the current boundaries after Stage 3.
   media transport or voice state machine changed. Those later responsibilities were not pulled into
   Stage 3.
 
-## Approved direction and stage gates (not implemented)
+## Stage 4 implemented boundary
+
+- `delivery_manager.hpp` is the profile-scoped delivery owner above sockets. Existing encrypted
+  `Storage` remains the durable source of truth for DM/group outboxes and delivered state.
+- A transport is authorized only after mutual TLS, expected Peer ID, local trust and Stage 3 winner
+  activation. Submission and ACK eligibility are keyed by delivery kind, exact destination, ID and
+  transport instance; another peer or an unsent ID cannot clear durable delivery state.
+- Transport retirement removes runtime eligibility without deleting pending storage. Restart and
+  replacement transports therefore resend through the existing outbox; receiver storage and the
+  signed group ledger retain their existing duplicate suppression and ordering rules.
+- No storage schema/ciphertext, peer frame, discovery API, trust behavior, group-event contract,
+  bridge/UI contract, media behavior or voice state changed. No Stage 5 handoff capability, message,
+  route overlap or make-before-break policy was introduced.
+
+## Approved direction and remaining stage gates
 
 The approved direction is in PEERCHAT_DEVELOPMENT_GOAL.md. The Desktop
 `PeerChat_Abstraction_Architecture_Prompt.md` is a task plan subordinate to the four authoritative
@@ -222,6 +242,21 @@ to implement protocol/media behavior in Stage 2.
   delivery and the unchanged verified voice-call lifecycle. No package or physical network-transition
   acceptance was performed for Stage 3.
 
+### Stage 4 targeted verification
+
+- Strict-warning native builds passed for storage, group-ledger, node, group-node and reconnect tests.
+- Storage delivery tests passed under the intended Windows user token. They cover exact-destination
+  ACK authorization, cross-peer and unsent-ID rejection, draining-transport ACK, no new sends while
+  draining, restart persistence, replacement-transport resend and incoming duplicate suppression.
+- Group-ledger delivery tests passed under the intended Windows user token. They prove per-recipient
+  group outbox isolation and that one member cannot acknowledge another member's pending event.
+- Six-node direct messaging passed with 15 mutual-TLS links, 30 messages/ACKs, disconnect,
+  restart/reconnect, durable outbox and encrypted history. Four-member group-node delivery and the
+  unchanged Stage 3 reconnect/continuity regression also passed.
+- A fresh desktop/native bridge build passed. Existing VersionInfo, unused-local and unawaited-call
+  warnings were unchanged. No UI/package/updater or physical test was run because Stage 4 changes no
+  wire, bridge, media, packaging or presentation boundary.
+
 ### Historical regression and physical evidence
 
 These results predate the architecture audit; they are not fresh execution of the migration gates.
@@ -300,6 +335,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-Stage 4 delivery migration, client modularization, screen sharing, video, files, group voice, TURN,
+Stage 5 handoff, client modularization, screen sharing, video, files, group voice, TURN,
 encrypted relay, onion, disappearing messages, external bridge and multi-device synchronization remain
 deferred. Preserve the accepted stack and begin the next stage only with separate authorization.

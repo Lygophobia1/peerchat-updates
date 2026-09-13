@@ -15,7 +15,8 @@ namespace peerchat::session {
 // The profile-scoped Stage 3 continuity owner. Node still owns the concrete
 // sockets and executes these decisions on its existing worker, but it no longer
 // decides winners, retry timing, cancellation eligibility, or stale-token
-// validity. Delivery/ACK state remains on legacy connections until Stage 4.
+// validity. Stage 4 delivery/ACK state is a separate profile-scoped owner and
+// consumes authenticated transport-instance identities without living here.
 class SessionTransportManager {
 public:
     SessionTransportManager(std::string localProfileScope,

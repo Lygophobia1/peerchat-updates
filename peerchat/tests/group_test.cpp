@@ -1,4 +1,5 @@
 #include "../group.hpp"
+#include "../delivery_manager.hpp"
 #include "../protocol.hpp"
 #include <algorithm>
 #include <filesystem>
@@ -31,8 +32,8 @@ int main(int argc,char** argv){
         require(replica.append(firstMessage),"identical replay changed acceptance");require(replica.state().messages.size()==2,"duplicate group delivery was not suppressed");
         auto remove=base(owner,devices[1],2,GroupEventKind::Remove);remove.subjectAccountId=3;signGroupEvent(remove,devices[1]);require(owner.append(remove)&&owner.state().members.count(3)==0,"admin could not remove member");
         auto leave=self(owner,devices[3],4,GroupEventKind::Leave);require(owner.append(leave)&&owner.state().members.count(4)==0,"member leave failed");auto ownerLeave=self(owner,devices[0],1,GroupEventKind::Leave);require(!owner.append(ownerLeave)&&owner.state().members.count(1)==1,"owner left without ownership transfer");
-        auto persistentPath=(root/L"persistent").wstring();{Storage storage(persistentPath);for(const auto& event:owner.events())storage.appendGroupEvent(event);require(storage.groupIds()==std::vector<std::string>{genesis.groupId},"stored Group ID index mismatch");}
+        auto persistentPath=(root/L"persistent").wstring();{Storage storage(persistentPath);for(const auto& event:owner.events())storage.appendGroupEvent(event);require(storage.groupIds()==std::vector<std::string>{genesis.groupId},"stored Group ID index mismatch");delivery::DeliveryManager deliveries(storage,devices[0].peerId);storage.queueGroupDelivery(firstMessage.eventId,devices[1].peerId);storage.queueGroupDelivery(firstMessage.eventId,devices[2].peerId);require(deliveries.authorizeTransport({401},devices[1].peerId)&&deliveries.authorizeTransport({402},devices[2].peerId),"Group delivery transports were not destination-bound");require(deliveries.submittedGroupEvent(devices[1].peerId,firstMessage.eventId,{401}),"Group event submission was not recorded");require(!deliveries.acknowledgeGroupEvent(devices[2].peerId,{402},firstMessage.eventId),"Another group destination acknowledged an unsent delivery");require(deliveries.beginDraining({401})&&deliveries.acknowledgeGroupEvent(devices[1].peerId,{401},firstMessage.eventId),"Authorized draining group ACK was rejected");require(storage.pendingGroupEvents(devices[1].peerId).empty()&&!storage.pendingGroupEvents(devices[2].peerId).empty(),"Group ACK changed another destination's durable outbox");}
         GroupLedger restarted;{Storage storage(persistentPath);for(const auto& event:storage.groupEvents(genesis.groupId))restarted.append(event);}require(restarted.state().name==owner.state().name&&restarted.state().members.size()==owner.state().members.size()&&restarted.state().messages.size()==2,"encrypted group ledger did not survive restart");
-        std::cout<<"PASS: signed client-owned encrypted group ledger, arbitrary membership, roles, deterministic convergence/order, replay rejection, remove, leave, and restart.\n";return 0;
+        std::cout<<"PASS: signed client-owned encrypted group ledger, arbitrary membership, destination-scoped group delivery, draining ACK, convergence, replay rejection, and restart.\n";return 0;
     }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<"\n";return 1;}
 }

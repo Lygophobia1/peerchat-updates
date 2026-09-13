@@ -21,14 +21,17 @@ owner for the existing direct path's attempt/instance tokens, active winner, dup
 bounded retry/backoff, route cancellation and stale-callback protection. Node retains its one worker,
 resolvers, sockets and Schannel objects and executes manager decisions. `DirectTransportAdapter`
 wraps each legacy connection and reports lifecycle/capability observations without owning a socket.
-Delivery/ACK state, media and coordinated handoff are not part of this Stage 3 boundary.
+The profile-scoped `DeliveryManager` owns durable DM/group send eligibility, transport-scoped ACK
+authorization, resend eligibility and incoming-DM deduplication above individual connections. Media
+and coordinated handoff remain outside the implemented boundary.
 
 The local-only types distinguish the profile scope, local/verified-remote device identity,
 runtime session epoch, transport instance ID, independent route revision, channel requirements,
 transport states, send acceptance, and immutable value events. Reliable control/messages and
 realtime media are distinct channel kinds. The manager promotes a direct connection only after the
 existing mutual-TLS, expected-identity and local-trust checks succeed. The same active direct binding
-serves control and reliable messages; media has no Stage 3 binding. Stale session epochs, transport
+serves control and reliable messages; only then may its instance submit or acknowledge durable
+delivery. Media has no logical binding yet. Stale session epochs, transport
 instances, route revisions and network generations cannot change the active binding. Send acceptance
 explicitly does not mean delivery; receive events contain sizes/metadata, never borrowed payload buffers.
 
@@ -276,13 +279,20 @@ Peer frames use the existing fixed version byte and Hello capability bits for mu
 ordering, groups and voice. Unknown packet types are rejected; there is no negotiated handoff
 message set. No handoff capability or compatibility fallback has been implemented.
 
-Storage persists the encrypted outbox and message IDs/order independently of sockets. Node sends
-pending messages over authenticated connections, but each Connection owns its own inflight and
-groupInflight sets. A DM ACK can mark delivery only when its ID was sent on that connection;
-group ACKs similarly clear per-connection eligibility and persist per-recipient delivery. Receive
-storage/ledger paths suppress duplicate IDs. Delivery therefore survives reconnect by reloading
-pending entries, but ACK eligibility has not been extracted into a transport-independent module.
-There is no coordinated old-route ACK drain or universal session-state synchronization.
+Storage persists the encrypted DM/group outboxes and message IDs/order independently of sockets.
+The profile-scoped `DeliveryManager` loads those pending entries and records which authenticated
+transport instance submitted each ID to each exact destination. A DM or group ACK may change durable
+state only when that same destination and an authorized submitting transport present the ID; another
+peer, an unsent ID, or an unrelated transport cannot acknowledge it. A transport marked draining
+cannot accept new application sends, but can still complete ACKs for IDs it previously submitted.
+Retiring a transport removes only its runtime ACK eligibility, so still-pending data can be resent on
+an authenticated replacement and survives process restart through the existing encrypted storage.
+Incoming DM storage and the group ledger retain their existing message/event-ID duplicate suppression.
+
+Current duplicate losers are still retired immediately by the Stage 3 policy; Stage 4 does not add a
+drain interval, route overlap, make-before-break messages, capability negotiation, or coordinated
+handoff. The draining ACK rule is an ownership invariant ready for an authorized later transport
+overlap, not a new wire or lifecycle behavior.
 
 ## One-to-one voice boundary
 
