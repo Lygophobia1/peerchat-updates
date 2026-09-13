@@ -255,11 +255,12 @@ public class DesktopApplication {
                 if(e.kind==13)HandleVoiceEvent(e);
                 if(incoming||incomingGroup)incomingNotification=true;
                 if(e.kind==0){if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id);ConfigureFirewallForListener(e.port);RestoreDiscoverySession();}
-                if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
-                if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
+                if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online&&attempting.SessionRevision==0){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
+                if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online&&scheduled.SessionRevision==0){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
+                if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);}
                 if(e.kind==2){var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId))e.text="Peer identity changed for "+identityConversation.Name+". Previously verified "+identityConversation.PreviousVerifiedPeerId+"; current device "+e.peer+". Explicit verification is required.";string failure=identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId)?"Peer identity changed":"Identity verification required";connectionAttempts.Update(e,identityConversation,"TLS identity mismatch","Verification required",failure);RecordConnection("trust",identityConversation,failure,e);string key=(e.expected??"")+"|"+(e.peer??"")+"|"+e.attempt;if(!trustPrompted.Contains(key)&&!trustSuppressed.Contains(key)){trustPrompted.Add(key);trustRequests.Enqueue(Tuple.Create(e,key));}TraceUi("Identity diagnostics: expected Peer ID="+(String.IsNullOrEmpty(e.expected)?"unspecified":e.expected)+"; presented Peer ID="+(e.peer??"unknown")+"; attempt="+e.attempt);}
                 if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){voiceAudioError=(e.text??"").Substring("Voice audio device error:".Length).Trim();latestVoiceAudioError=voiceAudioError;var voiceConversation=model.FindByPeer(e.peer);RecordConnection("voice-audio",voiceConversation,voiceAudioError,e);model.Status="Voice audio unavailable · "+voiceAudioError;RefreshVoiceUi();}
-                else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);if(IsRouteFailure(e.text)&&failed!=null&&!failed.Online&&failed.Contact!=null&&(String.IsNullOrEmpty(e.expected)||e.expected==failed.Contact.peer)&&!failed.PublicAttempted&&!String.IsNullOrWhiteSpace(failed.Contact.publicHost)&&failed.Contact.publicPort>0&&failed.Contact.host!=failed.Contact.publicHost){failed.PublicAttempted=true;failed.ConnectionState="Retrying public endpoint";failed.Refresh();DiscoverySearchResult friend;string source=failed.AccountId>0&&friendDirectory.TryGetValue(failed.AccountId,out friend)&&!String.IsNullOrEmpty(friend.PublicCandidateSource)?friend.PublicCandidateSource:"Discovery public candidate";try{core.Connect(failed.Contact.publicHost,failed.Contact.publicPort,failed.Contact.peer,source,"LAN route failed; public fallback",false);}catch{}}}
+                else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);if(IsRouteFailure(e.text)&&failed!=null&&!failed.Online&&failed.Contact!=null&&(String.IsNullOrEmpty(e.expected)||e.expected==failed.Contact.peer)&&!failed.PublicAttempted&&!String.IsNullOrWhiteSpace(failed.Contact.publicHost)&&failed.Contact.publicPort>0&&failed.Contact.host!=failed.Contact.publicHost){failed.PublicAttempted=true;if(failed.SessionRevision==0){failed.ConnectionState="Retrying public endpoint";failed.Refresh();}DiscoverySearchResult friend;string source=failed.AccountId>0&&friendDirectory.TryGetValue(failed.AccountId,out friend)&&!String.IsNullOrEmpty(friend.PublicCandidateSource)?friend.PublicCandidateSource:"Discovery public candidate";try{core.Connect(failed.Contact.publicHost,failed.Contact.publicPort,failed.Contact.peer,source,"LAN route failed; public fallback",false);}catch{}}}
                 if(e.kind==3&&!model.Groups){var connected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??model.Get(e.peer);connectionAttempts.Update(e,connected,"Ready","Verified","None");RecordConnection("connected",connected,"TCP and TLS authenticated; identity verified",e);model.Selected=connected;RequestConversationHistory(model.Selected);ShowConversation();}
                 if(e.kind==4){var disconnected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,disconnected,e.text??"Disconnected",null,null);RecordConnection("disconnected",disconnected,e.text??"Disconnected",e);}
                 if(e.kind==16){var lifecycle=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,lifecycle,null,null,null);RecordConnection("connection-lifecycle",lifecycle,e.text??"connection lifecycle transition",e);}
@@ -1310,15 +1311,15 @@ public class DesktopApplication {
 				}
 				LocalSubnetDecision localSubnetDecision3 = localSubnetDecision;
 				bool flag = IsPrivateCandidate(contact.host) && !localSubnetDecision3.SameSubnet;
-				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0), true);
+				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0), true, networkGeneration);
 				if (flag)
 				{
 					contact.host = "";
 					contact.port = 0;
 				}
-				item.Online = false;
-				item.ConnectionState = "Network changed · refreshing";
-				item.Refresh();
+				// The native session owner decides whether the active binding is
+				// actually retired. This recovery request must not pre-emptively
+				// downgrade a newer or retained authenticated winner in WPF.
 				ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.Update(new CoreEvent
 				{
 					expected = contact.peer,
@@ -1461,7 +1462,7 @@ public class DesktopApplication {
 			friendPresence[item.AccountId] = item.Online;
 			if (flag2 && !conversationModel.Online && contact != null && !string.IsNullOrEmpty(contact.peer))
 			{
-				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0));
+				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0), false, networkGeneration);
 			}
 			bool verified = contact != null && contact.peer == item.PublicIdentity && contact.verified;
 			conversationModel.Contact = new ContactData
@@ -2737,8 +2738,11 @@ public class DesktopApplication {
 			Refresh();
 			return;
 		}
-		conversation.ConnectionState = "Connecting" + (conversation.PublicAttempted ? " via public endpoint" : " via LAN endpoint");
-		conversation.Refresh();
+		if (conversation.SessionRevision == 0)
+		{
+			conversation.ConnectionState = "Connecting" + (conversation.PublicAttempted ? " via public endpoint" : " via LAN endpoint");
+			conversation.Refresh();
+		}
 		model.Status = "Connecting to " + friend.Username + " (" + text4 + ")…";
 		Refresh();
 		try
@@ -2747,8 +2751,11 @@ public class DesktopApplication {
 		}
 		catch (Exception ex)
 		{
-			conversation.ConnectionState = "Connection failed";
-			conversation.Refresh();
+			if (conversation.SessionRevision == 0)
+			{
+				conversation.ConnectionState = "Connection failed";
+				conversation.Refresh();
+			}
 			CoreEvent coreEvent3 = new CoreEvent();
 			coreEvent3.peer = friend.PublicIdentity;
 			coreEvent3.expected = friend.PublicIdentity;
@@ -2793,7 +2800,10 @@ public class DesktopApplication {
 			verified = verified
 		};
 		conversationModel.PublicAttempted = false;
-		conversationModel.ConnectionState = (friend.Online ? "Finding peer" : "Offline");
+		if (conversationModel.SessionRevision == 0)
+		{
+			conversationModel.ConnectionState = (friend.Online ? "Finding peer" : "Offline");
+		}
 		conversationModel.Refresh();
 		model.Groups = false;
 		model.Selected = conversationModel;
@@ -3259,7 +3269,7 @@ public class DesktopApplication {
 				connectionAttempts.Update(null, selected).LocalSubnetDiagnostics = localSubnetDecision.Diagnostics;
 				if (!localSubnetDecision.SameSubnet)
 				{
-					core.InvalidateRoute(contact.peer, contact.host, contact.port);
+					core.InvalidateRoute(contact.peer, contact.host, contact.port, false, networkGeneration);
 					contact.host = "";
 					contact.port = 0;
 					connectionAttempts.Update(null, selected).RefreshResult = "stale saved private endpoint discarded after network change";

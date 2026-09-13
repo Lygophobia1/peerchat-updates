@@ -6,7 +6,7 @@
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -17,6 +17,10 @@ struct NodeEvent {
     std::wstring route;
     std::uint16_t port=0;
     std::uint64_t attemptId=0;
+    std::uint64_t sessionEpoch=0;
+    std::uint64_t sessionRevision=0;
+    std::uint64_t networkGeneration=0;
+    bool sessionConnected=false;
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;
@@ -30,7 +34,7 @@ public:
     void start(const std::wstring& dataDirectory,std::uint16_t listeningPortOverride=0,const std::wstring& displayNameOverride={});
     void stop();
     void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={},const std::wstring& candidateSource=L"Direct",const std::wstring& route=L"manual",bool forceImmediate=false);
-    void invalidateRoute(const std::string& expectedIdentity,const std::wstring& staleHost={},std::uint16_t stalePort=0,bool allRoutes=false);
+    void invalidateRoute(const std::string& expectedIdentity,const std::wstring& staleHost={},std::uint16_t stalePort=0,bool allRoutes=false,std::uint64_t expectedNetworkGeneration=0);
     void setNetworkContext(std::uint64_t generation,const std::wstring& fingerprint);
     void saveContact(const Contact& contact);
     void removeContact(const std::string& peerId);

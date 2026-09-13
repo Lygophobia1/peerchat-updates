@@ -15,11 +15,14 @@ Acceptance does not imply a signed stable artifact or completed Release publicat
 
 ## CURRENT PHASE
 
-**Stage 2 session/transport types and direct-wrapper boundary implemented; Stage 3 not started.**
+**Stage 3 direct-session continuity ownership implemented; Stage 4 not started.**
 
 The accepted source is frozen on `release/v4.0.0`; incremental networking work belongs on
 `refactor/session-transport`. Formal Release versioning, signing backup and publication remain
-separate work. Stage 3 requires separate user authorization.
+separate work. Stage 3 now centralizes direct-transport winner selection, retry/backoff, cancellation/lifetime
+tokens, and revisioned session snapshots in the native session/transport boundary. Durable delivery,
+ACK ownership, draining, and resend behavior remain unchanged and belong to a separately authorized
+Stage 4.
 
 Milestone 1 — Account + Discovery Foundation is complete and has passed real packaged-client testing.
 
@@ -1105,10 +1108,11 @@ Everything above defines PeerChat's architectural direction.
 WebRTC/DTLS-SRTP + Opus calls are implemented. Packaged two-way voice and 3+ client group behavior
 have passed physical acceptance; exact current evidence remains in `PROJECT_STATUS.md`.**
 
-The current task is documentation/plan synchronization for the approved session/transport direction.
-Do not implement production changes until the next stage is explicitly authorized. Networking/session
-migration comes before broad client modularization. Preserve the accepted baseline and the open
-CLR/WPF and false-route-teardown backlog; do not infer closure from general product acceptance.
+Stage 3 of the approved session/transport migration is implemented: the existing direct path has one
+native winner/retry/cancellation authority with lifetime tokens and revisioned snapshots. Do not begin
+Stage 4 delivery/ACK migration until it is explicitly authorized. Networking/session migration comes
+before broad client modularization. Preserve the accepted baseline and the open CLR/WPF and
+false-route-teardown backlog; do not infer closure from general product acceptance.
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and
 encrypted-history behavior. Current implementation details and test state belong in

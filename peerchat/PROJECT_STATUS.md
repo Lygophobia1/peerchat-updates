@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 2 types/direct-wrapper implementation complete and checkpointed after targeted gates.
-**Next action:** await authorization for Stage 3 single continuity-owner migration; do not begin it implicitly.
+**Current stage:** Stage 3 direct-session continuity ownership complete after targeted gates.
+**Next action:** await separate authorization for Stage 4 delivery-above-sockets work; do not begin it implicitly.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -27,6 +27,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `a76a4aded84108dfadc5a2817ce5a9dbb1bec5d8` (`Document session transport migration plan`).
 - Stage 2 implementation checkpoint on `refactor/session-transport`:
   `f7259595da9e4d19847f2f71c038b6bfc6980800` (`Introduce Stage 2 direct transport wrapper`).
+- Stage 3 implementation checkpoint on `refactor/session-transport`: recorded by the implementation
+  commit immediately preceding the status-record commit.
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -83,22 +85,27 @@ separate; no publication, final tag, key change or package rebuild in this docum
 
 ## Current recovery limits relevant to the refactor
 
-These are existing implementation constraints, not newly fixed bugs.
+These are the current boundaries after Stage 3.
 
-- Recovery decisions remain split between WPF network/friend reconciliation and native socket,
-  reconnect and duplicate arbitration. Exact-endpoint refresh preserves a verified winner.
-- Whole-peer invalidation carries no expected connection-generation token; separately recorded
-  network generations are not end-to-end stale-callback protection. Route removal can end a call.
-- Duplicate arbitration immediately retires a loser, with a two-second no-progress heuristic before
-  deterministic direction selection. Normal exists(peer) includes pending work, not just healthy winners.
+- WPF still observes Windows network/friend changes and selects discovery candidates, but it sends
+  immutable recovery intents and the current network generation to the native boundary. The native
+  `SessionTransportManager` is the single owner for direct attempt identity, active-winner selection,
+  retry/backoff, route cancellation, stale-token rejection and authoritative session state.
+- Whole-peer invalidation is generation-checked. A delayed old-network invalidation cannot cancel a
+  newly authenticated route, exact-endpoint refresh preserves the active verified winner, and an old
+  transport close cannot clear a newer winner.
+- Duplicate arbitration remains immediate and deterministic. The manager records the winning
+  transport instance and rejects or retires losers; retry work remains dormant while a usable winner
+  exists. Physical sockets still run on the existing Node worker.
 - Storage outbox is durable, but DM/group inflight ACK eligibility still belongs to individual
   connections. Coordinated overlap and draining ACK ownership are not implemented.
 - TCP control/text and WebRTC media are separate live paths; current call teardown still depends
   on control disconnect/invalidation. Logical call/control/media lifetime separation is planned.
-- Native/managed events carry attempt IDs and winner diagnostics, but WPF still owns recovery
-  mutations and there is no authoritative revisioned session-snapshot contract.
-- Existing reconnect tests cover distinct stale endpoint and exact-current-endpoint retention;
-  they do not establish full lifetime safety for reused endpoints/handles or delayed all-route commands.
+- Native/managed events now carry complete profile/session epoch and monotonically revisioned session
+  snapshots. WPF applies only newer snapshots for online state and winning-connection projection;
+  failed/superseded legacy attempt events remain diagnostics and cannot downgrade a live winner.
+- Candidate selection and physical connection execution remain existing code. There is no alternate
+  route overlap, make-before-break handoff, transport drain or negotiated handoff protocol yet.
 
 ## Stage 2 implemented boundary
 
@@ -116,6 +123,24 @@ These are existing implementation constraints, not newly fixed bugs.
 - The current Node/WPF code remains authoritative for retries, candidate selection, invalidation,
   duplicate winners, trust, ACK/outbox, group delivery and voice. Stage 2 adds no scheduler, thread,
   socket, protocol field/type/capability, bridge export, discovery operation, or WPF orchestration.
+
+## Stage 3 implemented boundary
+
+- `SessionTransportManager` now owns the existing direct path's per-profile/session transport records,
+  unique attempt/instance tokens, active binding, deterministic duplicate arbitration, bounded
+  exponential retry with injected jitter, cancellation eligibility and network-revision validation.
+- Node still owns its single worker, resolvers, Winsock/Schannel objects and physical close/connect
+  execution. It registers lifecycle observations with the manager and executes explicit manager
+  decisions instead of maintaining a second reconnect/winner authority.
+- Candidate failure, stale close, rejected duplicate, delayed retry and stale network invalidation do
+  not replace or downgrade an authenticated active winner. Identity mismatch still stops that attempt
+  and suspends automatic retry without changing trust or rebinding the account/device identity.
+- The bridge emits self-contained revisioned session snapshots. Managed conversation and diagnostics
+  projections accept only newer revisions; legacy lifecycle events are compatibility diagnostics once
+  an authoritative snapshot has arrived.
+- No peer wire frame, discovery API, trust rule, storage format, ACK/outbox ownership, group ledger,
+  media transport or voice state machine changed. Those later responsibilities were not pulled into
+  Stage 3.
 
 ## Approved direction and stage gates (not implemented)
 
@@ -180,6 +205,23 @@ to implement protocol/media behavior in Stage 2.
   change those boundaries. `protocol.hpp`, the C ABI/managed bridge contract, and discovery wire/API
   remain unchanged.
 
+### Stage 3 targeted verification
+
+- Strict-warning native reconnect build and contract-only test: passed. Coverage includes the single
+  continuity owner, deterministic winner/retry/cancellation tokens, revisioned snapshots, direct
+  wrapper separation and unchanged peer-protocol framing.
+- Live reconnect/diagnostics test under the intended Windows user token: passed. Coverage includes
+  two-peer reconnect, bounded backoff, immediate presence/manual retry, route invalidation,
+  wrong-identity suspension, stale timer/callback rejection and active-winner preservation.
+- Managed desktop/profile/adapter suite under the intended Windows user token: passed, including
+  authoritative snapshot revision gating and delayed legacy loser/disconnect suppression. The first
+  sandbox-token run reproduced the documented DPAPI test-host limitation (Win32 2); encryption was
+  not bypassed and the normal-user run passed.
+- During implementation, the affected Node, group-node, six-process direct-network and voice call-state
+  suites also passed. They covered 15 mutual-TLS links, messaging/ACK/outbox/restart, four-member group
+  delivery and the unchanged verified voice-call lifecycle. No package or physical network-transition
+  acceptance was performed for Stage 3.
+
 ### Historical regression and physical evidence
 
 These results predate the architecture audit; they are not fresh execution of the migration gates.
@@ -239,9 +281,10 @@ Broader or uncertain changes remain open with the missing evidence.
 - **Open — intermittent CLR/WPF `0xe0434352`.** No matching actionable stack/reliable reproduction
   in the reviewed evidence. Needs packaged exception/Windows crash evidence; general baseline
   acceptance is not proof this intermittent condition is resolved.
-- **Open — false `Network route changed` / `Network connection lost` teardown.** Exact-route/winner
-  guards and focused regressions exist. Whole-peer lifetime safety and the relevant physical
-  transition remain unproven. No fix is made in this documentation pass.
+- **Open pending physical validation — false `Network route changed` / `Network connection lost`
+  teardown.** Stage 3 now centralizes generation-checked invalidation and proves with automated tests
+  that delayed old-generation work cannot close a newer verified winner. A live LAN→hotspot→LAN
+  transition has not been physically retested, so this bug is not silently closed.
 - **Resolved — isolated encrypted-data regression (test-host context).** First CryptProtectData
   failed with Win32 2 / ERROR_FILE_NOT_FOUND under CodexSandboxOffline inheriting Livel profile paths.
   Existing storage, node and group-node tests passed under the normal interactive user token.
@@ -257,6 +300,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-No production session abstraction, client modularization, screen sharing, video, files, group voice,
-TURN, encrypted relay, onion, disappearing messages, external bridge or multi-device synchronization
-is added by plan synchronization. Preserve the accepted stack and use the next authorized stage.
+Stage 4 delivery migration, client modularization, screen sharing, video, files, group voice, TURN,
+encrypted relay, onion, disappearing messages, external bridge and multi-device synchronization remain
+deferred. Preserve the accepted stack and begin the next stage only with separate authorization.

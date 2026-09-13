@@ -19,8 +19,8 @@ static size_t schedules(const std::vector<Seen>& seen,const std::string& peer){s
 
 int main(int argc,char** argv){
     try{
-        // Stage 2 is an observation boundary only: the legacy Node remains the
-        // direct transport authority and tells the projection what it decided.
+        // Retain the Stage 2 adapter-contract checks while Stage 3 moves the
+        // direct-path continuity decisions into the manager below.
         session::SessionEpoch epoch{41};
         session::RouteObservation route{{3},"127.0.0.1:29761","test","direct",false};
         session::SessionTransportManager manager("profile-a",std::string(64,'1'),epoch);
@@ -56,12 +56,63 @@ int main(int argc,char** argv){
         session::ChannelRequirements messages{true,true,false,protocol::MaxPacket};
         session::ChannelRequirements media{false,false,true,1200};
         require(messages.reliable&&messages.ordered&&!messages.lowLatency&&media.lowLatency&&!media.ordered,"reliable and realtime channel requirements collapsed together");
+
+        // Stage 3 decisions use explicit time and lifetime tokens so endpoint
+        // reuse, old callbacks and delayed network observations are deterministic.
+        const std::string continuityPeer(64,'b'),wrongIdentity(64,'c');
+        session::SessionEpoch continuityEpoch{51};
+        session::SessionTransportManager continuity("profile-stage3",std::string(64,'a'),continuityEpoch,100,800);
+        auto activate=[&](std::uint64_t instance,session::RouteObservation observation,std::uint64_t now){
+            require(continuity.registerAttempt(continuityEpoch,{instance},continuityPeer,observation,now),"continuity owner rejected attempt registration");
+            session::DirectTransportAdapter direct(continuityEpoch,{instance},observation,continuityPeer);
+            require(continuity.observeTransport(direct.identityPresented(continuityPeer,protocol::CapabilityMutualTls),now),"continuity owner rejected identity observation");
+            require(continuity.markLocallyTrusted(continuityEpoch,{instance})&&continuity.markRemoteAccepted(continuityEpoch,{instance}),"continuity owner rejected authenticated readiness");
+            return continuity.arbitrateWinner(continuityEpoch,{instance},now);
+        };
+        session::RouteObservation activeRoute{{100},"192.168.1.17:7777","discovery","LAN",false,1};
+        auto activeDecision=activate(100,activeRoute,1000);require(activeDecision.activated(),"first authenticated transport was not activated");
+        auto activeSnapshot=continuity.snapshot(continuityPeer);require(activeSnapshot&&activeSnapshot->connected&&activeSnapshot->activeTransport.value==100,"authoritative active snapshot was not published");
+        auto revisionAfterActive=activeSnapshot->revision;
+
+        session::RouteObservation failedCandidate{{101},"198.51.100.7:7777","discovery","public",false,1};
+        require(continuity.registerAttempt(continuityEpoch,{101},continuityPeer,failedCandidate,1100),"candidate registration failed");
+        auto candidateClose=continuity.closeTransport(continuityEpoch,{101},"candidate failed",true);
+        require(candidateClose.accepted&&!candidateClose.wasActiveWinner&&candidateClose.hasActiveWinner,"failed candidate downgraded healthy winner");
+        activeSnapshot=continuity.snapshot(continuityPeer);require(activeSnapshot->connected&&activeSnapshot->activeTransport.value==100&&activeSnapshot->latestFailedTransport.value==101,"candidate failure replaced active snapshot state");
+        session::RouteObservation wrongRoute{{104},"203.0.113.44:7777","discovery","fallback",false,1};
+        continuity.registerAttempt(continuityEpoch,{104},continuityPeer,wrongRoute,1150);session::DirectTransportAdapter wrongDirect(continuityEpoch,{104},wrongRoute,continuityPeer);continuity.observeTransport(wrongDirect.identityPresented(wrongIdentity,protocol::CapabilityMutualTls),1150);
+        auto wrongDecision=continuity.arbitrateWinner(continuityEpoch,{104},1150);require(wrongDecision.disposition==session::WinnerDisposition::RejectedNotReady,"wrong identity became eligible without explicit trust");continuity.closeTransport(continuityEpoch,{104},"identity mismatch",true);require(continuity.snapshot(continuityPeer)->activeTransport.value==100,"wrong-identity fallback replaced the verified winner");
+
+        session::RouteObservation duplicateRoute{{102},activeRoute.endpointUtf8,"refreshed","same endpoint",true,1};
+        auto duplicateDecision=activate(102,duplicateRoute,1200);require(duplicateDecision.disposition==session::WinnerDisposition::RejectedDuplicate&&duplicateDecision.winner.value==102,"deterministic duplicate loser was not rejected by the owner");
+        continuity.closeTransport(continuityEpoch,{102},duplicateDecision.reasonUtf8,false);
+        require(continuity.snapshot(continuityPeer)->activeTransport.value==100,"duplicate loser close cleared the winner");
+
+        session::RouteObservation replacementRoute{{103},activeRoute.endpointUtf8,"refreshed","reused endpoint/new lifetime",false,2};
+        continuity.observeProgress(continuityEpoch,{100},0);
+        auto replacementDecision=activate(103,replacementRoute,4001);require(replacementDecision.disposition==session::WinnerDisposition::ReplacedExisting&&replacementDecision.retire.size()==1&&replacementDecision.retire[0].value==100,"stale winner was not deterministically replaced");
+        auto oldClose=continuity.closeTransport(continuityEpoch,{100},"delayed old callback",true);require(oldClose.accepted&&!oldClose.wasActiveWinner&&oldClose.hasActiveWinner,"old callback demoted reused-endpoint replacement");
+        require(continuity.snapshot(continuityPeer)->activeTransport.value==103,"old callback changed the new instance token's binding");
+
+        require(continuity.observeNetwork(continuityEpoch,2),"network observation was rejected");
+        auto staleCancellation=continuity.cancelRoutes(continuityEpoch,continuityPeer,"",true,1);
+        require(staleCancellation.staleObservation&&staleCancellation.cancel.empty()&&continuity.snapshot(continuityPeer)->activeTransport.value==103,"old network invalidation cancelled a new-generation winner");
+        auto exactRefresh=continuity.cancelRoutes(continuityEpoch,continuityPeer,replacementRoute.endpointUtf8,false,2);
+        require(exactRefresh.retainedActiveWinner&&exactRefresh.cancel.empty(),"presence/endpoint refresh closed a healthy winner");
+
+        const std::string retryPeer(64,'d');session::RouteObservation retryRoute{{200},"203.0.113.9:7777","saved","automatic",false,2};
+        auto firstRetry=continuity.scheduleRetry(retryPeer,retryRoute,5000,0);require(firstRetry.scheduled&&firstRetry.delayMilliseconds==80,"retry owner did not apply deterministic bounded jitter");
+        continuity.requestImmediateRetry(retryPeer,retryRoute,5001);auto immediate=continuity.takeDueRetries(5001);require(immediate.size()==1&&immediate[0].remoteDeviceId==retryPeer,"presence/manual trigger did not produce one immediate retry");
+        continuity.registerAttempt(continuityEpoch,{200},retryPeer,retryRoute,5001);session::DirectTransportAdapter retryDirect(continuityEpoch,{200},retryRoute,retryPeer);continuity.observeTransport(retryDirect.identityPresented(retryPeer,protocol::CapabilityMutualTls),5001);continuity.markLocallyTrusted(continuityEpoch,{200});continuity.markRemoteAccepted(continuityEpoch,{200});require(continuity.arbitrateWinner(continuityEpoch,{200},5001).activated(),"retry transport was not promoted");
+        require(continuity.takeDueRetries(6000).empty(),"old retry timer fired while a healthy winner existed");
+        require(continuity.snapshot(continuityPeer)->revision>revisionAfterActive,"revisioned snapshot did not advance across owner decisions");
+
         protocol::Writer accepted(protocol::Accepted);
         const Blob acceptedWire=accepted.frame();
         const Blob expectedAcceptedWire={0,0,0,4,'P','T',1,static_cast<unsigned char>(protocol::Accepted)};
         require(acceptedWire==expectedAcceptedWire,"legacy protocol framing changed");
         if(argc==2&&std::string(argv[1])=="--contract-only"){
-            std::cout<<"PASS: Stage 2 session/direct-wrapper identities, epochs, route revisions, channel separation, immutable events, send limits, close completion, and unchanged protocol framing.\n";
+            std::cout<<"PASS: Stage 3 continuity owner, deterministic winner/retry/cancellation tokens, revisioned snapshots, direct-wrapper channel separation, and unchanged protocol framing.\n";
             return 0;
         }
 
@@ -79,6 +130,6 @@ int main(int argc,char** argv){
 
         Node target,verifier;std::vector<Seen> targetEvents,verifierEvents;target.start((root/L"target").wstring(),29762,L"Actual peer");verifier.start((root/L"verifier").wstring(),29763,L"Verifier");std::string targetId;until(target,targetEvents,[&]{for(const auto& value:targetEvents)if(value.event.kind==NodeEvent::Kind::Ready){targetId=value.event.peerId;return true;}return false;},"target did not start");until(verifier,verifierEvents,[&]{for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::Ready)return true;return false;},"verifier did not start");const std::string expected(64,'e');verifier.saveContact({expected,L"Expected peer",{},{{L"127.0.0.1",29762}},true});
         NodeEvent mismatch;until(verifier,verifierEvents,[&]{drain(target,targetEvents);for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::TrustRequired&&value.event.expectedPeerId==expected){mismatch=value.event;return true;}return false;},"wrong identity did not reach verification");require(mismatch.peerId==targetId&&mismatch.candidate==L"127.0.0.1:29762"&&mismatch.route==L"automatic reconnect","wrong-identity attempt lost correlation");size_t pendingAttempts=attempts(verifierEvents,expected).size();verifier.connect(L"127.0.0.1",29762,expected,L"Discovery LAN candidate",L"candidate update - same LAN",true);std::this_thread::sleep_for(std::chrono::milliseconds(30));drain(verifier,verifierEvents);verifier.connect(L"127.0.0.1",29762,expected,L"Refreshed candidate",L"manual retry",true);until(verifier,verifierEvents,[&]{drain(target,targetEvents);return attempts(verifierEvents,expected).size()>pendingAttempts;},"Manual repair was blocked by outstanding trust/transport state");bool refreshedMetadata=false;for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::Disconnected&&value.event.expectedPeerId==expected&&value.event.candidateSource==L"Discovery LAN candidate"&&value.event.route==L"candidate update - same LAN")refreshedMetadata=true;require(refreshedMetadata,"Authoritative same-endpoint refresh left the active attempt labeled Saved contact");until(verifier,verifierEvents,[&]{drain(target,targetEvents);int prompts=0;for(const auto& value:verifierEvents){require(value.event.kind!=NodeEvent::Kind::Connected,"Repair bypassed identity verification");if(value.event.kind==NodeEvent::Kind::TrustRequired&&value.event.expectedPeerId==expected)++prompts;}return prompts>=2;},"Retried wrong identity did not require verification");verifier.approve(targetId,false);size_t mismatchAttempts=attempts(verifierEvents,expected).size();auto quietUntil=Clock::now()+std::chrono::milliseconds(1100);while(Clock::now()<quietUntil){drain(verifier,verifierEvents);drain(target,targetEvents);std::this_thread::sleep_for(std::chrono::milliseconds(10));}require(attempts(verifierEvents,expected).size()==mismatchAttempts,"wrong-identity endpoint retried without a manual/presence trigger");target.stop();verifier.stop();
-        std::cout<<"PASS: Stage 2 direct-wrapper/session projection, unchanged wire framing, channel separation, stale-epoch rejection, two-peer reconnect backoff, route invalidation, retry diagnostics, and wrong-identity suspension.\n";return 0;
+        std::cout<<"PASS: Stage 3 direct continuity ownership, unchanged wire framing, authoritative snapshots, two-peer reconnect backoff, route invalidation, retry diagnostics, and wrong-identity suspension.\n";return 0;
     }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

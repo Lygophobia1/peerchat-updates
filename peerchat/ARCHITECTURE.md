@@ -14,31 +14,31 @@ exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native
 P2P sockets, Schannel sessions, peer trust, reconnect, delivery acknowledgements, logical ordering,
 offline outbox, contacts, identity keys, encrypted local history, and the client-owned group ledger.
 
-Recovery ownership is currently split: App.cs also owns network-address observation, recovery
-sequencing, friend reconciliation, candidate selection and route-invalidation requests; Node owns
-the sockets, attempt execution, retry map and duplicate arbitration. WPF maintains a per-peer winner
-projection from events. Stage 2 adds portable session/transport value types, an initial `PeerSession`,
-an observation-only `SessionTransportManager`, and a `DirectTransportAdapter` attached to each legacy
-direct connection. These record decisions already made by Node; they own no socket, worker, timer,
-retry, invalidation, trust decision, winner arbitration, delivery state, media, or close action.
-There is still no authoritative per-channel binding manager or coordinated handoff protocol.
-Planned ownership moves belong in PEERCHAT_DEVELOPMENT_GOAL.md.
+App.cs observes Windows network-address and discovery/friend changes and performs the existing
+candidate selection. It sends immutable retry/invalidation intents with the current network generation
+through the bridge. The native profile-scoped `SessionTransportManager` is now the single decision
+owner for the existing direct path's attempt/instance tokens, active winner, duplicate arbitration,
+bounded retry/backoff, route cancellation and stale-callback protection. Node retains its one worker,
+resolvers, sockets and Schannel objects and executes manager decisions. `DirectTransportAdapter`
+wraps each legacy connection and reports lifecycle/capability observations without owning a socket.
+Delivery/ACK state, media and coordinated handoff are not part of this Stage 3 boundary.
 
-The new local-only types distinguish the profile scope, local/verified-remote device identity,
+The local-only types distinguish the profile scope, local/verified-remote device identity,
 runtime session epoch, transport instance ID, independent route revision, channel requirements,
 transport states, send acceptance, and immutable value events. Reliable control/messages and
-realtime media are distinct channel kinds. A logical session is created only after the legacy path
-has authenticated, locally trusted, arbitrated, and activated the remote device. The same current
-direct connection is projected for control and reliable messages; media has no Stage 2 binding.
-Stale-epoch observations and a close from an older transport cannot change that projection. This is
-diagnostic structural state only, not a second production decision engine. Send acceptance explicitly
-does not mean delivery; receive events contain sizes/metadata, never borrowed payload buffers.
+realtime media are distinct channel kinds. The manager promotes a direct connection only after the
+existing mutual-TLS, expected-identity and local-trust checks succeed. The same active direct binding
+serves control and reliable messages; media has no Stage 3 binding. Stale session epochs, transport
+instances, route revisions and network generations cannot change the active binding. Send acceptance
+explicitly does not mean delivery; receive events contain sizes/metadata, never borrowed payload buffers.
 
 The C ABI assumes serial ownership and returns borrowed wchar_t buffers from its bridge instance.
 Node owns one worker and bounded command/event queues; the current event queue drops its oldest
-entry at capacity. WPF polls native events and separately renders media telemetry. There is no
-revisioned authoritative session-snapshot recovery contract today. Winsock, Schannel, CNG, DPAPI,
-Windows DNS/text APIs and WinMM are still concrete dependencies, not a portable Android core.
+entry at capacity. Relevant lifecycle changes emit self-contained session snapshots containing the
+profile/session epoch, monotonically increasing revision, network generation, active connection and
+state. WPF applies only newer revisions, so a late loser/attempt event cannot overwrite a live winner.
+WPF polls native events and separately renders media telemetry. Winsock, Schannel, CNG, DPAPI,
+Windows DNS/text APIs and WinMM remain concrete adapters/dependencies, not a portable Android core.
 
 `server/PeerChat.Server.cs` is the headless account/discovery service. The separate
 `PeerChat.Server.Admin.exe` creates/reuses a development certificate, launches the server,
@@ -234,48 +234,41 @@ identical heartbeat does not broadcast another friend event. Presence expires af
 the server emits an offline notification.
 
 Windows `NetworkAddressChanged` is the event-driven runtime recovery trigger; bursts are debounced
-without polling. A real active-address/subnet fingerprint change closes the old direct sessions,
-cancels their resolvers/backoff, and removes saved private endpoints outside every current subnet
-while retaining contact identity, trust, conversation, history, and outbox state. The client then
-publishes its newly detected candidate, forces a fresh authoritative friend snapshot, and runs the
-same candidate selector again. Discovery-channel recovery performs publish-before-snapshot as well,
-so an interface change that occurred while discovery was unreachable is repaired on reconnection.
-An authoritative endpoint change retires the former route before replacement only when no live
-verified session exists. Exact endpoint invalidation in the native core also retains a healthy
-authenticated winner and records that decision. This protects the tested exact-endpoint refresh
-case, not every asynchronous generation race. The WPF recovery path requests whole-peer invalidation
-for its own network change before replacement selection. However, the native invalidation command
-does not carry an expected connection/session generation: all-route invalidation matches every
-connection for that peer. NetworkContext updates generation/fingerprint fields separately; those
-fields currently correlate diagnostics rather than enforcing a complete lifetime boundary.
+without polling. A real active-address/subnet fingerprint change increments the managed network
+generation, requests native invalidation for that exact generation, cancels obsolete discovery work,
+and removes saved private endpoints outside every current subnet while retaining contact identity,
+trust, conversation, history, and outbox state. The client then publishes its newly detected candidate,
+forces a fresh authoritative friend snapshot, and runs the same candidate selector again.
+Discovery-channel recovery performs publish-before-snapshot as well, so an interface change that
+occurred while discovery was unreachable is repaired on reconnection. The manager compares the
+request's network generation with each route observation: delayed invalidation from an older network
+cannot close a newly authenticated route. Exact-endpoint refresh also retains a healthy winner.
 
 An out-of-subnet saved private endpoint is not retried while discovery is unavailable. Identity and
-conversation state survive. Rapid network changes are coalesced through WPF recovery flags; this is
-not token-checked per-instance handoff. Removing a matching route can call clearVoice with
-"Network route changed". Keep the false-route-teardown backlog open; ordinary endpoint-refresh
-protection does not prove that delayed whole-peer invalidations cannot affect a newer connection.
+conversation state survive. Rapid network changes are coalesced through WPF recovery flags. Route
+removal can still call clearVoice when the manager confirms that the active control winner belongs
+to the invalidated generation; there is no media-independent control-gap policy yet. Automated tests
+prove stale-generation rejection, but the false-route-teardown backlog stays open pending a physical
+live LAN→hotspot→LAN transition.
 
 Authenticated duplicate arbitration prefers a newly proven session over an older session with no
 recent transport progress, then uses the stable Peer-ID direction rule for genuinely simultaneous
 fresh connections. The stale heuristic is over two seconds without recorded transport progress;
 an idle connection is not thereby proven failed. Losers are marked dead for immediate retirement,
-not intentionally drained. The native exists(peer) predicate covers pending resolvers/attempts as
-well as live connections, so normal resolve avoids another attempt for an already represented peer.
+not intentionally drained. The manager's active binding is authoritative; normal resolve avoids
+another attempt while a usable winner exists, and retry state remains dormant until that winner ends.
 There is no authorized candidate-overlap state today. Superseded duplicates emit diagnostic lifecycle events without marking the
 surviving conversation offline. Final disconnect events carry an explicit bounded origin such as
 remote EOF/TLS close, local route invalidation, socket error, authentication timeout, protocol
 rejection, or duplicate arbitration. Discovery presence remains advisory and never closes an
 otherwise live authenticated P2P session merely because a snapshot reports offline.
 
-The managed connection projection tracks a winning native connection ID independently from the
-latest attempt/failure. Connected events pin the winning endpoint, source, route, and inbound/outbound
-direction. Attempt, retry, trust, lifecycle, and error events remain available as secondary
-diagnostics but cannot replace the winner or downgrade `ConversationModel.Online`. Only a final
-disconnect matching the winning connection ID (or the legacy zero-ID case) clears the tracker's
-live flag. WPF recovery can also explicitly mark a conversation offline. Native cleanup suppresses
-final disconnect/backoff while exists(peer) finds another live or pending connection/resolver; it is
-not a dedicated usable-winner predicate. These protections reduce loser-event projection errors but
-are not a single revisioned native authority for every UI/recovery transition.
+The managed connection projection applies the native manager's complete session snapshots in
+monotonic revision order. A snapshot pins active connection ID, connected state, session epoch and
+network generation. Attempt, retry, trust, lifecycle and error events remain secondary diagnostics;
+once a snapshot has arrived they cannot replace the winner or downgrade `ConversationModel.Online`.
+Only a newer authoritative snapshot can clear that state. The event queue remains bounded, but each
+snapshot is self-contained rather than a delta that depends on every prior lifecycle event.
 
 ## Current peer protocol and delivery ownership
 

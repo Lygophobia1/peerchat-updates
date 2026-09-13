@@ -34,7 +34,7 @@ int main(int argumentCount,char** arguments){
         case Kind::Delivered:for(const auto& message:event.messages)std::cout<<"DELIVERED "<<message.id<<'\n';break;
         case Kind::History:std::cout<<"HISTORY "<<event.peerId<<' '<<event.messages.size()<<'\n';break;
         case Kind::Contacts:std::cout<<"CONTACTS "<<event.contacts.size()<<'\n';break;
-        case Kind::Groups:case Kind::GroupMessage:case Kind::GroupHistory:case Kind::GroupDelivered:case Kind::VoiceCall:case Kind::ConnectionAttempt:case Kind::ReconnectScheduled:break;
+        case Kind::Groups:case Kind::GroupMessage:case Kind::GroupHistory:case Kind::GroupDelivered:case Kind::VoiceCall:case Kind::ConnectionAttempt:case Kind::ReconnectScheduled:case Kind::ConnectionLifecycle:case Kind::SessionSnapshot:break;
         }
         std::cout.flush();
     }std::this_thread::sleep_for(std::chrono::milliseconds(10));}

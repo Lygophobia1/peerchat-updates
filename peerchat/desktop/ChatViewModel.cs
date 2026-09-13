@@ -26,6 +26,7 @@ public class ConversationModel : ObservableModel {
     public bool Online,RequestedHistory,HistoryLoading,HistoryExhausted;
     public string LoadingHistoryPeer="";
     public long WinningConnectionId;
+    public long SessionEpoch,SessionRevision;
     public bool PublicAttempted;
     // Presentation state mirrors the core's connection lifecycle. It is deliberately
     // separate from account/friend state so a direct P2P chat can work offline.
@@ -116,14 +117,14 @@ public class ChatViewModel {
         if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){Status=e.text;return;}
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}
         if(e.kind==1&&e.contacts!=null)foreach(var contact in e.contacts){var item=Get(contact.peer);item.KnownPeerIds.Add(contact.peer);if(item.AccountId==0||item.Contact==null||item.Contact.peer==contact.peer){string accountName=item.AccountName;item.Contact=contact;if(!String.IsNullOrEmpty(accountName))item.Contact.name=accountName;if(contact.verified)item.PreviousVerifiedPeerId="";}item.Refresh();}
-        if(e.kind==3){var item=Get(e.peer);item.Online=true;item.WinningConnectionId=e.attempt;item.ConnectionState="Ready";item.Refresh();Status=e.text+" connected";}
-        if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
+        if(e.kind==3){var item=Get(e.peer);if(item.SessionRevision==0){item.Online=true;item.WinningConnectionId=e.attempt;item.ConnectionState="Ready";item.Refresh();}Status=e.text+" connected";}
+        if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(item.SessionRevision==0&&(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId)){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
         if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];if(!item.Online){item.ConnectionState="Awaiting peer verification";item.Refresh();}}}
         if(e.kind==9)Status=e.text;
         if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
         if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Data.id==receipt.id);if(match!=null)match.Delivered();}
-        if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
+        if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online&&item.SessionRevision==0){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
         if(e.kind==9&&e.groups!=null){
             var visible=new HashSet<string>(e.groups.Select(group=>group.id));
             foreach(var old in GroupChats.Keys.Where(id=>!visible.Contains(id)).ToList())GroupChats.Remove(old);
@@ -135,6 +136,7 @@ public class ChatViewModel {
             if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=!outgoing&&member!=null?member.name+"\n"+value.text:value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,delivery=2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
         }
         if(e.kind==13){VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";}
+        if(e.kind==17){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);bool newer=e.sessionEpoch>item.SessionEpoch||(e.sessionEpoch==item.SessionEpoch&&e.sessionRevision>item.SessionRevision);if(newer){item.SessionEpoch=e.sessionEpoch;item.SessionRevision=e.sessionRevision;item.Online=e.connected;item.WinningConnectionId=e.connected?e.attempt:0;item.ConnectionState=String.IsNullOrEmpty(e.text)?(e.connected?"Ready":"Offline"):e.text;item.Refresh();}}
     }
     static string ClassifyConnectionError(string text){
         string value=(text??"").ToLowerInvariant();

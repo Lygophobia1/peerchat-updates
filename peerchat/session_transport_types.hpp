@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace peerchat::session {
 
@@ -77,6 +78,82 @@ struct RouteObservation {
     std::string sourceUtf8;
     std::string routeUtf8;
     bool incoming = false;
+    // The local network observation under which this route was created. A
+    // delayed invalidation may retire only instances from an older observation.
+    std::uint64_t networkRevision = 0;
+};
+
+struct RetryTarget {
+    std::string remoteDeviceId;
+    RouteObservation route;
+};
+
+struct RetrySchedule {
+    bool scheduled = false;
+    bool suspended = false;
+    std::uint32_t failureCount = 0;
+    std::uint32_t delayMilliseconds = 0;
+    std::uint64_t dueMilliseconds = 0;
+    RetryTarget target;
+};
+
+enum class WinnerDisposition : std::uint8_t {
+    Activated,
+    ReplacedExisting,
+    RejectedDuplicate,
+    RejectedStaleToken,
+    RejectedNotReady
+};
+
+struct WinnerDecision {
+    WinnerDisposition disposition = WinnerDisposition::RejectedNotReady;
+    std::string remoteDeviceId;
+    TransportInstanceId winner;
+    std::vector<TransportInstanceId> retire;
+    std::string reasonUtf8;
+
+    bool activated() const {
+        return disposition == WinnerDisposition::Activated ||
+               disposition == WinnerDisposition::ReplacedExisting;
+    }
+};
+
+struct CancellationDecision {
+    bool accepted = false;
+    bool staleObservation = false;
+    bool retainedActiveWinner = false;
+    bool activeWinnerCancelled = false;
+    std::vector<TransportInstanceId> cancel;
+    std::vector<TransportInstanceId> updateRoute;
+    std::string reasonUtf8;
+};
+
+struct CloseDecision {
+    bool accepted = false;
+    bool wasActiveWinner = false;
+    bool hasActiveWinner = false;
+    bool hasPendingAttempt = false;
+    std::string remoteDeviceId;
+};
+
+// Complete value snapshot for one verified/pending remote device. This is the
+// only state WPF needs in order to project connectivity; attempt failures are
+// retained separately and can never replace an active binding in the snapshot.
+struct SessionSnapshot {
+    SessionEpoch epoch;
+    std::uint64_t revision = 0;
+    std::uint64_t networkRevision = 0;
+    std::string remoteDeviceId;
+    bool connected = false;
+    bool pending = false;
+    bool retryScheduled = false;
+    bool retrySuspended = false;
+    TransportInstanceId activeTransport;
+    RouteObservation activeRoute;
+    TransportInstanceId latestFailedTransport;
+    RouteObservation latestFailedRoute;
+    std::string latestFailureUtf8;
+    std::uint32_t retryDelayMilliseconds = 0;
 };
 
 enum class TransportEventKind : std::uint8_t {
