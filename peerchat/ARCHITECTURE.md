@@ -14,6 +14,19 @@ exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native
 P2P sockets, Schannel sessions, peer trust, reconnect, delivery acknowledgements, logical ordering,
 offline outbox, contacts, identity keys, encrypted local history, and the client-owned group ledger.
 
+Recovery ownership is currently split: App.cs also owns network-address observation, recovery
+sequencing, friend reconciliation, candidate selection and route-invalidation requests; Node owns
+the sockets, attempt execution, retry map and duplicate arbitration. WPF maintains a per-peer winner
+projection from events. There is no implemented PeerSession, SessionTransportManager, per-channel
+binding manager or coordinated handoff protocol. Planned replacements belong in
+PEERCHAT_DEVELOPMENT_GOAL.md; the limits below describe this frozen pre-abstraction implementation.
+
+The C ABI assumes serial ownership and returns borrowed wchar_t buffers from its bridge instance.
+Node owns one worker and bounded command/event queues; the current event queue drops its oldest
+entry at capacity. WPF polls native events and separately renders media telemetry. There is no
+revisioned authoritative session-snapshot recovery contract today. Winsock, Schannel, CNG, DPAPI,
+Windows DNS/text APIs and WinMM are still concrete dependencies, not a portable Android core.
+
 `server/PeerChat.Server.cs` is the headless account/discovery service. The separate
 `PeerChat.Server.Admin.exe` creates/reuses a development certificate, launches the server,
 forwards bounded logs, and uses a local named pipe for status and graceful stop. The server does
@@ -40,9 +53,10 @@ connection, or polling path.
 - **Local history:** encrypted client-side messages and delivery/order metadata.
 - **Server:** optional social/discovery coordination; it is not required for local profile access.
 
-The server receives public device identity only. Private device keys, plaintext messages, chat
-keys, password plaintext, and local history never leave the client. Passwords produce salted
-PBKDF2-SHA256 server verifiers and are never chat-encryption keys. Session tokens are random,
+Of device key material, the server receives only public identity. Private device keys, plaintext
+messages, chat keys and local history never go to discovery. Passwords are sent only inside
+register/login TLS requests, produce salted PBKDF2-SHA256 server verifiers and are never persisted
+as plaintext or used as chat-encryption keys. Session tokens are random,
 stored hashed on the server, and DPAPI-protected per local profile on the client. The protected
 `account-link.dat` stores the durable account ID/username binding and optional current session; a
 sign-out clears the session while preserving the binding. An unreadable binding fails closed in
@@ -70,7 +84,7 @@ last-used time. Creation is an explicit `+ New Profile` editor state; Open Profi
 action, while Rename and confirmed recoverable Delete live in the selected row's overflow menu.
 Keyboard selection, double-click/open, profile locking, and the bootstrap order are unchanged.
 
-v0.3-beta switching is restart-based. The active client stops discovery events/heartbeats, P2P
+Profile switching remains restart-based. The active client stops discovery events/heartbeats, P2P
 sessions and listener, joins/releases the native worker off the UI thread, flushes/closes SQLite,
 and only then starts the chooser in a replacement process using the current executable path and
 installation root. The temporary chooser uses an explicit WPF lifetime so closing it cannot end
@@ -215,13 +229,26 @@ same candidate selector again. Discovery-channel recovery performs publish-befor
 so an interface change that occurred while discovery was unreachable is repaired on reconnection.
 An authoritative endpoint change retires the former route before replacement only when no live
 verified session exists. Exact endpoint invalidation in the native core also retains a healthy
-authenticated winner and records that decision, so a delayed discovery refresh cannot tear down the
-call/control session when the network generation did not change. Only the client whose own network
-generation changed uses whole-peer route invalidation, before it starts replacement attempts.
+authenticated winner and records that decision. This protects the tested exact-endpoint refresh
+case, not every asynchronous generation race. The WPF recovery path requests whole-peer invalidation
+for its own network change before replacement selection. However, the native invalidation command
+does not carry an expected connection/session generation: all-route invalidation matches every
+connection for that peer. NetworkContext updates generation/fingerprint fields separately; those
+fields currently correlate diagnostics rather than enforcing a complete lifetime boundary.
+
+An out-of-subnet saved private endpoint is not retried while discovery is unavailable. Identity and
+conversation state survive. Rapid network changes are coalesced through WPF recovery flags; this is
+not token-checked per-instance handoff. Removing a matching route can call clearVoice with
+"Network route changed". Keep the false-route-teardown backlog open; ordinary endpoint-refresh
+protection does not prove that delayed whole-peer invalidations cannot affect a newer connection.
 
 Authenticated duplicate arbitration prefers a newly proven session over an older session with no
 recent transport progress, then uses the stable Peer-ID direction rule for genuinely simultaneous
-fresh connections. Superseded duplicates emit diagnostic lifecycle events without marking the
+fresh connections. The stale heuristic is over two seconds without recorded transport progress;
+an idle connection is not thereby proven failed. Losers are marked dead for immediate retirement,
+not intentionally drained. The native exists(peer) predicate covers pending resolvers/attempts as
+well as live connections, so normal resolve avoids another attempt for an already represented peer.
+There is no authorized candidate-overlap state today. Superseded duplicates emit diagnostic lifecycle events without marking the
 surviving conversation offline. Final disconnect events carry an explicit bounded origin such as
 remote EOF/TLS close, local route invalidation, socket error, authentication timeout, protocol
 rejection, or duplicate arbitration. Discovery presence remains advisory and never closes an
@@ -231,11 +258,35 @@ The managed connection projection tracks a winning native connection ID independ
 latest attempt/failure. Connected events pin the winning endpoint, source, route, and inbound/outbound
 direction. Attempt, retry, trust, lifecycle, and error events remain available as secondary
 diagnostics but cannot replace the winner or downgrade `ConversationModel.Online`. Only a final
-disconnect carrying the winning connection ID clears that state. Native reconnect cleanup already
-checks for another usable session before scheduling backoff, so the UI now mirrors that ownership
-rule instead of treating an individual loser as conversation-wide failure.
+disconnect matching the winning connection ID (or the legacy zero-ID case) clears the tracker's
+live flag. WPF recovery can also explicitly mark a conversation offline. Native cleanup suppresses
+final disconnect/backoff while exists(peer) finds another live or pending connection/resolver; it is
+not a dedicated usable-winner predicate. These protections reduce loser-event projection errors but
+are not a single revisioned native authority for every UI/recovery transition.
+
+## Current peer protocol and delivery ownership
+
+Peer frames use the existing fixed version byte and Hello capability bits for mutual TLS, logical
+ordering, groups and voice. Unknown packet types are rejected; there is no negotiated handoff
+message set. No handoff capability or compatibility fallback has been implemented.
+
+Storage persists the encrypted outbox and message IDs/order independently of sockets. Node sends
+pending messages over authenticated connections, but each Connection owns its own inflight and
+groupInflight sets. A DM ACK can mark delivery only when its ID was sent on that connection;
+group ACKs similarly clear per-connection eligibility and persist per-recipient delivery. Receive
+storage/ledger paths suppress duplicate IDs. Delivery therefore survives reconnect by reloading
+pending entries, but ACK eligibility has not been extracted into a transport-independent module.
+There is no coordinated old-route ACK drain or universal session-state synchronization.
 
 ## One-to-one voice boundary
+
+Text, group envelopes and call signaling use authenticated TCP/TLS control connections. Voice
+media uses an independent libdatachannel WebRTC/ICE/DTLS-SRTP path, which may select a different
+endpoint pair. These are separate existing resources, not implemented logical channel bindings.
+Current call lifetime is still coupled to control loss: final peer disconnect/route invalidation
+can clearVoice even if media was healthy. mediaEvents requires a control winner for descriptions
+and can omit trickled candidates while no winner is available. No control-gap resume protocol or
+media-route continuity abstraction is implemented yet.
 
 Voice call signaling is carried only after the existing direct peer connection has completed mutual
 TLS, expected Peer ID verification, and explicit local trust. Protocol capability negotiation gates
@@ -249,7 +300,8 @@ owned by the node's `VoiceMedia.poll` lifecycle, not a libdatachannel callback. 
 callbacks, stops audio, explicitly deletes independently registered C API track handles, then deletes
 the peer connection and codecs. Reuse resets call media counters and mute/deafen state. Each call
 creates a distinct PeerConnection/ICE agent tagged with the current WPF network generation and
-active IPv4 fingerprint; candidates never survive call teardown or a network transition. A capture
+active IPv4 fingerprint; candidates are cleared with call teardown. The existing network-invalidation
+path ends affected calls; the recorded generation is not a general stale-callback guard. A capture
 generation check prevents a buffer from being requeued after mute closes/reopens its device.
 
 The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
@@ -265,8 +317,8 @@ owns selected capture/playback devices. Capture resolves the Windows default thr
 enumeration before `waveInOpen`; the mapper sentinel is used only for the query. Default fallback
 uses concrete enumerated devices and honors Windows preferred-only policy. Explicit capture choices
 are never replaced by another mic. Refresh preserves a matching ID/name, then matches by name when
-enumeration has reordered. Capture is opened before playback; Bluetooth duplex hardware acceptance
-is still pending. Only Opus/RTP crosses the
+enumeration has reordered. Capture is opened before playback. Physical evidence and any remaining
+device-specific acceptance belong in PROJECT_STATUS.md, not this implementation contract. Only Opus/RTP crosses the
 media transport. Raw PCM stays in memory and is never logged, persisted, or written to temporary files.
 
 libdatachannel represents the negotiated audio m-line as one reused bidirectional `sendrecv` track.
@@ -356,14 +408,15 @@ rewrite the machine-wide rule for their harness executable path.
 
 `desktop`, `server`, and `shared` contain managed source; root C++ files remain where active
 build scripts expect them. `tests`, `docs`, and `scripts` contain their named support files.
-`build\v0.3-beta` is replaceable output, `releases\v0.3-beta` is the active package, and
-`releases\v0.1-beta` is the immutable fallback. `shared/VersionInfo.cs` centralizes the version.
+Build output is separate from retained release artifacts; scripts still default to the v0.3-beta
+layout. PROJECT_STATUS.md identifies the accepted v4 candidate and retained fallback packages.
+`shared/VersionInfo.cs` centralizes the actual runtime version, currently `4.0.0-dev.2`.
 The packaged Client always carries the desktop EXE/config, native core, updater EXE/core/config,
 and update-feed map as one runtime set. Packaging rejects a missing required managed file and inspects
 the desktop assembly reference metadata before running the native audit. The packaged `PeerChat.Core.dll` statically contains the pinned native media/security dependencies
 and MinGW support runtimes; it may dynamically import only Windows inbox DLLs. The managed bridge
 preloads the exact adjacent core with DLL search restricted to its directory and System32, reports
-the Windows loader code/message on failure, and does not rely on `PATH`. Packaging fails unless an
+the Windows loader code/message on failure, and does not rely on `PATH`. Packaging fails unless a
 managed runtime-set check, import-table audit, and restricted-search native load smoke all pass.
 
 ## Client updates

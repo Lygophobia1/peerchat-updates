@@ -9,6 +9,10 @@
 
 ## Transport and framing
 
+This document specifies the existing discovery wire/API and authority boundaries. Client scheduling,
+interface enumeration and invalidation implementation live in ARCHITECTURE.md. The approved
+session/transport plan introduces no discovery operation or field here.
+
 Protocol version 1 uses TLS 1.2/1.3 and length-prefixed UTF-8 JSON. A four-byte big-endian length
 precedes each request or response. Requests are limited to 4 KiB and responses to 16 KiB.
 Development clients explicitly pin/confirm the service certificate; production is intended to use
@@ -66,40 +70,17 @@ The server binds a public device identity to its first authenticated account and
 attempt that presents the same identity from a different account. The response echoes the authoritative account/username, registered device identity, LAN/public
 candidates, `publicCandidateSource`, and `observedAddressClassification`. Friend-state candidate
 records include those fields plus `candidateSeenUtc`. Presence is considered fresh for 90 seconds;
-clients heartbeat every 60 seconds.
+the current client's heartbeat scheduling is documented in ARCHITECTURE.md.
 
 Candidates are route hints, never identities. They are released only to authenticated friends and
 must still complete the native mutual-TLS Peer ID verification.
 
-When an authoritative friend event/snapshot changes online state or candidate data, the client may
-retry that expected Peer ID immediately. This only updates transport scheduling: it does not grant
-trust, rebind a social conversation, or accept a different device identity. Unchanged presence does
-not reset native reconnect backoff.
-Manual connection repair refreshes local presence and the authoritative friend snapshot when the
-service is available, then reuses the same account conversation and existing candidate selector.
-Unavailable discovery leaves saved direct endpoints usable. Snapshot responses from a signed-out
-client are discarded. Neither refresh nor retry grants trust to a changed device.
-
-Before publishing automatic presence or classifying a friend's LAN candidate, the client refreshes
-its current Windows IPv4 interfaces and subnet masks. Same-LAN comparison is masked subnet
-membership, not exact-address equality. Adapter-specific enumeration failures do not abort the
-remaining interfaces. An explicit user-configured advertised endpoint is not overwritten. A fresh
-authoritative candidate at the same endpoint updates transport provenance without changing the
-expected Peer ID, trust state, or reconnect security boundary.
-
-At runtime, a Windows address/subnet change invalidates sessions and saved private candidates tied
-to the previous network. The client republishes its current LAN candidate before requesting the
-next authoritative friend snapshot. If discovery is temporarily unavailable, an out-of-subnet
-saved private endpoint is not retried; the stable account/device identity and local conversation
-remain intact until discovery or an explicit current Direct P2P route becomes available. When the
-event channel reconnects, presence publication precedes friend reconciliation.
-
-Candidate invalidation caused by an authoritative friend update names the exact stale host/port and
-is deferred while a verified authenticated winner exists. The native core independently refuses to
-close that winner even if a delayed refresh names the winning endpoint. Whole-peer invalidation is
-reserved for the local machine's own network-generation transition and is ordered before replacement
-selection. An `online=false` discovery snapshot is advisory: it does not overrule an authenticated
-mutual-TLS session. Transport closure and duplicate arbitration are decided by the client core.
+Presence is advisory reachability information, not authenticated P2P liveness. An `online=false`
+snapshot, expired observation or disappearing candidate is not a server instruction to close a
+healthy authenticated connection. Such changes are observations for client reevaluation. They grant
+neither trust nor permission to rebind a social account to a different device. Candidate freshness
+does not replace mutual-TLS identity verification. Client route/retry decisions and their current
+limitations are documented in ARCHITECTURE.md, not dictated by this wire contract.
 
 ## Event stream
 
@@ -107,10 +88,9 @@ mutual-TLS session. Transport closure and duplicate arbitration are decided by t
 sends `friend_event` frames for friend requests/updates, friendship changes, and actual presence
 changes. Repeated identical heartbeats do not emit presence events.
 
-Events notify clients to update or reconcile; they are not a second source of truth. Clients fetch
-a full snapshot at login and event-channel reconnect. The bounded fallback is three minutes while
-events are healthy and one minute while reconnecting. Event reconnect uses backoff and direct P2P
-sessions continue independently.
+Events notify clients to reconcile authoritative friend/account state; they are not a second source
+of truth. Client snapshot, heartbeat and event-reconnect timing is implementation policy documented
+in ARCHITECTURE.md. Discovery unavailability does not command P2P session teardown.
 
 The client maps each authoritative friend account to one profile-local conversation and treats the
 snapshot's device Peer ID and endpoint fields as current attachments/candidates. A device change may
@@ -127,10 +107,8 @@ This discovery protocol has no authoritative group operations. It does not creat
 IDs, names, metadata, memberships, roles, invitations, removals, leave state, or history. Friend and
 presence results may help a client locate a verified account/device before the client signs and sends
 a group invitation directly, but that lookup does not give the service authority over the group.
-The invite picker consumes the client's stable reconciled friend model: offline/unreachable friends
-remain eligible unless already members or invited. Signing/delivery still requires a verified device.
-The inviter's local group projection retains invitees as pending state until a signed accept/decline
-or other authorized group-state event resolves the invitation.
+Group invite eligibility, pending-state projection and signed-event validation remain client behavior
+documented in ARCHITECTURE.md; discovery results alone never authorize a group-state change.
 
 Group state is a client-owned signed event ledger replicated between members. Existing groups and
 their direct text transport continue when this service is unavailable. A future service version may
@@ -142,20 +120,16 @@ availability must not turn the service into the source of truth or change the lo
 
 The discovery/account protocol does not own calls and stores no call state, voice diagnostics, or
 voice content. Local bounded voice diagnostics and normalized live level telemetry are never uploaded
-by this protocol. They contain no PCM/audio samples. Once
-two friends have an authenticated direct peer session, call offer/answer SDP, trickled ICE candidates,
-connected, decline, busy, and end signals travel on that verified mutual-TLS channel. Each signal carries an ephemeral random
-call ID and is accepted only from the already authenticated device Peer ID. One active call is
-allowed per selected profile in v0.3-beta. Discovery loss does not deliberately terminate a call;
-peer transport loss or profile shutdown does. Media is direct ICE with DTLS-SRTP and Opus; neither
-SDP/ICE coordination nor media packets create server-owned call state.
+by this protocol. Current call SDP/ICE signaling travels on the verified peer control channel, not
+the discovery API. Discovery loss does not itself terminate a call. Current call teardown and media
+implementation are described in ARCHITECTURE.md; they are not discovery protocol commands.
 
 Future ICE/TURN signaling may use coordination infrastructure, but it must remain authenticated to
 the same account/device trust relationship and must not make the server a call authority or content
 archive.
-The current voice client gathers host and STUN-derived server-reflexive candidates and exchanges
-them over the authenticated winning P2P control session. STUN observes addressing only; it does not
-own calls or receive media. TURN remains unimplemented as the future fallback for direct-ICE failure.
+STUN/TURN coordination is separate from social discovery. TURN remains unimplemented. Future peer
+handoff proposals, arbitration, promotion and channel authority must remain authenticated peer/client
+operations, not discovery authority. No handoff wire messages or new server operations are added here.
 
 ## Security and privacy
 

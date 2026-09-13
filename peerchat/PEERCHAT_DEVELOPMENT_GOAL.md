@@ -9,11 +9,17 @@
 
 ## CURRENT VERSION
 
-**v4-dev.2**
+**Source metadata: 4.0.0-dev.2; user-accepted product baseline: v4.0.0.**
+
+Acceptance does not imply a signed stable artifact or completed Release publication.
 
 ## CURRENT PHASE
 
-**v4 Development updater delivery proof**
+**Approved session/transport plan synchronization; production migration not started.**
+
+The accepted source is frozen on `release/v4.0.0`; incremental networking work belongs on
+`refactor/session-transport`. Formal Release versioning, signing backup and publication remain
+separate work. The next implementation stage requires user authorization.
 
 Milestone 1 — Account + Discovery Foundation is complete and has passed real packaged-client testing.
 
@@ -214,7 +220,7 @@ Development TLS private-key material remains protected by the Windows certificat
 
 ---
 
-# FRIEND SYSTEM — CURRENT MILESTONE
+# FRIEND SYSTEM — PRESERVED REQUIREMENTS
 
 PeerChat should support:
 
@@ -313,14 +319,15 @@ Do not expose private keys, authentication secrets, or unnecessary device detail
 
 PeerChat should automatically determine the best available connection path.
 
-Prefer approximately:
+Choose permitted routes by channel capabilities and policy, not a universal LAN → public → STUN →
+TURN ladder. Preserve current direct TCP messaging and library-managed WebRTC/ICE media separately.
+STUN success for media is not TCP reachability proof. Future router mapping or relay support needs
+its own demonstrated requirement; TURN is an ICE relay capability, not a separate media stack.
 
-1. existing known/direct endpoints
-2. same-LAN/direct connection
-3. public connection candidates
-4. established NAT traversal / hole punching
-5. automatic router mapping such as UPnP / NAT-PMP / PCP where useful
-6. encrypted relay / TURN-like fallback
+Apply privacy/security constraints before gathering candidates, DNS/probing, address advertisement
+and fallback. Direct is preferred in Automatic mode; strict privacy may require relay-only behavior
+and must fail closed rather than silently disclose a direct address. No new transport is authorized
+by this roadmap.
 
 Ordinary users must NOT need manual port forwarding.
 
@@ -328,9 +335,8 @@ Use mature networking standards/libraries where appropriate.
 
 Do not invent custom NAT traversal mechanisms when established solutions exist.
 
-Direct P2P remains preferred.
-
-Relay is fallback.
+Direct P2P remains available and preferred when policy permits it; relay is fallback or an explicit
+privacy choice. Existing manual/server-independent operation must remain intact.
 
 Relay infrastructure must not require plaintext private-message access.
 
@@ -398,13 +404,14 @@ Do not expose private keys, relay secrets, or unnecessary IP information merely 
 
 The normal message bubble should remain uncluttered.
 
-During Milestone 2, inexpensive forward-compatible protocol/storage/UI fields may be added for transport metadata, but do NOT implement relay transport yet.
+Preserve existing delivery metadata during migration. Do not implement relay transport in this phase.
 
 ---
 
-# MESSAGE ORDERING — REQUIRED FIX DURING MILESTONE 3
+# MESSAGE ORDERING — PRESERVED INVARIANT
 
-The current text system has demonstrated a bug where messages can appear out of order.
+Deterministic logical ordering is implemented. Preserve it across retries, history paging and
+future handoff; do not reopen the former ordering defect without new evidence.
 
 Do not fix this with a superficial WPF timestamp sort.
 
@@ -414,14 +421,8 @@ Do not use `sent_at` alone as authoritative conversation ordering.
 
 Do not use each client's local `received_at` timestamp as the sole ordering mechanism either.
 
-Establish deterministic P2P conversation ordering.
-
-Choose the simplest robust approach compatible with the architecture, such as:
-
-- per-conversation logical sequence information
-- Lamport/logical ordering
-- deterministic message-ID tie breaking
-- another established deterministic approach
+Preserve the current logical ordering and deterministic message-ID tie breaking rather than
+introducing a new ordering algorithm to fit transport interfaces.
 
 Avoid unnecessary distributed-system complexity.
 
@@ -580,9 +581,9 @@ Group membership is an arbitrary collection. Three clients are the minimum accep
 a product or architecture limit. Any future practical limit must be configurable policy rather than
 a hard-coded schema, protocol, storage, routing, authorization, or UI assumption.
 
-The next media stage is production-oriented 1-to-1 voice through the existing WPF → C ABI → native
-C/C++ boundary, using established WebRTC/Opus components rather than inventing media security or
-transport. Later directions still include:
+One-to-one voice is implemented through WPF → C ABI → native C/C++, using the pinned WebRTC/Opus
+stack. Prove messaging and voice continuity through the planned abstraction before adding media
+features. Later directions still include:
 
 - group voice
 - screen sharing
@@ -593,7 +594,7 @@ Do not begin group voice, screen sharing, webcam video, or file transfer during 
 
 Avoid architectural assumptions that permanently restrict conversations to exactly two participants.
 
-When real-time media work begins later, use established codecs/protocols/libraries.
+Continue using established codecs/protocols/libraries for later media work.
 
 Do not force reliable ordered text semantics onto latency-sensitive media simply to reuse existing code.
 
@@ -604,28 +605,49 @@ Do not force reliable ordered text semantics onto latency-sensitive media simply
 > Planned direction, not the currently implemented architecture. Preserve proven networking and
 > security behavior while responsibilities are migrated incrementally and verified.
 
-PeerChat will move toward a transport-independent logical `PeerSession`, where session continuity
-does not depend on continuity of any individual transport. Future ownership should be separated
-across `PeerSession`, `SessionTransportManager`, `TransportRouter`, and narrow `ITransport`
-implementations. That shared boundary should centralize identity verification, winner selection,
-route generations, stale-callback protection, retry/backoff, failover, and transport handoff.
+PeerChat will move toward a transport-independent `PeerSession` scoped to one local profile and
+verified remote device. Social/account conversation identity remains separate from cryptographic
+device identity, runtime session epoch and route. Changing devices still requires explicit trust.
+
+`SessionTransportManager` will solely own transport attempts, promotion, draining, retry and
+cancellation, using active bindings per channel/channel bundle. Control/messages and media may
+use different bindings. `TransportRouter` ranks immutable observations under policy; it owns no
+sockets, timers, discovery credentials or delivery state. Durable outbox/ACK/resend/dedup belongs
+in a separate delivery module above transports, with destination/message-scoped ACK eligibility
+that survives permitted draining. Group ledger authority remains client-owned and separate.
 
 Future route changes should use make-before-break handoff where possible:
 
 **establish alternate route → authenticate and verify the expected peer → confirm ready → promote
-the new route → drain and retire the old route**
+the new binding → drain and retire the old route**
+
+Promotion is locally atomic, not distributed atomicity. Authenticated, capability-gated peer
+coordination and legacy fallback must precede intentional overlap. Candidate failure must preserve
+a healthy winner. Lifetime/instance tokens reject stale callbacks; route hints or presence changes
+trigger reevaluation, not automatic teardown. Call lifetime, control availability and media
+availability remain distinct. WPF will consume authoritative revisioned snapshots instead of owning
+reconnect, winner or disconnect decisions. Maintain exactly one production decision owner while
+each responsibility migrates.
 
 Keep peer/account identity separate from endpoint/route identity. Messaging, voice, and future
 screen sharing, video, and file transfer should consume the shared session/channel abstraction
 instead of creating separate reconnect stacks. Feature-specific recovery should remain small—for
-example, resending unacknowledged message IDs, resuming a file from an offset, or requesting a media
-keyframe after handoff.
+example, requesting delivery recovery through the shared module, resuming a file from an acknowledged
+offset, or requesting a media keyframe after handoff. Reliable-message and realtime-media semantics
+remain distinct; libraries retain ICE, congestion, retransmission and jitter machinery.
 
 New features must not add substantial reconnect, route-selection, stale-route, winner-selection, or
 identity-verification logic of their own. New orchestration should use narrow controllers/services
 instead of continuing to grow `App.cs`; native functionality should be wrapped by adapters/services
 rather than scattered direct P/Invoke calls throughout WPF. Keep Windows-specific behavior behind
 platform adapters where practical so the portable core remains suitable for future Android reuse.
+Use portable UTF-8/fixed-width contracts, explicit buffer/callback lifetimes and opaque platform-key
+handles; preserve Windows implementations, existing ciphertext and identity-key handling.
+
+Separate materially different state, lifecycle, concurrency and test responsibilities into focused
+classes/files: session, transport ownership, delivery, routing/policy, call/media coordination and
+platform adapters. Prefer composition over another large orchestrator. Interfaces/factories need
+real ownership, testing, portability or substitution value; no ceremonial pair for every class.
 
 The auto-updater remains self-contained and outside the session/transport abstraction. Continue
 using mature libraries for TLS, WebRTC, ICE, STUN/TURN, DTLS-SRTP, Opus, and cryptographic
@@ -635,8 +657,13 @@ incremental refactor.
 
 Intended sequence:
 
-**stable Windows baseline → updater integration → session/transport abstraction → prove
-messaging/voice continuity → screen sharing → video/files**
+**accepted baseline/updater checkpoint → types and direct wrapper without behavior changes →
+single winner/retry/lifetime owner → delivery continuity → capability-gated direct handoff →
+voice control migration → media continuity proof → packaged physical acceptance → retire proven
+legacy paths → client modularization → screen sharing → video/files**
+
+Use incremental engineering checkpoints and separate physical-acceptance milestones. Full regression
+belongs at significant checkpoints; local and affected integration gates cover smaller stages.
 
 ---
 
@@ -660,8 +687,9 @@ Do not show PeerChat's native E2E privacy indicator for content that an external
 
 # AUTOMATIC CLIENT UPDATE SERVICE
 
-PeerChat now has an isolated updater foundation and client handoff; production feed/signing
-configuration and the first physical in-place update proof remain the next update milestone.
+PeerChat has an isolated updater and client handoff with Development publishing and a fail-closed
+Release verifier. Formal stable version/artifact selection, signing-key backup and Release
+publication remain separate from the networking migration; current evidence is in PROJECT_STATUS.md.
 Public infrastructure should provide automatic update information so new builds do not need to be
 manually distributed.
 
@@ -681,7 +709,7 @@ The client must NEVER trust an executable solely because the public server says 
 
 Updates must be cryptographically signed and independently verified by the client using a trusted update-signing public key.
 
-Release remains fail-closed until that verifier and trusted public key are configured. An explicitly
+Release must remain fail-closed through the configured verifier and trusted public key. An explicitly
 authorized Development-only unsigned package may use the existing opt-in boundary, but must still
 use HTTPS plus exact size and SHA-256 verification.
 
@@ -881,11 +909,7 @@ Known-good fallback release:
 
 `releases\v0.1-beta\`
 
-Current development release:
-
-`releases\v0.3-beta\`
-
-Current executables:
+Retained v0.3 package layout (not the accepted v4 candidate):
 
 - `releases\v0.3-beta\Client\PeerChat.Desktop.exe`
 - `releases\v0.3-beta\Server\PeerChat.Server.Admin.exe`
@@ -895,9 +919,10 @@ Temporary compiler output belongs under:
 
 `build\v0.3-beta\`
 
-Do not create confusing candidate/modern/latest/test release directories.
-
-One clearly versioned packaged release should be the version used for real testing.
+The accepted retained client is `releases\v4-dev.2-history-paging-runtimefix\Client`; exact package
+selection and acceptance belong in PROJECT_STATUS.md. Stage new verification output separately;
+never overwrite accepted artifacts or assume a rebuild has identical bytes. Preserve historical
+packages and evidence. Do not manually clean historical source files.
 
 Packaged clients must be self-contained: native third-party/toolchain runtime dependencies are
 statically linked where appropriate or shipped beside the executable, and release verification must
@@ -908,6 +933,11 @@ Future versions should continue this versioned release approach.
 ---
 
 # DEVELOPMENT MILESTONES
+
+The numbered milestones below retain product acceptance requirements, not a new execution order.
+Milestones 1–3 are implemented; direct ICE/STUN voice and updater integration also exist. Remaining
+NAT/relay, formal Release and future feature work follow the approved migration sequence above,
+not stale imperative wording in historical milestone checklists.
 
 Work incrementally.
 
@@ -970,7 +1000,7 @@ Use parameterized/transactional database operations where appropriate.
 
 Test with two real packaged WPF clients.
 
-## MILESTONE 3 — AUTOMATIC DIRECT CONNECTION + MESSAGE ORDERING
+## MILESTONE 3 — AUTOMATIC DIRECT CONNECTION + MESSAGE ORDERING — COMPLETE
 
 Once accounts are friends, use rendezvous information to automatically establish the existing secure P2P connection.
 
@@ -1075,13 +1105,10 @@ Everything above defines PeerChat's architectural direction.
 WebRTC/DTLS-SRTP + Opus calls are implemented. Packaged two-way voice and 3+ client group behavior
 have passed physical acceptance; exact current evidence remains in `PROJECT_STATUS.md`.**
 
-The current development target is:
-
-# v0.3-beta STABILIZATION
-
-Focus now on eliminating lifecycle and projection defects without expanding scope:
-
-**live-route ownership** → **profile process ownership** → **complete group invitation state**
+The current task is documentation/plan synchronization for the approved session/transport direction.
+Do not implement production changes until the next stage is explicitly authorized. Networking/session
+migration comes before broad client modularization. Preserve the accepted baseline and the open
+CLR/WPF and false-route-teardown backlog; do not infer closure from general product acceptance.
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and
 encrypted-history behavior. Current implementation details and test state belong in
@@ -1091,7 +1118,8 @@ Do NOT begin:
 
 - additional NAT traversal or TURN/relay work beyond the implemented direct ICE/STUN path
 - relay implementation
-- updater implementation
+- changes to the independent updater or Release signing/publication workflow in this refactor
+- client modularization before session/messaging/voice continuity is accepted
 - disappearing messages
 - Discord bridge
 - video
@@ -1105,7 +1133,7 @@ Preserve:
 - encrypted local history
 - account/discovery functionality
 - cryptographic peer identities
-- frozen v0.1-beta fallback and active v0.3-beta release structure
+- frozen baseline branches, v0.1-beta fallback and retained accepted packages
 - modern WPF UI
 - Server Admin/headless-server separation
 
@@ -1149,7 +1177,7 @@ When a milestone is complete:
 5. Update `ARCHITECTURE.md` when appropriate.
 6. Record known problems.
 7. Clearly report what was completed.
-8. Continue to the next milestone unless a genuine architectural/security decision requires user input.
+8. Report the gate and remaining physical evidence; continue only within the user-authorized stage.
 
 ---
 
