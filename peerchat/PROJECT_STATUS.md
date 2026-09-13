@@ -25,6 +25,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
 - No final `v4.0.0` tag; reserve it for formal signed Release publication.
 - Architecture-plan checkpoint on `refactor/session-transport`:
   `a76a4aded84108dfadc5a2817ce5a9dbb1bec5d8` (`Document session transport migration plan`).
+- Stage 2 implementation checkpoint on `refactor/session-transport`:
+  `f7259595da9e4d19847f2f71c038b6bfc6980800` (`Introduce Stage 2 direct transport wrapper`).
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
