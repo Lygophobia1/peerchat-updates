@@ -17,9 +17,22 @@ offline outbox, contacts, identity keys, encrypted local history, and the client
 Recovery ownership is currently split: App.cs also owns network-address observation, recovery
 sequencing, friend reconciliation, candidate selection and route-invalidation requests; Node owns
 the sockets, attempt execution, retry map and duplicate arbitration. WPF maintains a per-peer winner
-projection from events. There is no implemented PeerSession, SessionTransportManager, per-channel
-binding manager or coordinated handoff protocol. Planned replacements belong in
-PEERCHAT_DEVELOPMENT_GOAL.md; the limits below describe this frozen pre-abstraction implementation.
+projection from events. Stage 2 adds portable session/transport value types, an initial `PeerSession`,
+an observation-only `SessionTransportManager`, and a `DirectTransportAdapter` attached to each legacy
+direct connection. These record decisions already made by Node; they own no socket, worker, timer,
+retry, invalidation, trust decision, winner arbitration, delivery state, media, or close action.
+There is still no authoritative per-channel binding manager or coordinated handoff protocol.
+Planned ownership moves belong in PEERCHAT_DEVELOPMENT_GOAL.md.
+
+The new local-only types distinguish the profile scope, local/verified-remote device identity,
+runtime session epoch, transport instance ID, independent route revision, channel requirements,
+transport states, send acceptance, and immutable value events. Reliable control/messages and
+realtime media are distinct channel kinds. A logical session is created only after the legacy path
+has authenticated, locally trusted, arbitrated, and activated the remote device. The same current
+direct connection is projected for control and reliable messages; media has no Stage 2 binding.
+Stale-epoch observations and a close from an older transport cannot change that projection. This is
+diagnostic structural state only, not a second production decision engine. Send acceptance explicitly
+does not mean delivery; receive events contain sizes/metadata, never borrowed payload buffers.
 
 The C ABI assumes serial ownership and returns borrowed wchar_t buffers from its bridge instance.
 Node owns one worker and bounded command/event queues; the current event queue drops its oldest

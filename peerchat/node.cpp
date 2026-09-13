@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include "node.hpp"
+#include "direct_transport_adapter.hpp"
+#include "session_transport_manager.hpp"
 #include "tls.hpp"
 #include "protocol.hpp"
 #include "voice_media.hpp"
@@ -15,8 +17,10 @@
 #include <chrono>
 #include <deque>
 #include <future>
+#include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -48,6 +52,7 @@ struct Connection {
     Clock::time_point began=Clock::now(),lastProgress=Clock::now();
     std::set<std::string> inflight;
     std::set<std::string> groupInflight;
+    std::optional<session::DirectTransportAdapter> directTransport;
     ~Connection(){if(socket!=INVALID_SOCKET)closesocket(socket);}
 };
 struct Resolver {
@@ -75,6 +80,10 @@ struct Node::Impl {
     struct RetryState {Clock::time_point due{};std::uint32_t failures=0;std::wstring host,source,route;std::uint16_t port=0;bool suspended=false;};
     std::map<std::string,RetryState> reconnect;
     std::uint64_t nextAttemptId=1;
+    std::uint64_t nextSessionEpoch=1;
+    std::uint64_t nextRouteRevision=1;
+    session::SessionEpoch sessionEpoch{};
+    std::unique_ptr<session::SessionTransportManager> sessionTransports;
     enum class VoiceState { Idle,Outgoing,Ringing,Connecting,Connected,Ending };
     VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId,voiceOffer;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
     std::uint64_t networkGeneration=0,voiceNetworkGeneration=0,voiceConnectionAtStart=0,voiceRequestSentOn=0,voiceRequestReceivedOn=0,voiceOfferSentOn=0,voiceOfferReceivedOn=0,voiceAnswerSentOn=0,voiceAnswerReceivedOn=0,voiceLastSignalConnection=0,voiceCandidatesSent=0,voiceCandidatesReceived=0;
@@ -102,6 +111,34 @@ struct Node::Impl {
     }
     void notice(NodeEvent::Kind kind,const std::wstring& text,const std::string& peer={}){NodeEvent e;e.kind=kind;e.text=text;e.peerId=peer;emit(std::move(e));}
     static std::wstring endpoint(const std::wstring& host,std::uint16_t port){return host.empty()?L"":host+L":"+std::to_wstring(port);}
+    static std::string utf8(const std::wstring& value){
+        if(value.empty())return {};
+        int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+        if(length<=0)return {};
+        std::string result(static_cast<size_t>(length),'\0');
+        if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),result.data(),length,nullptr,nullptr)!=length)return {};
+        return result;
+    }
+    session::RouteObservation routeObservation(const Connection& connection,session::RouteRevision revision)const{
+        session::RouteObservation route;
+        route.revision=revision;
+        route.endpointUtf8=utf8(endpoint(connection.host,connection.port));
+        route.sourceUtf8=utf8(connection.source);
+        route.routeUtf8=utf8(connection.route);
+        route.incoming=connection.incoming;
+        return route;
+    }
+    void attachDirectTransport(Connection& connection)noexcept{
+        if(!sessionTransports||connection.directTransport)return;
+        try{
+            connection.directTransport.emplace(sessionEpoch,session::TransportInstanceId{connection.attemptId},routeObservation(connection,{nextRouteRevision++}),connection.expected);
+            sessionTransports->observeLegacyDecision(connection.directTransport->connecting());
+        }catch(...){connection.directTransport.reset();}
+    }
+    void project(Connection& connection,const session::TransportEvent& event)noexcept{
+        if(!sessionTransports||!connection.directTransport)return;
+        try{sessionTransports->observeLegacyDecision(event);}catch(...){}
+    }
     NodeEvent connectionEvent(NodeEvent::Kind kind,const std::wstring& text,const Connection& connection,const std::string& peer={}){NodeEvent event;event.kind=kind;event.text=text;event.detail=connection.incoming?L"inbound":L"outbound";event.peerId=peer.empty()?connection.expected:peer;event.expectedPeerId=connection.expected;event.candidate=endpoint(connection.host,connection.port);event.candidateSource=connection.source;event.route=connection.route;event.attemptId=connection.attemptId;return event;}
 #ifdef PEERCHAT_TEST_SHORT_RECONNECT_BACKOFF
     static constexpr std::uint64_t ReconnectBaseMilliseconds=80,ReconnectCapMilliseconds=800;
@@ -158,7 +195,7 @@ struct Node::Impl {
         IN_ADDR numeric{};
         if(InetPtonW(AF_INET,host.c_str(),&numeric)==1){
             sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(port);address.sin_addr=numeric;
-            auto connection=std::make_unique<Connection>();connection->host=host;connection->port=port;connection->expected=expected;connection->source=source;connection->route=route;connection->attemptId=attemptId;connection->socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+            auto connection=std::make_unique<Connection>();connection->host=host;connection->port=port;connection->expected=expected;connection->source=source;connection->route=route;connection->attemptId=attemptId;attachDirectTransport(*connection);connection->socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
             if(connection->socket==INVALID_SOCKET){emit(connectionEvent(NodeEvent::Kind::Error,L"Could not create a connection socket.",*connection));scheduleReconnect(expected,host,port,source,route);return;}
             nonblocking(connection->socket);int result=::connect(connection->socket,reinterpret_cast<sockaddr*>(&address),sizeof(address));int error=result==0?0:WSAGetLastError();
             if(result==0||error==WSAEWOULDBLOCK||error==WSAEINPROGRESS){connection->connecting=result!=0;connections.push_back(std::move(connection));}
@@ -174,7 +211,7 @@ struct Node::Impl {
             auto& r=**it;if(r.pending&&WaitForSingleObject(r.overlap.hEvent,0)!=WAIT_OBJECT_0){++it;continue;}
             int result=r.pending?GetAddrInfoExOverlappedResult(&r.overlap):0;r.pending=false;
             if(result==0&&r.result){
-                auto c=std::make_unique<Connection>();c->host=r.host;c->port=r.port;c->expected=r.expected;c->source=r.source;c->route=r.route;c->attemptId=r.attemptId;c->socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+                auto c=std::make_unique<Connection>();c->host=r.host;c->port=r.port;c->expected=r.expected;c->source=r.source;c->route=r.route;c->attemptId=r.attemptId;attachDirectTransport(*c);c->socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
                 if(c->socket!=INVALID_SOCKET){nonblocking(c->socket);int n=::connect(c->socket,r.result->ai_addr,static_cast<int>(r.result->ai_addrlen));
                     if(n==0||WSAGetLastError()==WSAEWOULDBLOCK||WSAGetLastError()==WSAEINPROGRESS){c->connecting=n!=0;connections.push_back(std::move(c));}
                     else {int error=WSAGetLastError();tcpFailure(*c,error);closesocket(c->socket);c->socket=INVALID_SOCKET;scheduleReconnect(r.expected,r.host,r.port,r.source,r.route);}
@@ -184,8 +221,8 @@ struct Node::Impl {
         }
     }
     void collect(Connection& c){auto bytes=c.tls->takeOutput();if(c.output.size()-c.sent+bytes.size()>MaxQueue)throw std::runtime_error("Peer is not consuming outgoing data");if(c.sent){c.output.erase(c.output.begin(),c.output.begin()+c.sent);c.sent=0;}c.output.insert(c.output.end(),bytes.begin(),bytes.end());}
-    void packet(Connection& c,protocol::Writer& w){c.tls->send(w.frame());collect(c);}
-    void packet(Connection& c,const Blob& value){c.tls->send(protocol::frame(value));collect(c);}
+    void packet(Connection& c,protocol::Writer& writer){auto framed=writer.frame();c.tls->send(framed);if(c.directTransport)project(c,c.directTransport->observedSend(framed.size()));collect(c);}
+    void packet(Connection& c,const Blob& value){auto framed=protocol::frame(value);c.tls->send(framed);if(c.directTransport)project(c,c.directTransport->observedSend(framed.size()));collect(c);}
     void outbox(Connection& c){
         if(!c.online)return;
         for(const auto& m:store->pending(c.peerId,100)) {
@@ -213,10 +250,10 @@ struct Node::Impl {
             if(!existingStale&&c.incoming==(profile.peerId<c.peerId)){c.closeReason=L"duplicate connection loser (deterministic direction)";c.dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,c.closeReason,c,c.peerId));return;}
             other->closeReason=existingStale?L"duplicate connection superseded stale authenticated session":L"duplicate connection loser (deterministic direction)";other->dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,other->closeReason,*other,other->peerId));
         }
-        c.online=true;reconnect.erase(c.peerId);if(!c.expected.empty())reconnect.erase(c.expected);emit(connectionEvent(NodeEvent::Kind::Connected,c.name,c,c.peerId));outbox(c);groupOutbox(c);
+        c.online=true;if(c.directTransport)project(c,c.directTransport->activated());reconnect.erase(c.peerId);if(!c.expected.empty())reconnect.erase(c.expected);emit(connectionEvent(NodeEvent::Kind::Connected,c.name,c,c.peerId));outbox(c);groupOutbox(c);
     }
     void approve(Connection& c){
-        c.approved=true;protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
+        c.approved=true;if(c.directTransport)project(c,c.directTransport->locallyTrusted());protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
     }
     void process(Connection& c,const Blob& frame){
         protocol::Reader r(frame);
@@ -225,6 +262,7 @@ struct Node::Impl {
             protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.hello=true;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty())c.host=observedAddress(c.socket);
+            if(c.directTransport){c.directTransport->updateRoute(routeObservation(c,c.directTransport->routeRevision()));project(c,c.directTransport->identityPresented(c.peerId,capabilities));}
             // A changed identity is a security-relevant verification event, not a silent
             // transport rejection. The UI must show the expected and presented public IDs and
             // require an explicit decision. No private key, password, or message content is
@@ -300,7 +338,7 @@ struct Node::Impl {
         }
         auto plain=c.tls->takePlaintext();protocol::check(c.input.size()+plain.size()<=256*1024);c.input.insert(c.input.end(),plain.begin(),plain.end());
         while(c.input.size()>=4&&!c.dead){size_t length=(size_t(c.input[0])<<24)|(size_t(c.input[1])<<16)|(size_t(c.input[2])<<8)|c.input[3];protocol::check(length>=4&&length<=protocol::MaxPacket);if(c.input.size()<length+4)break;
-            Blob frame(c.input.begin()+4,c.input.begin()+4+length);c.input.erase(c.input.begin(),c.input.begin()+4+length);process(c,frame);}
+            Blob frame(c.input.begin()+4,c.input.begin()+4+length);c.input.erase(c.input.begin(),c.input.begin()+4+length);if(c.directTransport)project(c,c.directTransport->observedReceive(frame.size()));process(c,frame);}
     }
     void flush(Connection& c){if(c.sent>=c.output.size())return;int n=::send(c.socket,reinterpret_cast<const char*>(c.output.data()+c.sent),static_cast<int>(std::min<size_t>(16384,c.output.size()-c.sent)),0);if(n>0){c.sent+=n;c.lastProgress=Clock::now();if(c.sent==c.output.size()){c.output.clear();c.sent=0;}}else if(n==0){c.closeReason=L"socket send returned zero";c.dead=true;}else {int error=WSAGetLastError();if(error!=WSAEWOULDBLOCK){c.closeReason=L"socket send error "+std::to_wstring(error);c.dead=true;}}}
     GroupEvent localGroupEvent(GroupLedger& ledger,GroupEventKind kind){
@@ -412,6 +450,9 @@ struct Node::Impl {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
             store=std::make_unique<Storage>(directory);profile=store->profile();
+            sessionEpoch={nextSessionEpoch++};
+            auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
+            sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch);
             if(listeningPortOverride)profile.listenPort=listeningPortOverride;
             if(!displayNameOverride.empty())profile.name=displayNameOverride;
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
@@ -434,7 +475,7 @@ struct Node::Impl {
                 fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);FD_SET(listener,&reads);
                 for(auto& c:connections)if(!c->dead){if(!c->connecting)FD_SET(c->socket,&reads);if(c->connecting||c->sent<c->output.size())FD_SET(c->socket,&writes);FD_SET(c->socket,&errors);}
                 timeval timeout{0,20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
-                if(FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
+                if(FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";attachDirectTransport(*c);nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
                 for(auto& c:connections)if(!c->dead)try{
                     if(FD_ISSET(c->socket,&errors)){int error=0,length=sizeof(error);getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length);error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"socket error "+std::to_wstring(error);c->dead=true;}
                     if(c->connecting&&FD_ISSET(c->socket,&writes)){int error=0,length=sizeof(error);if(getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length)||error){error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"connect completion error "+std::to_wstring(error);c->dead=true;}c->connecting=false;}
@@ -444,10 +485,10 @@ struct Node::Impl {
                     auto age=Clock::now()-c->began;if(!c->online&&age>std::chrono::seconds(c->hello?120:10)){emit(connectionEvent(NodeEvent::Kind::Error,L"TCP connection timeout: the peer did not respond in time.",*c,c->peerId.empty()?c->expected:c->peerId));c->closeReason=L"local authentication timeout";c->dead=true;}
                     if(c->output.size()>c->sent&&Clock::now()-c->lastProgress>std::chrono::seconds(15)){c->closeReason=L"local send timeout";c->dead=true;}
                 }catch(const std::exception& error){c->dead=true;std::string detail=error.what();std::wstring safeDetail(detail.begin(),detail.end());std::wstring stage=!c->hello?L"TLS handshake failure: ":L"application protocol/identity failure: ";c->closeReason=stage+safeDetail;emit(connectionEvent(NodeEvent::Kind::Error,c->closeReason,*c,c->peerId.empty()?c->expected:c->peerId));}
-                for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch;std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;auto disconnected=connectionEvent(NodeEvent::Kind::Disconnected,reason,connection,id);it=connections.erase(it);if(!id.empty()&&!exists(id)){if(voiceState!=VoiceState::Idle&&voicePeerId==id)clearVoice(L"Network connection lost");emit(std::move(disconnected));scheduleReconnect(id,host,port,source,route,mismatch);}}else ++it;
+                for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch;std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;if(connection.directTransport)project(connection,connection.directTransport->closed(utf8(reason),!connection.online));auto disconnected=connectionEvent(NodeEvent::Kind::Disconnected,reason,connection,id);it=connections.erase(it);if(!id.empty()&&!exists(id)){if(voiceState!=VoiceState::Idle&&voicePeerId==id)clearVoice(L"Network connection lost");emit(std::move(disconnected));scheduleReconnect(id,host,port,source,route,mismatch);}}else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");running=false;resolvers.clear();connections.clear();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();finishedVoiceCalls.clear();if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");running=false;resolvers.clear();connections.clear();sessionTransports.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};reconnect.clear();finishedVoiceCalls.clear();if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;

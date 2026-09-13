@@ -15,11 +15,11 @@ Acceptance does not imply a signed stable artifact or completed Release publicat
 
 ## CURRENT PHASE
 
-**Approved session/transport plan synchronization; production migration not started.**
+**Stage 2 session/transport types and direct-wrapper boundary implemented; Stage 3 not started.**
 
 The accepted source is frozen on `release/v4.0.0`; incremental networking work belongs on
 `refactor/session-transport`. Formal Release versioning, signing backup and publication remain
-separate work. The next implementation stage requires user authorization.
+separate work. Stage 3 requires separate user authorization.
 
 Milestone 1 — Account + Discovery Foundation is complete and has passed real packaged-client testing.
 

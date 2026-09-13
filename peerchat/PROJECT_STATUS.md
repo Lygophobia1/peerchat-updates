@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 1 architecture audit and approved documentation/plan synchronization.
-**Next action:** await authorization for Stage 2 types/direct-wrapper implementation.
+**Current stage:** Stage 2 types/direct-wrapper implementation complete and checkpointed after targeted gates.
+**Next action:** await authorization for Stage 3 single continuity-owner migration; do not begin it implicitly.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -23,6 +23,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
 - `refactor/session-transport`: current branch; both branches were created from that exact commit.
   This documentation synchronization is subsequent work, not a change to the frozen Release branch.
 - No final `v4.0.0` tag; reserve it for formal signed Release publication.
+- Architecture-plan checkpoint on `refactor/session-transport`:
+  `a76a4aded84108dfadc5a2817ce5a9dbb1bec5d8` (`Document session transport migration plan`).
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -96,6 +98,23 @@ These are existing implementation constraints, not newly fixed bugs.
 - Existing reconnect tests cover distinct stale endpoint and exact-current-endpoint retention;
   they do not establish full lifetime safety for reused endpoints/handles or delayed all-route commands.
 
+## Stage 2 implemented boundary
+
+- `session_transport_types.hpp` defines portable profile/device session identity, runtime epoch,
+  transport instance, independent route revision, channel requirements, state/result vocabulary,
+  and immutable payload-free transport events.
+- `direct_transport_adapter.hpp` observes one existing direct connection and exposes identity,
+  capability, route, send-acceptance, receive-size and close-completion semantics. It cannot open,
+  send on, retry, arbitrate, cancel, promote, drain, or close a socket.
+- `peer_session.hpp` holds the initial verified-device logical session and per-channel observed
+  bindings. `session_transport_manager.hpp` is profile-scoped and rejects stale-epoch observations.
+- Node attaches the adapter to inbound/outbound legacy connections and reports lifecycle decisions
+  after the existing implementation makes them. Failures in this optional projection cannot change
+  legacy networking behavior.
+- The current Node/WPF code remains authoritative for retries, candidate selection, invalidation,
+  duplicate winners, trust, ACK/outbox, group delivery and voice. Stage 2 adds no scheduler, thread,
+  socket, protocol field/type/capability, bridge export, discovery operation, or WPF orchestration.
+
 ## Approved direction and stage gates (not implemented)
 
 The approved direction is in PEERCHAT_DEVELOPMENT_GOAL.md. The Desktop
@@ -139,6 +158,25 @@ to implement protocol/media behavior in Stage 2.
   unawaited WPF calls. They were not changed.
 - No full regression or physical acceptance was rerun by the audit. This document-only follow-up
   synchronizes the plan/docs and checks scope/consistency; it makes no new runtime-validation claim.
+
+### Stage 2 targeted verification
+
+- Native/core and managed desktop bridge build: passed with the pre-existing VersionInfo, unused-local
+  and unawaited-call warnings unchanged.
+- Extended reconnect/direct-wrapper test: passed under the normal Windows user context. It covers
+  untrusted identity exclusion, legacy activation projection, distinct reliable/realtime requirements,
+  stale epoch rejection, old-close/new-binding isolation, payload acceptance vocabulary, the unchanged
+  fixed Accepted frame, reconnect backoff, route invalidation, manual/presence retry, diagnostics and
+  wrong-identity suspension.
+- Six-node direct test: passed with 15 mutual-TLS links, 30 messages/ACKs, disconnect, restart/reconnect,
+  durable outbox, contacts and encrypted histories.
+- Managed profile/adapter tests: passed, including profile isolation/migration/reset/restore, direct
+  mutual TLS and trust, changed-device verification, bidirectional text/ACK, groups and repeated voice.
+- A sandboxed first reconnect run reproduced the known DPAPI test-host context limitation; the same
+  executable passed under the intended interactive Windows user token. Encryption was not bypassed.
+- No UI, updater, packaging, full regression, or new physical test was run because Stage 2 did not
+  change those boundaries. `protocol.hpp`, the C ABI/managed bridge contract, and discovery wire/API
+  remain unchanged.
 
 ### Historical regression and physical evidence
 
