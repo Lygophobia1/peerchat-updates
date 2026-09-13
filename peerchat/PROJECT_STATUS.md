@@ -31,6 +31,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `38e6a4ea4f5778bfe31def98e95e5980703b8e79` (`Centralize Stage 3 session continuity ownership`).
 - Stage 3 documentation checkpoint and Stage 4 starting point on `refactor/session-transport`:
   `6b5934dc196b56431a9480167f5c4fc1eea1e2b3` (`Record Stage 3 implementation checkpoint`).
+- Stage 4 implementation checkpoint on `refactor/session-transport`:
+  `372663a` (`Extract Stage 4 durable delivery ownership`).
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
