@@ -27,8 +27,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `a76a4aded84108dfadc5a2817ce5a9dbb1bec5d8` (`Document session transport migration plan`).
 - Stage 2 implementation checkpoint on `refactor/session-transport`:
   `f7259595da9e4d19847f2f71c038b6bfc6980800` (`Introduce Stage 2 direct transport wrapper`).
-- Stage 3 implementation checkpoint on `refactor/session-transport`: recorded by the implementation
-  commit immediately preceding the status-record commit.
+- Stage 3 implementation checkpoint on `refactor/session-transport`:
+  `38e6a4ea4f5778bfe31def98e95e5980703b8e79` (`Centralize Stage 3 session continuity ownership`).
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
