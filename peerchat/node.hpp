@@ -1,11 +1,12 @@
 #pragma once
 #include "storage.hpp"
 #include "group.hpp"
+#include "media_telemetry.hpp"
 #include <memory>
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -29,6 +30,8 @@ public:
     void start(const std::wstring& dataDirectory,std::uint16_t listeningPortOverride=0,const std::wstring& displayNameOverride={});
     void stop();
     void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={},const std::wstring& candidateSource=L"Direct",const std::wstring& route=L"manual",bool forceImmediate=false);
+    void invalidateRoute(const std::string& expectedIdentity,const std::wstring& staleHost={},std::uint16_t stalePort=0,bool allRoutes=false);
+    void setNetworkContext(std::uint64_t generation,const std::wstring& fingerprint);
     void saveContact(const Contact& contact);
     void removeContact(const std::string& peerId);
     void approve(const std::string& peerId,bool accepted);
@@ -45,6 +48,7 @@ public:
     bool setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin);
     bool sendGroup(const std::string& groupId,const std::wstring& text);
     void loadGroups();
+    void loadGroupHistory(const std::string& groupId,std::int64_t before=INT64_MAX);
     std::string startVoiceCall(const std::string& peerId);
     bool answerVoiceCall(const std::string& callId);
     bool declineVoiceCall(const std::string& callId);
@@ -53,6 +57,7 @@ public:
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
     std::wstring voiceDiagnostics();
+    MediaTelemetry voiceTelemetry() const;
     std::vector<NodeEvent> poll();
 private:
     struct Impl;std::unique_ptr<Impl> impl_;

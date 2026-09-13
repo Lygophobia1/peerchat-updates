@@ -4,6 +4,16 @@ $projectRoot=Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
     $client=Resolve-Path $ClientDirectory
+    $requiredRuntime=@('PeerChat.Desktop.exe','PeerChat.Desktop.exe.config','PeerChat.Core.dll','PeerChat.Updater.exe','PeerChat.Updater.Core.dll','PeerChat.Updater.exe.config','update-feeds.json')
+    $missing=@($requiredRuntime | Where-Object { -not (Test-Path (Join-Path $client $_)) })
+    if($missing.Count -ne 0){throw 'Packaged Client is missing required runtime file(s): '+($missing -join ', ')}
+    $desktop=Join-Path $client 'PeerChat.Desktop.exe'
+    try {
+        # Load metadata from bytes so the verifier neither depends on reflection-only support in
+        # the current PowerShell host nor holds a file handle in the staging directory.
+        $references=[Reflection.Assembly]::Load([IO.File]::ReadAllBytes($desktop)).GetReferencedAssemblies() | ForEach-Object {$_.Name}
+    } catch { throw 'Could not inspect managed PeerChat.Desktop.exe assembly references: '+$_.Exception.Message }
+    if($references -contains 'PeerChat.Updater.Core' -and -not (Test-Path (Join-Path $client 'PeerChat.Updater.Core.dll'))){throw 'PeerChat.Desktop.exe references PeerChat.Updater.Core but the packaged assembly is missing.'}
     $core=Join-Path $client 'PeerChat.Core.dll'
     if(-not (Test-Path $core)){throw "Packaged native core was not found: $core"}
     $objdump=(Get-Command objdump -ErrorAction Stop).Source
@@ -19,5 +29,5 @@ try {
     $savedPath=$env:PATH
     try{$env:PATH=(Join-Path $env:WINDIR 'System32')+';'+$env:WINDIR;& $smoke $core;if($LASTEXITCODE -ne 0){throw 'Package native-load smoke failed.'}}
     finally{$env:PATH=$savedPath;Remove-Item -LiteralPath $smoke -Force -ErrorAction SilentlyContinue}
-    Write-Host ('PASS: PeerChat.Core.dll imports Windows components only: '+($imports -join ', '))
+    Write-Host ('PASS: Client runtime includes managed updater dependencies; PeerChat.Core.dll imports Windows components only: '+($imports -join ', '))
 } finally {Pop-Location}

@@ -1,0 +1,18 @@
+{
+  "SchemaVersion": 1,
+  "Product": "PeerChat",
+  "Channel": "release",
+  "Version": "4.0.0",
+  "MinimumCurrentVersion": "0.3.0-beta",
+  "PackageUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/download/v4.0.0/PeerChat-4.0.0.zip",
+  "PackageSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "PackageSize": 12345678,
+  "EntryExecutable": "PeerChat.Desktop.exe",
+  "ReleaseNotesUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.0",
+  "PublishedUtc": "2026-09-11T12:00:00Z",
+  "Signature": {
+    "Algorithm": "rsa-sha256-pkcs1-v1_5",
+    "KeyId": "peerchat-release-2026-01",
+    "Value": "base64-signature-placeholder"
+  }
+}

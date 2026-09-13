@@ -53,7 +53,7 @@ int main() {
             Sqlite api;sqlite3* raw{};auto path=(root/L"0"/L"peerchat.sqlite").wstring();
             require(api.open16(path.c_str(),&raw)==0,"Tamper test open failed");
             int rc=api.exec(raw,"UPDATE messages SET b=zeroblob(length(b)) WHERE rowid=1",nullptr,nullptr,nullptr);api.close(raw);require(rc==0,"Tamper test update failed");
-            Storage db((root/L"0").wstring());bool rejected=false;try{db.history(b.peerId);}catch(const std::runtime_error&){rejected=true;}require(rejected,"Altered ciphertext was accepted");
+            Storage db((root/L"0").wstring());bool rejected=false,diagnosed=false;try{db.history(b.peerId);}catch(const std::runtime_error& error){rejected=true;diagnosed=std::string(error.what()).find("DPAPI Win32 error")!=std::string::npos;}require(rejected,"Altered ciphertext was accepted");require(diagnosed,"DPAPI failure did not retain its Win32 error diagnostic");
         }
         std::cout<<"PASS: six persistent identities, profiles, contacts/endpoints, encrypted history, restart, pagination, IDs/dedup, acknowledgements, independent copies, disk scan, tamper rejection.\n";
         // Test-created directory is retained for inspection; contains encrypted synthetic data only.

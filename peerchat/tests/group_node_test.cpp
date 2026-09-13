@@ -1,4 +1,5 @@
 #include "node.hpp"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -7,13 +8,14 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 void require(bool condition,const char* explanation){if(!condition)throw std::runtime_error(explanation);}
 
 int main(){
     using namespace peerchat;using Clock=std::chrono::steady_clock;constexpr size_t Count=4;
     std::array<Node,Count> peers;std::array<std::string,Count> identities;std::array<bool,Count> ready{};
-    std::array<std::set<std::string>,Count> connected,messages;std::array<std::map<std::string,GroupState>,Count> states;std::array<unsigned int,Count> errors{};
+    std::array<std::set<std::string>,Count> connected,messages;std::array<std::map<std::string,GroupState>,Count> states;std::array<std::vector<std::vector<GroupEvent>>,Count> historyPages;std::array<unsigned int,Count> errors{};
     auto token=Storage::newMessageId();auto directory=std::filesystem::current_path()/L"build"/L"tests"/L"group-network"/std::wstring(token.begin(),token.end());
     unsigned short basePort=static_cast<unsigned short>(30000+std::stoul(token.substr(0,4),nullptr,16)%12000);
     auto collect=[&]{for(size_t index=0;index<Count;index++)for(auto& event:peers[index].poll())switch(event.kind){
@@ -23,6 +25,7 @@ int main(){
         case NodeEvent::Kind::Disconnected:connected[index].erase(event.peerId);break;
         case NodeEvent::Kind::Groups:states[index].clear();for(const auto& group:event.groups)states[index][group.groupId]=group;break;
         case NodeEvent::Kind::GroupMessage:for(const auto& message:event.groupEvents)require(messages[index].insert(message.eventId).second,"Duplicate group message event");break;
+        case NodeEvent::Kind::GroupHistory:historyPages[index].push_back(event.groupEvents);break;
         case NodeEvent::Kind::Error:errors[index]++;std::wcerr<<L"Group peer "<<index<<L": "<<event.text<<L'\n';break;
         default:break;
     }};
@@ -57,8 +60,22 @@ int main(){
         peers[3].start((directory/L"3").wstring());
         wait([&]{return ready[3]&&messages[3].size()==2&&states[3].count(groupId)&&states[3][groupId].members.size()==Count;},"Restarted member did not recover persisted group and queued message");
 
+        // History delivery is a presentation retrieval boundary. The replicated signed ledger
+        // remains intact, but opening a group must not materialize its whole history into WPF.
+        for(int index=0;index<100;index++)require(peers[1].sendGroup(groupId,L"Paged group history "+std::to_wstring(index)),"Paged group message was not queued");
+        wait([&]{for(const auto& received:messages)if(received.size()!=102)return false;return true;},"Paged group messages did not converge");
+        historyPages[0].clear();peers[0].loadGroups();std::this_thread::sleep_for(std::chrono::milliseconds(80));collect();require(historyPages[0].empty(),"Group metadata refresh eagerly materialized history");
+        peers[0].loadGroupHistory(groupId);
+        wait([&]{return !historyPages[0].empty();},"Newest group history page was not delivered");
+        const auto& newest=historyPages[0].back();require(newest.size()==100,"Newest group history page was not bounded to 100 messages");
+        std::set<std::string> pageIds;std::uint64_t oldest=newest.front().logicalOrder;for(const auto& event:newest){require(pageIds.insert(event.eventId).second,"Newest group history page contained a duplicate ID");oldest=std::min(oldest,event.logicalOrder);}
+        peers[0].loadGroupHistory(groupId,static_cast<std::int64_t>(oldest));
+        wait([&]{return historyPages[0].size()>=2;},"Older group history page was not delivered");
+        const auto& older=historyPages[0].back();require(!older.empty()&&older.size()<100,"Older group history page did not stop at the history boundary");
+        for(const auto& event:older){require(event.logicalOrder<oldest,"Older group history page did not use its before cursor");require(pageIds.insert(event.eventId).second,"Group history pages overlapped by message ID");}
+
         for(auto& peer:peers)peer.stop();
         for(size_t index=0;index<Count;index++){Storage store((directory/std::to_wstring(index)).wstring());require(store.groupAccount().accountId==1000+index,"Group account binding did not persist");require(!store.groupEvents(groupId).empty(),"Encrypted group ledger did not persist");}
-        std::cout<<"PASS: four-member client-owned group, signed invites/accepts, roles, authorization, direct peer fanout, offline delivery, convergence, and restart persistence.\n";return 0;
+        std::cout<<"PASS: four-member client-owned group, signed invites/accepts, roles, authorization, direct peer fanout, restart persistence, and bounded paged history retrieval.\n";return 0;
     }catch(const std::exception& error){for(auto& peer:peers)peer.stop();std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

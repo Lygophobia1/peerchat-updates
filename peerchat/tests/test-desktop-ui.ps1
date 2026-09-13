@@ -4,7 +4,7 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
  New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
- Copy-Item "$ApplicationDirectory\PeerChat.Desktop.exe","$ApplicationDirectory\PeerChat.Core.dll","$ApplicationDirectory\PeerChat.Desktop.exe.config","$ApplicationDirectory\peerchat-client.ico" $OutputDirectory -Force
+ Copy-Item "$ApplicationDirectory\PeerChat.Desktop.exe","$ApplicationDirectory\PeerChat.Core.dll","$ApplicationDirectory\PeerChat.Desktop.exe.config","$ApplicationDirectory\peerchat-client.ico","$ApplicationDirectory\PeerChat.Updater.Core.dll","$ApplicationDirectory\PeerChat.Updater.exe","$ApplicationDirectory\PeerChat.Updater.exe.config","$ApplicationDirectory\update-feeds.json" $OutputDirectory -Force
  $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
  $references=@('System.dll','System.Core.dll','System.Xaml.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }
  & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$OutputDirectory\UiSmoke.exe" "/reference:$OutputDirectory\PeerChat.Desktop.exe" $references .\desktop\UiSmoke.cs

@@ -14,6 +14,25 @@
 
 namespace peerchat {
 namespace {
+std::atomic<std::uint64_t> NextMediaSessionId{1};
+const char* pcStateName(rtcState state) {
+    switch(state){case RTC_NEW:return "new";case RTC_CONNECTING:return "connecting";case RTC_CONNECTED:return "connected";case RTC_DISCONNECTED:return "disconnected";case RTC_FAILED:return "failed";case RTC_CLOSED:return "closed";}return "unknown";
+}
+const char* iceStateName(rtcIceState state) {
+    switch(state){case RTC_ICE_NEW:return "new";case RTC_ICE_CHECKING:return "checking";case RTC_ICE_CONNECTED:return "connected";case RTC_ICE_COMPLETED:return "completed";case RTC_ICE_FAILED:return "failed";case RTC_ICE_DISCONNECTED:return "disconnected";case RTC_ICE_CLOSED:return "closed";}return "unknown";
+}
+const char* gatheringStateName(rtcGatheringState state) {
+    switch(state){case RTC_GATHERING_NEW:return "new";case RTC_GATHERING_INPROGRESS:return "in-progress";case RTC_GATHERING_COMPLETE:return "complete";}return "unknown";
+}
+const char* signalingStateName(rtcSignalingState state) {
+    switch(state){case RTC_SIGNALING_STABLE:return "stable";case RTC_SIGNALING_HAVE_LOCAL_OFFER:return "have-local-offer";case RTC_SIGNALING_HAVE_REMOTE_OFFER:return "have-remote-offer";case RTC_SIGNALING_HAVE_LOCAL_PRANSWER:return "have-local-pranswer";case RTC_SIGNALING_HAVE_REMOTE_PRANSWER:return "have-remote-pranswer";}return "unknown";
+}
+std::string candidateSummary(const std::string& candidate) {
+    std::istringstream input(candidate);std::vector<std::string> parts;std::string part;while(input>>part)parts.push_back(part);
+    std::string type="unknown",addressClass="unknown";for(size_t i=0;i+1<parts.size();++i)if(parts[i]=="typ")type=parts[i+1];
+    if(parts.size()>4){const auto& address=parts[4];if(address.find(':')!=std::string::npos)addressClass="ipv6";else if(address.rfind("10.",0)==0||address.rfind("192.168.",0)==0||address.rfind("172.",0)==0)addressClass="private-ipv4";else addressClass="public-ipv4";}
+    return "type="+type+" address_class="+addressClass;
+}
 bool rtpPayload(const char* packet, int size, const unsigned char*& payload, int& payloadSize) {
     if (!packet || size < 12) return false;
     const auto* bytes = reinterpret_cast<const unsigned char*>(packet);
@@ -47,8 +66,10 @@ struct VoiceMedia::Impl {
     int pc = -1, sendTrack = -1, receiveTrack = -1;
     std::atomic<bool> stopping{false}, deafened{false}, trackOpen{false};
     std::atomic<std::uint64_t> capturedFrames{0}, encodedFrames{0}, submittedFrames{0};
-    std::atomic<std::uint64_t> receivedPackets{0}, decodedFrames{0}, playbackFrames{0};
-    std::string mediaState="created", latestAudioError="none", latestMediaError="none";
+    std::atomic<std::uint64_t> peerMediaPackets{0},peerMediaBytes{0},trackCallbackPackets{0},receivedPackets{0},decodedFrames{0},playbackFrames{0};
+    std::uint64_t mediaSessionId=0,networkGeneration=0,localCandidatesGenerated=0,remoteCandidatesReceived=0;
+    std::string networkFingerprint,mediaState="created",iceState="new",gatheringState="new",signalingState="stable",latestAudioError="none",latestMediaError="none";
+    std::deque<std::string> localCandidateSummaries,remoteCandidateSummaries;
     int inputDevice=-1,outputDevice=-1;
 
     void push(EventKind kind, std::string value = {}, std::string detail = {}) {
@@ -61,20 +82,18 @@ struct VoiceMedia::Impl {
         if (ptr && sdp && type) static_cast<Impl*>(ptr)->push(EventKind::Description, sdp, type);
     }
     static void candidate(int, const char* cand, const char* mid, void* ptr) {
-        if (ptr && cand) static_cast<Impl*>(ptr)->push(EventKind::Candidate, cand, mid ? mid : "0");
+        if (ptr && cand) {auto& self=*static_cast<Impl*>(ptr);{std::lock_guard<std::mutex> lock(self.mutex);++self.localCandidatesGenerated;if(self.localCandidateSummaries.size()>=16)self.localCandidateSummaries.pop_front();self.localCandidateSummaries.push_back(candidateSummary(cand));}self.push(EventKind::Candidate, cand, mid ? mid : "0");}
     }
     static void opened(int, void* ptr) { if (ptr) static_cast<Impl*>(ptr)->trackOpen=true; }
     static void closed(int, void* ptr) { if (ptr) static_cast<Impl*>(ptr)->trackOpen=false; }
+
     static void state(int, rtcState state, void* ptr) {
         if (!ptr) return;
         auto& self = *static_cast<Impl*>(ptr);
+        {std::lock_guard<std::mutex> lock(self.mutex);self.mediaState=pcStateName(state);}
         if (state == RTC_CONNECTED) {
             { std::lock_guard<std::mutex> lock(self.mutex); self.mediaState="connected"; }
-            std::wstring error;
-            if (!self.audio->start(error) || !self.audio->setMuted(false, error)) {
-                { std::lock_guard<std::mutex> lock(self.mutex); self.latestAudioError=std::string(error.begin(),error.end()); }
-                self.push(EventKind::AudioError, std::string(error.begin(), error.end()));
-            }
+            // Device lifecycle is processed by the owning node, never a library callback.
             self.push(EventKind::Connected);
         } else if (state == RTC_DISCONNECTED || state == RTC_CLOSED) {
             { std::lock_guard<std::mutex> lock(self.mutex); self.mediaState="disconnected"; }
@@ -84,6 +103,9 @@ struct VoiceMedia::Impl {
             self.push(EventKind::Failed, "ICE/DTLS-SRTP media connection failed");
         }
     }
+    static void ice(int, rtcIceState state, void* ptr){if(ptr){auto& self=*static_cast<Impl*>(ptr);std::lock_guard<std::mutex> lock(self.mutex);self.iceState=iceStateName(state);}}
+    static void gathering(int, rtcGatheringState state, void* ptr){if(ptr){auto& self=*static_cast<Impl*>(ptr);std::lock_guard<std::mutex> lock(self.mutex);self.gatheringState=gatheringStateName(state);}}
+    static void signaling(int, rtcSignalingState state, void* ptr){if(ptr){auto& self=*static_cast<Impl*>(ptr);std::lock_guard<std::mutex> lock(self.mutex);self.signalingState=signalingStateName(state);}}
     static void track(int, int tr, void* ptr) {
         if (!ptr || tr < 0) return;
         auto& self = *static_cast<Impl*>(ptr);
@@ -98,6 +120,7 @@ struct VoiceMedia::Impl {
     static void message(int, const char* packet, int size, void* ptr) {
         if (!ptr || size <= 0) return;
         auto& self = *static_cast<Impl*>(ptr);
+        ++self.trackCallbackPackets;
         if (self.deafened || !self.decoder) return;
         const unsigned char* payload = nullptr; int payloadSize = 0;
         if (!rtpPayload(packet, size, payload, payloadSize)) return;
@@ -135,6 +158,10 @@ struct VoiceMedia::Impl {
     }
     bool create(std::wstring& error) {
         stopping = false;
+        deafened=false;trackOpen=false;
+        capturedFrames=0;encodedFrames=0;submittedFrames=0;
+        peerMediaPackets=0;peerMediaBytes=0;trackCallbackPackets=0;receivedPackets=0;decodedFrames=0;playbackFrames=0;
+        {std::lock_guard<std::mutex> lock(mutex);mediaSessionId=NextMediaSessionId++;localCandidatesGenerated=remoteCandidatesReceived=0;localCandidateSummaries.clear();remoteCandidateSummaries.clear();mediaState="created";iceState="new";gatheringState="new";signalingState="stable";latestAudioError=latestMediaError="none";}
         int opusError = OPUS_OK;
         encoder = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &opusError);
         decoder = opus_decoder_create(16000, 1, &opusError);
@@ -146,6 +173,9 @@ struct VoiceMedia::Impl {
         audio->setDevices(inputDevice,outputDevice);
         audio->setCaptureHandler([this](const std::vector<unsigned char>& frame){ captured(frame); });
         rtcConfiguration config{};
+        const char* iceServers[]={"stun:stun.l.google.com:19302"};
+        config.iceServers=iceServers;
+        config.iceServersCount=1;
         config.certificateType = RTC_CERTIFICATE_ECDSA;
         config.iceTransportPolicy = RTC_TRANSPORT_POLICY_ALL;
         config.disableAutoNegotiation = true;
@@ -156,6 +186,9 @@ struct VoiceMedia::Impl {
         rtcSetLocalDescriptionCallback(pc, &Impl::description);
         rtcSetLocalCandidateCallback(pc, &Impl::candidate);
         rtcSetStateChangeCallback(pc, &Impl::state);
+        rtcSetIceStateChangeCallback(pc, &Impl::ice);
+        rtcSetGatheringStateChangeCallback(pc, &Impl::gathering);
+        rtcSetSignalingStateChangeCallback(pc, &Impl::signaling);
         rtcSetTrackCallback(pc, &Impl::track);
         std::random_device random;
         rtcTrackInit track{}; track.direction=RTC_DIRECTION_SENDRECV;track.codec=RTC_CODEC_OPUS;track.payloadType=111;
@@ -175,7 +208,13 @@ struct VoiceMedia::Impl {
     }
     void close() {
         stopping = true;
+        // C API tracks have an independent registry and must be deleted explicitly.
+        // Detach callbacks before releasing audio/codecs or their owning instance.
+        if(pc>=0){rtcSetStateChangeCallback(pc,nullptr);rtcSetIceStateChangeCallback(pc,nullptr);rtcSetGatheringStateChangeCallback(pc,nullptr);rtcSetSignalingStateChangeCallback(pc,nullptr);rtcSetTrackCallback(pc,nullptr);rtcSetLocalDescriptionCallback(pc,nullptr);rtcSetLocalCandidateCallback(pc,nullptr);rtcSetMediaInterceptorCallback(pc,nullptr);rtcSetUserPointer(pc,nullptr);}
+        for(int track : {sendTrack,receiveTrack}) if(track>=0){rtcSetMessageCallback(track,nullptr);rtcSetOpenCallback(track,nullptr);rtcSetClosedCallback(track,nullptr);rtcSetUserPointer(track,nullptr);}
         if (audio) audio->stop();
+        if(receiveTrack>=0&&receiveTrack!=sendTrack)rtcDeleteTrack(receiveTrack);
+        if(sendTrack>=0)rtcDeleteTrack(sendTrack);
         if (pc >= 0) { rtcSetUserPointer(pc, nullptr); rtcClosePeerConnection(pc); rtcDeletePeerConnection(pc); pc=-1; }
         trackOpen=false;sendTrack=receiveTrack=-1;
         if (encoder) opus_encoder_destroy(encoder);
@@ -187,19 +226,37 @@ struct VoiceMedia::Impl {
     }
 };
 
-VoiceMedia::VoiceMedia(int inputDevice,int outputDevice):impl_(std::make_unique<Impl>()) { impl_->inputDevice=inputDevice;impl_->outputDevice=outputDevice;rtcInitLogger(RTC_LOG_NONE, nullptr); }
+VoiceMedia::VoiceMedia(int inputDevice,int outputDevice,std::uint64_t networkGeneration,std::string networkFingerprint):impl_(std::make_unique<Impl>()) { impl_->inputDevice=inputDevice;impl_->outputDevice=outputDevice;impl_->networkGeneration=networkGeneration;impl_->networkFingerprint=std::move(networkFingerprint);rtcInitLogger(RTC_LOG_NONE, nullptr); }
 VoiceMedia::~VoiceMedia(){ stop(); }
 bool VoiceMedia::startOffer(std::wstring& error){stop();if(!impl_->create(error))return false;return rtcSetLocalDescription(impl_->pc,"offer")>=0;}
 bool VoiceMedia::startAnswer(const std::string& offer,std::wstring& error){stop();if(!impl_->create(error))return false;if(rtcSetRemoteDescription(impl_->pc,offer.c_str(),"offer")<0||rtcSetLocalDescription(impl_->pc,"answer")<0){error=L"The remote voice offer was invalid.";return false;}return true;}
 bool VoiceMedia::setAnswer(const std::string& answer,std::wstring& error){if(impl_->pc<0||rtcSetRemoteDescription(impl_->pc,answer.c_str(),"answer")<0){error=L"The remote voice answer was invalid.";return false;}return true;}
-bool VoiceMedia::addCandidate(const std::string& candidate,const std::string& mid,std::wstring& error){if(impl_->pc<0||rtcAddRemoteCandidate(impl_->pc,candidate.c_str(),mid.c_str())<0){error=L"The remote ICE candidate was invalid.";return false;}return true;}
+bool VoiceMedia::addCandidate(const std::string& candidate,const std::string& mid,std::wstring& error){if(impl_->pc<0||rtcAddRemoteCandidate(impl_->pc,candidate.c_str(),mid.c_str())<0){error=L"The remote ICE candidate was invalid.";return false;}{std::lock_guard<std::mutex> lock(impl_->mutex);++impl_->remoteCandidatesReceived;if(impl_->remoteCandidateSummaries.size()>=16)impl_->remoteCandidateSummaries.pop_front();impl_->remoteCandidateSummaries.push_back(candidateSummary(candidate));}return true;}
 bool VoiceMedia::setMuted(bool muted,std::wstring& error){return impl_->audio&&impl_->audio->setMuted(muted,error);}
 void VoiceMedia::setDeafened(bool value){impl_->deafened=value;}
-std::wstring VoiceMedia::diagnostics(){std::lock_guard<std::mutex> lock(impl_->mutex);std::wostringstream out;out<<L"media_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_dtls_srtp_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\ntrack_open="<<(impl_->trackOpen?L"true":L"false")<<L"\ncodec=Opus 16 kHz mono, 20 ms frames, 48 kHz RTP clock\ntransport=WebRTC ICE / DTLS-SRTP\ncapture_frames="<<impl_->capturedFrames.load()<<L"\nencoded_frames="<<impl_->encodedFrames.load()<<L"\nopus_submitted="<<impl_->submittedFrames.load()<<L"\nsend_api_accepted="<<impl_->submittedFrames.load()<<L"\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets="<<impl_->receivedPackets.load()<<L"\npayload_delivered="<<impl_->receivedPackets.load()<<L"\nreceived_packets="<<impl_->receivedPackets.load()<<L"\ndecoded_frames="<<impl_->decodedFrames.load()<<L"\nplayback_frames="<<impl_->playbackFrames.load()<<L"\nlatest_audio_error="<<std::wstring(impl_->latestAudioError.begin(),impl_->latestAudioError.end())<<L"\nlatest_media_error="<<std::wstring(impl_->latestMediaError.begin(),impl_->latestMediaError.end());return out.str();}
+MediaTelemetry VoiceMedia::telemetry(){
+    auto result=impl_->audio?impl_->audio->telemetry():MediaTelemetry{};
+    if(impl_->deafened)result.outputLevel=0.0f;
+    if(impl_->stopping)return {};
+    return result;
+}
+std::wstring VoiceMedia::diagnostics(){std::lock_guard<std::mutex> lock(impl_->mutex);char local[512]{},remote[512]{};std::wstring pair=L"unavailable";if(impl_->pc>=0&&rtcGetSelectedCandidatePair(impl_->pc,local,sizeof(local),remote,sizeof(remote))>=0)pair=std::wstring(local,local+std::strlen(local))+L" -> "+std::wstring(remote,remote+std::strlen(remote));auto summaries=[&](const std::deque<std::string>& values){std::wstring result;if(values.empty())return std::wstring(L"none");for(const auto& value:values){if(!result.empty())result+=L" | ";result+=std::wstring(value.begin(),value.end());}return result;};std::wostringstream out;out<<L"media_session_id="<<impl_->mediaSessionId<<L"\nfresh_peer_connection=true\nnetwork_generation_at_media_creation="<<impl_->networkGeneration<<L"\nnetwork_fingerprint_at_media_creation="<<std::wstring(impl_->networkFingerprint.begin(),impl_->networkFingerprint.end())<<L"\nmedia_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_dtls_srtp_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_connection_state="<<std::wstring(impl_->iceState.begin(),impl_->iceState.end())<<L"\nice_gathering_state="<<std::wstring(impl_->gatheringState.begin(),impl_->gatheringState.end())<<L"\nsignaling_state="<<std::wstring(impl_->signalingState.begin(),impl_->signalingState.end())<<L"\ntrack_open="<<(impl_->trackOpen?L"true":L"false")<<L"\nselected_ice_pair="<<pair<<L"\nlocal_ice_candidates_generated="<<impl_->localCandidatesGenerated<<L"\nlocal_ice_candidate_summaries="<<summaries(impl_->localCandidateSummaries)<<L"\nremote_ice_candidates_added="<<impl_->remoteCandidatesReceived<<L"\nremote_ice_candidate_summaries="<<summaries(impl_->remoteCandidateSummaries)<<L"\nice_servers=STUN configured; TURN not configured\ncodec=Opus 16 kHz mono, 20 ms frames, 48 kHz RTP clock\ntransport=WebRTC ICE / DTLS-SRTP\ncapture_frames="<<impl_->capturedFrames.load()<<L"\nencoded_frames="<<impl_->encodedFrames.load()<<L"\nopus_submitted="<<impl_->submittedFrames.load()<<L"\nsend_api_accepted="<<impl_->submittedFrames.load()<<L"\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\npeer_connection_incoming_media_packets=not exposed safely by pinned C API\npeer_connection_incoming_media_bytes=not exposed safely by pinned C API\nremote_track_callback_packets="<<impl_->trackCallbackPackets.load()<<L"\npayload_delivered="<<impl_->receivedPackets.load()<<L"\nreceived_packets="<<impl_->receivedPackets.load()<<L"\ndecoded_frames="<<impl_->decodedFrames.load()<<L"\nplayback_frames="<<impl_->playbackFrames.load()<<L"\nlatest_audio_error="<<std::wstring(impl_->latestAudioError.begin(),impl_->latestAudioError.end())<<L"\nlatest_media_error="<<std::wstring(impl_->latestMediaError.begin(),impl_->latestMediaError.end());if(impl_->audio)out<<L"\n"<<impl_->audio->diagnostics();return out.str();}
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
 void VoiceMedia::testInjectPcm(const std::vector<unsigned char>& pcm){impl_->captured(pcm);}
 #endif
-std::vector<VoiceMedia::Event> VoiceMedia::poll(){if(impl_->audio){auto error=impl_->audio->takeError();if(!error.empty()){std::string safe(error.begin(),error.end());{std::lock_guard<std::mutex> lock(impl_->mutex);impl_->latestAudioError=safe;}impl_->push(EventKind::AudioError,std::move(safe));}}std::lock_guard<std::mutex> lock(impl_->mutex);std::vector<Event> out;while(!impl_->events.empty()){out.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return out;}
+std::vector<VoiceMedia::Event> VoiceMedia::poll(){
+    std::vector<Event> out;
+    {std::lock_guard<std::mutex> lock(impl_->mutex);while(!impl_->events.empty()){out.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}}
+    std::wstring error;
+    for(const auto& event:out)if(event.kind==EventKind::Connected&&impl_->audio)impl_->audio->start(error);
+    if(impl_->audio){auto workerError=impl_->audio->takeError();if(!workerError.empty())error=std::move(workerError);}
+    if(!error.empty()){
+        std::string safe(error.begin(),error.end());
+        {std::lock_guard<std::mutex> lock(impl_->mutex);impl_->latestAudioError=safe;}
+        out.push_back({EventKind::AudioError,std::move(safe),{}});
+    }
+    return out;
+}
 void VoiceMedia::stop(){impl_->close();}
 
 } // namespace peerchat

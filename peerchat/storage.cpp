@@ -64,7 +64,7 @@ Blob protect(const Blob& plain,const std::string& context,bool encrypt) {
     DATA_BLOB entropy{static_cast<DWORD>(context.size()),reinterpret_cast<BYTE*>(const_cast<char*>(context.data()))},out{};
     BOOL ok=encrypt?CryptProtectData(&in,L"PeerChat record",&entropy,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&out)
                    :CryptUnprotectData(&in,nullptr,&entropy,nullptr,nullptr,CRYPTPROTECT_UI_FORBIDDEN,&out);
-    require(ok!=FALSE,encrypt?"Could not encrypt local data":"Local data failed authentication or belongs to another Windows account");
+    if(ok==FALSE){DWORD error=GetLastError();throw std::runtime_error(std::string(encrypt?"Could not encrypt local data":"Local data failed authentication or belongs to another Windows account")+" (DPAPI Win32 error "+std::to_string(error)+")");}
     Blob result(out.pbData,out.pbData+out.cbData);SecureZeroMemory(out.pbData,out.cbData);LocalFree(out.pbData);return result;
 }
 struct Algorithm {BCRYPT_ALG_HANDLE h{};~Algorithm(){if(h)BCryptCloseAlgorithmProvider(h,0);}};

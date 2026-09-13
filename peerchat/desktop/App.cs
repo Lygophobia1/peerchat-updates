@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -16,6 +17,7 @@ using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
@@ -24,6 +26,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Ellipse = System.Windows.Shapes.Ellipse;
 using System.Windows.Threading;
+using PeerChat.Updater;
 
 namespace PeerChatDesktop {
 // Links are built as text/Hyperlink objects. Peer text is never parsed as XAML.
@@ -59,10 +62,13 @@ public class DesktopApplication {
     readonly FriendConversationIndex conversationIndex;
     readonly ConnectionDiagnosticLog connectionLog;
     readonly ProfileAccountStore accountStore;
+    readonly DesktopUpdateClient updateClient;
+    readonly string updateHealthToken;
     readonly DispatcherTimer timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(60)};
     readonly DispatcherTimer voiceTimer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
+    readonly DispatcherTimer networkChangeTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(900)};
     readonly string directory;
-    bool changingSelection,busy,closing,closed,trustDialog,friendRefreshInFlight,presenceInFlight,firewallConfigurationInFlight,accountSetupPrompted,interactiveAccountSetup;
+    bool changingSelection,busy,closing,closed,trustDialog,friendRefreshInFlight,presenceInFlight,networkRecoveryInFlight,networkRecoveryPending,firewallConfigurationInFlight,accountSetupPrompted,interactiveAccountSetup;
     ushort firewallConfiguredPort;
     Task startupTask=Task.FromResult(0);
     readonly Queue<Tuple<CoreEvent,string>> trustRequests=new Queue<Tuple<CoreEvent,string>>();
@@ -70,7 +76,7 @@ public class DesktopApplication {
     readonly HashSet<string> trustSuppressed=new HashSet<string>(StringComparer.Ordinal);
     readonly ConnectionAttemptTracker connectionAttempts=new ConnectionAttemptTracker();
     string lastPublicCandidate="Unavailable",lastPublicCandidateSource="Unavailable",lastObservedAddressClassification="Unavailable";
-    string shareHost=DefaultReachableHost();
+    string shareHost=DefaultReachableHost(),networkFingerprint="";ulong networkGeneration=1;bool shareHostManuallyConfigured;
     DiscoveryClient discovery;
     ProfileAccountLink accountLink;
     readonly Dictionary<long,string> friendRequestStates=new Dictionary<long,string>();
@@ -80,27 +86,31 @@ public class DesktopApplication {
     DateTime lastFriendRefreshUtc=DateTime.MinValue;
     DateTime lastPresenceUtc=DateTime.MinValue;
     readonly TextBlock profileName=new TextBlock(), profileHandle=new TextBlock();
-    Window incomingVoiceWindow;DateTime voiceConnectedUtc=DateTime.MinValue,voiceLastConnectedUtc=DateTime.MinValue,voiceStartedUtc=DateTime.MinValue,voiceEndedUtc=DateTime.MinValue;string voiceAudioError="",latestVoiceAudioError="None",recentVoiceCallId="",recentVoicePeerId="",recentVoiceState="Idle";bool recentVoiceMuted,recentVoiceDeafened;
+    Window incomingVoiceWindow;ContextMenu headerFlyout;DateTime voiceConnectedUtc=DateTime.MinValue,voiceLastConnectedUtc=DateTime.MinValue,voiceStartedUtc=DateTime.MinValue,voiceEndedUtc=DateTime.MinValue;string voiceAudioError="",latestVoiceAudioError="None",recentVoiceCallId="",recentVoicePeerId="",recentVoiceState="Idle";bool recentVoiceMuted,recentVoiceDeafened;
+    // Older pages are prepended to the bound collection. Keep the same visual message
+    // under the reader's eye when WPF remeasures that prepend.
+    string historyScrollKey="";
+    double historyScrollOffset,historyScrollExtent;
     bool discoveryRestored;
+    Task<bool> presenceRefreshTask;
+    Task<bool> friendRefreshTask;
+    readonly HashSet<string> reconnectRepairs=new HashSet<string>();
+    event Action InviteCandidatesChanged;
     static string DefaultReachableHost(){
-        try{
-            // Prefer a physical Ethernet/Wi-Fi adapter with a default gateway.
-            foreach(var network in NetworkInterface.GetAllNetworkInterfaces()){
-                if(network.OperationalStatus!=OperationalStatus.Up)continue;
-                if(network.NetworkInterfaceType!=NetworkInterfaceType.Ethernet&&network.NetworkInterfaceType!=NetworkInterfaceType.Wireless80211)continue;
-                var properties=network.GetIPProperties();bool gateway=properties.GatewayAddresses.Any(g=>g.Address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(g.Address));
-                if(!gateway)continue;
-                foreach(var address in properties.UnicastAddresses.Select(item=>item.Address))
-                    if(address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(address)&&!address.ToString().StartsWith("169.254."))return address.ToString();
-            }
-            foreach(var address in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
-                if(address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(address)&&!address.ToString().StartsWith("169.254."))return address.ToString();
-        }catch{}
+        NetworkInterface[] networks;try{networks=NetworkInterface.GetAllNetworkInterfaces();}catch{networks=new NetworkInterface[0];}
+        // Prefer a current physical Ethernet/Wi-Fi adapter with a default gateway. A
+        // broken virtual adapter must not abort inspection of later usable adapters.
+        foreach(var network in networks){
+            if(network.OperationalStatus!=OperationalStatus.Up)continue;
+            if(network.NetworkInterfaceType!=NetworkInterfaceType.Ethernet&&network.NetworkInterfaceType!=NetworkInterfaceType.Wireless80211)continue;
+            try{var properties=network.GetIPProperties();bool gateway=properties.GatewayAddresses.Any(g=>g.Address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(g.Address));if(!gateway)continue;foreach(var address in properties.UnicastAddresses.Select(item=>item.Address))if(address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(address)&&!address.ToString().StartsWith("169.254."))return address.ToString();}catch{/* Continue past an adapter with unavailable properties. */}
+        }
+        try{foreach(var address in Dns.GetHostEntry(Dns.GetHostName()).AddressList)if(address.AddressFamily==AddressFamily.InterNetwork&&!IPAddress.IsLoopback(address)&&!address.ToString().StartsWith("169.254."))return address.ToString();}catch{}
         return Environment.MachineName;
     }
-    public DesktopApplication(string dataDirectory,ushort port,string capturePath=null,bool compact=false,LocalProfileManager manager=null,LocalProfileInfo selectedProfile=null){
+    public DesktopApplication(string dataDirectory,ushort port,string capturePath=null,bool compact=false,LocalProfileManager manager=null,LocalProfileInfo selectedProfile=null,string healthToken=null){
         directory=dataDirectory;
-        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
+        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
@@ -108,9 +118,9 @@ public class DesktopApplication {
         // Profile selection and any legacy migration finish before the native owner exists.
         core=new CoreAdapter();
         window.SourceInitialized+=(s,e)=>{int enabled=1;var handle=new System.Windows.Interop.WindowInteropHelper(window).Handle;try{if(DwmSetWindowAttribute(handle,20,ref enabled,4)!=0)DwmSetWindowAttribute(handle,19,ref enabled,4);}catch(EntryPointNotFoundException){}};
-        BindActions();LoadVoiceDevices();timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();
+        BindActions();LoadVoiceDevices();timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>core.Dispose());closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>core.Dispose());closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -126,21 +136,23 @@ public class DesktopApplication {
         ButtonIcon("CopyCompact","\uE8C8",null);var profileCard=new StackPanel{Orientation=Orientation.Horizontal};profileCard.Children.Add(new Border{Width=34,Height=34,CornerRadius=new CornerRadius(17),Background=Brush("#365D89"),Child=new TextBlock{Text="P",FontSize=18,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});var profileText=new StackPanel{Margin=new Thickness(10,0,0,0),VerticalAlignment=VerticalAlignment.Center};profileName.Text=localProfile==null?"Your profile":localProfile.Name;profileName.FontWeight=FontWeights.SemiBold;profileHandle.Text="Local profile and account";profileHandle.Foreground=Brush("#A1AEBB");profileHandle.FontSize=11;profileText.Children.Add(profileName);profileText.Children.Add(profileHandle);profileCard.Children.Add(profileText);Find<Button>("Profile").Content=profileCard;
         foreach(string name in new[]{"Manual","QuickManual"})ButtonIcon(name,"\uE774","Manual Connect");
         ButtonIcon("Settings","\uE713","Settings");ButtonIcon("Reconnect","\uE72C","Try Reconnect");
-        ButtonIcon("Details","\uE701","Show Details");ButtonIcon("PeerInfo","\uE946",null);ButtonIcon("VoiceCall","\uE717","Call");ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
+        ButtonIcon("Details","\uE701","My Connection");ButtonIcon("PeerInfo","\uE946",null);ButtonIcon("VoiceCall","\uE717","Call");ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
         Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",SettingsPage);
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
-        Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));
+        Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
         Click("EmptyAction",()=>{if(model.Groups)CreateGroup();else AddFriend();});
-        Click("Send",Send);Click("VoiceCall",StartVoiceCall);Click("VoiceHangUp",EndVoiceCall);Click("VoiceMute",ToggleVoiceMute);Click("VoiceDeafen",ToggleVoiceDeafen);Click("VoiceRefreshDevices",RefreshVoiceDevices);Click("CopyVoiceDiagnostics",CopyVoiceDiagnostics);Click("Reconnect",Reconnect);Click("CopyConnectionDetails",CopyConnectionDetails);Click("ViewConnectionLog",ViewConnectionLog);Click("Older",Older);
-        Click("PeerInfo",()=>{if(model.Groups)ShowGroupInfo();else Notify(model.Selected==null?"Select a friend to inspect their identity.":model.Selected.Name+"\n\nPeer fingerprint:\n"+model.Selected.Contact.peer+"\n\nEndpoint: "+model.Selected.Contact.host+":"+model.Selected.Contact.port+"\n"+(model.Selected.Contact.verified?"Identity verified":"Awaiting identity verification"));});
-        Click("Details",()=>{var fields=Dialog("My connection",new[]{"Host/IP to put in Copy My ID"},new[]{shareHost},"Save endpoint",ConnectionDiagnosticsText()+"\n\nChoose a hostname, LAN/VPN IPv4, or forwarded endpoint your friend can reach. This does not configure your router.");if(fields!=null){string host=fields[0].Trim();if(host.Length==0||host.Length>253||host.Any(Char.IsWhiteSpace)||host.Any(Char.IsControl)){Notify("Enter a valid hostname or IPv4 address.");return;}shareHost=host;}});
+        Click("Send",Send);Click("VoiceCall",StartVoiceCall);Click("VoiceHangUp",EndVoiceCall);Click("VoiceMute",ToggleVoiceMute);Click("VoiceDeafen",ToggleVoiceDeafen);Click("VoiceDetails",ShowVoiceDiagnostics);Click("VoiceRefreshDevices",RefreshVoiceDevices);Click("CopyVoiceDiagnostics",CopyVoiceDiagnostics);Click("Reconnect",Reconnect);Click("CopyConnectionDetails",CopyConnectionDetails);Click("ViewConnectionLog",ViewConnectionLog);Click("Older",Older);
+        Find<ScrollViewer>("MessageScroll").ScrollChanged+=(s,e)=>{if(e.VerticalChange<0&&e.VerticalOffset<=48)Older();};
+        Click("PeerInfo",ShowConversationFlyout);Click("GroupMembers",()=>ShowGroupFlyout("GroupMembers","members"));Click("GroupInvite",()=>ShowGroupFlyout("GroupInvite","invite"));Click("GroupOverflow",()=>ShowGroupFlyout("GroupOverflow","settings"));
+        Click("Details",()=>{var fields=Dialog("My connection",new[]{"Host/IP to put in Copy My ID"},new[]{shareHost},"Save endpoint",ConnectionDiagnosticsText()+"\n\nChoose a hostname, LAN/VPN IPv4, or forwarded endpoint your friend can reach. This does not configure your router.");if(fields!=null){string host=fields[0].Trim();if(host.Length==0||host.Length>253||host.Any(Char.IsWhiteSpace)||host.Any(Char.IsControl)){Notify("Enter a valid hostname or IPv4 address.");return;}shareHost=host;shareHostManuallyConfigured=true;}});
         Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
-        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
+        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
+        Find<Expander>("VoiceAdvancedExpander").Expanded+=(s,e)=>RefreshVoiceDiagnosticsText();
         var removeMenu=new ContextMenu();var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(removeItem);removeItem.Click+=(s,e)=>RemoveSelectedContact();
         var list=Find<ListBox>("ContactList");list.ContextMenu=removeMenu;list.PreviewMouseRightButtonDown+=(s,e)=>{var element=e.OriginalSource as DependencyObject;var item=ItemsControl.ContainerFromElement(list,element) as ListBoxItem;if(item!=null){item.IsSelected=true;item.Focus();}};
     }
@@ -159,6 +171,12 @@ public class DesktopApplication {
             firewallConfiguredPort=0;
             startupTask=Task.Run(()=>core.Start(directory,port,name));
             await startupTask;
+            core.SetNetworkContext(networkGeneration,networkFingerprint);
+            // A replacement is healthy only after its local native profile/core initialization succeeds.
+            if(!String.IsNullOrWhiteSpace(updateHealthToken)){
+                try{UpdateHealthReporter.MarkHealthyFromCommandLine(new[]{"--peerchat-update-health-token",updateHealthToken});TraceStartup(profileManager==null?AppDomain.CurrentDomain.BaseDirectory:profileManager.InstallRoot,"update-health-confirmed");}
+                catch(Exception healthError){TraceStartup(profileManager==null?AppDomain.CurrentDomain.BaseDirectory:profileManager.InstallRoot,"update-health-confirm-failed type="+healthError.GetType().Name);}
+            }
         }catch(Exception error){model.Status=error.Message;}
         busy=false;if(!closing)timer.Start();Refresh();
     }
@@ -208,7 +226,7 @@ public class DesktopApplication {
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Direct P2P":"Local profile ready · Sign in, create an account, or continue Offline / Direct P2P"):"@"+accountLink.Username+" signed out · Local history and Direct P2P remain available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,shareHost,model.Port));discovery=saved;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");RefreshAutomaticShareHost();var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,shareHost,model.Port));discovery=saved;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
         }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Direct P2P · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
@@ -223,25 +241,31 @@ public class DesktopApplication {
             // Presence is a small authenticated heartbeat. It updates only this device's
             // presence/candidates and never fetches or rebuilds the friend snapshot.
             if(discovery!=null&&!presenceInFlight&&DateTime.UtcNow-lastPresenceUtc>=TimeSpan.FromSeconds(60))RefreshPresence();
-            var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");if(events.Length==0)return;
+            var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
                 // Live incoming messages notify even when their conversation is selected.
                 // History replay (kind 6) never notifies, and outgoing echoes are ignored.
                 bool incoming=e.kind==5&&e.messages!=null&&e.messages.Any(message=>message.sender!=model.OwnId&&!model.Get(e.peer).Messages.Any(existing=>existing.Data.id==message.id));
                 bool incomingGroup=e.kind==10&&e.groupEvents!=null&&e.groupEvents.Any(message=>message.sender!=model.OwnId);
+                bool initialDmHistory=e.kind==6&&model.Selected!=null&&model.FindByPeer(e.peer)==model.Selected&&model.Selected.Messages.Count==0;
+                bool initialGroupHistory=e.kind==11&&model.SelectedGroup!=null&&e.peer==model.SelectedGroup.Id&&model.SelectedGroup.Messages.Count==0;
                 model.Apply(e);
+                if(e.kind==9){if(InviteCandidatesChanged!=null)InviteCandidatesChanged();if(model.SelectedGroup!=null)RequestGroupHistory(model.SelectedGroup);}
                 if(e.kind==13)HandleVoiceEvent(e);
                 if(incoming||incomingGroup)incomingNotification=true;
                 if(e.kind==0){if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id);ConfigureFirewallForListener(e.port);RestoreDiscoverySession();}
-                if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
-                if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
+                if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
+                if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
                 if(e.kind==2){var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId))e.text="Peer identity changed for "+identityConversation.Name+". Previously verified "+identityConversation.PreviousVerifiedPeerId+"; current device "+e.peer+". Explicit verification is required.";string failure=identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId)?"Peer identity changed":"Identity verification required";connectionAttempts.Update(e,identityConversation,"TLS identity mismatch","Verification required",failure);RecordConnection("trust",identityConversation,failure,e);string key=(e.expected??"")+"|"+(e.peer??"")+"|"+e.attempt;if(!trustPrompted.Contains(key)&&!trustSuppressed.Contains(key)){trustPrompted.Add(key);trustRequests.Enqueue(Tuple.Create(e,key));}TraceUi("Identity diagnostics: expected Peer ID="+(String.IsNullOrEmpty(e.expected)?"unspecified":e.expected)+"; presented Peer ID="+(e.peer??"unknown")+"; attempt="+e.attempt);}
                 if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){voiceAudioError=(e.text??"").Substring("Voice audio device error:".Length).Trim();latestVoiceAudioError=voiceAudioError;var voiceConversation=model.FindByPeer(e.peer);RecordConnection("voice-audio",voiceConversation,voiceAudioError,e);model.Status="Voice audio unavailable · "+voiceAudioError;RefreshVoiceUi();}
-                else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);if(IsRouteFailure(e.text)&&failed!=null&&failed.Contact!=null&&(String.IsNullOrEmpty(e.expected)||e.expected==failed.Contact.peer)&&!failed.PublicAttempted&&!String.IsNullOrWhiteSpace(failed.Contact.publicHost)&&failed.Contact.publicPort>0&&failed.Contact.host!=failed.Contact.publicHost){failed.PublicAttempted=true;failed.ConnectionState="Retrying public endpoint";failed.Refresh();DiscoverySearchResult friend;string source=failed.AccountId>0&&friendDirectory.TryGetValue(failed.AccountId,out friend)&&!String.IsNullOrEmpty(friend.PublicCandidateSource)?friend.PublicCandidateSource:"Discovery public candidate";try{core.Connect(failed.Contact.publicHost,failed.Contact.publicPort,failed.Contact.peer,source,"LAN route failed; public fallback",false);}catch{}}}
+                else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);if(IsRouteFailure(e.text)&&failed!=null&&!failed.Online&&failed.Contact!=null&&(String.IsNullOrEmpty(e.expected)||e.expected==failed.Contact.peer)&&!failed.PublicAttempted&&!String.IsNullOrWhiteSpace(failed.Contact.publicHost)&&failed.Contact.publicPort>0&&failed.Contact.host!=failed.Contact.publicHost){failed.PublicAttempted=true;failed.ConnectionState="Retrying public endpoint";failed.Refresh();DiscoverySearchResult friend;string source=failed.AccountId>0&&friendDirectory.TryGetValue(failed.AccountId,out friend)&&!String.IsNullOrEmpty(friend.PublicCandidateSource)?friend.PublicCandidateSource:"Discovery public candidate";try{core.Connect(failed.Contact.publicHost,failed.Contact.publicPort,failed.Contact.peer,source,"LAN route failed; public fallback",false);}catch{}}}
                 if(e.kind==3&&!model.Groups){var connected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??model.Get(e.peer);connectionAttempts.Update(e,connected,"Ready","Verified","None");RecordConnection("connected",connected,"TCP and TLS authenticated; identity verified",e);model.Selected=connected;RequestConversationHistory(model.Selected);ShowConversation();}
                 if(e.kind==4){var disconnected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,disconnected,e.text??"Disconnected",null,null);RecordConnection("disconnected",disconnected,e.text??"Disconnected",e);}
-                if((e.kind==5&&model.Selected!=null&&e.peer==model.Selected.Contact.peer)||(e.kind==10&&model.SelectedGroup!=null&&e.peer==model.SelectedGroup.Id))scroll=true;
+                if(e.kind==16){var lifecycle=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,lifecycle,null,null,null);RecordConnection("connection-lifecycle",lifecycle,e.text??"connection lifecycle transition",e);}
+                if((e.kind==5&&model.Selected!=null&&e.peer==model.Selected.Contact.peer)||(e.kind==10&&model.SelectedGroup!=null&&e.peer==model.SelectedGroup.Id)||initialDmHistory||initialGroupHistory)scroll=true;
+                string historyKey=e.kind==6&&model.Selected!=null&&model.FindByPeer(e.peer)==model.Selected?model.Selected.ConversationId:e.kind==11?"group:"+e.peer:"";
+                if(!String.IsNullOrEmpty(historyKey)&&historyKey==historyScrollKey){string restoreKey=historyScrollKey;double offset=historyScrollOffset,extent=historyScrollExtent;historyScrollKey="";window.Dispatcher.BeginInvoke((Action)delegate {if(CurrentHistoryKey()==restoreKey){var viewer=Find<ScrollViewer>("MessageScroll");viewer.ScrollToVerticalOffset(offset+Math.Max(0,viewer.ExtentHeight-extent));}});}
             }
             if(incomingNotification)NotifyIncomingMessage();
             if(model.Selected==null&&model.Conversations.Count>0){model.Selected=model.Conversations.Values.First();RequestConversationHistory(model.Selected);ShowConversation();}
@@ -249,252 +273,3060 @@ public class DesktopApplication {
             if(!trustDialog&&trustRequests.Count>0){trustDialog=true;var pending=trustRequests.Dequeue();var request=pending.Item1;string trustKey=pending.Item2;TraceUi("trust dialog construction started for "+request.peer);var dialogTimer=Stopwatch.StartNew();bool identityChanged=(request.text??"").IndexOf("identity changed",StringComparison.OrdinalIgnoreCase)>=0;var title=identityChanged?"Verify new device identity":"Verify your friend";var action=identityChanged?"Trust new identity":"Trust peer";bool accepted=Confirm(title,request.text+"\n\nPeer fingerprint:\n"+request.peer+"\n\nCompare this fingerprint over your trusted channel. Trust this identity?",action);TraceUi("trust dialog closed after "+dialogTimer.ElapsedMilliseconds+" ms");string trustResult=accepted?"Explicitly trusted":"Rejected for this connection attempt";var trustConversation=model.FindByPeer(request.expected)??model.FindByPeer(request.peer);connectionAttempts.Update(request,trustConversation,null,trustResult,accepted?"None":null);RecordConnection("trust",trustConversation,trustResult,request);if(!accepted&&!String.IsNullOrEmpty(trustKey))trustSuppressed.Add(trustKey);core.Approve(request.peer,accepted);trustDialog=false;}
         }catch(Exception error){model.Status="UI adapter: "+error.Message;Refresh();}
     }
-    void Switch(bool groups){model.Groups=groups;if(groups)core.LoadGroups();RefreshList();ShowConversation();Refresh();}
+    string CurrentHistoryKey(){return model.Groups&&model.SelectedGroup!=null?"group:"+model.SelectedGroup.Id:!model.Groups&&model.Selected!=null?model.Selected.ConversationId:"";}
+    void Switch(bool groups){model.Groups=groups;if(groups){core.LoadGroups();RequestGroupHistory(model.SelectedGroup);}RefreshList();ShowConversation();Refresh();}
     void CreateGroup(){
         if(discovery==null||discovery.AccountId<=0){Notify("Sign in once to bind your account identity before creating a group. Existing groups continue to work directly when the server is unavailable.");return;}
         var fields=Dialog("Create group",new[]{"Group name"},new[]{"My group"},"Create","The Group ID and signed state are created on this client. PeerChat’s server does not own the group.");if(fields==null)return;string name=fields[0].Trim();if(name.Length==0||name.Length>80){Notify("Use a group name from 1 to 80 characters.");return;}string id=core.CreateGroup(name);if(String.IsNullOrEmpty(id)){Notify("The group could not be created.");return;}model.Groups=true;model.Status="Creating signed local group…";core.LoadGroups();Refresh();
     }
-    void ShowGroupInfo(){
-        var group=model.SelectedGroup;if(group==null){Notify("Select a group first.");return;}
-        var dialog=new Window{Title="Group details",Owner=window,Width=540,Height=650,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#0C1116"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto};var panel=new StackPanel{Margin=new Thickness(24)};scroll.Content=panel;dialog.Content=scroll;
-        panel.Children.Add(new TextBlock{Text=group.Name,FontSize=25,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text="Client-owned group · "+group.Id,TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,5,0,18)});
-        var mine=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(member=>member.peer==model.OwnId);var invitation=(group.Data.invites??new GroupMemberData[0]).FirstOrDefault(member=>member.peer==model.OwnId);
-        if(invitation!=null){var actions=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,18)};var accept=new Button{Content="Accept invitation",Padding=new Thickness(14,8,14,8),Margin=new Thickness(0,0,8,0)};var decline=new Button{Content="Decline",Padding=new Thickness(14,8,14,8)};accept.Click+=(s,e)=>{core.RespondToGroupInvite(group.Id,true);dialog.Close();};decline.Click+=(s,e)=>{core.RespondToGroupInvite(group.Id,false);dialog.Close();};actions.Children.Add(accept);actions.Children.Add(decline);panel.Children.Add(actions);}
-        if(mine!=null&&mine.role>=2){var actions=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,18)};var rename=new Button{Content="Rename",Padding=new Thickness(14,8,14,8),Margin=new Thickness(0,0,8,0)};rename.Click+=(s,e)=>{var values=Dialog("Rename group",new[]{"Group name"},new[]{group.Name},"Rename","The rename is signed locally and replicated to members.");if(values!=null&&core.RenameGroup(group.Id,values[0].Trim()))dialog.Close();};var invite=new Button{Content="Invite friend",Padding=new Thickness(14,8,14,8)};invite.Click+=(s,e)=>InviteFriendToGroup(group,dialog);actions.Children.Add(rename);actions.Children.Add(invite);panel.Children.Add(actions);}
-        panel.Children.Add(new TextBlock{Text="Members ("+(group.Data.members??new GroupMemberData[0]).Length+")",FontSize=16,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,8)});
-        foreach(var member in (group.Data.members??new GroupMemberData[0]).OrderByDescending(item=>item.role).ThenBy(item=>item.name)){var row=new Grid{Margin=new Thickness(0,0,0,8)};row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});string role=member.role==3?"Owner":member.role==2?"Admin":"Member";row.Children.Add(new TextBlock{Text=member.name+" · "+role,VerticalAlignment=VerticalAlignment.Center});bool canRemove=mine!=null&&member.account!=mine.account&&((mine.role==3&&member.role<3)||(mine.role==2&&member.role==1));if(canRemove){var actions=new StackPanel{Orientation=Orientation.Horizontal};if(mine.role==3){var roleButton=new Button{Content=member.role==2?"Demote":"Promote",Padding=new Thickness(9,5,9,5),Margin=new Thickness(0,0,6,0)};roleButton.Click+=(s,e)=>{core.SetGroupAdmin(group.Id,member.account,member.role!=2);dialog.Close();};actions.Children.Add(roleButton);}var remove=new Button{Content="Remove",Padding=new Thickness(9,5,9,5)};remove.Click+=(s,e)=>{if(Confirm("Remove member","Remove "+member.name+" from this group?","Remove")){core.RemoveGroupMember(group.Id,member.account);dialog.Close();}};actions.Children.Add(remove);Grid.SetColumn(actions,1);row.Children.Add(actions);}panel.Children.Add(row);}
-        if(mine!=null&&mine.role!=3){var leave=new Button{Content="Leave group",HorizontalAlignment=HorizontalAlignment.Left,Padding=new Thickness(14,8,14,8),Margin=new Thickness(0,16,0,0)};leave.Click+=(s,e)=>{if(Confirm("Leave group","Leave "+group.Name+"? Your signed leave event will be replicated to members.","Leave")){core.LeaveGroup(group.Id);dialog.Close();}};panel.Children.Add(leave);}else if(mine!=null&&mine.role==3)panel.Children.Add(new TextBlock{Text="The owner cannot leave while responsible for the group.",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,16,0,0)});
-        dialog.ShowDialog();
+    TextBlock FlyoutText(string text,double size=13,bool muted=false){return new TextBlock{Text=text,FontSize=size,Foreground=Brush(muted?"#A1AEBB":"#EDF1F5"),TextWrapping=TextWrapping.Wrap};}
+    Button FlyoutAction(string text,Action action,bool destructive=false){var button=new Button{Content=text,Style=(Style)window.FindResource(typeof(Button)),Foreground=Brush("#EDF1F5")};button.Foreground=Brush("#EDF1F5");button.Background=Brush(destructive?"#632630":"#19222B");button.Padding=new Thickness(10,7,10,7);button.Margin=new Thickness(0,0,0,6);button.HorizontalContentAlignment=HorizontalAlignment.Left;button.Click+=(s,e)=>action();return button;}
+    void CloseHeaderFlyout(){if(headerFlyout!=null){headerFlyout.IsOpen=false;headerFlyout=null;}}
+    void OpenHeaderFlyout(string anchorName,StackPanel panel){
+        CloseHeaderFlyout();panel.Width=340;panel.Margin=new Thickness(3);
+        var scroll=new ScrollViewer{Content=panel,MaxHeight=430,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};
+        var host=new MenuItem{Header=scroll,StaysOpenOnClick=true,Style=(Style)window.FindResource(typeof(MenuItem)),Padding=new Thickness(10),Background=Brush("#111920"),Foreground=Brush("#EDF1F5")};
+        var menu=new ContextMenu{PlacementTarget=Find<Button>(anchorName),Placement=System.Windows.Controls.Primitives.PlacementMode.Bottom,HorizontalOffset=-8,Background=Brush("#111920"),Foreground=Brush("#EDF1F5"),BorderBrush=Brush("#344351"),BorderThickness=new Thickness(1),Padding=new Thickness(4),Style=(Style)window.FindResource(typeof(ContextMenu))};
+        menu.Items.Add(host);menu.Closed+=(s,e)=>{if(Object.ReferenceEquals(headerFlyout,menu))headerFlyout=null;};headerFlyout=menu;menu.IsOpen=true;
     }
-    void InviteFriendToGroup(GroupModel group,Window parent){
-        if(discovery==null){Notify("Friend discovery is offline. Existing group state and messages remain available over direct P2P.");return;}var candidates=friendState.Friends.Where(friend=>(group.Data.members??new GroupMemberData[0]).All(member=>member.account!=friend.AccountId)&&(group.Data.invites??new GroupMemberData[0]).All(member=>member.account!=friend.AccountId)).ToList();if(candidates.Count==0){Notify("There are no uninvited friends available.");return;}
-        var picker=new Window{Title="Invite friend",Owner=parent,Width=460,Height=520,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto};var stack=new StackPanel{Margin=new Thickness(22)};scroll.Content=stack;picker.Content=scroll;stack.Children.Add(new TextBlock{Text="Invite a friend",FontSize=23,FontWeight=FontWeights.SemiBold});stack.Children.Add(new TextBlock{Text="Discovery supplies the friend’s current device endpoint only. The invitation itself is signed and peer-replicated.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,6,0,16)});foreach(var friend in candidates){var button=new Button{Content=friend.Username,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new Thickness(12,9,12,9),Margin=new Thickness(0,0,0,7),Tag=friend};button.Click+=(s,e)=>{var selected=(DiscoverySearchResult)((Button)s).Tag;var conversation=model.FindByPeer(selected.PublicIdentity);if(conversation==null||conversation.Contact==null||!conversation.Contact.verified){OpenFriendConversation(selected);Notify("Verify the direct connection to "+selected.Username+", then invite them again.");picker.Close();parent.Close();return;}if(core.InviteToGroup(group.Id,selected.AccountId,selected.PublicIdentity,selected.Username)){picker.Close();parent.Close();}else Notify("The invitation could not be queued.");};stack.Children.Add(button);}picker.ShowDialog();
+    void ShowConversationFlyout(){
+        var selected=model.Selected;if(selected==null)return;var panel=new StackPanel();panel.Children.Add(FlyoutText(selected.Name,18));panel.Children.Add(new TextBlock{Text=selected.AccountId>0?"Account "+selected.AccountId:"Direct P2P contact",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
+        string trust=selected.Contact!=null&&selected.Contact.verified?"Verified device":"Verification required";panel.Children.Add(FlyoutText(selected.ConnectionState+" · "+trust));panel.Children.Add(new TextBlock{Text="Peer ID\n"+(selected.Contact==null||String.IsNullOrEmpty(selected.Contact.peer)?"Not available":selected.Contact.peer),Foreground=Brush("#A1AEBB"),FontSize=11,Margin=new Thickness(0,8,0,12),TextWrapping=TextWrapping.Wrap});
+        panel.Children.Add(FlyoutAction("Try Reconnect",()=>{CloseHeaderFlyout();Reconnect();}));panel.Children.Add(FlyoutAction("Copy Connection Details",()=>CopyConnectionDetails()));OpenHeaderFlyout("PeerInfo",panel);
     }
-    void RemoveSelectedContact(){
-        if(model.Groups||model.Selected==null)return;var selected=model.Selected;
-        if(!Confirm("Remove contact","Remove "+selected.Name+" and its saved endpoint? Local chat history will be kept.","Remove contact"))return;
-        if(!core.Remove(selected.Contact.peer)){Notify("Could not remove this contact.");return;}
-        model.RemoveConversation(selected);model.Selected=null;ShowConversation();RefreshList();Refresh();
-    }
-    void RefreshList(){
-        string search=Find<TextBox>("Search").Text;
-        Find<TextBlock>("SearchHint").Visibility=search.Length==0?Visibility.Visible:Visibility.Collapsed;
-        changingSelection=true;
-        var visibleGroups=model.GroupChats.Values.Where(group=>group.Name.IndexOf(search,StringComparison.CurrentCultureIgnoreCase)>=0).OrderBy(group=>group.Name).ToList();
-        var visible=model.Conversations.Values.Where(c=>c.Name.IndexOf(search,StringComparison.CurrentCultureIgnoreCase)>=0).OrderBy(c=>c.Name).ToList();
-        Find<ListBox>("ContactList").ItemsSource=model.Groups?(System.Collections.IEnumerable)visibleGroups:visible;Find<ListBox>("ContactList").SelectedItem=model.Groups?(object)model.SelectedGroup:model.Selected;changingSelection=false;
-        int visibleCount=model.Groups?visibleGroups.Count:visible.Count;Find<TextBlock>("ListEmpty").Visibility=visibleCount==0?Visibility.Visible:Visibility.Collapsed;
-        Find<TextBlock>("ListEmpty").Text=model.Groups?(search.Length>0?"No matching groups.":"Create a group or accept an invitation."):(search.Length>0?"No matching conversations.":"Find friends to start building your friend list.");
-    }
-    void ShowConversation(){
-        Find<ItemsControl>("Messages").ItemsSource=model.Groups?(model.SelectedGroup==null?null:model.SelectedGroup.Messages):(model.Selected==null?null:model.Selected.Messages);
-        Find<TextBox>("Composer").Text=model.Groups?(model.SelectedGroup==null?"":model.SelectedGroup.Draft):(model.Selected==null?"":model.Selected.Draft);SizeBubbles();
-    }
-    void SizeBubbles(){double maximum=Math.Max(170,(Find<ScrollViewer>("MessageScroll").ActualWidth-65)*0.82);foreach(var chat in model.Conversations.Values)foreach(var message in chat.Messages)message.BubbleWidth=maximum;foreach(var group in model.GroupChats.Values)foreach(var message in group.Messages)message.BubbleWidth=maximum;}
-    void Refresh(){
-        bool selected=model.Selected!=null&&!model.Groups;bool groupSelected=model.Groups&&model.SelectedGroup!=null;
-        Find<TextBlock>("LocalProfile").Text=(localProfile==null?model.Name:localProfile.Name)+(accountLink==null?" · Unlinked":" · @"+accountLink.Username);
-        profileName.Text=localProfile==null?model.Name:localProfile.Name;
-        profileHandle.Text=discovery!=null?"@"+discovery.Username+" · Online":accountLink!=null?"@"+accountLink.Username+" · Offline / Direct P2P":accountStore.Exists?"Account link unavailable · Offline / Direct P2P":"Unlinked · Offline / Direct P2P";
-        Find<TextBlock>("OwnId").Text=model.OwnId.Length==0?"Waiting for identity":model.OwnId;
-        Find<TextBlock>("OwnId").ToolTip=model.OwnId;
-        Find<TextBlock>("Listener").Text=model.Listening?"●  Listening on "+shareHost+":"+model.Port:"○  Not listening";
-        Find<TextBlock>("Listener").Foreground=Brush(model.Listening?"#36D873":"#A1AEBB");
-        int count=model.Conversations.Values.Count(c=>c.Online);
-        Find<TextBlock>("PeerCount").Text=count+" peers connected";
-        Find<TextBlock>("CompactConnectionStatus").Text=selected?ConnectionStatusText(model.Selected):(model.Listening?"Ready for direct connections":"Offline");
-        Find<TextBlock>("CompactConnectionStatus").Foreground=Brush(selected&&model.Selected.ConnectionState=="Ready"?"#36D873":"#EDF1F5");
-        Find<TextBlock>("LastConnectionFailure").Text="Last failure: "+(selected?connectionAttempts.For(model.Selected).Failure:"None");
-        Find<TextBlock>("Status").Text=model.Status;
-        Find<TextBlock>("Security").Text=count>0?"Authenticated TLS connections: "+count:"TLS: no active peer connection";
-        Find<TextBlock>("StorageStatus").Text=model.Listening?"Local history: encrypted on this PC":"Local profile: not ready";
-        Find<TextBlock>("VersionText").Text="App version: "+PeerChat.VersionInfo.Display;
-        Find<TextBlock>("EndpointHint").Text="Shareable endpoint: "+shareHost+":"+model.Port;
-        Find<TextBlock>("LanEndpoint").Text="LAN: "+shareHost+":"+model.Port;
-        Find<TextBlock>("PublicEndpoint").Text="Public: Detecting…";
-        Find<TextBlock>("FriendAreaStatus").Text="Friends · "+model.Conversations.Values.Count(item=>item.IsFriend)+"   Incoming · "+friendState.Incoming.Count+"   Pending · "+friendState.Outgoing.Count;
-        UpdateFriendRequestsButton();
-        bool signedIn=discovery!=null&&!String.IsNullOrEmpty(discovery.SessionToken);
-        Find<Button>("AccountRegister").Visibility=signedIn||accountLink!=null||accountStore.Exists?Visibility.Collapsed:Visibility.Visible;
-        Find<Button>("AccountLogin").Visibility=signedIn||accountLink==null&&accountStore.Exists?Visibility.Collapsed:Visibility.Visible;Find<Button>("AccountLogin").ToolTip=accountLink==null?"Link this profile to an existing account":"Sign this profile back into @"+accountLink.Username;
-        Find<Button>("AccountSignOut").Visibility=signedIn?Visibility.Visible:Visibility.Collapsed;
-        Find<TextBlock>("HeaderName").Text=groupSelected?model.SelectedGroup.Name:model.Groups?"Groups":selected?model.Selected.Name:"Your conversations";
-        Find<TextBlock>("HeaderInitial").Text=groupSelected?model.SelectedGroup.Initial:model.Groups?"G":selected?model.Selected.Initial:"p";
-        Find<TextBlock>("HeaderStatus").Text=groupSelected?(model.SelectedGroup.Invited?"Group invitation · review before joining":model.SelectedGroup.MemberCount+" members · client-owned encrypted history"):model.Groups?"Client-owned groups · direct P2P":selected?ConnectionStatusText(model.Selected):"Choose a friend to start chatting";
-        Find<TextBlock>("HeaderStatus").Foreground=Brush(selected&&model.Selected.ConnectionState=="Ready"?"#36D873":"#A1AEBB");
-        Find<StackPanel>("ChatEmpty").Visibility=groupSelected?(model.SelectedGroup.Messages.Count==0?Visibility.Visible:Visibility.Collapsed):(!selected||model.Selected.Messages.Count==0)?Visibility.Visible:Visibility.Collapsed;
-        Find<TextBlock>("EmptyTitle").Text=groupSelected?(model.SelectedGroup.Invited?"You’re invited":"Start the group conversation"):model.Groups?"A place for your people":selected?"The start of your conversation":"Good conversations start here.";
-        Find<TextBlock>("EmptyDescription").Text=groupSelected?(model.SelectedGroup.Invited?"Open group details to accept or decline this signed invitation.":"Messages are signed, stored locally, and replicated directly to members."):model.Groups?"Create a client-owned group. The server is not the source of truth.":selected?"Messages and history belong to this PC. Verify your friend to start chatting.":"Use Find Friends to discover people, or add a manual connection as an advanced fallback.";
-        Find<Button>("EmptyAction").Content=model.Groups?"＋    Create Group":"＋    Add Friend";
-        Find<Button>("EmptyAction").Visibility=(selected||groupSelected)?Visibility.Collapsed:Visibility.Visible;
-        Find<Button>("Older").Visibility=selected&&model.Selected.Messages.Count>0?Visibility.Visible:Visibility.Collapsed;
-        // Direct P2P readiness is owned by the peer core. Discovery login/friend state is
-        // deliberately absent here so a verified direct conversation remains usable offline.
-        bool directConversationReady=selected&&model.Listening&&model.Selected.Contact.verified&&!busy;bool groupReady=groupSelected&&!model.SelectedGroup.Invited&&model.Listening&&!busy;
-        Find<Button>("Send").IsEnabled=directConversationReady||groupReady;
-        var composer=Find<TextBox>("Composer");composer.IsEnabled=directConversationReady||groupReady;composer.IsReadOnly=false;composer.Focusable=true;composer.IsHitTestVisible=true;
-        Find<Button>("Reconnect").IsEnabled=selected&&model.Listening&&!busy;
-        Find<Button>("VoiceCall").Visibility=selected?Visibility.Visible:Visibility.Collapsed;Find<Button>("VoiceCall").IsEnabled=selected&&model.Selected.Online&&model.Selected.Contact.verified&&model.VoiceState.StartsWith("Idle",StringComparison.Ordinal)&&!busy;
-        foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact","AddFriend","QuickAdd","Manual","QuickManual","Details","CopyConnectionDetails","ViewConnectionLog"})Find<Button>(name).IsEnabled=model.Listening&&!busy;
-        foreach(string name in new[]{"DM","Groups"}){bool active=(name=="Groups")==model.Groups;var tab=Find<Button>(name);tab.Background=Brush("Transparent");tab.Foreground=Brush(active?"#EDF1F5":"#A1AEBB");tab.BorderBrush=Brush(active?"#4297E8":"Transparent");tab.BorderThickness=new Thickness(0,0,0,2);}
-        RefreshVoiceUi();
-    }
-    static string ConnectionStatusText(ConversationModel conversation){string state=conversation.ConnectionState??"Offline";return state=="Ready"?"●  Online · Authenticated TLS":state=="Offline"?"○  Offline · Direct message":"●  "+state;}
-    static Brush Brush(string hex){return (Brush)new BrushConverter().ConvertFromString(hex);}
-    async void CopyId(){
-        string detected=DefaultReachableHost();if(!String.IsNullOrEmpty(detected))shareHost=detected;
-        string value=core.Share(shareHost,model.Port,model.OwnId);
-        if(String.IsNullOrEmpty(value)){Notify("The local identity is not ready.");return;}
-        for(int attempt=0;attempt<6;attempt++){
-            try{Clipboard.SetText(value);model.Status="PeerChat ID copied · "+shareHost+":"+model.Port;Refresh();return;}
-            catch(System.Runtime.InteropServices.COMException){}
-            await Task.Delay(100);
+    void ShowGroupFlyout(string anchorName,string focus){
+        var group=model.SelectedGroup;if(group==null){Notify("Select a group first.");return;}var panel=new StackPanel();panel.Children.Add(FlyoutText(group.Name,18));panel.Children.Add(new TextBlock{Text=group.MemberCount+" members · client-owned",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
+        var members=group.Data.members??new GroupMemberData[0];var invites=group.Data.invites??new GroupMemberData[0];var mine=members.FirstOrDefault(member=>member.peer==model.OwnId);var invitation=invites.FirstOrDefault(member=>member.peer==model.OwnId);
+        if(focus=="invite"){
+            panel.Children.Add(FlyoutText("Invite a friend",15));panel.Children.Add(new TextBlock{Text="Offline friends remain listed. Sending still requires a verified device.",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,5,0,10)});
+            var candidates=model.GroupInviteCandidates(group.Data).ToArray();if(mine==null||mine.role<2)panel.Children.Add(FlyoutText("Only an owner or admin can invite members.",13,true));else if(candidates.Length==0)panel.Children.Add(FlyoutText("No uninvited friends are available.",13,true));else foreach(var friend in candidates){var candidate=friend;panel.Children.Add(FlyoutAction(candidate.Name,()=>{if(candidate.Contact==null||!candidate.Contact.verified){Notify("Verify "+candidate.Name+"'s device before sending this invitation.");return;}if(core.InviteToGroup(group.Id,candidate.AccountId,candidate.Contact.peer,candidate.Name)){model.Status="Invitation queued for "+candidate.Name+".";CloseHeaderFlyout();Refresh();}else Notify("The invitation could not be queued.");}));}
+            OpenHeaderFlyout(anchorName,panel);return;
         }
-        model.Status="Clipboard is busy. Please try Copy My ID again.";Refresh();
+        if(focus=="members"){
+            panel.Children.Add(FlyoutText("Members ("+members.Length+")",15));foreach(var member in members.OrderByDescending(item=>item.role).ThenBy(item=>item.name)){var memberCopy=member;string role=member.role==3?"Owner":member.role==2?"Admin":"Member";panel.Children.Add(new TextBlock{Text=member.name+" · "+role,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,8,0,4)});bool canManage=mine!=null&&member.account!=mine.account&&((mine.role==3&&member.role<3)||(mine.role==2&&member.role==1));if(canManage){var actions=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,4)};if(mine.role==3){var roleButton=FlyoutAction(member.role==2?"Demote":"Promote",()=>{core.SetGroupAdmin(group.Id,memberCopy.account,memberCopy.role!=2);CloseHeaderFlyout();});roleButton.Margin=new Thickness(0,0,6,0);actions.Children.Add(roleButton);}actions.Children.Add(FlyoutAction("Remove",()=>{if(Confirm("Remove member","Remove "+memberCopy.name+" from this group?","Remove")){core.RemoveGroupMember(group.Id,memberCopy.account);CloseHeaderFlyout();}},true));panel.Children.Add(actions);}}
+            if(invites.Length>0){panel.Children.Add(new Separator{Margin=new Thickness(0,10,0,10)});panel.Children.Add(FlyoutText("Pending Invites ("+invites.Length+")",15));foreach(var pending in invites.OrderBy(item=>item.name))panel.Children.Add(new TextBlock{Text=pending.name+" · Pending Invite",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,7,0,0)});}
+            OpenHeaderFlyout(anchorName,panel);return;
+        }
+        panel.Children.Add(FlyoutText("Group Settings",15));panel.Children.Add(new TextBlock{Text="Group ID\n"+group.Id,Foreground=Brush("#A1AEBB"),FontSize=11,Margin=new Thickness(0,7,0,12),TextWrapping=TextWrapping.Wrap});
+        if(invitation!=null){panel.Children.Add(FlyoutAction("Accept invitation",()=>{core.RespondToGroupInvite(group.Id,true);CloseHeaderFlyout();}));panel.Children.Add(FlyoutAction("Decline invitation",()=>{core.RespondToGroupInvite(group.Id,false);CloseHeaderFlyout();},true));}
+        if(mine!=null&&mine.role>=2)panel.Children.Add(FlyoutAction("Rename Group",()=>{CloseHeaderFlyout();var values=Dialog("Rename group",new[]{"Group name"},new[]{group.Name},"Rename","The rename is signed locally and replicated to members.");if(values!=null)core.RenameGroup(group.Id,values[0].Trim());}));
+        if(mine!=null&&mine.role!=3)panel.Children.Add(FlyoutAction("Leave Group",()=>{CloseHeaderFlyout();if(Confirm("Leave group","Leave "+group.Name+"? Your signed leave event will be replicated to members.","Leave"))core.LeaveGroup(group.Id);},true));else if(mine!=null)panel.Children.Add(FlyoutText("The owner cannot leave while responsible for the group.",12,true));
+        OpenHeaderFlyout(anchorName,panel);
     }
-    void PromptProfileAccountSetup(){if(accountSetupPrompted||!interactiveAccountSetup||profileManager==null||accountLink!=null||accountStore.Exists)return;accountSetupPrompted=true;window.Dispatcher.BeginInvoke(new Action(()=>{var dialog=new Window{Title="Connect this profile",Owner=window,Width=490,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;panel.Children.Add(new TextBlock{Text="Connect "+(localProfile==null?"this profile":localProfile.Name),FontSize=24,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text="Sign in or create the account that belongs to this local profile. You can also continue offline; local history and Direct P2P do not require the server.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,8,0,20)});var signIn=new Button{Content="Sign In",Margin=new Thickness(0,0,0,8),Background=Brush("#275AA7")};var create=new Button{Content="Create Account",Margin=new Thickness(0,0,0,8)};var offline=new Button{Content="Continue Offline"};signIn.Click+=(s,e)=>{dialog.Close();window.Dispatcher.BeginInvoke(new Action(()=>Account(true)));};create.Click+=(s,e)=>{dialog.Close();window.Dispatcher.BeginInvoke(new Action(()=>Account(false)));};offline.Click+=(s,e)=>dialog.Close();panel.Children.Add(signIn);panel.Children.Add(create);panel.Children.Add(offline);dialog.ShowDialog();}));}
-    string[] AccountDialog(string title,string accept,string presetUsername="",bool lockUsername=false){
-        var dialog=new Window{Title=title,Owner=window,Width=470,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),FontSize=15,Resources=window.Resources};
-        var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;panel.Children.Add(new TextBlock{Text=title,FontSize=24,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,8)});panel.Children.Add(new TextBlock{Text="Your account uses the configured PeerChat service. The server receives a password verifier, never this password.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,0,0,18)});
-        var labels=new[]{"Username / friend code","Password"};var username=new TextBox{Text=presetUsername??"",IsReadOnly=lockUsername};var password=new PasswordBox{};var controls=new Control[]{username,password};for(int i=0;i<labels.Length;i++){panel.Children.Add(new TextBlock{Text=labels[i],Margin=new Thickness(0,0,0,6)});controls[i].Margin=new Thickness(0,0,0,13);panel.Children.Add(controls[i]);}
-        var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var cancel=new Button{Content="Cancel",IsCancel=true,Margin=new Thickness(0,0,8,0)};var save=new Button{Content=accept,Background=Brush("#275AA7")};cancel.Click+=(s,e)=>dialog.DialogResult=false;save.Click+=(s,e)=>dialog.DialogResult=true;buttons.Children.Add(cancel);buttons.Children.Add(save);panel.Children.Add(buttons);dialog.Loaded+=(s,e)=>username.Focus();return dialog.ShowDialog()==true?new[]{username.Text,password.Password}:null;
-    }
-    async void Account(bool login){
-        if(String.IsNullOrEmpty(model.OwnId)){Notify("Wait for the encrypted profile to finish opening.");return;}var binding=accountStore.Load();if(binding==null&&accountStore.Exists){Notify("This profile's protected account link could not be read. It will stay offline and cannot be linked to another account silently.");return;}if(!login&&binding!=null){Notify("This local profile is already linked to @"+binding.Username+". Create or switch to another local profile for a different account.");return;}var values=AccountDialog(login?"Sign in to PeerChat":"Create PeerChat account",login?"Sign in":"Create account",binding==null?"":binding.Username,binding!=null);if(values==null)return;DiscoveryClient candidate=null;try{busy=true;model.Status=login?"Signing this profile in…":"Creating and linking this profile…";Refresh();candidate=NewDiscoveryClient();await Task.Run(()=>{if(login)candidate.Login(values[0].Trim(),values[1]);else candidate.Register(values[0].Trim(),values[1],model.OwnId);});if(binding!=null&&binding.AccountId!=candidate.AccountId){try{await Task.Run(()=>candidate.Logout());}catch{}throw new InvalidOperationException("This local profile is linked to @"+binding.Username+". Switch profiles to use another account.");}accountLink=accountStore.SaveSession(candidate.AccountId,candidate.Username,candidate.Host,candidate.Port,candidate.CertificateSha256,candidate.SessionToken);SaveDiscoveryService(candidate.Host,candidate.Port,candidate.CertificateSha256);var presence=await Task.Run(()=>candidate.ReportPresence(model.OwnId,shareHost,model.Port));discovery=candidate;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(discovery.AccountId,discovery.Username);core.LoadGroups();discovery.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+discovery.Username+" · Discoverable";}catch(Exception error){model.Status=error.Message;}finally{busy=false;Refresh();}RefreshFriendState();
-    }
-    async void SignOut(){var signedOut=discovery;if(signedOut!=null)signedOut.StopEventChannel();discovery=null;discoveryRestored=true;accountLink=accountStore.ClearSession();friendState=new FriendState();friendRequestStates.Clear();friendDirectory.Clear();friendPresence.Clear();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}model.Status=(accountLink==null?"Profile":"@"+accountLink.Username)+" signed out · local identity, trust, groups, and history remain available";Refresh();if(signedOut!=null)try{await Task.Run(()=>signedOut.Logout());}catch{/* Local sign-out is complete; an unreachable server session expires normally. */}}
-    void HandleDiscoveryEvent(DiscoveryEvent notification){if(window==null)return;window.Dispatcher.BeginInvoke(new Action(()=>{if(discovery==null)return;model.Status=notification!=null&&notification.Event=="channel_connected"?"Discovery reconnected · refreshing…":"Friend state changed · refreshing…";Refresh();RefreshFriendState();}));}
-    void ApplyPresenceDiagnostics(PresenceResult result){if(result==null)return;lastPublicCandidate=String.IsNullOrEmpty(result.PublicEndpointHost)?"Unavailable":result.PublicEndpointHost+":"+result.PublicEndpointPort;lastPublicCandidateSource=result.PublicCandidateSource??"Unavailable";lastObservedAddressClassification=result.ObservedAddressClassification??"Unavailable";TraceUi("Account/device diagnostics: account="+result.AccountId+" ("+result.Username+"); local Peer ID="+model.OwnId+"; server-registered Peer ID="+result.RegisteredPublicIdentity+"; LAN candidate="+result.EndpointHost+":"+result.EndpointPort+"; public candidate="+lastPublicCandidate+"; source="+lastPublicCandidateSource+"; observed classification="+lastObservedAddressClassification);}
-    async void RefreshPresence(){if(presenceInFlight||discovery==null||String.IsNullOrEmpty(discovery.SessionToken))return;presenceInFlight=true;lastPresenceUtc=DateTime.UtcNow;try{var result=await Task.Run(()=>discovery.ReportPresence(model.OwnId,shareHost,model.Port));ApplyPresenceDiagnostics(result);SaveDiscoverySession();}catch{/* A later heartbeat or event-channel reconnect repairs transient failures. */}finally{presenceInFlight=false;}}
-    // The event stream is the primary update path. A slow bounded snapshot repairs missed
-    // notifications and covers the short period while an event channel reconnects.
-    async void RefreshFriendState(){
-        if(friendRefreshInFlight||discovery==null||String.IsNullOrEmpty(discovery.SessionToken))return;friendRefreshInFlight=true;
-        try{
-            var state=await Task.Run(()=>discovery.GetFriendState());friendState=state;lastFriendRefreshUtc=DateTime.UtcNow;friendRequestStates.Clear();friendDirectory.Clear();
-            foreach(var item in state.Incoming)friendRequestStates[item.AccountId]="Incoming Request";foreach(var item in state.Outgoing)friendRequestStates[item.AccountId]="Request Sent";conversationIndex.Reconcile(state.Friends);var active=new HashSet<long>();
-            foreach(var item in state.Friends){
-                friendRequestStates[item.AccountId]="Friends";friendDirectory[item.AccountId]=item;active.Add(item.AccountId);var binding=conversationIndex.Records.First(value=>value.AccountId==item.AccountId);bool reused;var conversation=model.BindFriend(item.AccountId,item.Username,item.PublicIdentity,binding.KnownPeerIds,out reused);
-                var old=conversation.Contact;bool endpointChanged=old==null||old.peer!=item.PublicIdentity||old.host!=(item.EndpointHost??"")||old.port!=(ushort)Math.Max(0,Math.Min(65535,item.EndpointPort))||old.publicHost!=(item.PublicEndpointHost??"")||old.publicPort!=(ushort)Math.Max(0,Math.Min(65535,item.PublicEndpointPort));bool previousPresence;bool presenceChanged=!friendPresence.TryGetValue(item.AccountId,out previousPresence)||previousPresence!=item.Online;friendPresence[item.AccountId]=item.Online;
-                bool verified=old!=null&&old.peer==item.PublicIdentity&&old.verified;conversation.Contact=new ContactData{peer=item.PublicIdentity,name=item.Username,host=item.EndpointHost??"",port=(ushort)Math.Max(0,Math.Min(65535,item.EndpointPort)),publicHost=item.PublicEndpointHost??"",publicPort=(ushort)Math.Max(0,Math.Min(65535,item.PublicEndpointPort)),verified=verified};conversation.Refresh();TraceUi("Friend conversation "+(reused?"reused":"created")+": account="+item.AccountId+"; username="+item.Username+"; device Peer ID="+item.PublicIdentity+"; local conversation="+conversation.ConversationId+"; endpoint="+(item.EndpointHost??"")+":"+item.EndpointPort);
-                if(item.Online&&!conversation.Online&&(endpointChanged||presenceChanged))ConnectFriendCandidate(item,conversation,true,"candidate update");
-            }
-            model.ReconcileFriends(active);RefreshList();Refresh();
-        }catch(Exception error){model.Status="Friend status unavailable: "+error.Message;Refresh();}finally{friendRefreshInFlight=false;}
-    }
-    async void SendFriendRequest(DiscoverySearchResult result){if(discovery==null)return;try{string state=await Task.Run(()=>discovery.SendFriendRequest(result.AccountId));model.Status=state=="accepted_crossed"?"You are now friends with "+result.Username+".":"Friend request sent to "+result.Username+".";RefreshFriendState();}catch(Exception error){model.Status=error.Message;Refresh();}}
-    async void RespondToFriendRequest(DiscoverySearchResult result,bool accept){if(discovery==null)return;try{await Task.Run(()=>discovery.RespondToFriendRequest(result.AccountId,accept));model.Status=accept?"You are now friends with "+result.Username+".":"Friend request rejected.";RefreshFriendState();}catch(Exception error){model.Status=error.Message;Refresh();}}
-    async void CancelFriendRequest(DiscoverySearchResult result){if(discovery==null)return;try{await Task.Run(()=>discovery.CancelFriendRequest(result.AccountId));model.Status="Friend request to "+result.Username+" cancelled.";RefreshFriendState();}catch(Exception error){model.Status=error.Message;Refresh();}}
-    async void RemoveFriend(DiscoverySearchResult result){if(discovery==null)return;try{await Task.Run(()=>discovery.RemoveFriend(result.AccountId));model.Status=result.Username+" was removed from your friends. Local history was kept.";RefreshFriendState();}catch(Exception error){model.Status=error.Message;Refresh();}}
-    async void SetBlocked(DiscoverySearchResult result,bool blocked){if(discovery==null)return;try{await Task.Run(()=>discovery.SetBlocked(result.AccountId,blocked));model.Status=blocked?result.Username+" is blocked.":result.Username+" is unblocked.";RefreshFriendState();}catch(Exception error){model.Status=error.Message;Refresh();}}
-    Border SettingsCard(string title,string description,FrameworkElement body){var stack=new StackPanel();stack.Children.Add(new TextBlock{Text=title,FontSize=18,FontWeight=FontWeights.SemiBold});stack.Children.Add(new TextBlock{Text=description,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,4,0,14),TextWrapping=TextWrapping.Wrap});stack.Children.Add(body);return new Border{Background=Brush("#111920"),BorderBrush=Brush("#25313C"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Padding=new Thickness(18),Margin=new Thickness(0,0,0,14),Child=stack};}
-    Border FriendRequestCard(DiscoverySearchResult person,string primary,Action primaryAction,string secondary=null,Action secondaryAction=null,string tertiary=null,Action tertiaryAction=null){var row=new Grid();row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.Children.Add(new TextBlock{Text=person.Username+"  ·  "+(person.Online?"● Online":"○ Offline"),VerticalAlignment=VerticalAlignment.Center,Foreground=Brush(person.Online?"#36D873":"#AAB7C4")});var actions=new StackPanel{Orientation=Orientation.Horizontal};var button=new Button{Content=primary,Padding=new Thickness(12,7,12,7),Background=Brush("#244C79")};button.Click+=(s,e)=>primaryAction();actions.Children.Add(button);if(!String.IsNullOrEmpty(secondary)){var second=new Button{Content=secondary,Padding=new Thickness(12,7,12,7),Margin=new Thickness(7,0,0,0),Background=Brush("#202B35")};second.Click+=(s,e)=>secondaryAction();actions.Children.Add(second);}if(!String.IsNullOrEmpty(tertiary)){var third=new Button{Content=tertiary,Padding=new Thickness(12,7,12,7),Margin=new Thickness(7,0,0,0),Background=Brush("#202B35")};third.Click+=(s,e)=>tertiaryAction();actions.Children.Add(third);}Grid.SetColumn(actions,1);row.Children.Add(actions);return new Border{Background=Brush("#18222C"),BorderBrush=Brush("#2E3C49"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(9),Padding=new Thickness(10),Margin=new Thickness(0,5,0,0),Child=row};}
-    async void FriendRequestsDialog(){if(discovery==null)return;var opened=Stopwatch.StartNew();TraceUi("Friend Requests triggered; dispatching snapshot");try{friendState=await Task.Run(()=>discovery.GetFriendState());TraceUi("Friend Requests snapshot returned after "+opened.ElapsedMilliseconds+" ms");}catch(Exception error){Notify("Friend requests are unavailable: "+error.Message);return;}var dialog=new Window{Title="Friend Requests",Owner=window,Width=590,Height=650,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#0C1116"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var frame=new Border{Background=Brush("#101820"),BorderBrush=Brush("#293844"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(14),Margin=new Thickness(12),Padding=new Thickness(24)};dialog.Content=frame;var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto};frame.Child=scroll;var stack=new StackPanel();scroll.Content=stack;stack.Children.Add(new TextBlock{Text="Friend Requests",FontSize=25,FontWeight=FontWeights.SemiBold});stack.Children.Add(new TextBlock{Text="Server-backed requests, friends, and blocks.",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,5,0,18)});var incoming=new StackPanel();if(friendState.Incoming.Count==0)incoming.Children.Add(new TextBlock{Text="No incoming requests yet.",Foreground=Brush("#A1AEBB")});foreach(var person in friendState.Incoming)incoming.Children.Add(FriendRequestCard(person,"Accept",()=>{RespondToFriendRequest(person,true);dialog.Close();},"Reject",()=>{RespondToFriendRequest(person,false);dialog.Close();}));stack.Children.Add(SettingsCard("Incoming Requests","Accept creates a durable account friendship.",incoming));var outgoing=new StackPanel();if(friendState.Outgoing.Count==0)outgoing.Children.Add(new TextBlock{Text="No pending requests.",Foreground=Brush("#A1AEBB")});foreach(var person in friendState.Outgoing)outgoing.Children.Add(FriendRequestCard(person,"Cancel",()=>{CancelFriendRequest(person);dialog.Close();}));stack.Children.Add(SettingsCard("Pending Outgoing","Requests remain for offline recipients.",outgoing));var friends=new StackPanel();if(friendState.Friends.Count==0)friends.Children.Add(new TextBlock{Text="No friends yet.",Foreground=Brush("#A1AEBB")});foreach(var person in friendState.Friends)friends.Children.Add(FriendRequestCard(person,"Message",()=>{OpenFriendConversation(person);dialog.Close();},"Remove",()=>{RemoveFriend(person);dialog.Close();},"Block",()=>{if(Confirm("Block user","Block "+person.Username+"? This also removes the friendship and pending requests.","Block"))SetBlocked(person,true);dialog.Close();}));stack.Children.Add(SettingsCard("Friends","Open a direct conversation or manage the friendship.",friends));var blocked=new StackPanel();if(friendState.Blocked.Count==0)blocked.Children.Add(new TextBlock{Text="No blocked accounts.",Foreground=Brush("#A1AEBB")});foreach(var person in friendState.Blocked)blocked.Children.Add(FriendRequestCard(person,"Unblock",()=>{SetBlocked(person,false);dialog.Close();}));stack.Children.Add(SettingsCard("Blocked","Blocked accounts cannot search for or request you.",blocked));var close=new Button{Content="Close",HorizontalAlignment=HorizontalAlignment.Right,Padding=new Thickness(18,9,18,9)};close.Click+=(s,e)=>dialog.Close();stack.Children.Add(close);TraceUi("Friend Requests dialog constructed after "+opened.ElapsedMilliseconds+" ms; showing");dialog.ShowDialog();}
-    string ClientBackupDirectory(){return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"PeerChat-backup-"+DateTime.Now.ToString("yyyyMMdd-HHmmss"));}
-    void BackupClientState(){try{if(!Directory.Exists(directory)){Notify("The local profile directory does not exist yet.");return;}string target=ClientBackupDirectory();if(profileManager!=null)profileManager.BackupSelected(target);else CopyDirectory(directory,Path.Combine(target,"PeerChat"));Notify("Selected local profile backed up to:\n"+target);}catch(Exception error){Notify("Client backup failed: "+error.Message);}}
-    static void CopyDirectory(string source,string target){Directory.CreateDirectory(target);foreach(string file in Directory.GetFiles(source))File.Copy(file,Path.Combine(target,Path.GetFileName(file)),true);foreach(string child in Directory.GetDirectories(source))CopyDirectory(child,Path.Combine(target,Path.GetFileName(child)));}
-    void RestartWithProfile(string profile){string exe=Process.GetCurrentProcess().MainModule.FileName;Process.Start(new ProcessStartInfo(exe,"--data-dir \""+profile.Replace("\"","\\\"")+"\" --port 0"){UseShellExecute=false});Environment.Exit(0);}
-    void StopProfileServices(){timer.Stop();if(discovery!=null)discovery.StopEventChannel();discovery=null;core.Dispose();}
-    void RestartManaged(){string exe=Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);if(!File.Exists(exe))throw new FileNotFoundException("PeerChat executable was not found for restart.",exe);string arguments="--install-root \""+profileManager.InstallRoot.Replace("\"","\\\"")+"\"";TraceStartup(profileManager.InstallRoot,"restart-launch executable="+exe+" arguments="+arguments);var launched=Process.Start(new ProcessStartInfo(exe,arguments){UseShellExecute=false,WorkingDirectory=AppDomain.CurrentDomain.BaseDirectory});if(launched==null)throw new InvalidOperationException("Windows did not start the replacement PeerChat process.");TraceStartup(profileManager.InstallRoot,"restart-launched replacement-pid="+launched.Id);Environment.Exit(0);}
-    async void SwitchLocalProfile(){
-        if(profileManager==null){Notify("Profile switching is available from the normal installed client launch.");return;}
-        TraceStartup(profileManager.InstallRoot,"switch-requested from-profile="+localProfile.Id);
-        if(!Confirm("Switch local profile?","PeerChat will close all direct sessions and discovery activity, flush encrypted storage, and restart at the local profile chooser.","Switch Profile"))return;
-        TraceStartup(profileManager.InstallRoot,"switch-confirmed from-profile="+localProfile.Id);window.IsEnabled=false;
-        try{await Task.Run(()=>StopProfileServices());TraceStartup(profileManager.InstallRoot,"profile-services-stopped from-profile="+localProfile.Id);RestartManaged();}
-        catch(Exception error){window.IsEnabled=true;Notify("Profile switch failed: "+error.Message);}
-    }
-    void ResetFreshClient(){if(!Confirm("Reset selected local profile?","This creates a new Peer ID for this profile by replacing only its local identity, contacts, trust, settings, session, and encrypted history. Other local profiles and server accounts are not changed. A complete backup is created first.","Reset Selected Profile"))return;try{string backup=ClientBackupDirectory();StopProfileServices();if(profileManager!=null){profileManager.ResetSelected(backup);RestartManaged();}else{Directory.CreateDirectory(backup);Directory.Move(directory,Path.Combine(backup,"PeerChat"));RestartWithProfile(directory);}}catch(Exception error){Notify("Fresh-profile reset failed: "+error.Message);}}
-    void RestoreClientState(){var backups=Directory.GetDirectories(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"PeerChat-backup-*").Where(path=>Directory.Exists(Path.Combine(path,profileManager==null?"PeerChat":"PeerChatProfile"))).OrderByDescending(x=>x).ToArray();if(backups.Length==0){Notify("No compatible selected-profile backups were found on the Desktop.");return;}var choices=backups.Select(Path.GetFileName).ToArray();var selected=Dialog("Restore Client State",new[]{"Backup folder name"},new[]{choices[0]},"Restore","Only the currently selected local profile will be replaced. Available backups:\n"+String.Join("\n",choices));if(selected==null)return;string chosen=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),selected[0].Trim());string savedProfile=Path.Combine(chosen,profileManager==null?"PeerChat":"PeerChatProfile");if(!Directory.Exists(savedProfile)){Notify("That backup folder was not found.");return;}if(!Confirm("Replace selected local profile?","The current selected profile will be backed up and replaced. Other profiles are untouched.","Restore Selected Profile"))return;try{string safety=ClientBackupDirectory();StopProfileServices();if(profileManager!=null){profileManager.RestoreSelected(savedProfile,safety);RestartManaged();}else{Directory.CreateDirectory(safety);if(Directory.Exists(directory))Directory.Move(directory,Path.Combine(safety,"PeerChat"));CopyDirectory(savedProfile,directory);RestartWithProfile(directory);}}catch(Exception error){Notify("Client restore failed: "+error.Message);}}
-    void SettingsPage(){var service=LoadDiscoveryService();var dialog=new Window{Title="Settings",Owner=window,Width=1060,Height=720,MinWidth=900,MinHeight=620,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#0C1116"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var root=new Grid{Margin=new Thickness(18)};root.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(220)});root.ColumnDefinitions.Add(new ColumnDefinition());dialog.Content=root;var nav=new StackPanel{Margin=new Thickness(8,8,20,8)};nav.Children.Add(new TextBlock{Text="PeerChat",FontSize=27,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,28)});foreach(var item in new[]{"General","Account","Privacy","Notifications","Appearance","Connection","Advanced"}){var label=new TextBlock{Text=item,FontSize=15,Foreground=Brush(item=="Advanced"?"#EDF1F5":"#A1AEBB"),Margin=new Thickness(0,0,0,20)};nav.Children.Add(label);}nav.Children.Add(new TextBlock{Text="About\nVersion "+PeerChat.VersionInfo.Display,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,30,0,0)});root.Children.Add(nav);var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto};Grid.SetColumn(scroll,1);root.Children.Add(scroll);var content=new StackPanel();scroll.Content=content;content.Children.Add(new TextBlock{Text="Advanced",FontSize=29,FontWeight=FontWeights.SemiBold});content.Children.Add(new TextBlock{Text="Power-user, direct connection, identity, and development tools.",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,4,0,18)});
-        var tools=new StackPanel();var manual=new Button{Content="◉   Direct P2P Connection\n      Connect directly by hostname/IP and port without discovery",Padding=new Thickness(14),Margin=new Thickness(0,0,0,8)};manual.Click+=(s,e)=>{try{Manual(dialog);}catch(Exception error){Notify(error.Message,dialog);}};var copy=new Button{Content="▣   Copy My Peer ID\n      Copy the persistent cryptographic identity bundle",Padding=new Thickness(14),Margin=new Thickness(0,0,0,8)};copy.Click+=(s,e)=>CopyId();var identity=new Button{Content="♙   View Peer Identity\n      Inspect the permanent device identity and fingerprint",Padding=new Thickness(14),Margin=new Thickness(0,0,0,8)};identity.Click+=(s,e)=>Notify("Peer ID is the permanent cryptographic identity. IP addresses and ports are current connection endpoints.");tools.Children.Add(manual);tools.Children.Add(copy);tools.Children.Add(identity);content.Children.Add(SettingsCard("Advanced Tools","Direct P2P remains available if the optional PeerChat service is unavailable.",tools));
-        var endpoint=new StackPanel();var host=new TextBox{Text=service[0],Margin=new Thickness(0,0,0,8)};var port=new TextBox{Text=service[1],Margin=new Thickness(0,0,0,8)};endpoint.Children.Add(new TextBlock{Text="PeerChat Service Endpoint",Foreground=Brush("#AAB7C4")});endpoint.Children.Add(host);endpoint.Children.Add(new TextBlock{Text="TLS port",Foreground=Brush("#AAB7C4")});endpoint.Children.Add(port);var save=new Button{Content="Save Endpoint",Padding=new Thickness(14),HorizontalAlignment=HorizontalAlignment.Left};save.Click+=(s,e)=>{int number;if(!Int32.TryParse(port.Text,out number)||number<1||number>65535){Notify("Enter a valid TLS port.");return;}SaveDiscoveryService(host.Text.Trim(),number,host.Text.Trim()==service[0]&&number.ToString()==service[1]?service[2]:"");dialog.Close();model.Status="PeerChat service endpoint saved.";Refresh();};endpoint.Children.Add(save);content.Children.Add(SettingsCard("PeerChat Service","The public service assists discovery and relationships; direct peer communication remains an advanced fallback.",endpoint));
-        var conn=new StackPanel();conn.Children.Add(new TextBlock{Text="LAN: "+shareHost+":"+model.Port,Foreground=Brush("#D7E2EC")});conn.Children.Add(new TextBlock{Text="Public: Detecting…",Foreground=Brush("#AAB7C4"),Margin=new Thickness(0,7,0,0)});conn.Children.Add(new TextBlock{Text=model.Listening?"● Listening on local network":"○ Listener not ready",Foreground=Brush(model.Listening?"#36D873":"#AAB7C4"),Margin=new Thickness(0,7,0,0)});content.Children.Add(SettingsCard("Connection Details","Current endpoints are diagnostics, not permanent identity.",conn));content.Children.Add(SettingsCard("Privacy & Trust","Discoverability and trusted server/peer controls will be wired with the Milestone 2 service contract.",new TextBlock{Text="Discoverable\nFriends Only\nHidden\n\nNo private keys, passwords, tokens, or message contents are shown here.",Foreground=Brush("#AAB7C4")}));var debug=new StackPanel();debug.Children.Add(new TextBlock{Text="Profile: "+directory,Foreground=Brush("#AAB7C4"),TextWrapping=TextWrapping.Wrap});debug.Children.Add(new TextBlock{Text="Peer ID: "+(String.IsNullOrEmpty(model.OwnId)?"Not ready":model.OwnId),Foreground=Brush("#AAB7C4"),TextTrimming=TextTrimming.CharacterEllipsis,Margin=new Thickness(0,6,0,0)});debug.Children.Add(new TextBlock{Text="Service source: "+(File.Exists(DiscoveryServicePath)?"Saved override":"Packaged bootstrap")+"\nEndpoint: "+service[0]+":"+service[1],Foreground=Brush("#AAB7C4"),Margin=new Thickness(0,6,0,12)});var switchProfile=new Button{Content="Switch Local Profile",Padding=new Thickness(12),Margin=new Thickness(0,0,0,7),IsEnabled=profileManager!=null};switchProfile.Click+=(s,e)=>SwitchLocalProfile();var backup=new Button{Content="Backup Selected Profile",Padding=new Thickness(12),Margin=new Thickness(0,0,0,7)};backup.Click+=(s,e)=>BackupClientState();var reset=new Button{Content="Reset Selected Profile",Padding=new Thickness(12),Margin=new Thickness(0,0,0,7)};reset.Click+=(s,e)=>ResetFreshClient();var restore=new Button{Content="Restore Selected Profile",Padding=new Thickness(12)};restore.Click+=(s,e)=>RestoreClientState();debug.Children.Add(switchProfile);debug.Children.Add(backup);debug.Children.Add(reset);debug.Children.Add(restore);content.Children.Add(SettingsCard("Local Profile Tools","Switching restarts PeerChat after closing direct sessions and storage. Backup, reset, and restore affect only the selected profile.",debug));var closeButton=new Button{Content="Close",Padding=new Thickness(18,9,18,9),HorizontalAlignment=HorizontalAlignment.Right};closeButton.Click+=(s,e)=>dialog.Close();content.Children.Add(closeButton);dialog.ShowDialog();}
-    // Advanced development configuration is deliberately separate from account credentials. A
-    // normal production release will supply its service hostname and public CA validation here.
-    void DiscoverySettings(){var service=LoadDiscoveryService();var values=Dialog("PeerChat Server",new[]{"Server hostname or address","TLS port"},new[]{service[0],service[1]},"Save server","Advanced development setting. Changing the endpoint clears its trusted development server identity and asks for confirmation on the next connection.");if(values==null)return;int port;if(String.IsNullOrWhiteSpace(values[0])||!Int32.TryParse(values[1],out port)||port<1||port>65535){Notify("Enter a valid server address and TLS port.");return;}string host=values[0].Trim();string preservedPin=String.Equals(host,service[0],StringComparison.OrdinalIgnoreCase)&&port.ToString()==service[1]?service[2]:"";SaveDiscoveryService(host,port,preservedPin);model.Status="PeerChat server settings saved.";Refresh();}
-    static bool SameLocalSubnet(string candidate){IPAddress remote;if(!IPAddress.TryParse(candidate,out remote)||remote.AddressFamily!=AddressFamily.InterNetwork)return false;try{foreach(var network in NetworkInterface.GetAllNetworkInterfaces()){if(network.OperationalStatus!=OperationalStatus.Up)continue;foreach(var item in network.GetIPProperties().UnicastAddresses){var local=item.Address;var mask=item.IPv4Mask;if(local.AddressFamily!=AddressFamily.InterNetwork||mask==null)continue;byte[] a=remote.GetAddressBytes(),b=local.GetAddressBytes(),m=mask.GetAddressBytes();bool same=true;for(int i=0;i<4;i++)if((a[i]&m[i])!=(b[i]&m[i])){same=false;break;}if(same)return true;}}}catch{}return false;}
-    static bool IsPrivateCandidate(string candidate){IPAddress address;if(!IPAddress.TryParse(candidate,out address)||address.AddressFamily!=AddressFamily.InterNetwork)return false;byte[] b=address.GetAddressBytes();return b[0]==10||(b[0]==172&&b[1]>=16&&b[1]<=31)||(b[0]==192&&b[1]==168)||b[0]==169&&b[1]==254;}
-    static bool IsRouteFailure(string message){string value=(message??"").ToLowerInvariant();return value.Contains("tcp ")||value.Contains("connection refused")||value.Contains("unreachable")||value.Contains("dns")||value.Contains("address")&&value.Contains("invalid");}
-    static string ConnectionFailureSummary(string message){string value=(message??"").ToLowerInvariant();if(value.Contains("refused"))return "Connection refused";if(value.Contains("timeout")||value.Contains("timed out"))return "TCP timeout";if(value.Contains("tls")||value.Contains("secure session")||value.Contains("handshake"))return "TLS handshake failed";if(value.Contains("identity changed"))return "Peer identity changed";if(value.Contains("identity")||value.Contains("trust")||value.Contains("verification"))return "Identity verification required";if(value.Contains("candidate")||value.Contains("unreachable")||value.Contains("dns")||value.Contains("route"))return "No reachable candidates";return "Connection failed";}
-    void RecordConnection(string stage,ConversationModel conversation,string result,CoreEvent connectionEvent=null){var details=connectionEvent==null?connectionAttempts.For(conversation):connectionAttempts.Update(connectionEvent,conversation);connectionLog.Record(stage,conversation==null?0:conversation.AccountId,conversation==null?"":conversation.ConversationId,details.ExpectedPeer,details.PresentedPeer,details.Candidate,details.Source,details.Route,result);}
-    void RequestConversationHistory(ConversationModel conversation){if(conversation==null)return;foreach(var peer in conversation.KnownPeerIds.Concat(new[]{conversation.Contact==null?"":conversation.Contact.peer}).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal))if(conversation.RequestedPeerHistory.Add(peer))core.History(peer,long.MaxValue);conversation.RequestedHistory=true;}
-    string ConnectionDiagnosticsText(){var service=LoadDiscoveryService();var selected=model.Selected;var details=connectionAttempts.For(selected);return "PeerChat connection details\nTimestamp: "+DateTime.UtcNow.ToString("O")+"\nProfile: "+(localProfile==null?"Local":localProfile.Name)+"\nAccount ID: "+(selected==null||selected.AccountId<=0?"Unavailable":selected.AccountId.ToString())+"\nConversation ID: "+(selected==null?"None":selected.ConversationId)+"\nDiscovery endpoint: "+service[0]+":"+service[1]+"\nLocal P2P listener: 0.0.0.0:"+model.Port+"\nLAN candidate: "+shareHost+":"+model.Port+"\nPublic candidate: "+lastPublicCandidate+"\nPublic candidate source: "+lastPublicCandidateSource+"\nObserved address: "+lastObservedAddressClassification+"\nSelected candidate: "+details.Candidate+"\nSelection reason: "+details.Route+"\nExpected Peer ID: "+(String.IsNullOrEmpty(details.ExpectedPeer)?"Unspecified":details.ExpectedPeer)+"\nPresented/current Peer ID: "+(String.IsNullOrEmpty(details.PresentedPeer)?"Not presented":details.PresentedPeer)+"\nTCP/TLS state: "+details.TransportState+"\nTrust state: "+details.TrustState+"\nLast failure: "+details.Failure;}
-    void ConnectFriendCandidate(DiscoverySearchResult friend,ConversationModel conversation,bool force,string trigger){
-        string lan=friend.EndpointHost??"",publicHost=friend.PublicEndpointHost??"";int lanPort=friend.EndpointPort,publicPort=friend.PublicEndpointPort;
-        bool hasLan=!String.IsNullOrWhiteSpace(lan)&&lanPort>0&&lanPort<=65535,hasPublic=!String.IsNullOrWhiteSpace(publicHost)&&publicPort>0&&publicPort<=65535;
-        bool sameLan=hasLan&&SameLocalSubnet(lan);string selectedHost=lan,reason="same LAN",source="Discovery LAN candidate";int selectedPort=lanPort;
-        if(!sameLan&&hasPublic){selectedHost=publicHost;selectedPort=publicPort;reason="public candidate (LAN candidate is outside local subnets)";source=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery public candidate":friend.PublicCandidateSource;conversation.PublicAttempted=true;}
-        else if(!hasLan&&hasPublic){selectedHost=publicHost;selectedPort=publicPort;reason="public candidate (no LAN candidate)";source=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery public candidate":friend.PublicCandidateSource;conversation.PublicAttempted=true;}
-        if(trigger=="candidate update")reason="candidate update · "+reason;else if(trigger=="manual retry")reason="manual retry · "+reason;
-        lastPublicCandidate=hasPublic?publicHost+":"+publicPort:"Unavailable";lastPublicCandidateSource=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery friend state":friend.PublicCandidateSource;lastObservedAddressClassification=String.IsNullOrEmpty(friend.ObservedAddressClassification)?"Unavailable":friend.ObservedAddressClassification;
-        TraceUi("Candidate diagnostics: account="+friend.AccountId+"; LAN candidate: "+(hasLan?lan+":"+lanPort:"none")+"; Public candidate: "+(hasPublic?publicHost+":"+publicPort:"none")+"; Selected candidate: "+(String.IsNullOrEmpty(selectedHost)?"none":selectedHost+":"+selectedPort)+"; Selection reason: "+reason);
-        if(String.IsNullOrWhiteSpace(selectedHost)||selectedPort<1){model.Status=friend.Online?"Finding peer… no reachable endpoint has been published yet.":"Offline — waiting for this friend to publish a reachable endpoint.";var unavailable=new CoreEvent{peer=friend.PublicIdentity,expected=friend.PublicIdentity,candidate="None",source="Discovery friend state",route=trigger,attempt=0};connectionAttempts.Update(unavailable,conversation,"Offline",null,"No reachable candidates");RecordConnection("failure",conversation,"No reachable candidates",unavailable);Refresh();return;}
-        conversation.ConnectionState="Connecting"+(conversation.PublicAttempted?" via public endpoint":" via LAN endpoint");conversation.Refresh();model.Status="Connecting to "+friend.Username+" ("+reason+")…";Refresh();
-        try{core.Connect(selectedHost,(ushort)selectedPort,friend.PublicIdentity,source,reason,force);}catch(Exception error){conversation.ConnectionState="Connection failed";conversation.Refresh();var failed=new CoreEvent{peer=friend.PublicIdentity,expected=friend.PublicIdentity,candidate=selectedHost+":"+selectedPort,source=source,route=reason};connectionAttempts.Update(failed,conversation,"Failed",null,ConnectionFailureSummary(error.Message));RecordConnection("failure",conversation,ConnectionFailureSummary(error.Message),failed);model.Status="Connection failed: "+error.Message;Refresh();}
-    }
-    void OpenFriendConversation(DiscoverySearchResult requested,bool force=false,string trigger="selection"){
-        DiscoverySearchResult friend;lock(friendDirectory){if(!friendDirectory.TryGetValue(requested.AccountId,out friend))friend=requested;}
-        var binding=conversationIndex.Records.FirstOrDefault(value=>value.AccountId==friend.AccountId);bool reused;IEnumerable<string> known=binding==null?(IEnumerable<string>)new[]{friend.PublicIdentity}:binding.KnownPeerIds;var conversation=model.BindFriend(friend.AccountId,friend.Username,friend.PublicIdentity,known,out reused);var existingVerified=conversation.Contact!=null&&conversation.Contact.peer==friend.PublicIdentity&&conversation.Contact.verified;
-        string lan=friend.EndpointHost??"",publicHost=friend.PublicEndpointHost??"";int lanPort=friend.EndpointPort,publicPort=friend.PublicEndpointPort;
-        conversation.Contact=new ContactData{peer=friend.PublicIdentity,name=friend.Username,host=lan,port=(ushort)Math.Max(0,Math.Min(65535,lanPort)),publicHost=publicHost,publicPort=(ushort)Math.Max(0,Math.Min(65535,publicPort)),verified=existingVerified};
-        conversation.PublicAttempted=false;conversation.ConnectionState=friend.Online?"Finding peer":"Offline";conversation.Refresh();model.Groups=false;model.Selected=conversation;conversation.Unread=0;RequestConversationHistory(conversation);TraceUi("Friend conversation "+(reused?"reused":"created")+": account="+friend.AccountId+"; username="+friend.Username+"; device Peer ID="+friend.PublicIdentity+"; local conversation="+conversation.ConversationId);ShowConversation();RefreshList();Refresh();
-        ConnectFriendCandidate(friend,conversation,force,trigger);
-    }
-    Border DiscoveryCard(DiscoverySearchResult result){
-        var card=new Border{Background=Brush("#18222C"),BorderBrush=Brush("#2E3C49"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Padding=new Thickness(14),Margin=new Thickness(0,0,0,9)};
-        var row=new Grid();row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(48)});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});card.Child=row;
-        var avatar=new Grid{Width=40,Height=40,VerticalAlignment=VerticalAlignment.Top};avatar.Children.Add(new Ellipse{Fill=Brush("#365D89")});avatar.Children.Add(new TextBlock{Text=String.IsNullOrEmpty(result.Username)?"?":result.Username.Substring(0,1).ToUpperInvariant(),HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,FontSize=18,FontWeight=FontWeights.SemiBold});var dot=new Ellipse{Width=9,Height=9,Fill=Brush(result.Online?"#36D873":"#71808E"),Stroke=Brush("#18222C"),StrokeThickness=2,HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Bottom};avatar.Children.Add(dot);row.Children.Add(avatar);
-        var detailsPanel=new StackPanel{VerticalAlignment=VerticalAlignment.Center};Grid.SetColumn(detailsPanel,1);detailsPanel.Children.Add(new TextBlock{Text=result.Username,FontSize=16,FontWeight=FontWeights.SemiBold,TextTrimming=TextTrimming.CharacterEllipsis});var metadata=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,3,0,0)};metadata.Children.Add(new TextBlock{Text="@"+result.Username,Foreground=Brush("#AAB7C4"),FontSize=12});metadata.Children.Add(new TextBlock{Text=result.Online?"  ● Online":"  ○ Offline",Foreground=Brush(result.Online?"#36D873":"#9AA7B4"),FontSize=12});detailsPanel.Children.Add(metadata);row.Children.Add(detailsPanel);
-        string requestState;friendRequestStates.TryGetValue(result.AccountId,out requestState);string label=String.IsNullOrEmpty(requestState)?"Add Friend":requestState;bool actionable=label=="Add Friend"||label=="Incoming Request"||label=="Friends";if(label=="Friends")label="Message";var add=new Button{Content=label,Background=Brush(actionable?"#244C79":"#202B35"),BorderBrush=Brush(actionable?"#3A6E9F":"#3A4650"),Foreground=Brush(actionable?"#EDF1F5":"#AAB7C4"),Padding=new Thickness(12,8,12,8),HorizontalContentAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(10,0,0,0),Tag=result,IsEnabled=actionable};add.Click+=(s,e)=>{var selected=(DiscoverySearchResult)((Button)s).Tag;if(requestState=="Incoming Request"){if(Confirm("Friend request",selected.Username+" wants to be friends. Accept this request?","Accept"))RespondToFriendRequest(selected,true);else RespondToFriendRequest(selected,false);}else if(requestState=="Friends")OpenFriendConversation(selected);else SendFriendRequest(selected);};Grid.SetColumn(add,2);row.Children.Add(add);return card;
-    }
-    void ShowDiscoveryProfile(DiscoverySearchResult result){Notify(result.Username+"\n@"+result.Username+" · "+(result.Online?"Online":"Offline")+"\n\nThis is public discovery information. Use Add Friend to send a server-backed request.");}
-    void FindFriend(){
-        if(discovery==null||String.IsNullOrEmpty(discovery.SessionToken)){Notify("Create an account or sign in before searching.");return;}
-        var dialog=new Window{Title="Find Friends",Owner=window,Width=610,Height=620,MinWidth=520,MinHeight=460,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#0C1116"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),FontSize=15,Resources=window.Resources};
-        var frame=new Border{Background=Brush("#101820"),BorderBrush=Brush("#293844"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(14),Margin=new Thickness(12),Padding=new Thickness(24)};dialog.Content=frame;var layout=new Grid();layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition{Height=new GridLength(1,GridUnitType.Star)});frame.Child=layout;
-        var title=new StackPanel();title.Children.Add(new TextBlock{Text="Find Friends",FontSize=25,FontWeight=FontWeights.SemiBold});title.Children.Add(new TextBlock{Text="Find people by their public username or friend code.",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,5,0,18)});layout.Children.Add(title);
-        var searchSurface=new Border{Background=Brush("#17212A"),BorderBrush=Brush("#354553"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(11),Padding=new Thickness(13,2,13,2)};var searchRow=new Grid();searchRow.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});searchRow.ColumnDefinitions.Add(new ColumnDefinition());searchRow.Children.Add(new TextBlock{Text="⌕",FontFamily=new FontFamily("Segoe MDL2 Assets"),FontSize=17,Foreground=Brush("#AAB7C4"),VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,10,0)});var query=new TextBox{Background=Brush("#17212A"),BorderThickness=new Thickness(0),Padding=new Thickness(0,11,0,11),ToolTip="Search by username or friend code"};Grid.SetColumn(query,1);searchRow.Children.Add(query);searchSurface.Child=searchRow;Grid.SetRow(searchSurface,1);layout.Children.Add(searchSurface);
-        Func<string> summary=()=>"Pending outgoing: "+friendState.Outgoing.Count+"   Incoming requests: "+friendState.Incoming.Count+"   Friends: "+friendState.Friends.Count;var state=new TextBlock{Text="Start typing to find people on PeerChat\n\n"+summary(),Foreground=Brush("#A1AEBB"),Margin=new Thickness(2,13,2,10),FontSize=13};Grid.SetRow(state,2);layout.Children.Add(state);
-        var collection=new ObservableCollection<DiscoverySearchResult>();var resultsScroll=new ScrollViewer{Content=new StackPanel(),VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};Grid.SetRow(resultsScroll,3);layout.Children.Add(resultsScroll);
-        int generation=0;var debounce=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(300)};
-        Action clear=()=>{collection.Clear();state.Text="Start typing to find people on PeerChat\n\n"+summary();};
-        // ItemsControl uses explicit compact cards so the live collection is the only source for
-        // visible results; no hidden ListBox template or DataContext can swallow results.
-        Action rebuildCards=()=>{var host=new StackPanel();foreach(var item in collection)host.Children.Add(DiscoveryCard(item));resultsScroll.Content=host;state.Text=collection.Count==0?"No users found":collection.Count+" public profile"+(collection.Count==1?"":"s")+" found";};
-        debounce.Tick+=async(s,e)=>{debounce.Stop();int request=++generation;string prefix=query.Text.Trim();if(prefix.Length==0){clear();resultsScroll.Content=new StackPanel();return;}state.Text="Searching…";System.Diagnostics.Debug.WriteLine("PeerChat Find Friends text/debounce: '"+prefix+"', request "+request+".");try{var found=await Task.Run(()=>discovery.Suggest(prefix));dialog.Dispatcher.BeginInvoke(new Action(()=>{bool current=request==generation&&query.Text.Trim()==prefix;System.Diagnostics.Debug.WriteLine("PeerChat Find Friends response: "+found.Count+" result(s), current="+current+".");if(!current)return;collection.Clear();foreach(var result in found)collection.Add(result);rebuildCards();System.Diagnostics.Debug.WriteLine("PeerChat Find Friends UI collection: "+collection.Count+" item(s), visible="+resultsScroll.IsVisible+".");}));}catch(Exception error){dialog.Dispatcher.BeginInvoke(new Action(()=>{if(request!=generation)return;collection.Clear();resultsScroll.Content=new StackPanel();state.Text="Unable to search — server unavailable";System.Diagnostics.Debug.WriteLine("PeerChat Find Friends error: "+error.GetType().Name);}));}};
-        query.TextChanged+=(s,e)=>{generation++;debounce.Stop();if(query.Text.Trim().Length==0){clear();resultsScroll.Content=new StackPanel();}else debounce.Start();};dialog.Loaded+=(s,e)=>query.Focus();TraceUi("Find Friends dialog constructed; showing");dialog.ShowDialog();
-    }
-    void AddFriend(){var values=Dialog("Add Friend",new[]{"Paste a PeerChat ID"},new[]{""},"Save and connect","Your friend can send you their ID using Copy My ID. Offline friends stay in your contacts.");if(values==null)return;string error=core.Add(values[0].Trim(),model.OwnId);if(error.Length>0)Notify(error);else{model.Status="Contact requested. Connecting…";Refresh();}}
-    void Manual(){Manual(null);}
-    void Manual(Window owner){var values=Dialog("Manual Connect",new[]{"IP address or hostname","Listening port"},new[]{"","7777"},"Connect","Use this for LAN, VPN, or forwarded-port troubleshooting.",false,owner);if(values==null)return;ushort port;if(!UInt16.TryParse(values[1],out port)||port==0||String.IsNullOrWhiteSpace(values[0])){Notify("Enter an address and a port from 1 to 65535.",owner);return;}string host=values[0].Trim();core.Connect(host,port,"","Manual entry","manual direct",true);model.Status="Connecting to "+values[0]+"…";Refresh();}
-    async void Profile(){var values=Dialog("My Profile",new[]{"Display name","Listening port"},new[]{model.Name,model.Port.ToString()},"Save profile","Saving restarts your listener. Your persistent identity and encrypted history stay the same.");if(values==null)return;ushort port;if(String.IsNullOrWhiteSpace(values[0])||values[0].Length>64||!UInt16.TryParse(values[1],out port)||port==0){Notify("Use a name up to 64 characters and a port from 1 to 65535.");return;}foreach(var chat in model.Conversations.Values){chat.Online=false;chat.Refresh();}await Start(port,values[0].Trim());}
-    void Reconnect(){if(model.Selected==null)return;DiscoverySearchResult current;if(model.Selected.AccountId>0&&friendDirectory.TryGetValue(model.Selected.AccountId,out current)){OpenFriendConversation(current,true,"manual retry");return;}var contact=model.Selected.Contact;if(contact==null||String.IsNullOrEmpty(contact.host)||contact.port==0){var unavailable=new CoreEvent{peer=contact==null?"":contact.peer,expected=contact==null?"":contact.peer,candidate="None",source="Saved contact",route="manual retry"};connectionAttempts.Update(unavailable,model.Selected,"Offline",null,"No reachable candidates");RecordConnection("failure",model.Selected,"No reachable candidates",unavailable);Notify("No reachable candidates are saved for this conversation.");Refresh();return;}core.Connect(contact.host,contact.port,contact.peer,"Saved contact","manual retry",true);model.Status="Reconnecting to "+model.Selected.Name+"…";Refresh();}
+
+    private void ShowGroupInfoDialog()
+	{
+		GroupModel group = model.SelectedGroup;
+		if (group == null)
+		{
+			Notify("Select a group first.");
+			return;
+		}
+		Window dialog = new Window
+		{
+			Title = "Group details",
+			Owner = window,
+			Width = 540.0,
+			Height = 650.0,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#0C1116"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			Resources = window.Resources
+		};
+		ScrollViewer scrollViewer = new ScrollViewer();
+		scrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+		ScrollViewer scrollViewer2 = scrollViewer;
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Margin = new Thickness(24.0);
+		StackPanel stackPanel2 = (StackPanel)(scrollViewer2.Content = stackPanel);
+		dialog.Content = scrollViewer2;
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = group.Name,
+			FontSize = 25.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = "Client-owned group · " + group.Id,
+			TextWrapping = TextWrapping.Wrap,
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 5.0, 0.0, 18.0)
+		});
+		GroupMemberData groupMemberData = (group.Data.members ?? new GroupMemberData[0]).FirstOrDefault((GroupMemberData groupMemberData3) => groupMemberData3.peer == model.OwnId);
+		GroupMemberData groupMemberData2 = (group.Data.invites ?? new GroupMemberData[0]).FirstOrDefault((GroupMemberData groupMemberData3) => groupMemberData3.peer == model.OwnId);
+		if (groupMemberData2 != null)
+		{
+			StackPanel stackPanel4 = new StackPanel();
+			stackPanel4.Orientation = Orientation.Horizontal;
+			stackPanel4.Margin = new Thickness(0.0, 0.0, 0.0, 18.0);
+			StackPanel stackPanel5 = stackPanel4;
+			Button button = new Button();
+			button.Content = "Accept invitation";
+			button.Padding = new Thickness(14.0, 8.0, 14.0, 8.0);
+			button.Margin = new Thickness(0.0, 0.0, 8.0, 0.0);
+			Button button2 = button;
+			Button button3 = new Button();
+			button3.Content = "Decline";
+			button3.Padding = new Thickness(14.0, 8.0, 14.0, 8.0);
+			Button button4 = button3;
+			button2.Click += delegate
+			{
+				core.RespondToGroupInvite(group.Id, true);
+				dialog.Close();
+			};
+			button4.Click += delegate
+			{
+				core.RespondToGroupInvite(group.Id, false);
+				dialog.Close();
+			};
+			stackPanel5.Children.Add(button2);
+			stackPanel5.Children.Add(button4);
+			stackPanel2.Children.Add(stackPanel5);
+		}
+		if (groupMemberData != null && groupMemberData.role >= 2)
+		{
+			StackPanel stackPanel6 = new StackPanel();
+			stackPanel6.Orientation = Orientation.Horizontal;
+			stackPanel6.Margin = new Thickness(0.0, 0.0, 0.0, 18.0);
+			StackPanel stackPanel7 = stackPanel6;
+			Button button5 = new Button();
+			button5.Content = "Rename";
+			button5.Padding = new Thickness(14.0, 8.0, 14.0, 8.0);
+			button5.Margin = new Thickness(0.0, 0.0, 8.0, 0.0);
+			Button button6 = button5;
+			button6.Click += delegate
+			{
+				string[] array2 = Dialog("Rename group", new string[1] { "Group name" }, new string[1] { group.Name }, "Rename", "The rename is signed locally and replicated to members.");
+				if (array2 != null && core.RenameGroup(group.Id, array2[0].Trim()))
+				{
+					dialog.Close();
+				}
+			};
+			Button button7 = new Button();
+			button7.Content = "Invite friend";
+			button7.Padding = new Thickness(14.0, 8.0, 14.0, 8.0);
+			Button button8 = button7;
+			button8.Click += delegate
+			{
+				InviteFriendToGroup(group, dialog);
+			};
+			stackPanel7.Children.Add(button6);
+			stackPanel7.Children.Add(button8);
+			stackPanel2.Children.Add(stackPanel7);
+		}
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = "Members (" + (group.Data.members ?? new GroupMemberData[0]).Length + ")",
+			FontSize = 16.0,
+			FontWeight = FontWeights.SemiBold,
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		});
+		foreach (GroupMemberData member in from item in @group.Data.members ?? new GroupMemberData[0]
+			orderby item.role descending, item.name
+			select item)
+		{
+			Grid grid = new Grid();
+			grid.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+			Grid grid2 = grid;
+			grid2.ColumnDefinitions.Add(new ColumnDefinition());
+			grid2.ColumnDefinitions.Add(new ColumnDefinition
+			{
+				Width = GridLength.Auto
+			});
+			string text = ((member.role == 3) ? "Owner" : ((member.role == 2) ? "Admin" : "Member"));
+			grid2.Children.Add(new TextBlock
+			{
+				Text = member.name + " · " + text,
+				VerticalAlignment = VerticalAlignment.Center
+			});
+			if (groupMemberData != null && member.account != groupMemberData.account && ((groupMemberData.role == 3 && member.role < 3) || (groupMemberData.role == 2 && member.role == 1)))
+			{
+				StackPanel stackPanel8 = new StackPanel();
+				stackPanel8.Orientation = Orientation.Horizontal;
+				StackPanel stackPanel9 = stackPanel8;
+				if (groupMemberData.role == 3)
+				{
+					Button button9 = new Button();
+					button9.Content = ((member.role == 2) ? "Demote" : "Promote");
+					button9.Padding = new Thickness(9.0, 5.0, 9.0, 5.0);
+					button9.Margin = new Thickness(0.0, 0.0, 6.0, 0.0);
+					Button button10 = button9;
+					button10.Click += delegate
+					{
+						core.SetGroupAdmin(group.Id, member.account, member.role != 2);
+						dialog.Close();
+					};
+					stackPanel9.Children.Add(button10);
+				}
+				Button button11 = new Button();
+				button11.Content = "Remove";
+				button11.Padding = new Thickness(9.0, 5.0, 9.0, 5.0);
+				Button button12 = button11;
+				button12.Click += delegate
+				{
+					if (Confirm("Remove member", "Remove " + member.name + " from this group?", "Remove"))
+					{
+						core.RemoveGroupMember(group.Id, member.account);
+						dialog.Close();
+					}
+				};
+				stackPanel9.Children.Add(button12);
+				Grid.SetColumn(stackPanel9, 1);
+				grid2.Children.Add(stackPanel9);
+			}
+			stackPanel2.Children.Add(grid2);
+		}
+		GroupMemberData[] array = group.Data.invites ?? new GroupMemberData[0];
+		if (array.Length > 0)
+		{
+			stackPanel2.Children.Add(new TextBlock
+			{
+				Text = "Pending Invites (" + array.Length + ")",
+				FontSize = 16.0,
+				FontWeight = FontWeights.SemiBold,
+				Margin = new Thickness(0.0, 14.0, 0.0, 8.0)
+			});
+			foreach (GroupMemberData item in array.OrderBy((GroupMemberData item) => item.name))
+			{
+				stackPanel2.Children.Add(new TextBlock
+				{
+					Text = item.name + " · Pending Invite",
+					Foreground = Brush("#A1AEBB"),
+					Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+				});
+			}
+		}
+		if (groupMemberData != null && groupMemberData.role != 3)
+		{
+			Button button13 = new Button();
+			button13.Content = "Leave group";
+			button13.HorizontalAlignment = HorizontalAlignment.Left;
+			button13.Padding = new Thickness(14.0, 8.0, 14.0, 8.0);
+			button13.Margin = new Thickness(0.0, 16.0, 0.0, 0.0);
+			Button button14 = button13;
+			button14.Click += delegate
+			{
+				if (Confirm("Leave group", "Leave " + group.Name + "? Your signed leave event will be replicated to members.", "Leave"))
+				{
+					core.LeaveGroup(group.Id);
+					dialog.Close();
+				}
+			};
+			stackPanel2.Children.Add(button14);
+		}
+		else if (groupMemberData != null && groupMemberData.role == 3)
+		{
+			stackPanel2.Children.Add(new TextBlock
+			{
+				Text = "The owner cannot leave while responsible for the group.",
+				Foreground = Brush("#A1AEBB"),
+				Margin = new Thickness(0.0, 16.0, 0.0, 0.0)
+			});
+		}
+		dialog.ShowDialog();
+	}
+
+	private void InviteFriendToGroup(GroupModel group, Window parent)
+	{
+		Window picker = new Window
+		{
+			Title = "Invite friend",
+			Owner = parent,
+			Width = 460.0,
+			Height = 520.0,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#101820"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			Resources = window.Resources
+		};
+		StackPanel stack = new StackPanel
+		{
+			Margin = new Thickness(22.0)
+		};
+		picker.Content = new ScrollViewer
+		{
+			Content = stack,
+			VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+		};
+		Action rebuild = delegate
+		{
+			stack.Children.Clear();
+			stack.Children.Add(new TextBlock
+			{
+				Text = "Invite a friend",
+				FontSize = 23.0,
+				FontWeight = FontWeights.SemiBold
+			});
+			stack.Children.Add(new TextBlock
+			{
+				Text = "Offline friends remain available. Invitations to verified devices are queued for direct delivery.",
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0.0, 6.0, 0.0, 16.0)
+			});
+			ConversationModel[] array = model.GroupInviteCandidates(group.Data).ToArray();
+			if (array.Length == 0)
+			{
+				stack.Children.Add(new TextBlock
+				{
+					Text = "There are no uninvited friends available."
+				});
+			}
+			ConversationModel[] array2 = array;
+			foreach (ConversationModel friend in array2)
+			{
+				Button button = new Button
+				{
+					Content = friend.Name,
+					Padding = new Thickness(12.0, 9.0, 12.0, 9.0),
+					Margin = new Thickness(0.0, 0.0, 0.0, 7.0)
+				};
+				RoutedEventHandler value = delegate
+				{
+					if (model.GroupInviteCandidates(group.Data).Any((ConversationModel item) => item.AccountId == friend.AccountId))
+					{
+						if (friend.Contact == null || !friend.Contact.verified)
+						{
+							Notify("Verify " + friend.Name + "'s device in your direct conversation before sending this invitation.");
+						}
+						else if (core.InviteToGroup(group.Id, friend.AccountId, friend.Contact.peer, friend.Name))
+						{
+							picker.Close();
+							parent.Close();
+						}
+						else
+						{
+							Notify("The invitation could not be queued.");
+						}
+					}
+				};
+				button.Click += value;
+				stack.Children.Add(button);
+			}
+		};
+		InviteCandidatesChanged += rebuild;
+		picker.Closed += delegate
+		{
+			InviteCandidatesChanged -= rebuild;
+		};
+		rebuild();
+		picker.ShowDialog();
+	}
+
+	private void RemoveSelectedContact()
+	{
+		if (model.Groups || model.Selected == null)
+		{
+			return;
+		}
+		ConversationModel selected = model.Selected;
+		if (Confirm("Remove contact", "Remove " + selected.Name + " and its saved endpoint? Local chat history will be kept.", "Remove contact"))
+		{
+			if (!core.Remove(selected.Contact.peer))
+			{
+				Notify("Could not remove this contact.");
+				return;
+			}
+			model.RemoveConversation(selected);
+			model.Selected = null;
+			ShowConversation();
+			RefreshList();
+			Refresh();
+		}
+	}
+
+	private void RefreshList()
+	{
+		string search = Find<TextBox>("Search").Text;
+		Find<TextBlock>("SearchHint").Visibility = ((search.Length != 0) ? Visibility.Collapsed : Visibility.Visible);
+		changingSelection = true;
+		List<GroupModel> list = (from @group in model.GroupChats.Values
+			where @group.Name.IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0
+			orderby @group.Name
+			select @group).ToList();
+		List<ConversationModel> list2 = (from c in model.Conversations.Values
+			where c.Name.IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0
+			orderby c.Name
+			select c).ToList();
+		ListBox listBox = Find<ListBox>("ContactList");
+		object itemsSource;
+		if (!model.Groups)
+		{
+			IEnumerable enumerable = list2;
+			itemsSource = enumerable;
+		}
+		else
+		{
+			itemsSource = list;
+		}
+		listBox.ItemsSource = (IEnumerable)itemsSource;
+		Find<ListBox>("ContactList").SelectedItem = (model.Groups ? ((ObservableModel)model.SelectedGroup) : ((ObservableModel)model.Selected));
+		changingSelection = false;
+		int num = (model.Groups ? list.Count : list2.Count);
+		Find<TextBlock>("ListEmpty").Visibility = ((num != 0) ? Visibility.Collapsed : Visibility.Visible);
+		Find<TextBlock>("ListEmpty").Text = ((!model.Groups) ? ((search.Length > 0) ? "No matching conversations." : "Find friends to start building your friend list.") : ((search.Length > 0) ? "No matching groups." : "Create a group or accept an invitation."));
+	}
+
+	private void ShowConversation()
+	{
+		Find<ItemsControl>("Messages").ItemsSource = ((!model.Groups) ? ((model.Selected == null) ? null : model.Selected.Messages) : ((model.SelectedGroup == null) ? null : model.SelectedGroup.Messages));
+		Find<TextBox>("Composer").Text = ((!model.Groups) ? ((model.Selected == null) ? "" : model.Selected.Draft) : ((model.SelectedGroup == null) ? "" : model.SelectedGroup.Draft));
+		window.Dispatcher.BeginInvoke((Action)delegate { Find<ScrollViewer>("MessageScroll").ScrollToEnd(); });
+		SizeBubbles();
+	}
+
+	private void SizeBubbles()
+	{
+		double bubbleWidth = Math.Max(170.0, (Find<ScrollViewer>("MessageScroll").ActualWidth - 65.0) * 0.82);
+		foreach (ConversationModel value in model.Conversations.Values)
+		{
+			foreach (MessageModel message in value.Messages)
+			{
+				message.BubbleWidth = bubbleWidth;
+			}
+		}
+		foreach (GroupModel value2 in model.GroupChats.Values)
+		{
+			foreach (MessageModel message2 in value2.Messages)
+			{
+				message2.BubbleWidth = bubbleWidth;
+			}
+		}
+	}
+
+	private void Refresh()
+	{
+		bool flag = model.Selected != null && !model.Groups;
+		bool flag2 = model.Groups && model.SelectedGroup != null;
+		Find<TextBlock>("LocalProfile").Text = ((localProfile == null) ? model.Name : localProfile.Name) + ((accountLink == null) ? " · Unlinked" : (" · @" + accountLink.Username));
+		profileName.Text = ((localProfile == null) ? model.Name : localProfile.Name);
+		profileHandle.Text = ((discovery != null) ? ("@" + discovery.Username + " · Online") : ((accountLink != null) ? ("@" + accountLink.Username + " · Offline / Direct P2P") : (accountStore.Exists ? "Account link unavailable · Offline / Direct P2P" : "Unlinked · Offline / Direct P2P")));
+		Find<TextBlock>("OwnId").Text = ((model.OwnId.Length == 0) ? "Waiting for identity" : model.OwnId);
+		Find<TextBlock>("OwnId").ToolTip = model.OwnId;
+		Find<TextBlock>("Listener").Text = (model.Listening ? ("●  Listening on " + shareHost + ":" + model.Port) : "○  Not listening");
+		Find<TextBlock>("Listener").Foreground = Brush(model.Listening ? "#36D873" : "#A1AEBB");
+		int num = model.Conversations.Values.Count((ConversationModel c) => c.Online);
+		Find<TextBlock>("PeerCount").Text = num + " peers connected";
+		Find<TextBlock>("CompactConnectionStatus").Text = (flag ? ConnectionStatusText(model.Selected) : (model.Listening ? "Ready for direct connections" : "Offline"));
+		Find<TextBlock>("CompactConnectionStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#EDF1F5");
+		Find<TextBlock>("LastConnectionFailure").Text = "Last failure: " + (flag ? connectionAttempts.For(model.Selected).Failure : "None");
+		Find<TextBlock>("Status").Text = model.Status;
+		Find<TextBlock>("Security").Text = ((num > 0) ? ("Authenticated TLS connections: " + num) : "TLS: no active peer connection");
+		Find<TextBlock>("StorageStatus").Text = (model.Listening ? "Local history: encrypted on this PC" : "Local profile: not ready");
+		Find<TextBlock>("VersionText").Text = "App version: " + PeerChat.VersionInfo.Display;
+		Find<TextBlock>("EndpointHint").Text = "Shareable endpoint: " + shareHost + ":" + model.Port;
+		Find<TextBlock>("LanEndpoint").Text = "LAN: " + shareHost + ":" + model.Port;
+		Find<TextBlock>("PublicEndpoint").Text = "Public: Detecting…";
+		Find<TextBlock>("FriendAreaStatus").Text = "Friends · " + model.Conversations.Values.Count((ConversationModel item) => item.IsFriend) + "   Incoming · " + friendState.Incoming.Count + "   Pending · " + friendState.Outgoing.Count;
+		UpdateFriendRequestsButton();
+		bool flag3 = discovery != null && !string.IsNullOrEmpty(discovery.SessionToken);
+		Find<Button>("AccountRegister").Visibility = ((flag3 || accountLink != null || accountStore.Exists) ? Visibility.Collapsed : Visibility.Visible);
+		Find<Button>("AccountLogin").Visibility = ((flag3 || (accountLink == null && accountStore.Exists)) ? Visibility.Collapsed : Visibility.Visible);
+		Find<Button>("AccountLogin").ToolTip = ((accountLink == null) ? "Link this profile to an existing account" : ("Sign this profile back into @" + accountLink.Username));
+		Find<Button>("AccountSignOut").Visibility = ((!flag3) ? Visibility.Collapsed : Visibility.Visible);
+		Find<TextBlock>("HeaderName").Text = (flag2 ? model.SelectedGroup.Name : (model.Groups ? "Groups" : (flag ? model.Selected.Name : "Your conversations")));
+		Find<TextBlock>("HeaderInitial").Text = (flag2 ? model.SelectedGroup.Initial : (model.Groups ? "G" : (flag ? model.Selected.Initial : "p")));
+		Find<TextBlock>("HeaderStatus").Text = ((!flag2) ? (model.Groups ? "Client-owned groups · direct P2P" : (flag ? ConnectionStatusText(model.Selected) : "Choose a friend to start chatting")) : (model.SelectedGroup.Invited ? "Group invitation · review before joining" : (model.SelectedGroup.MemberCount + " members · client-owned encrypted history")));
+		Find<TextBlock>("HeaderStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#A1AEBB");
+		Find<StackPanel>("ChatEmpty").Visibility = ((!flag2) ? ((flag && model.Selected.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible) : ((model.SelectedGroup.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible));
+		Find<TextBlock>("EmptyTitle").Text = ((!flag2) ? (model.Groups ? "A place for your people" : (flag ? "The start of your conversation" : "Good conversations start here.")) : (model.SelectedGroup.Invited ? "You’re invited" : "Start the group conversation"));
+		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a client-owned group. The server is not the source of truth." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Use Find Friends to discover people, or add a manual connection as an advanced fallback.")) : (model.SelectedGroup.Invited ? "Open group details to accept or decline this signed invitation." : "Messages are signed, stored locally, and replicated directly to members."));
+		Find<Button>("EmptyAction").Content = (model.Groups ? "＋    Create Group" : "＋    Add Friend");
+		Find<Button>("EmptyAction").Visibility = ((flag || flag2) ? Visibility.Collapsed : Visibility.Visible);
+		Find<Button>("GroupNew").Visibility = ((!model.Groups) ? Visibility.Collapsed : Visibility.Visible);
+		string[] array = new string[3] { "GroupMembers", "GroupInvite", "GroupOverflow" };
+		foreach (string name in array)
+		{
+			Find<Button>(name).Visibility = ((!flag2) ? Visibility.Collapsed : Visibility.Visible);
+		}
+		Find<Button>("GroupInvite").IsEnabled = flag2 && !model.SelectedGroup.Invited;
+		bool canLoadOlder = (!model.Groups && model.Selected != null && model.Selected.Messages.Count > 0 && !model.Selected.HistoryExhausted) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
+		Find<Button>("Older").Visibility = canLoadOlder ? Visibility.Visible : Visibility.Collapsed;
+		bool flag4 = flag && model.Listening && model.Selected.Contact.verified && !busy;
+		bool flag5 = flag2 && !model.SelectedGroup.Invited && model.Listening && !busy;
+		Find<Button>("Send").IsEnabled = flag4 || flag5;
+		TextBox textBox = Find<TextBox>("Composer");
+		textBox.IsEnabled = flag4 || flag5;
+		textBox.IsReadOnly = false;
+		textBox.Focusable = true;
+		textBox.IsHitTestVisible = true;
+		Find<Button>("Reconnect").IsEnabled = flag && model.Listening && !busy;
+		bool flag6 = !model.VoiceState.StartsWith("Idle", StringComparison.Ordinal);
+		Find<Button>("VoiceCall").Visibility = ((!flag || flag6) ? Visibility.Collapsed : Visibility.Visible);
+		Find<Button>("VoiceCall").IsEnabled = flag && model.Selected.Online && model.Selected.Contact.verified && !flag6 && !busy;
+		Find<Button>("PeerInfo").Visibility = ((!flag && !flag2) ? Visibility.Collapsed : Visibility.Visible);
+		string[] array2 = new string[10] { "CopyId", "QuickCopy", "CopyCompact", "AddFriend", "QuickAdd", "Manual", "QuickManual", "Details", "CopyConnectionDetails", "ViewConnectionLog" };
+		foreach (string name2 in array2)
+		{
+			Find<Button>(name2).IsEnabled = model.Listening && !busy;
+		}
+		string[] array3 = new string[2] { "DM", "Groups" };
+		foreach (string text in array3)
+		{
+			bool flag7 = text == "Groups" == model.Groups;
+			Button button = Find<Button>(text);
+			button.Background = Brush("Transparent");
+			button.Foreground = Brush(flag7 ? "#EDF1F5" : "#A1AEBB");
+			button.BorderBrush = Brush(flag7 ? "#4297E8" : "Transparent");
+			button.BorderThickness = new Thickness(0.0, 0.0, 0.0, 2.0);
+		}
+		RefreshVoiceUi();
+	}
+
+	private static string ConnectionStatusText(ConversationModel conversation)
+	{
+		string text = conversation.ConnectionState ?? "Offline";
+		if (!(text == "Ready"))
+		{
+			if (!(text == "Offline"))
+			{
+				return "●  " + text;
+			}
+			return "○  Offline · Direct message";
+		}
+		return "●  Online · Authenticated TLS";
+	}
+
+	private static Brush Brush(string hex)
+	{
+		return (Brush)new BrushConverter().ConvertFromString(hex);
+	}
+
+	private async void CopyId()
+	{
+		if (!shareHostManuallyConfigured)
+		{
+			RefreshAutomaticShareHost();
+		}
+		string value = core.Share(shareHost, model.Port, model.OwnId);
+		if (string.IsNullOrEmpty(value))
+		{
+			Notify("The local identity is not ready.");
+			return;
+		}
+		for (int attempt = 0; attempt < 6; attempt++)
+		{
+			try
+			{
+				Clipboard.SetText(value);
+				model.Status = "PeerChat ID copied · " + shareHost + ":" + model.Port;
+				Refresh();
+				return;
+			}
+			catch (COMException)
+			{
+			}
+			await Task.Delay(100);
+		}
+		model.Status = "Clipboard is busy. Please try Copy My ID again.";
+		Refresh();
+	}
+
+	private void PromptProfileAccountSetup()
+	{
+		if (accountSetupPrompted || !interactiveAccountSetup || profileManager == null || accountLink != null || accountStore.Exists)
+		{
+			return;
+		}
+		accountSetupPrompted = true;
+		window.Dispatcher.BeginInvoke((Action)delegate
+		{
+			Window dialog = new Window
+			{
+				Title = "Connect this profile",
+				Owner = window,
+				Width = 490.0,
+				SizeToContent = SizeToContent.Height,
+				ResizeMode = ResizeMode.NoResize,
+				WindowStartupLocation = WindowStartupLocation.CenterOwner,
+				Background = Brush("#101820"),
+				Foreground = Brush("#EDF1F5"),
+				FontFamily = new FontFamily("Segoe UI"),
+				Resources = window.Resources
+			};
+			StackPanel stackPanel = new StackPanel
+			{
+				Margin = new Thickness(26.0)
+			};
+			dialog.Content = stackPanel;
+			stackPanel.Children.Add(new TextBlock
+			{
+				Text = "Connect " + ((localProfile == null) ? "this profile" : localProfile.Name),
+				FontSize = 24.0,
+				FontWeight = FontWeights.SemiBold
+			});
+			stackPanel.Children.Add(new TextBlock
+			{
+				Text = "Sign in or create the account that belongs to this local profile. You can also continue offline; local history and Direct P2P do not require the server.",
+				TextWrapping = TextWrapping.Wrap,
+				Foreground = Brush("#A1AEBB"),
+				Margin = new Thickness(0.0, 8.0, 0.0, 20.0)
+			});
+			Button button = new Button
+			{
+				Content = "Sign In",
+				Margin = new Thickness(0.0, 0.0, 0.0, 8.0),
+				Background = Brush("#275AA7")
+			};
+			Button button2 = new Button
+			{
+				Content = "Create Account",
+				Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+			};
+			Button button3 = new Button
+			{
+				Content = "Continue Offline"
+			};
+			button.Click += delegate
+			{
+				dialog.Close();
+				window.Dispatcher.BeginInvoke((Action)delegate
+				{
+					Account(true);
+				});
+			};
+			button2.Click += delegate
+			{
+				dialog.Close();
+				window.Dispatcher.BeginInvoke((Action)delegate
+				{
+					Account(false);
+				});
+			};
+			button3.Click += delegate
+			{
+				dialog.Close();
+			};
+			stackPanel.Children.Add(button);
+			stackPanel.Children.Add(button2);
+			stackPanel.Children.Add(button3);
+			dialog.ShowDialog();
+		});
+	}
+
+	private string[] AccountDialog(string title, string accept, string presetUsername = "", bool lockUsername = false)
+	{
+		Window dialog = new Window
+		{
+			Title = title,
+			Owner = window,
+			Width = 470.0,
+			SizeToContent = SizeToContent.Height,
+			ResizeMode = ResizeMode.NoResize,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#101820"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			FontSize = 15.0,
+			Resources = window.Resources
+		};
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Margin = new Thickness(26.0);
+		StackPanel stackPanel2 = stackPanel;
+		dialog.Content = stackPanel2;
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = title,
+			FontSize = 24.0,
+			FontWeight = FontWeights.SemiBold,
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		});
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = "Your account uses the configured PeerChat service. The server receives a password verifier, never this password.",
+			TextWrapping = TextWrapping.Wrap,
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 0.0, 0.0, 18.0)
+		});
+		string[] array = new string[2] { "Username / friend code", "Password" };
+		TextBox username = new TextBox
+		{
+			Text = (presetUsername ?? ""),
+			IsReadOnly = lockUsername
+		};
+		PasswordBox passwordBox = new PasswordBox();
+		Control[] array2 = new Control[2] { username, passwordBox };
+		for (int i = 0; i < array.Length; i++)
+		{
+			stackPanel2.Children.Add(new TextBlock
+			{
+				Text = array[i],
+				Margin = new Thickness(0.0, 0.0, 0.0, 6.0)
+			});
+			array2[i].Margin = new Thickness(0.0, 0.0, 0.0, 13.0);
+			stackPanel2.Children.Add(array2[i]);
+		}
+		StackPanel stackPanel3 = new StackPanel();
+		stackPanel3.Orientation = Orientation.Horizontal;
+		stackPanel3.HorizontalAlignment = HorizontalAlignment.Right;
+		StackPanel stackPanel4 = stackPanel3;
+		Button button = new Button();
+		button.Content = "Cancel";
+		button.IsCancel = true;
+		button.Margin = new Thickness(0.0, 0.0, 8.0, 0.0);
+		Button button2 = button;
+		Button button3 = new Button();
+		button3.Content = accept;
+		button3.Background = Brush("#275AA7");
+		Button button4 = button3;
+		button2.Click += delegate
+		{
+			dialog.DialogResult = false;
+		};
+		button4.Click += delegate
+		{
+			dialog.DialogResult = true;
+		};
+		stackPanel4.Children.Add(button2);
+		stackPanel4.Children.Add(button4);
+		stackPanel2.Children.Add(stackPanel4);
+		dialog.Loaded += delegate
+		{
+			username.Focus();
+		};
+		if (dialog.ShowDialog() != true)
+		{
+			return null;
+		}
+		return new string[2] { username.Text, passwordBox.Password };
+	}
+
+	private async void Account(bool login)
+	{
+		if (string.IsNullOrEmpty(model.OwnId))
+		{
+			Notify("Wait for the encrypted profile to finish opening.");
+			return;
+		}
+		ProfileAccountLink binding = accountStore.Load();
+		if (binding == null && accountStore.Exists)
+		{
+			Notify("This profile's protected account link could not be read. It will stay offline and cannot be linked to another account silently.");
+			return;
+		}
+		if (!login && binding != null)
+		{
+			Notify("This local profile is already linked to @" + binding.Username + ". Create or switch to another local profile for a different account.");
+			return;
+		}
+		string[] values = AccountDialog(login ? "Sign in to PeerChat" : "Create PeerChat account", login ? "Sign in" : "Create account", (binding == null) ? "" : binding.Username, binding != null);
+		if (values == null)
+		{
+			return;
+		}
+		DiscoveryClient candidate = null;
+		try
+		{
+			busy = true;
+			model.Status = (login ? "Signing this profile in…" : "Creating and linking this profile…");
+			Refresh();
+			candidate = NewDiscoveryClient();
+			await Task.Run(delegate
+			{
+				if (login)
+				{
+					candidate.Login(values[0].Trim(), values[1]);
+				}
+				else
+				{
+					candidate.Register(values[0].Trim(), values[1], model.OwnId);
+				}
+			});
+			if (binding != null && binding.AccountId != candidate.AccountId)
+			{
+				try
+				{
+					await Task.Run(delegate
+					{
+						candidate.Logout();
+					});
+				}
+				catch
+				{
+				}
+				throw new InvalidOperationException("This local profile is linked to @" + binding.Username + ". Switch profiles to use another account.");
+			}
+			accountLink = accountStore.SaveSession(candidate.AccountId, candidate.Username, candidate.Host, candidate.Port, candidate.CertificateSha256, candidate.SessionToken);
+			SaveDiscoveryService(candidate.Host, candidate.Port, candidate.CertificateSha256);
+			RefreshAutomaticShareHost();
+			PresenceResult presence = await Task.Run(() => candidate.ReportPresence(model.OwnId, shareHost, model.Port));
+			discovery = candidate;
+			ApplyPresenceDiagnostics(presence);
+			core.SetGroupAccount(discovery.AccountId, discovery.Username);
+			core.LoadGroups();
+			discovery.StartEventChannel(HandleDiscoveryEvent);
+			SaveDiscoverySession();
+			model.Status = "Signed in as " + discovery.Username + " · Discoverable";
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+		}
+		finally
+		{
+			busy = false;
+			Refresh();
+		}
+		RefreshFriendState();
+	}
+
+	private async void SignOut()
+	{
+		DiscoveryClient signedOut = discovery;
+		if (signedOut != null)
+		{
+			signedOut.StopEventChannel();
+		}
+		discovery = null;
+		discoveryRestored = true;
+		accountLink = accountStore.ClearSession();
+		friendState = new FriendState();
+		friendRequestStates.Clear();
+		friendDirectory.Clear();
+		friendPresence.Clear();
+		try
+		{
+			if (File.Exists(DiscoverySessionPath))
+			{
+				File.Delete(DiscoverySessionPath);
+			}
+		}
+		catch
+		{
+		}
+		model.Status = ((accountLink == null) ? "Profile" : ("@" + accountLink.Username)) + " signed out · local identity, trust, groups, and history remain available";
+		Refresh();
+		if (signedOut == null)
+		{
+			return;
+		}
+		try
+		{
+			await Task.Run(delegate
+			{
+				signedOut.Logout();
+			});
+		}
+		catch
+		{
+		}
+	}
+
+	private void HandleDiscoveryEvent(DiscoveryEvent notification)
+	{
+		if (window == null)
+		{
+			return;
+		}
+		window.Dispatcher.BeginInvoke((Action)delegate
+		{
+			if (discovery != null)
+			{
+				if (notification != null && notification.Event == "channel_connected")
+				{
+					model.Status = "Discovery reconnected · refreshing network presence…";
+					Refresh();
+					BeginNetworkRecovery("discovery channel reconnected", false);
+				}
+				else
+				{
+					model.Status = "Friend state changed · refreshing…";
+					Refresh();
+					RefreshFriendState();
+				}
+			}
+		});
+	}
+
+	private void ApplyPresenceDiagnostics(PresenceResult result)
+	{
+		if (result != null)
+		{
+			lastPublicCandidate = (string.IsNullOrEmpty(result.PublicEndpointHost) ? "Unavailable" : (result.PublicEndpointHost + ":" + result.PublicEndpointPort));
+			lastPublicCandidateSource = result.PublicCandidateSource ?? "Unavailable";
+			lastObservedAddressClassification = result.ObservedAddressClassification ?? "Unavailable";
+			TraceUi("Account/device diagnostics: account=" + result.AccountId + " (" + result.Username + "); local Peer ID=" + model.OwnId + "; server-registered Peer ID=" + result.RegisteredPublicIdentity + "; LAN candidate=" + result.EndpointHost + ":" + result.EndpointPort + "; public candidate=" + lastPublicCandidate + "; source=" + lastPublicCandidateSource + "; observed classification=" + lastObservedAddressClassification);
+		}
+	}
+
+	private void RefreshAutomaticShareHost()
+	{
+		if (!shareHostManuallyConfigured)
+		{
+			string value = DefaultReachableHost();
+			if (!string.IsNullOrEmpty(value))
+			{
+				shareHost = value;
+			}
+		}
+	}
+
+	private Task<bool> PublishCurrentPresenceAsync()
+	{
+		if (presenceRefreshTask != null && !presenceRefreshTask.IsCompleted)
+		{
+			return presenceRefreshTask;
+		}
+		DiscoveryClient discoveryClient = discovery;
+		if (discoveryClient == null || string.IsNullOrEmpty(discoveryClient.SessionToken))
+		{
+			return Task.FromResult(false);
+		}
+		RefreshAutomaticShareHost();
+		presenceInFlight = true;
+		lastPresenceUtc = DateTime.UtcNow;
+		return presenceRefreshTask = PublishCurrentPresenceCoreAsync(discoveryClient, shareHost, model.Port);
+	}
+
+	private async Task<bool> PublishCurrentPresenceCoreAsync(DiscoveryClient source, string host, ushort port)
+	{
+		try
+		{
+			int num = default(int);
+			int num2 = num;
+			int num3 = 0;
+			try
+			{
+				PresenceResult result = await Task.Run(() => source.ReportPresence(model.OwnId, host, port));
+				if (discovery != source || closing || closed)
+				{
+					return false;
+				}
+				ApplyPresenceDiagnostics(result);
+				SaveDiscoverySession();
+				return true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+		finally
+		{
+			presenceInFlight = false;
+		}
+	}
+
+	private async void RefreshPresence()
+	{
+		await PublishCurrentPresenceAsync();
+	}
+
+	private void NetworkAddressChanged(object sender, EventArgs args)
+	{
+		if (closing || closed)
+		{
+			return;
+		}
+		try
+		{
+			window.Dispatcher.BeginInvoke((Action)delegate
+			{
+				if (!closing && !closed)
+				{
+					networkChangeTimer.Stop();
+					networkChangeTimer.Start();
+				}
+			});
+		}
+		catch (InvalidOperationException)
+		{
+		}
+	}
+
+	private void HandleNetworkChange()
+	{
+		string text = CurrentNetworkFingerprint();
+		if (!(text == networkFingerprint))
+		{
+			string text2 = networkFingerprint;
+			networkFingerprint = text;
+			networkGeneration++;
+			core.SetNetworkContext(networkGeneration, networkFingerprint);
+			TraceUi("Runtime network change detected: generation=" + networkGeneration + "; previous=" + (string.IsNullOrEmpty(text2) ? "none" : text2) + "; current=" + (string.IsNullOrEmpty(text) ? "none" : text));
+			BeginNetworkRecovery("runtime network change", true);
+		}
+	}
+
+	private async void BeginNetworkRecovery(string reason, bool invalidateRoutes)
+	{
+		if (networkRecoveryInFlight)
+		{
+			networkRecoveryPending = true;
+			return;
+		}
+		networkRecoveryInFlight = true;
+		try
+		{
+			do
+			{
+				networkRecoveryPending = false;
+				await RecoverNetworkAsync(reason, invalidateRoutes);
+				invalidateRoutes = false;
+			}
+			while (networkRecoveryPending && !closing && !closed);
+		}
+		finally
+		{
+			networkRecoveryInFlight = false;
+		}
+	}
+
+	private async Task<bool> ForceFriendRefreshAsync()
+	{
+		Task<bool> pending = friendRefreshTask;
+		if (pending != null && !pending.IsCompleted)
+		{
+			await pending;
+		}
+		if (discovery == null || closing || closed)
+		{
+			return false;
+		}
+		friendRefreshTask = RefreshFriendsCoreAsync();
+		return await friendRefreshTask;
+	}
+
+	private async Task RecoverNetworkAsync(string reason, bool invalidateRoutes)
+	{
+		List<ConversationModel> affected = new List<ConversationModel>();
+		if (invalidateRoutes)
+		{
+			foreach (ConversationModel item in model.Conversations.Values.Where((ConversationModel conversationModel) => conversationModel.AccountId > 0 && conversationModel.Contact != null && !string.IsNullOrEmpty(conversationModel.Contact.peer)).ToList())
+			{
+				ContactData contact = item.Contact;
+				LocalSubnetDecision localSubnetDecision;
+				if (!string.IsNullOrEmpty(contact.host))
+				{
+					localSubnetDecision = CurrentLocalSubnetDecision(contact.host);
+				}
+				else
+				{
+					LocalSubnetDecision localSubnetDecision2 = new LocalSubnetDecision();
+					localSubnetDecision2.Diagnostics = "saved LAN candidate unavailable";
+					localSubnetDecision = localSubnetDecision2;
+				}
+				LocalSubnetDecision localSubnetDecision3 = localSubnetDecision;
+				bool flag = IsPrivateCandidate(contact.host) && !localSubnetDecision3.SameSubnet;
+				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0), true);
+				if (flag)
+				{
+					contact.host = "";
+					contact.port = 0;
+				}
+				item.Online = false;
+				item.ConnectionState = "Network changed · refreshing";
+				item.Refresh();
+				ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.Update(new CoreEvent
+				{
+					expected = contact.peer,
+					candidate = (flag ? "Discarded stale private endpoint" : "Previous route invalidated"),
+					source = "Runtime network change",
+					route = reason
+				}, item, "Offline", null, "Network changed");
+				connectionAttemptDetails.LocalSubnetDiagnostics = localSubnetDecision3.Diagnostics;
+				connectionAttemptDetails.RefreshResult = (flag ? "stale private endpoint invalidated; refreshing authoritative candidates" : "local route invalidated; refreshing authoritative candidates");
+				RecordConnection("network-change", item, connectionAttemptDetails.RefreshResult);
+				affected.Add(item);
+			}
+		}
+		RefreshAutomaticShareHost();
+		Refresh();
+		if (string.IsNullOrEmpty(CurrentNetworkFingerprint()))
+		{
+			model.Status = "Network changed · waiting for an active IPv4 connection";
+			Refresh();
+			return;
+		}
+		DiscoveryClient source = discovery;
+		if (source == null || string.IsNullOrEmpty(source.SessionToken))
+		{
+			model.Status = "Network changed · Offline / Direct P2P · stale private routes discarded";
+			Refresh();
+			return;
+		}
+		model.Status = "Network changed · publishing " + shareHost + ":" + model.Port + "…";
+		Refresh();
+		if (!(await PublishCurrentPresenceAsync()) || discovery != source)
+		{
+			model.Status = "Network changed · discovery unavailable; stale private routes were not reused";
+			Refresh();
+			return;
+		}
+		if (!(await ForceFriendRefreshAsync()) || discovery != source)
+		{
+			model.Status = "New presence published · friend candidates unavailable";
+			Refresh();
+			return;
+		}
+		foreach (ConversationModel item2 in affected)
+		{
+			DiscoverySearchResult value;
+			if (friendDirectory.TryGetValue(item2.AccountId, out value) && value.Online)
+			{
+				ConnectFriendCandidate(value, item2, true, "network change");
+			}
+			else
+			{
+				connectionAttempts.Update(null, item2).RefreshResult = "authoritative refresh complete; friend has no current online candidate";
+			}
+		}
+		model.Status = "Network change reconciled · current candidates refreshed";
+		Refresh();
+	}
+
+	private async void RefreshFriendState()
+	{
+		await RefreshFriendsAsync();
+	}
+
+	private Task<bool> RefreshFriendsAsync()
+	{
+		if (friendRefreshTask != null && !friendRefreshTask.IsCompleted)
+		{
+			return friendRefreshTask;
+		}
+		return friendRefreshTask = RefreshFriendsCoreAsync();
+	}
+
+	private async Task<bool> RefreshFriendsCoreAsync()
+	{
+		DiscoveryClient source = discovery;
+		if (source == null || string.IsNullOrEmpty(source.SessionToken))
+		{
+			return false;
+		}
+		friendRefreshInFlight = true;
+		try
+		{
+			int num = default(int);
+			int num2 = num;
+			int num3 = 0;
+			try
+			{
+				FriendState state = await Task.Run(() => source.GetFriendState());
+				if (discovery != source || closing || closed)
+				{
+					return false;
+				}
+				ApplyFriendSnapshot(state);
+				return true;
+			}
+			catch (Exception ex)
+			{
+				model.Status = "Friend status unavailable: " + ex.Message;
+				Refresh();
+				return false;
+			}
+		}
+		finally
+		{
+			friendRefreshInFlight = false;
+		}
+	}
+
+	private void ApplyFriendSnapshot(FriendState state)
+	{
+		friendState = state;
+		lastFriendRefreshUtc = DateTime.UtcNow;
+		friendRequestStates.Clear();
+		friendDirectory.Clear();
+		foreach (DiscoverySearchResult item2 in state.Incoming)
+		{
+			friendRequestStates[item2.AccountId] = "Incoming Request";
+		}
+		foreach (DiscoverySearchResult item3 in state.Outgoing)
+		{
+			friendRequestStates[item3.AccountId] = "Request Sent";
+		}
+		conversationIndex.Reconcile(state.Friends);
+		HashSet<long> hashSet = new HashSet<long>();
+		foreach (DiscoverySearchResult item in state.Friends)
+		{
+			friendRequestStates[item.AccountId] = "Friends";
+			friendDirectory[item.AccountId] = item;
+			hashSet.Add(item.AccountId);
+			IEnumerable<FriendConversationBinding> records = conversationIndex.Records;
+			Func<FriendConversationBinding, bool> predicate = (FriendConversationBinding friendConversationBinding2) => friendConversationBinding2.AccountId == item.AccountId;
+			FriendConversationBinding friendConversationBinding = records.First(predicate);
+			bool reused;
+			ConversationModel conversationModel = model.BindFriend(item.AccountId, item.Username, item.PublicIdentity, friendConversationBinding.KnownPeerIds, out reused);
+			ContactData contact = conversationModel.Contact;
+			bool flag = contact == null || contact.peer != item.PublicIdentity || contact.host != (item.EndpointHost ?? "") || contact.port != (ushort)Math.Max(0, Math.Min(65535, item.EndpointPort));
+			bool flag2 = flag || contact.publicHost != (item.PublicEndpointHost ?? "") || contact.publicPort != (ushort)Math.Max(0, Math.Min(65535, item.PublicEndpointPort));
+			bool value;
+			bool flag3 = !friendPresence.TryGetValue(item.AccountId, out value) || value != item.Online;
+			friendPresence[item.AccountId] = item.Online;
+			if (flag2 && !conversationModel.Online && contact != null && !string.IsNullOrEmpty(contact.peer))
+			{
+				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0));
+			}
+			bool verified = contact != null && contact.peer == item.PublicIdentity && contact.verified;
+			conversationModel.Contact = new ContactData
+			{
+				peer = item.PublicIdentity,
+				name = item.Username,
+				host = (item.EndpointHost ?? ""),
+				port = (ushort)Math.Max(0, Math.Min(65535, item.EndpointPort)),
+				publicHost = (item.PublicEndpointHost ?? ""),
+				publicPort = (ushort)Math.Max(0, Math.Min(65535, item.PublicEndpointPort)),
+				verified = verified
+			};
+			conversationModel.Refresh();
+			TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + item.AccountId + "; username=" + item.Username + "; device Peer ID=" + item.PublicIdentity + "; local conversation=" + conversationModel.ConversationId + "; endpoint=" + (item.EndpointHost ?? "") + ":" + item.EndpointPort);
+			if (item.Online && !conversationModel.Online && (flag2 || flag3))
+			{
+				ConnectFriendCandidate(item, conversationModel, true, "candidate update");
+			}
+		}
+		model.ReconcileFriends(hashSet);
+		RefreshList();
+		Refresh();
+		if (this.InviteCandidatesChanged != null)
+		{
+			this.InviteCandidatesChanged();
+		}
+	}
+
+	private async void SendFriendRequest(DiscoverySearchResult result)
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		try
+		{
+			string state = await Task.Run(() => discovery.SendFriendRequest(result.AccountId));
+			model.Status = ((state == "accepted_crossed") ? ("You are now friends with " + result.Username + ".") : ("Friend request sent to " + result.Username + "."));
+			RefreshFriendState();
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+			Refresh();
+		}
+	}
+
+	private async void RespondToFriendRequest(DiscoverySearchResult result, bool accept)
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		try
+		{
+			await Task.Run(() => discovery.RespondToFriendRequest(result.AccountId, accept));
+			model.Status = (accept ? ("You are now friends with " + result.Username + ".") : "Friend request rejected.");
+			RefreshFriendState();
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+			Refresh();
+		}
+	}
+
+	private async void CancelFriendRequest(DiscoverySearchResult result)
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		try
+		{
+			await Task.Run(() => discovery.CancelFriendRequest(result.AccountId));
+			model.Status = "Friend request to " + result.Username + " cancelled.";
+			RefreshFriendState();
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+			Refresh();
+		}
+	}
+
+	private async void RemoveFriend(DiscoverySearchResult result)
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		try
+		{
+			await Task.Run(() => discovery.RemoveFriend(result.AccountId));
+			model.Status = result.Username + " was removed from your friends. Local history was kept.";
+			RefreshFriendState();
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+			Refresh();
+		}
+	}
+
+	private async void SetBlocked(DiscoverySearchResult result, bool blocked)
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		try
+		{
+			await Task.Run(() => discovery.SetBlocked(result.AccountId, blocked));
+			model.Status = (blocked ? (result.Username + " is blocked.") : (result.Username + " is unblocked."));
+			RefreshFriendState();
+		}
+		catch (Exception ex)
+		{
+			model.Status = ex.Message;
+			Refresh();
+		}
+	}
+
+	private Border SettingsCard(string title, string description, FrameworkElement body)
+	{
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Children.Add(new TextBlock
+		{
+			Text = title,
+			FontSize = 18.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		stackPanel.Children.Add(new TextBlock
+		{
+			Text = description,
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 4.0, 0.0, 14.0),
+			TextWrapping = TextWrapping.Wrap
+		});
+		stackPanel.Children.Add(body);
+		Border border = new Border();
+		border.Background = Brush("#111920");
+		border.BorderBrush = Brush("#25313C");
+		border.BorderThickness = new Thickness(1.0);
+		border.CornerRadius = new CornerRadius(12.0);
+		border.Padding = new Thickness(18.0);
+		border.Margin = new Thickness(0.0, 0.0, 0.0, 14.0);
+		border.Child = stackPanel;
+		return border;
+	}
+
+	private Border FriendRequestCard(DiscoverySearchResult person, string primary, Action primaryAction, string secondary = null, Action secondaryAction = null, string tertiary = null, Action tertiaryAction = null)
+	{
+		Grid grid = new Grid();
+		grid.ColumnDefinitions.Add(new ColumnDefinition());
+		grid.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = GridLength.Auto
+		});
+		grid.Children.Add(new TextBlock
+		{
+			Text = person.Username + "  ·  " + (person.Online ? "● Online" : "○ Offline"),
+			VerticalAlignment = VerticalAlignment.Center,
+			Foreground = Brush(person.Online ? "#36D873" : "#AAB7C4")
+		});
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Orientation = Orientation.Horizontal;
+		StackPanel stackPanel2 = stackPanel;
+		Button button = new Button();
+		button.Content = primary;
+		button.Padding = new Thickness(12.0, 7.0, 12.0, 7.0);
+		button.Background = Brush("#244C79");
+		Button button2 = button;
+		button2.Click += delegate
+		{
+			primaryAction();
+		};
+		stackPanel2.Children.Add(button2);
+		if (!string.IsNullOrEmpty(secondary))
+		{
+			Button button3 = new Button();
+			button3.Content = secondary;
+			button3.Padding = new Thickness(12.0, 7.0, 12.0, 7.0);
+			button3.Margin = new Thickness(7.0, 0.0, 0.0, 0.0);
+			button3.Background = Brush("#202B35");
+			Button button4 = button3;
+			button4.Click += delegate
+			{
+				secondaryAction();
+			};
+			stackPanel2.Children.Add(button4);
+		}
+		if (!string.IsNullOrEmpty(tertiary))
+		{
+			Button button5 = new Button();
+			button5.Content = tertiary;
+			button5.Padding = new Thickness(12.0, 7.0, 12.0, 7.0);
+			button5.Margin = new Thickness(7.0, 0.0, 0.0, 0.0);
+			button5.Background = Brush("#202B35");
+			Button button6 = button5;
+			button6.Click += delegate
+			{
+				tertiaryAction();
+			};
+			stackPanel2.Children.Add(button6);
+		}
+		Grid.SetColumn(stackPanel2, 1);
+		grid.Children.Add(stackPanel2);
+		Border border = new Border();
+		border.Background = Brush("#18222C");
+		border.BorderBrush = Brush("#2E3C49");
+		border.BorderThickness = new Thickness(1.0);
+		border.CornerRadius = new CornerRadius(9.0);
+		border.Padding = new Thickness(10.0);
+		border.Margin = new Thickness(0.0, 5.0, 0.0, 0.0);
+		border.Child = grid;
+		return border;
+	}
+
+	private async void FriendRequestsDialog()
+	{
+		if (discovery == null)
+		{
+			return;
+		}
+		Stopwatch opened = Stopwatch.StartNew();
+		TraceUi("Friend Requests triggered; dispatching snapshot");
+		try
+		{
+			if (!(await RefreshFriendsAsync()))
+			{
+				return;
+			}
+			TraceUi("Friend Requests snapshot returned after " + opened.ElapsedMilliseconds + " ms");
+		}
+		catch (Exception ex)
+		{
+			Notify("Friend requests are unavailable: " + ex.Message);
+			return;
+		}
+		Window dialog = new Window
+		{
+			Title = "Friend Requests",
+			Owner = window,
+			Width = 590.0,
+			Height = 650.0,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#0C1116"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			Resources = window.Resources
+		};
+		Border frame = new Border
+		{
+			Background = Brush("#101820"),
+			BorderBrush = Brush("#293844"),
+			BorderThickness = new Thickness(1.0),
+			CornerRadius = new CornerRadius(14.0),
+			Margin = new Thickness(12.0),
+			Padding = new Thickness(24.0)
+		};
+		dialog.Content = frame;
+		ScrollViewer scroll = (ScrollViewer)(frame.Child = new ScrollViewer
+		{
+			VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+		});
+		StackPanel stack = (StackPanel)(scroll.Content = new StackPanel());
+		stack.Children.Add(new TextBlock
+		{
+			Text = "Friend Requests",
+			FontSize = 25.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		stack.Children.Add(new TextBlock
+		{
+			Text = "Server-backed requests, friends, and blocks.",
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 5.0, 0.0, 18.0)
+		});
+		StackPanel incoming = new StackPanel();
+		if (friendState.Incoming.Count == 0)
+		{
+			incoming.Children.Add(new TextBlock
+			{
+				Text = "No incoming requests yet.",
+				Foreground = Brush("#A1AEBB")
+			});
+		}
+		foreach (DiscoverySearchResult person in friendState.Incoming)
+		{
+			incoming.Children.Add(FriendRequestCard(person, "Accept", delegate
+			{
+				RespondToFriendRequest(person, true);
+				dialog.Close();
+			}, "Reject", delegate
+			{
+				RespondToFriendRequest(person, false);
+				dialog.Close();
+			}));
+		}
+		stack.Children.Add(SettingsCard("Incoming Requests", "Accept creates a durable account friendship.", incoming));
+		StackPanel outgoing = new StackPanel();
+		if (friendState.Outgoing.Count == 0)
+		{
+			outgoing.Children.Add(new TextBlock
+			{
+				Text = "No pending requests.",
+				Foreground = Brush("#A1AEBB")
+			});
+		}
+		foreach (DiscoverySearchResult person2 in friendState.Outgoing)
+		{
+			outgoing.Children.Add(FriendRequestCard(person2, "Cancel", delegate
+			{
+				CancelFriendRequest(person2);
+				dialog.Close();
+			}));
+		}
+		stack.Children.Add(SettingsCard("Pending Outgoing", "Requests remain for offline recipients.", outgoing));
+		StackPanel friends = new StackPanel();
+		if (friendState.Friends.Count == 0)
+		{
+			friends.Children.Add(new TextBlock
+			{
+				Text = "No friends yet.",
+				Foreground = Brush("#A1AEBB")
+			});
+		}
+		foreach (DiscoverySearchResult person3 in friendState.Friends)
+		{
+			friends.Children.Add(FriendRequestCard(person3, "Message", delegate
+			{
+				OpenFriendConversation(person3);
+				dialog.Close();
+			}, "Remove", delegate
+			{
+				RemoveFriend(person3);
+				dialog.Close();
+			}, "Block", delegate
+			{
+				if (Confirm("Block user", "Block " + person3.Username + "? This also removes the friendship and pending requests.", "Block"))
+				{
+					SetBlocked(person3, true);
+				}
+				dialog.Close();
+			}));
+		}
+		stack.Children.Add(SettingsCard("Friends", "Open a direct conversation or manage the friendship.", friends));
+		StackPanel blocked = new StackPanel();
+		if (friendState.Blocked.Count == 0)
+		{
+			blocked.Children.Add(new TextBlock
+			{
+				Text = "No blocked accounts.",
+				Foreground = Brush("#A1AEBB")
+			});
+		}
+		foreach (DiscoverySearchResult person4 in friendState.Blocked)
+		{
+			blocked.Children.Add(FriendRequestCard(person4, "Unblock", delegate
+			{
+				SetBlocked(person4, false);
+				dialog.Close();
+			}));
+		}
+		stack.Children.Add(SettingsCard("Blocked", "Blocked accounts cannot search for or request you.", blocked));
+		Button close = new Button
+		{
+			Content = "Close",
+			HorizontalAlignment = HorizontalAlignment.Right,
+			Padding = new Thickness(18.0, 9.0, 18.0, 9.0)
+		};
+		close.Click += delegate
+		{
+			dialog.Close();
+		};
+		stack.Children.Add(close);
+		TraceUi("Friend Requests dialog constructed after " + opened.ElapsedMilliseconds + " ms; showing");
+		dialog.ShowDialog();
+	}
+
+	private string ClientBackupDirectory()
+	{
+		return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "PeerChat-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+	}
+
+	private void BackupClientState()
+	{
+		try
+		{
+			if (!Directory.Exists(directory))
+			{
+				Notify("The local profile directory does not exist yet.");
+				return;
+			}
+			string text = ClientBackupDirectory();
+			if (profileManager != null)
+			{
+				profileManager.BackupSelected(text);
+			}
+			else
+			{
+				CopyDirectory(directory, System.IO.Path.Combine(text, "PeerChat"));
+			}
+			Notify("Selected local profile backed up to:\n" + text);
+		}
+		catch (Exception ex)
+		{
+			Notify("Client backup failed: " + ex.Message);
+		}
+	}
+
+	private static void CopyDirectory(string source, string target)
+	{
+		Directory.CreateDirectory(target);
+		string[] files = Directory.GetFiles(source);
+		foreach (string text in files)
+		{
+			File.Copy(text, System.IO.Path.Combine(target, System.IO.Path.GetFileName(text)), true);
+		}
+		string[] directories = Directory.GetDirectories(source);
+		foreach (string text2 in directories)
+		{
+			CopyDirectory(text2, System.IO.Path.Combine(target, System.IO.Path.GetFileName(text2)));
+		}
+	}
+
+	private void RestartWithProfile(string profile)
+	{
+		string fileName = Process.GetCurrentProcess().MainModule.FileName;
+		ProcessStartInfo processStartInfo = new ProcessStartInfo(fileName, "--data-dir \"" + profile.Replace("\"", "\\\"") + "\" --port 0");
+		processStartInfo.UseShellExecute = false;
+		Process.Start(processStartInfo);
+		Environment.Exit(0);
+	}
+
+	private void StopProfileServices()
+	{
+		timer.Stop();
+		if (discovery != null)
+		{
+			discovery.StopEventChannel();
+		}
+		discovery = null;
+		core.Dispose();
+	}
+
+	private void RestartManaged()
+	{
+		string fullPath = System.IO.Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
+		if (!File.Exists(fullPath))
+		{
+			throw new FileNotFoundException("PeerChat executable was not found for restart.", fullPath);
+		}
+		string text = "--install-root \"" + profileManager.InstallRoot.Replace("\"", "\\\"") + "\"";
+		TraceStartup(profileManager.InstallRoot, "restart-launch executable=" + fullPath + " arguments=" + text);
+		ProcessStartInfo processStartInfo = new ProcessStartInfo(fullPath, text);
+		processStartInfo.UseShellExecute = false;
+		processStartInfo.WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory;
+		Process process = Process.Start(processStartInfo);
+		if (process == null)
+		{
+			throw new InvalidOperationException("Windows did not start the replacement PeerChat process.");
+		}
+		TraceStartup(profileManager.InstallRoot, "restart-launched replacement-pid=" + process.Id);
+		Environment.Exit(0);
+	}
+
+	private async void SwitchLocalProfile()
+	{
+		if (profileManager == null)
+		{
+			Notify("Profile switching is available from the normal installed client launch.");
+			return;
+		}
+		TraceStartup(profileManager.InstallRoot, "switch-requested from-profile=" + localProfile.Id);
+		if (!Confirm("Switch local profile?", "PeerChat will close all direct sessions and discovery activity, flush encrypted storage, and restart at the local profile chooser.", "Switch Profile"))
+		{
+			return;
+		}
+		TraceStartup(profileManager.InstallRoot, "switch-confirmed from-profile=" + localProfile.Id);
+		window.IsEnabled = false;
+		try
+		{
+			await Task.Run(delegate
+			{
+				StopProfileServices();
+			});
+			TraceStartup(profileManager.InstallRoot, "profile-services-stopped from-profile=" + localProfile.Id);
+			RestartManaged();
+		}
+		catch (Exception ex)
+		{
+			window.IsEnabled = true;
+			Notify("Profile switch failed: " + ex.Message);
+		}
+	}
+
+	private void ResetFreshClient()
+	{
+		if (!Confirm("Reset selected local profile?", "This creates a new Peer ID for this profile by replacing only its local identity, contacts, trust, settings, session, and encrypted history. Other local profiles and server accounts are not changed. A complete backup is created first.", "Reset Selected Profile"))
+		{
+			return;
+		}
+		try
+		{
+			string text = ClientBackupDirectory();
+			StopProfileServices();
+			if (profileManager != null)
+			{
+				profileManager.ResetSelected(text);
+				RestartManaged();
+			}
+			else
+			{
+				Directory.CreateDirectory(text);
+				Directory.Move(directory, System.IO.Path.Combine(text, "PeerChat"));
+				RestartWithProfile(directory);
+			}
+		}
+		catch (Exception ex)
+		{
+			Notify("Fresh-profile reset failed: " + ex.Message);
+		}
+	}
+
+	private void RestoreClientState()
+	{
+		string[] array = (from x in Directory.GetDirectories(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "PeerChat-backup-*")
+			where Directory.Exists(System.IO.Path.Combine(x, (profileManager == null) ? "PeerChat" : "PeerChatProfile"))
+			orderby x descending
+			select x).ToArray();
+		if (array.Length == 0)
+		{
+			Notify("No compatible selected-profile backups were found on the Desktop.");
+			return;
+		}
+		string[] array2 = array.Select(System.IO.Path.GetFileName).ToArray();
+		string[] array3 = Dialog("Restore Client State", new string[1] { "Backup folder name" }, new string[1] { array2[0] }, "Restore", "Only the currently selected local profile will be replaced. Available backups:\n" + string.Join("\n", array2));
+		if (array3 == null)
+		{
+			return;
+		}
+		string path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), array3[0].Trim());
+		string text = System.IO.Path.Combine(path, (profileManager == null) ? "PeerChat" : "PeerChatProfile");
+		if (!Directory.Exists(text))
+		{
+			Notify("That backup folder was not found.");
+		}
+		else
+		{
+			if (!Confirm("Replace selected local profile?", "The current selected profile will be backed up and replaced. Other profiles are untouched.", "Restore Selected Profile"))
+			{
+				return;
+			}
+			try
+			{
+				string text2 = ClientBackupDirectory();
+				StopProfileServices();
+				if (profileManager != null)
+				{
+					profileManager.RestoreSelected(text, text2);
+					RestartManaged();
+					return;
+				}
+				Directory.CreateDirectory(text2);
+				if (Directory.Exists(directory))
+				{
+					Directory.Move(directory, System.IO.Path.Combine(text2, "PeerChat"));
+				}
+				CopyDirectory(text, directory);
+				RestartWithProfile(directory);
+			}
+			catch (Exception ex)
+			{
+				Notify("Client restore failed: " + ex.Message);
+			}
+		}
+	}
+
+	private void SettingsPage()
+	{
+		string[] service = LoadDiscoveryService();
+		Window dialog = new Window
+		{
+			Title = "Settings",
+			Owner = window,
+			Width = 1060.0,
+			Height = 720.0,
+			MinWidth = 900.0,
+			MinHeight = 620.0,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#0C1116"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			Resources = window.Resources
+		};
+		Grid grid = new Grid();
+		grid.Margin = new Thickness(18.0);
+		Grid grid2 = grid;
+		grid2.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = new GridLength(220.0)
+		});
+		grid2.ColumnDefinitions.Add(new ColumnDefinition());
+		dialog.Content = grid2;
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Margin = new Thickness(8.0, 8.0, 20.0, 8.0);
+		StackPanel stackPanel2 = stackPanel;
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = "PeerChat",
+			FontSize = 27.0,
+			FontWeight = FontWeights.SemiBold,
+			Margin = new Thickness(0.0, 0.0, 0.0, 28.0)
+		});
+		Action<string> showSettingsPage = null;
+		Dictionary<string, Button> settingsNavigation = new Dictionary<string, Button>(StringComparer.Ordinal);
+		string[] array = new string[8] { "General", "Privacy & Security", "Voice", "Video", "Screen Sharing", "Network", "Updates", "Advanced" };
+		foreach (string text in array)
+		{
+			Button navigationButton = new Button
+			{
+				Content = text,
+				FontSize = 15.0,
+				Foreground = Brush((text == "Advanced") ? "#EDF1F5" : "#A1AEBB"),
+				Padding = new Thickness(10.0, 7.0, 10.0, 7.0),
+				Margin = new Thickness(0.0, 0.0, 0.0, 4.0),
+				HorizontalContentAlignment = HorizontalAlignment.Left,
+				ToolTip = "Open " + text + " settings"
+			};
+			AutomationProperties.SetName(navigationButton, "Settings navigation " + text);
+			string page = text;
+			navigationButton.Click += delegate
+			{
+				if (showSettingsPage != null)
+				{
+					showSettingsPage(page);
+				}
+			};
+			settingsNavigation.Add(text, navigationButton);
+			stackPanel2.Children.Add(navigationButton);
+		}
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = "About\nVersion " + PeerChat.VersionInfo.Display,
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 30.0, 0.0, 0.0)
+		});
+		grid2.Children.Add(stackPanel2);
+		ScrollViewer scrollViewer = new ScrollViewer();
+		scrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+		ScrollViewer scrollViewer2 = scrollViewer;
+		Grid.SetColumn(scrollViewer2, 1);
+		grid2.Children.Add(scrollViewer2);
+		StackPanel stackPanel3 = (StackPanel)(scrollViewer2.Content = new StackPanel());
+		StackPanel advancedPanel = stackPanel3;
+		advancedPanel.Children.Add(new TextBlock
+		{
+			Text = "Advanced",
+			FontSize = 29.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		advancedPanel.Children.Add(new TextBlock
+		{
+			Text = "Power-user, direct connection, identity, and development tools.",
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 4.0, 0.0, 18.0)
+		});
+		StackPanel stackPanel5 = new StackPanel();
+		Button button = new Button();
+		button.Content = "◉   Direct P2P Connection\n      Connect directly by hostname/IP and port without discovery";
+		button.Padding = new Thickness(14.0);
+		button.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+		Button button2 = button;
+		button2.Click += delegate
+		{
+			try
+			{
+				Manual(dialog);
+			}
+			catch (Exception ex)
+			{
+				Notify(ex.Message, dialog);
+			}
+		};
+		Button button3 = new Button();
+		button3.Content = "▣   Copy My Peer ID\n      Copy the persistent cryptographic identity bundle";
+		button3.Padding = new Thickness(14.0);
+		button3.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+		Button button4 = button3;
+		button4.Click += delegate
+		{
+			CopyId();
+		};
+		Button button5 = new Button();
+		button5.Content = "♙   View Peer Identity\n      Inspect the permanent device identity and fingerprint";
+		button5.Padding = new Thickness(14.0);
+		button5.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+		Button button6 = button5;
+		button6.Click += delegate
+		{
+			Notify("Peer ID is the permanent cryptographic identity. IP addresses and ports are current connection endpoints.");
+		};
+		stackPanel5.Children.Add(button2);
+		stackPanel5.Children.Add(button4);
+		stackPanel5.Children.Add(button6);
+		advancedPanel.Children.Add(SettingsCard("Advanced Tools", "Direct P2P remains available if the optional PeerChat service is unavailable.", stackPanel5));
+		StackPanel stackPanel6 = new StackPanel();
+		TextBox host = new TextBox
+		{
+			Text = service[0],
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		};
+		TextBox port = new TextBox
+		{
+			Text = service[1],
+			Margin = new Thickness(0.0, 0.0, 0.0, 8.0)
+		};
+		stackPanel6.Children.Add(new TextBlock
+		{
+			Text = "PeerChat Service Endpoint",
+			Foreground = Brush("#AAB7C4")
+		});
+		stackPanel6.Children.Add(host);
+		stackPanel6.Children.Add(new TextBlock
+		{
+			Text = "TLS port",
+			Foreground = Brush("#AAB7C4")
+		});
+		stackPanel6.Children.Add(port);
+		Button button7 = new Button();
+		button7.Content = "Save Endpoint";
+		button7.Padding = new Thickness(14.0);
+		button7.HorizontalAlignment = HorizontalAlignment.Left;
+		Button button8 = button7;
+		button8.Click += delegate
+		{
+			int result;
+			if (!int.TryParse(port.Text, out result) || result < 1 || result > 65535)
+			{
+				Notify("Enter a valid TLS port.");
+			}
+			else
+			{
+				SaveDiscoveryService(host.Text.Trim(), result, (host.Text.Trim() == service[0] && result.ToString() == service[1]) ? service[2] : "");
+				dialog.Close();
+				model.Status = "PeerChat service endpoint saved.";
+				Refresh();
+			}
+		};
+		stackPanel6.Children.Add(button8);
+		advancedPanel.Children.Add(SettingsCard("PeerChat Service", "The public service assists discovery and relationships; direct peer communication remains an advanced fallback.", stackPanel6));
+		StackPanel stackPanel7 = new StackPanel();
+		stackPanel7.Children.Add(new TextBlock
+		{
+			Text = "LAN: " + shareHost + ":" + model.Port,
+			Foreground = Brush("#D7E2EC")
+		});
+		stackPanel7.Children.Add(new TextBlock
+		{
+			Text = "Public: Detecting…",
+			Foreground = Brush("#AAB7C4"),
+			Margin = new Thickness(0.0, 7.0, 0.0, 0.0)
+		});
+		stackPanel7.Children.Add(new TextBlock
+		{
+			Text = (model.Listening ? "● Listening on local network" : "○ Listener not ready"),
+			Foreground = Brush(model.Listening ? "#36D873" : "#AAB7C4"),
+			Margin = new Thickness(0.0, 7.0, 0.0, 0.0)
+		});
+		advancedPanel.Children.Add(SettingsCard("Connection Details", "Current endpoints are diagnostics, not permanent identity.", stackPanel7));
+		advancedPanel.Children.Add(SettingsCard("Privacy & Trust", "Discoverability and trusted server/peer controls will be wired with the Milestone 2 service contract.", new TextBlock
+		{
+			Text = "Discoverable\nFriends Only\nHidden\n\nNo private keys, passwords, tokens, or message contents are shown here.",
+			Foreground = Brush("#AAB7C4")
+		}));
+		StackPanel stackPanel8 = new StackPanel();
+		stackPanel8.Children.Add(new TextBlock
+		{
+			Text = "Profile: " + directory,
+			Foreground = Brush("#AAB7C4"),
+			TextWrapping = TextWrapping.Wrap
+		});
+		stackPanel8.Children.Add(new TextBlock
+		{
+			Text = "Peer ID: " + (string.IsNullOrEmpty(model.OwnId) ? "Not ready" : model.OwnId),
+			Foreground = Brush("#AAB7C4"),
+			TextTrimming = TextTrimming.CharacterEllipsis,
+			Margin = new Thickness(0.0, 6.0, 0.0, 0.0)
+		});
+		stackPanel8.Children.Add(new TextBlock
+		{
+			Text = "Service source: " + (File.Exists(DiscoveryServicePath) ? "Saved override" : "Packaged bootstrap") + "\nEndpoint: " + service[0] + ":" + service[1],
+			Foreground = Brush("#AAB7C4"),
+			Margin = new Thickness(0.0, 6.0, 0.0, 12.0)
+		});
+		Button button9 = new Button();
+		button9.Content = "Switch Local Profile";
+		button9.Padding = new Thickness(12.0);
+		button9.Margin = new Thickness(0.0, 0.0, 0.0, 7.0);
+		button9.IsEnabled = profileManager != null;
+		Button button10 = button9;
+		button10.Click += delegate
+		{
+			SwitchLocalProfile();
+		};
+		Button button11 = new Button();
+		button11.Content = "Backup Selected Profile";
+		button11.Padding = new Thickness(12.0);
+		button11.Margin = new Thickness(0.0, 0.0, 0.0, 7.0);
+		Button button12 = button11;
+		button12.Click += delegate
+		{
+			BackupClientState();
+		};
+		Button button13 = new Button();
+		button13.Content = "Reset Selected Profile";
+		button13.Padding = new Thickness(12.0);
+		button13.Margin = new Thickness(0.0, 0.0, 0.0, 7.0);
+		Button button14 = button13;
+		button14.Click += delegate
+		{
+			ResetFreshClient();
+		};
+		Button button15 = new Button();
+		button15.Content = "Restore Selected Profile";
+		button15.Padding = new Thickness(12.0);
+		Button button16 = button15;
+		button16.Click += delegate
+		{
+			RestoreClientState();
+		};
+		stackPanel8.Children.Add(button10);
+		stackPanel8.Children.Add(button12);
+		stackPanel8.Children.Add(button14);
+		stackPanel8.Children.Add(button16);
+		advancedPanel.Children.Add(SettingsCard("Local Profile Tools", "Switching restarts PeerChat after closing direct sessions and storage. Backup, reset, and restore affect only the selected profile.", stackPanel8));
+		StackPanel updatesPanel = new StackPanel();
+		updatesPanel.Children.Add(new TextBlock
+		{
+			Text = "Updates",
+			FontSize = 29.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		updatesPanel.Children.Add(new TextBlock
+		{
+			Text = "Choose a channel and check for a verified PeerChat update.",
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 4.0, 0.0, 18.0)
+		});
+		StackPanel updatePanel = new StackPanel();
+		TextBlock updateStatus = new TextBlock { Text = "Channel: " + updateClient.ChannelLabel + "\nChecks are manual. A downloaded update is verified, staged, applied by the separate updater after PeerChat exits, and rolled back if its first native startup does not confirm healthy.", TextWrapping = TextWrapping.Wrap, Foreground = Brush("#AAB7C4"), Margin = new Thickness(0.0, 0.0, 0.0, 10.0) };
+		ComboBox updateChannel = new ComboBox { Width = 190.0, SelectedIndex = String.Equals(updateClient.Preferences.Channel, "development", StringComparison.OrdinalIgnoreCase) ? 1 : 0, Margin = new Thickness(0.0, 0.0, 0.0, 8.0) };
+		updateChannel.Items.Add("Release"); updateChannel.Items.Add("Development");
+		updateChannel.SelectionChanged += delegate { try { updateClient.SelectChannel(updateChannel.SelectedIndex == 1 ? "development" : "release"); updateStatus.Text = "Channel: " + updateClient.ChannelLabel + "\nChecks are manual. A downloaded update is verified, staged, applied by the separate updater after PeerChat exits, and rolled back if its first native startup does not confirm healthy."; } catch (Exception error) { Notify(error.Message); } };
+		Button checkUpdates = new Button { Content = "Check for Updates", Padding = new Thickness(12.0), HorizontalAlignment = HorizontalAlignment.Left };
+		checkUpdates.Click += async delegate
+		{
+			checkUpdates.IsEnabled = false; updateStatus.Text = "Checking the " + updateClient.ChannelLabel + " update feed…";
+			try
+			{
+				var result = await updateClient.CheckForUpdate(System.Threading.CancellationToken.None);
+				if (!result.UpdateAvailable) { updateStatus.Text = "Channel: " + updateClient.ChannelLabel + "\n" + result.Reason; return; }
+				updateStatus.Text = "Version " + result.Manifest.Version + " is ready to download and verify.";
+				if (!Confirm("Install update", "Download and verify PeerChat " + result.Manifest.Version + " from the " + updateClient.ChannelLabel + " channel? PeerChat will close only after the separate updater is launched. The previous files are retained until the replacement confirms a healthy first startup.", "Download and restart")) return;
+				updateStatus.Text = "Downloading and verifying PeerChat " + result.Manifest.Version + "…";
+				await updateClient.DownloadPrepareAndLaunch(result, Process.GetCurrentProcess().Id, System.Threading.CancellationToken.None);
+				updateStatus.Text = "Updater started. Closing PeerChat safely…"; window.Close();
+			}
+			catch (Exception error) { updateStatus.Text = "Update not installed: " + error.Message; }
+			finally { if (!closing) checkUpdates.IsEnabled = true; }
+		};
+		updatePanel.Children.Add(updateStatus); updatePanel.Children.Add(updateChannel); updatePanel.Children.Add(checkUpdates);
+		updatesPanel.Children.Add(SettingsCard("Updates", "Release is the normal verified feed. Development is an explicit installation-wide channel for pre-release testing; it does not alter local profiles or account data.", updatePanel));
+		Button button17 = new Button();
+		button17.Content = "Close";
+		button17.Padding = new Thickness(18.0, 9.0, 18.0, 9.0);
+		button17.HorizontalAlignment = HorizontalAlignment.Right;
+		Button button18 = button17;
+		button18.Click += delegate
+		{
+			dialog.Close();
+		};
+		advancedPanel.Children.Add(button18);
+		Dictionary<string, StackPanel> settingsPages = new Dictionary<string, StackPanel>(StringComparer.Ordinal)
+		{
+			{ "Advanced", advancedPanel },
+			{ "Updates", updatesPanel }
+		};
+		Func<string, string, StackPanel> createInfoPage = delegate(string title, string description)
+		{
+			StackPanel panel = new StackPanel();
+			panel.Children.Add(new TextBlock
+			{
+				Text = title,
+				FontSize = 29.0,
+				FontWeight = FontWeights.SemiBold
+			});
+			panel.Children.Add(new TextBlock
+			{
+				Text = description,
+				TextWrapping = TextWrapping.Wrap,
+				Foreground = Brush("#A1AEBB"),
+				Margin = new Thickness(0.0, 4.0, 0.0, 0.0)
+			});
+			return panel;
+		};
+		settingsPages.Add("General", createInfoPage("General", "General client preferences will appear here as they are introduced. Local profile and account controls remain available from the profile bubble."));
+		settingsPages.Add("Privacy & Security", createInfoPage("Privacy & Security", "Local history is encrypted on this PC. Peer and account trust status remains available in the main Security & Status surface."));
+		settingsPages.Add("Voice", createInfoPage("Voice", "Call controls stay in the conversation header. Future voice preferences will appear here without changing the active-call interface."));
+		settingsPages.Add("Video", createInfoPage("Video", "Video is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
+		settingsPages.Add("Screen Sharing", createInfoPage("Screen Sharing", "Screen sharing is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
+		settingsPages.Add("Network", createInfoPage("Network", "PeerChat automatically selects verified routes. Direct P2P tools and service endpoint configuration remain under Advanced."));
+		showSettingsPage = delegate(string page)
+		{
+			StackPanel panel;
+			if (!settingsPages.TryGetValue(page, out panel))
+			{
+				return;
+			}
+			scrollViewer2.Content = panel;
+			foreach (KeyValuePair<string, Button> item in settingsNavigation)
+			{
+				item.Value.Foreground = Brush((item.Key == page) ? "#EDF1F5" : "#A1AEBB");
+			}
+		};
+		showSettingsPage("Advanced");
+		dialog.ShowDialog();
+	}
+
+	private void DiscoverySettings()
+	{
+		string[] array = LoadDiscoveryService();
+		string[] array2 = Dialog("PeerChat Server", new string[2] { "Server hostname or address", "TLS port" }, new string[2]
+		{
+			array[0],
+			array[1]
+		}, "Save server", "Advanced development setting. Changing the endpoint clears its trusted development server identity and asks for confirmation on the next connection.");
+		if (array2 != null)
+		{
+			int result;
+			if (string.IsNullOrWhiteSpace(array2[0]) || !int.TryParse(array2[1], out result) || result < 1 || result > 65535)
+			{
+				Notify("Enter a valid server address and TLS port.");
+				return;
+			}
+			string text = array2[0].Trim();
+			string pin = ((string.Equals(text, array[0], StringComparison.OrdinalIgnoreCase) && result.ToString() == array[1]) ? array[2] : "");
+			SaveDiscoveryService(text, result, pin);
+			model.Status = "PeerChat server settings saved.";
+			Refresh();
+		}
+	}
+
+	private static List<LocalSubnetInterface> CurrentLocalSubnetInterfaces()
+	{
+		List<LocalSubnetInterface> list = new List<LocalSubnetInterface>();
+		NetworkInterface[] allNetworkInterfaces;
+		try
+		{
+			allNetworkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
+		}
+		catch (Exception ex)
+		{
+			list.Add(new LocalSubnetInterface
+			{
+				Name = "Windows interface enumeration",
+				IgnoredReason = ex.GetType().Name
+			});
+			return list;
+		}
+		NetworkInterface[] array = allNetworkInterfaces;
+		foreach (NetworkInterface networkInterface in array)
+		{
+			string name = string.Concat(networkInterface.Name ?? "unnamed", " [", networkInterface.NetworkInterfaceType, "]");
+			if (networkInterface.OperationalStatus != OperationalStatus.Up)
+			{
+				list.Add(new LocalSubnetInterface
+				{
+					Name = name,
+					IgnoredReason = "interface is " + networkInterface.OperationalStatus
+				});
+				continue;
+			}
+			if (networkInterface.NetworkInterfaceType == NetworkInterfaceType.Loopback || networkInterface.NetworkInterfaceType == NetworkInterfaceType.Tunnel)
+			{
+				list.Add(new LocalSubnetInterface
+				{
+					Name = name,
+					IgnoredReason = "loopback/tunnel adapter"
+				});
+				continue;
+			}
+			IPInterfaceProperties iPProperties;
+			try
+			{
+				iPProperties = networkInterface.GetIPProperties();
+			}
+			catch (Exception ex2)
+			{
+				list.Add(new LocalSubnetInterface
+				{
+					Name = name,
+					IgnoredReason = "properties unavailable: " + ex2.GetType().Name
+				});
+				continue;
+			}
+			bool flag = false;
+			foreach (UnicastIPAddressInformation unicastAddress in iPProperties.UnicastAddresses)
+			{
+				IPAddress address;
+				try
+				{
+					address = unicastAddress.Address;
+				}
+				catch (Exception ex3)
+				{
+					list.Add(new LocalSubnetInterface
+					{
+						Name = name,
+						IgnoredReason = "address unavailable: " + ex3.GetType().Name
+					});
+					continue;
+				}
+				if (address == null || address.AddressFamily != AddressFamily.InterNetwork)
+				{
+					continue;
+				}
+				flag = true;
+				if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.ToString().StartsWith("169.254."))
+				{
+					list.Add(new LocalSubnetInterface
+					{
+						Name = name,
+						Address = address.ToString(),
+						IgnoredReason = "loopback, unspecified, or link-local address"
+					});
+					continue;
+				}
+				try
+				{
+					IPAddress iPv4Mask = unicastAddress.IPv4Mask;
+					list.Add(new LocalSubnetInterface
+					{
+						Name = name,
+						Address = address.ToString(),
+						Mask = ((iPv4Mask == null) ? "" : iPv4Mask.ToString()),
+						IgnoredReason = ((iPv4Mask == null) ? "IPv4 subnet mask unavailable" : "")
+					});
+				}
+				catch (Exception ex4)
+				{
+					list.Add(new LocalSubnetInterface
+					{
+						Name = name,
+						Address = address.ToString(),
+						IgnoredReason = "IPv4 subnet mask unavailable: " + ex4.GetType().Name
+					});
+				}
+			}
+			if (!flag)
+			{
+				list.Add(new LocalSubnetInterface
+				{
+					Name = name,
+					IgnoredReason = "no IPv4 unicast address"
+				});
+			}
+		}
+		return list;
+	}
+
+	private static LocalSubnetDecision CurrentLocalSubnetDecision(string candidate)
+	{
+		return LocalSubnetClassifier.Evaluate(candidate, CurrentLocalSubnetInterfaces());
+	}
+
+	private static string CurrentNetworkFingerprint()
+	{
+		return string.Join("|", (from item in CurrentLocalSubnetInterfaces()
+			where string.IsNullOrEmpty(item.IgnoredReason) && !string.IsNullOrEmpty(item.Address) && !string.IsNullOrEmpty(item.Mask)
+			select item.Address + "/" + item.Mask).OrderBy((string value) => value, StringComparer.Ordinal));
+	}
+
+	private static bool IsPrivateCandidate(string candidate)
+	{
+		IPAddress address;
+		if (!IPAddress.TryParse(candidate, out address) || address.AddressFamily != AddressFamily.InterNetwork)
+		{
+			return false;
+		}
+		byte[] addressBytes = address.GetAddressBytes();
+		if (addressBytes[0] != 10 && (addressBytes[0] != 172 || addressBytes[1] < 16 || addressBytes[1] > 31) && (addressBytes[0] != 192 || addressBytes[1] != 168))
+		{
+			if (addressBytes[0] == 169)
+			{
+				return addressBytes[1] == 254;
+			}
+			return false;
+		}
+		return true;
+	}
+
+	private static bool IsRouteFailure(string message)
+	{
+		string text = (message ?? "").ToLowerInvariant();
+		if (!text.Contains("tcp ") && !text.Contains("connection refused") && !text.Contains("unreachable") && !text.Contains("dns"))
+		{
+			if (text.Contains("address"))
+			{
+				return text.Contains("invalid");
+			}
+			return false;
+		}
+		return true;
+	}
+
+	private static string ConnectionFailureSummary(string message)
+	{
+		string text = (message ?? "").ToLowerInvariant();
+		if (text.Contains("refused"))
+		{
+			return "Connection refused";
+		}
+		if (text.Contains("timeout") || text.Contains("timed out"))
+		{
+			return "TCP timeout";
+		}
+		if (text.Contains("tls") || text.Contains("secure session") || text.Contains("handshake"))
+		{
+			return "TLS handshake failed";
+		}
+		if (text.Contains("identity changed"))
+		{
+			return "Peer identity changed";
+		}
+		if (text.Contains("identity") || text.Contains("trust") || text.Contains("verification"))
+		{
+			return "Identity verification required";
+		}
+		if (text.Contains("candidate") || text.Contains("unreachable") || text.Contains("dns") || text.Contains("route"))
+		{
+			return "No reachable candidates";
+		}
+		return "Connection failed";
+	}
+
+	private void RecordConnection(string stage, ConversationModel conversation, string result, CoreEvent connectionEvent = null)
+	{
+		ConnectionAttemptDetails connectionAttemptDetails = ((connectionEvent == null) ? connectionAttempts.For(conversation) : connectionAttempts.Update(connectionEvent, conversation));
+		connectionLog.Record(stage, conversation==null?0:conversation.AccountId, conversation==null?"":conversation.ConversationId, connectionAttemptDetails.ExpectedPeer, connectionAttemptDetails.PresentedPeer, connectionAttemptDetails.Candidate, connectionAttemptDetails.Source, connectionAttemptDetails.Route, result);
+	}
+
+	private void RequestConversationHistory(ConversationModel conversation)
+	{
+		if (conversation == null || conversation.RequestedHistory || conversation.Contact == null || String.IsNullOrEmpty(conversation.Contact.peer))
+		{
+			return;
+		}
+		string peer = conversation.Contact.peer;
+		conversation.RequestedPeerHistory.Add(peer);
+		conversation.LoadingHistoryPeer = peer;
+		conversation.HistoryLoading = true;
+		core.History(peer, long.MaxValue);
+		conversation.RequestedHistory = true;
+	}
+
+	private void RequestGroupHistory(GroupModel group)
+	{
+		if (group == null || group.RequestedHistory)
+		{
+			return;
+		}
+		group.RequestedHistory = true;
+		group.HistoryLoading = true;
+		core.GroupHistory(group.Id, long.MaxValue);
+	}
+
+	private string ConnectionDiagnosticsText()
+	{
+		string[] array = LoadDiscoveryService();
+		ConversationModel selected = model.Selected;
+		ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.For(selected);
+		return "PeerChat connection details\nTimestamp: " + DateTime.UtcNow.ToString("O") + "\nProfile: " + ((localProfile == null) ? "Local" : localProfile.Name) + "\nAccount ID: " + ((selected == null || selected.AccountId <= 0) ? "Unavailable" : selected.AccountId.ToString()) + "\nConversation ID: " + ((selected == null) ? "None" : selected.ConversationId) + "\nDiscovery endpoint: " + array[0] + ":" + array[1] + "\nLocal P2P listener: 0.0.0.0:" + model.Port + "\nLAN candidate: " + shareHost + ":" + model.Port + "\nFriend presence: " + connectionAttemptDetails.Presence + "\nCandidate seen UTC (server): " + connectionAttemptDetails.CandidateSeenUtc + "\nRefresh result: " + connectionAttemptDetails.RefreshResult + "\nPublic candidate: " + ((selected == null || selected.Contact == null) ? "Unavailable" : (selected.Contact.publicHost + ":" + selected.Contact.publicPort)) + "\nLive winning session: " + (connectionAttemptDetails.HasLiveSession ? "Connected" : "None") + "\nWinning connection ID: " + (connectionAttemptDetails.HasLiveSession ? connectionAttemptDetails.LiveConnectionId.ToString() : "None") + "\nWinning direction: " + connectionAttemptDetails.LiveDirection + "\nWinning endpoint: " + connectionAttemptDetails.LiveCandidate + "\nWinning source: " + connectionAttemptDetails.LiveSource + "\nWinning route: " + connectionAttemptDetails.LiveRoute + "\nCandidate source: " + connectionAttemptDetails.Source + "\nSelected candidate: " + connectionAttemptDetails.Candidate + "\nSelection reason: " + connectionAttemptDetails.Route + "\nExpected Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.ExpectedPeer) ? "Unspecified" : connectionAttemptDetails.ExpectedPeer) + "\nPresented/current Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.PresentedPeer) ? "Not presented" : connectionAttemptDetails.PresentedPeer) + "\nTCP/TLS state: " + connectionAttemptDetails.TransportState + "\nTrust state: " + connectionAttemptDetails.TrustState + "\nLatest failed attempt ID: " + ((connectionAttemptDetails.LatestFailedAttemptId > 0) ? connectionAttemptDetails.LatestFailedAttemptId.ToString() : "None") + "\nLatest failed endpoint: " + connectionAttemptDetails.LatestFailedCandidate + "\nLatest failed source: " + connectionAttemptDetails.LatestFailedSource + "\nLatest failed route: " + connectionAttemptDetails.LatestFailedRoute + "\nLatest failed reason: " + connectionAttemptDetails.LatestFailure + "\n\nLocal subnet classification:\n" + connectionAttemptDetails.LocalSubnetDiagnostics;
+	}
+
+	private void ConnectFriendCandidate(DiscoverySearchResult friend, ConversationModel conversation, bool force, string trigger)
+	{
+		ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.Update(new CoreEvent
+		{
+			expected = friend.PublicIdentity
+		}, conversation);
+		connectionAttemptDetails.Presence = (friend.Online ? "Online" : "Offline");
+		connectionAttemptDetails.CandidateSeenUtc = friend.CandidateSeenUtc;
+		string text = friend.EndpointHost ?? "";
+		string text2 = friend.PublicEndpointHost ?? "";
+		int endpointPort = friend.EndpointPort;
+		int publicEndpointPort = friend.PublicEndpointPort;
+		bool flag = !string.IsNullOrWhiteSpace(text) && endpointPort > 0 && endpointPort <= 65535;
+		bool flag2 = !string.IsNullOrWhiteSpace(text2) && publicEndpointPort > 0 && publicEndpointPort <= 65535;
+		LocalSubnetDecision localSubnetDecision2;
+		if (!flag)
+		{
+			LocalSubnetDecision localSubnetDecision = new LocalSubnetDecision();
+			localSubnetDecision.SameSubnet = false;
+			localSubnetDecision.Diagnostics = "LAN candidate unavailable; subnet classification not performed";
+			localSubnetDecision2 = localSubnetDecision;
+		}
+		else
+		{
+			localSubnetDecision2 = CurrentLocalSubnetDecision(text);
+		}
+		LocalSubnetDecision localSubnetDecision3 = localSubnetDecision2;
+		connectionAttemptDetails.LocalSubnetDiagnostics = localSubnetDecision3.Diagnostics;
+		bool flag3 = flag && localSubnetDecision3.SameSubnet;
+		string text3 = text;
+		string text4 = "same LAN";
+		string source = "Discovery LAN candidate";
+		int num = endpointPort;
+		if (!flag && flag2)
+		{
+			text3 = text2;
+			num = publicEndpointPort;
+			text4 = "public candidate (no LAN candidate)";
+			source = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery public candidate" : friend.PublicCandidateSource);
+			conversation.PublicAttempted = true;
+		}
+		else if (!flag3 && flag2)
+		{
+			text3 = text2;
+			num = publicEndpointPort;
+			text4 = "public candidate (LAN candidate is outside local subnets)";
+			source = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery public candidate" : friend.PublicCandidateSource);
+			conversation.PublicAttempted = true;
+		}
+		else if (flag && !flag3)
+		{
+			text3 = "";
+			num = 0;
+			text4 = "no reachable candidate (LAN candidate is outside local subnets)";
+			source = "Discovery friend state";
+		}
+		switch (trigger)
+		{
+		case "candidate update":
+			text4 = "candidate update · " + text4;
+			break;
+		case "manual retry":
+			text4 = "manual retry · " + text4;
+			break;
+		case "network change":
+			text4 = "network change · " + text4;
+			break;
+		}
+		lastPublicCandidate = (flag2 ? (text2 + ":" + publicEndpointPort) : "Unavailable");
+		lastPublicCandidateSource = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery friend state" : friend.PublicCandidateSource);
+		lastObservedAddressClassification = (string.IsNullOrEmpty(friend.ObservedAddressClassification) ? "Unavailable" : friend.ObservedAddressClassification);
+		TraceUi("Candidate diagnostics: account=" + friend.AccountId + "; LAN candidate: " + (flag ? (text + ":" + endpointPort) : "none") + "; Public candidate: " + (flag2 ? (text2 + ":" + publicEndpointPort) : "none") + "; Selected candidate: " + (string.IsNullOrEmpty(text3) ? "none" : (text3 + ":" + num)) + "; Selection reason: " + text4 + "; interfaces=" + localSubnetDecision3.Diagnostics.Replace('\n', '|'));
+		if (string.IsNullOrWhiteSpace(text3) || num < 1)
+		{
+			model.Status = (friend.Online ? "Finding peer… no reachable endpoint has been published yet." : "Offline — waiting for this friend to publish a reachable endpoint.");
+			CoreEvent coreEvent = new CoreEvent();
+			coreEvent.peer = friend.PublicIdentity;
+			coreEvent.expected = friend.PublicIdentity;
+			coreEvent.candidate = "None";
+			coreEvent.source = "Discovery friend state";
+			coreEvent.route = trigger;
+			coreEvent.attempt = 0L;
+			CoreEvent coreEvent2 = coreEvent;
+			connectionAttempts.Update(coreEvent2, conversation, "Offline", null, "No reachable candidates");
+			RecordConnection("failure", conversation, "No reachable candidates", coreEvent2);
+			Refresh();
+			return;
+		}
+		conversation.ConnectionState = "Connecting" + (conversation.PublicAttempted ? " via public endpoint" : " via LAN endpoint");
+		conversation.Refresh();
+		model.Status = "Connecting to " + friend.Username + " (" + text4 + ")…";
+		Refresh();
+		try
+		{
+			core.Connect(text3, (ushort)num, friend.PublicIdentity, source, text4, force);
+		}
+		catch (Exception ex)
+		{
+			conversation.ConnectionState = "Connection failed";
+			conversation.Refresh();
+			CoreEvent coreEvent3 = new CoreEvent();
+			coreEvent3.peer = friend.PublicIdentity;
+			coreEvent3.expected = friend.PublicIdentity;
+			coreEvent3.candidate = text3 + ":" + num;
+			coreEvent3.source = source;
+			coreEvent3.route = text4;
+			CoreEvent coreEvent4 = coreEvent3;
+			connectionAttempts.Update(coreEvent4, conversation, "Failed", null, ConnectionFailureSummary(ex.Message));
+			RecordConnection("failure", conversation, ConnectionFailureSummary(ex.Message), coreEvent4);
+			model.Status = "Connection failed: " + ex.Message;
+			Refresh();
+		}
+	}
+
+	private void OpenFriendConversation(DiscoverySearchResult requested, bool force = false, string trigger = "selection")
+	{
+		DiscoverySearchResult friend;
+		lock (friendDirectory)
+		{
+			if (!friendDirectory.TryGetValue(requested.AccountId, out friend))
+			{
+				friend = requested;
+			}
+		}
+		FriendConversationBinding friendConversationBinding = conversationIndex.Records.FirstOrDefault((FriendConversationBinding value) => value.AccountId == friend.AccountId);
+		IEnumerable<string> knownPeers = ((friendConversationBinding == null) ? ((IEnumerable<string>)new string[1] { friend.PublicIdentity }) : friendConversationBinding.KnownPeerIds);
+		bool reused;
+		ConversationModel conversationModel = model.BindFriend(friend.AccountId, friend.Username, friend.PublicIdentity, knownPeers, out reused);
+		bool verified = conversationModel.Contact != null && conversationModel.Contact.peer == friend.PublicIdentity && conversationModel.Contact.verified;
+		string host = friend.EndpointHost ?? "";
+		string publicHost = friend.PublicEndpointHost ?? "";
+		int endpointPort = friend.EndpointPort;
+		int publicEndpointPort = friend.PublicEndpointPort;
+		conversationModel.Contact = new ContactData
+		{
+			peer = friend.PublicIdentity,
+			name = friend.Username,
+			host = host,
+			port = (ushort)Math.Max(0, Math.Min(65535, endpointPort)),
+			publicHost = publicHost,
+			publicPort = (ushort)Math.Max(0, Math.Min(65535, publicEndpointPort)),
+			verified = verified
+		};
+		conversationModel.PublicAttempted = false;
+		conversationModel.ConnectionState = (friend.Online ? "Finding peer" : "Offline");
+		conversationModel.Refresh();
+		model.Groups = false;
+		model.Selected = conversationModel;
+		conversationModel.Unread = 0;
+		RequestConversationHistory(conversationModel);
+		TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + friend.AccountId + "; username=" + friend.Username + "; device Peer ID=" + friend.PublicIdentity + "; local conversation=" + conversationModel.ConversationId);
+		ShowConversation();
+		RefreshList();
+		Refresh();
+		ConnectFriendCandidate(friend, conversationModel, force, trigger);
+	}
+
+	private Border DiscoveryCard(DiscoverySearchResult result)
+	{
+		Border border = new Border();
+		border.Background = Brush("#18222C");
+		border.BorderBrush = Brush("#2E3C49");
+		border.BorderThickness = new Thickness(1.0);
+		border.CornerRadius = new CornerRadius(12.0);
+		border.Padding = new Thickness(14.0);
+		border.Margin = new Thickness(0.0, 0.0, 0.0, 9.0);
+		Border border2 = border;
+		Grid grid = new Grid();
+		grid.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = new GridLength(48.0)
+		});
+		grid.ColumnDefinitions.Add(new ColumnDefinition());
+		grid.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = GridLength.Auto
+		});
+		border2.Child = grid;
+		Grid grid2 = new Grid();
+		grid2.Width = 40.0;
+		grid2.Height = 40.0;
+		grid2.VerticalAlignment = VerticalAlignment.Top;
+		Grid grid3 = grid2;
+		grid3.Children.Add(new Ellipse
+		{
+			Fill = Brush("#365D89")
+		});
+		grid3.Children.Add(new TextBlock
+		{
+			Text = (string.IsNullOrEmpty(result.Username) ? "?" : result.Username.Substring(0, 1).ToUpperInvariant()),
+			HorizontalAlignment = HorizontalAlignment.Center,
+			VerticalAlignment = VerticalAlignment.Center,
+			FontSize = 18.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		Ellipse ellipse = new Ellipse();
+		ellipse.Width = 9.0;
+		ellipse.Height = 9.0;
+		ellipse.Fill = Brush(result.Online ? "#36D873" : "#71808E");
+		ellipse.Stroke = Brush("#18222C");
+		ellipse.StrokeThickness = 2.0;
+		ellipse.HorizontalAlignment = HorizontalAlignment.Right;
+		ellipse.VerticalAlignment = VerticalAlignment.Bottom;
+		Ellipse element = ellipse;
+		grid3.Children.Add(element);
+		grid.Children.Add(grid3);
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.VerticalAlignment = VerticalAlignment.Center;
+		StackPanel stackPanel2 = stackPanel;
+		Grid.SetColumn(stackPanel2, 1);
+		stackPanel2.Children.Add(new TextBlock
+		{
+			Text = result.Username,
+			FontSize = 16.0,
+			FontWeight = FontWeights.SemiBold,
+			TextTrimming = TextTrimming.CharacterEllipsis
+		});
+		StackPanel stackPanel3 = new StackPanel();
+		stackPanel3.Orientation = Orientation.Horizontal;
+		stackPanel3.Margin = new Thickness(0.0, 3.0, 0.0, 0.0);
+		StackPanel stackPanel4 = stackPanel3;
+		stackPanel4.Children.Add(new TextBlock
+		{
+			Text = "@" + result.Username,
+			Foreground = Brush("#AAB7C4"),
+			FontSize = 12.0
+		});
+		stackPanel4.Children.Add(new TextBlock
+		{
+			Text = (result.Online ? "  ● Online" : "  ○ Offline"),
+			Foreground = Brush(result.Online ? "#36D873" : "#9AA7B4"),
+			FontSize = 12.0
+		});
+		stackPanel2.Children.Add(stackPanel4);
+		grid.Children.Add(stackPanel2);
+		string requestState;
+		friendRequestStates.TryGetValue(result.AccountId, out requestState);
+		string text = (string.IsNullOrEmpty(requestState) ? "Add Friend" : requestState);
+		bool flag = text == "Add Friend" || text == "Incoming Request" || text == "Friends";
+		if (text == "Friends")
+		{
+			text = "Message";
+		}
+		Button button = new Button();
+		button.Content = text;
+		button.Background = Brush(flag ? "#244C79" : "#202B35");
+		button.BorderBrush = Brush(flag ? "#3A6E9F" : "#3A4650");
+		button.Foreground = Brush(flag ? "#EDF1F5" : "#AAB7C4");
+		button.Padding = new Thickness(12.0, 8.0, 12.0, 8.0);
+		button.HorizontalContentAlignment = HorizontalAlignment.Center;
+		button.VerticalAlignment = VerticalAlignment.Center;
+		button.Margin = new Thickness(10.0, 0.0, 0.0, 0.0);
+		button.Tag = result;
+		button.IsEnabled = flag;
+		Button button2 = button;
+		button2.Click += delegate(object s, RoutedEventArgs e)
+		{
+			DiscoverySearchResult discoverySearchResult = (DiscoverySearchResult)((Button)s).Tag;
+			if (requestState == "Incoming Request")
+			{
+				if (Confirm("Friend request", discoverySearchResult.Username + " wants to be friends. Accept this request?", "Accept"))
+				{
+					RespondToFriendRequest(discoverySearchResult, true);
+				}
+				else
+				{
+					RespondToFriendRequest(discoverySearchResult, false);
+				}
+			}
+			else if (requestState == "Friends")
+			{
+				OpenFriendConversation(discoverySearchResult);
+			}
+			else
+			{
+				SendFriendRequest(discoverySearchResult);
+			}
+		};
+		Grid.SetColumn(button2, 2);
+		grid.Children.Add(button2);
+		return border2;
+	}
+
+	private void ShowDiscoveryProfile(DiscoverySearchResult result)
+	{
+		Notify(result.Username + "\n@" + result.Username + " · " + (result.Online ? "Online" : "Offline") + "\n\nThis is public discovery information. Use Add Friend to send a server-backed request.");
+	}
+
+	private void FindFriend()
+	{
+		if (discovery == null || string.IsNullOrEmpty(discovery.SessionToken))
+		{
+			Notify("Create an account or sign in before searching.");
+			return;
+		}
+		Window dialog = new Window
+		{
+			Title = "Find Friends",
+			Owner = window,
+			Width = 610.0,
+			Height = 620.0,
+			MinWidth = 520.0,
+			MinHeight = 460.0,
+			WindowStartupLocation = WindowStartupLocation.CenterOwner,
+			Background = Brush("#0C1116"),
+			Foreground = Brush("#EDF1F5"),
+			FontFamily = new FontFamily("Segoe UI"),
+			FontSize = 15.0,
+			Resources = window.Resources
+		};
+		Border border = new Border();
+		border.Background = Brush("#101820");
+		border.BorderBrush = Brush("#293844");
+		border.BorderThickness = new Thickness(1.0);
+		border.CornerRadius = new CornerRadius(14.0);
+		border.Margin = new Thickness(12.0);
+		border.Padding = new Thickness(24.0);
+		Border border2 = border;
+		dialog.Content = border2;
+		Grid grid = new Grid();
+		grid.RowDefinitions.Add(new RowDefinition
+		{
+			Height = GridLength.Auto
+		});
+		grid.RowDefinitions.Add(new RowDefinition
+		{
+			Height = GridLength.Auto
+		});
+		grid.RowDefinitions.Add(new RowDefinition
+		{
+			Height = GridLength.Auto
+		});
+		grid.RowDefinitions.Add(new RowDefinition
+		{
+			Height = new GridLength(1.0, GridUnitType.Star)
+		});
+		border2.Child = grid;
+		StackPanel stackPanel = new StackPanel();
+		stackPanel.Children.Add(new TextBlock
+		{
+			Text = "Find Friends",
+			FontSize = 25.0,
+			FontWeight = FontWeights.SemiBold
+		});
+		stackPanel.Children.Add(new TextBlock
+		{
+			Text = "Find people by their public username or friend code.",
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(0.0, 5.0, 0.0, 18.0)
+		});
+		grid.Children.Add(stackPanel);
+		Border border3 = new Border();
+		border3.Background = Brush("#17212A");
+		border3.BorderBrush = Brush("#354553");
+		border3.BorderThickness = new Thickness(1.0);
+		border3.CornerRadius = new CornerRadius(11.0);
+		border3.Padding = new Thickness(13.0, 2.0, 13.0, 2.0);
+		Border border4 = border3;
+		Grid grid2 = new Grid();
+		grid2.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = GridLength.Auto
+		});
+		grid2.ColumnDefinitions.Add(new ColumnDefinition());
+		grid2.Children.Add(new TextBlock
+		{
+			Text = "⌕",
+			FontFamily = new FontFamily("Segoe MDL2 Assets"),
+			FontSize = 17.0,
+			Foreground = Brush("#AAB7C4"),
+			VerticalAlignment = VerticalAlignment.Center,
+			Margin = new Thickness(0.0, 0.0, 10.0, 0.0)
+		});
+		TextBox query = new TextBox
+		{
+			Background = Brush("#17212A"),
+			BorderThickness = new Thickness(0.0),
+			Padding = new Thickness(0.0, 11.0, 0.0, 11.0),
+			ToolTip = "Search by username or friend code"
+		};
+		Grid.SetColumn(query, 1);
+		grid2.Children.Add(query);
+		border4.Child = grid2;
+		Grid.SetRow(border4, 1);
+		grid.Children.Add(border4);
+		Func<string> summary = () => "Pending outgoing: " + friendState.Outgoing.Count + "   Incoming requests: " + friendState.Incoming.Count + "   Friends: " + friendState.Friends.Count;
+		TextBlock state = new TextBlock
+		{
+			Text = "Start typing to find people on PeerChat\n\n" + summary(),
+			Foreground = Brush("#A1AEBB"),
+			Margin = new Thickness(2.0, 13.0, 2.0, 10.0),
+			FontSize = 13.0
+		};
+		Grid.SetRow(state, 2);
+		grid.Children.Add(state);
+		ObservableCollection<DiscoverySearchResult> collection = new ObservableCollection<DiscoverySearchResult>();
+		ScrollViewer resultsScroll = new ScrollViewer
+		{
+			Content = new StackPanel(),
+			VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+		};
+		Grid.SetRow(resultsScroll, 3);
+		grid.Children.Add(resultsScroll);
+		int generation = 0;
+		DispatcherTimer debounce = new DispatcherTimer
+		{
+			Interval = TimeSpan.FromMilliseconds(300.0)
+		};
+		Action clear = delegate
+		{
+			collection.Clear();
+			state.Text = "Start typing to find people on PeerChat\n\n" + summary();
+		};
+		Action rebuildCards = delegate
+		{
+			StackPanel stackPanel2 = new StackPanel();
+			foreach (DiscoverySearchResult item in collection)
+			{
+				stackPanel2.Children.Add(DiscoveryCard(item));
+			}
+			resultsScroll.Content = stackPanel2;
+			state.Text = ((collection.Count == 0) ? "No users found" : (collection.Count + " public profile" + ((collection.Count == 1) ? "" : "s") + " found"));
+		};
+		debounce.Tick += async delegate
+		{
+			debounce.Stop();
+			int request = ++generation;
+			string prefix = query.Text.Trim();
+			if (prefix.Length == 0)
+			{
+				clear();
+				resultsScroll.Content = new StackPanel();
+				return;
+			}
+			state.Text = "Searching…";
+			try
+			{
+				List<DiscoverySearchResult> found = await Task.Run(() => discovery.Suggest(prefix));
+				dialog.Dispatcher.BeginInvoke((Action)delegate
+				{
+					if (request == generation && query.Text.Trim() == prefix)
+					{
+						collection.Clear();
+						foreach (DiscoverySearchResult item2 in found)
+						{
+							collection.Add(item2);
+						}
+						rebuildCards();
+					}
+				});
+			}
+			catch (Exception)
+			{
+				dialog.Dispatcher.BeginInvoke((Action)delegate
+				{
+					if (request == generation)
+					{
+						collection.Clear();
+						resultsScroll.Content = new StackPanel();
+						state.Text = "Unable to search — server unavailable";
+					}
+				});
+			}
+		};
+		query.TextChanged += delegate
+		{
+			generation++;
+			debounce.Stop();
+			if (query.Text.Trim().Length == 0)
+			{
+				clear();
+				resultsScroll.Content = new StackPanel();
+			}
+			else
+			{
+				debounce.Start();
+			}
+		};
+		dialog.Loaded += delegate
+		{
+			query.Focus();
+		};
+		TraceUi("Find Friends dialog constructed; showing");
+		dialog.ShowDialog();
+	}
+
+	private void AddFriend()
+	{
+		string[] array = Dialog("Add Friend", new string[1] { "Paste a PeerChat ID" }, new string[1] { "" }, "Save and connect", "Your friend can send you their ID using Copy My ID. Offline friends stay in your contacts.");
+		if (array != null)
+		{
+			string text = core.Add(array[0].Trim(), model.OwnId);
+			if (text.Length > 0)
+			{
+				Notify(text);
+				return;
+			}
+			model.Status = "Contact requested. Connecting…";
+			Refresh();
+		}
+	}
+
+	private void Manual()
+	{
+		Manual(null);
+	}
+
+	private void Manual(Window owner)
+	{
+		string[] array = Dialog("Manual Connect", new string[2] { "IP address or hostname", "Listening port" }, new string[2] { "", "7777" }, "Connect", "Use this for LAN, VPN, or forwarded-port troubleshooting.", false, owner);
+		if (array != null)
+		{
+			ushort result;
+			if (!ushort.TryParse(array[1], out result) || result == 0 || string.IsNullOrWhiteSpace(array[0]))
+			{
+				Notify("Enter an address and a port from 1 to 65535.", owner);
+				return;
+			}
+			string host = array[0].Trim();
+			core.Connect(host, result, "", "Manual entry", "manual direct", true);
+			model.Status = "Connecting to " + array[0] + "…";
+			Refresh();
+		}
+	}
+
+	private async void Profile()
+	{
+		string[] values = Dialog("My Profile", new string[2] { "Display name", "Listening port" }, new string[2]
+		{
+			model.Name,
+			model.Port.ToString()
+		}, "Save profile", "Saving restarts your listener. Your persistent identity and encrypted history stay the same.");
+		if (values == null)
+		{
+			return;
+		}
+		ushort port;
+		if (string.IsNullOrWhiteSpace(values[0]) || values[0].Length > 64 || !ushort.TryParse(values[1], out port) || port == 0)
+		{
+			Notify("Use a name up to 64 characters and a port from 1 to 65535.");
+			return;
+		}
+		foreach (ConversationModel value in model.Conversations.Values)
+		{
+			value.Online = false;
+			value.Refresh();
+		}
+		await Start(port, values[0].Trim());
+	}
+
+	private async void Reconnect()
+	{
+		ConversationModel selected = model.Selected;
+		if (selected == null || !reconnectRepairs.Add(selected.ConversationId))
+		{
+			return;
+		}
+		DiscoveryClient source = discovery;
+		try
+		{
+			string refreshResult = "offline; using saved identity/endpoints";
+			if (source != null && selected.AccountId > 0)
+			{
+				RefreshAutomaticShareHost();
+				try
+				{
+					await Task.Run(() => source.ReportPresence(model.OwnId, shareHost, model.Port));
+				}
+				catch
+				{
+				}
+				if (discovery != source || closing || closed)
+				{
+					return;
+				}
+				bool refreshed = await RefreshFriendsAsync();
+				if (discovery != source || closing || closed)
+				{
+					return;
+				}
+				refreshResult = (refreshed ? "authoritative friend snapshot refreshed" : "refresh unavailable; using saved candidates");
+				if (refreshed && !selected.IsFriend)
+				{
+					RecordConnection("repair", selected, "Account is no longer an established friend");
+					Notify("This account is no longer in your friends. Local history is retained.");
+					return;
+				}
+			}
+			connectionAttempts.Update(null, selected).RefreshResult = refreshResult;
+			DiscoverySearchResult current;
+			if (selected.AccountId > 0 && friendDirectory.TryGetValue(selected.AccountId, out current))
+			{
+				RecordConnection("repair", selected, refreshResult + "; account=" + selected.AccountId + "; presence=" + current.Online + "; candidateSeenUtc=" + current.CandidateSeenUtc + "; source=" + current.PublicCandidateSource);
+				OpenFriendConversation(current, true, "manual retry");
+				return;
+			}
+			ContactData contact = selected.Contact;
+			RecordConnection("repair", selected, refreshResult);
+			if (contact == null || string.IsNullOrEmpty(contact.host) || contact.port == 0)
+			{
+				Notify("No reachable candidates are saved for this conversation.");
+				return;
+			}
+			if (IsPrivateCandidate(contact.host))
+			{
+				LocalSubnetDecision localSubnetDecision = CurrentLocalSubnetDecision(contact.host);
+				connectionAttempts.Update(null, selected).LocalSubnetDiagnostics = localSubnetDecision.Diagnostics;
+				if (!localSubnetDecision.SameSubnet)
+				{
+					core.InvalidateRoute(contact.peer, contact.host, contact.port);
+					contact.host = "";
+					contact.port = 0;
+					connectionAttempts.Update(null, selected).RefreshResult = "stale saved private endpoint discarded after network change";
+					RecordConnection("network-change", selected, "Stale saved private endpoint discarded; discovery is unavailable");
+					Notify("The saved LAN address belongs to the previous network. Connect discovery or use a current Direct P2P endpoint.");
+					return;
+				}
+			}
+			core.Connect(contact.host, contact.port, contact.peer, "Saved contact", "manual retry", true);
+			model.Status = "Reconnecting to " + selected.Name + "…";
+			Refresh();
+		}
+		finally
+		{
+			reconnectRepairs.Remove(selected.ConversationId);
+		}
+	}
+
+
+
     void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified||!model.Selected.Online){Notify("Choose an online, verified direct-message friend before calling.");return;}if(!model.VoiceState.StartsWith("Idle",StringComparison.Ordinal)){Notify("Only one voice call can be active in this profile.");return;}string call=core.StartVoiceCall(model.Selected.Contact.peer);if(String.IsNullOrEmpty(call))Notify("The voice call could not be started.");}
     bool loadingVoiceDevices,voiceDeviceHandlersBound;
     void LoadVoiceDevices(){LoadVoiceDevices(false);}
-    void LoadVoiceDevices(bool preserveSelection){var input=Find<ComboBox>("VoiceInput");var output=Find<ComboBox>("VoiceOutput");var oldInput=preserveSelection?input.SelectedItem as VoiceDevice:null;var oldOutput=preserveSelection?output.SelectedItem as VoiceDevice:null;loadingVoiceDevices=true;var devices=core.VoiceDevices();input.ItemsSource=devices.inputs;output.ItemsSource=devices.outputs;input.SelectedItem=oldInput==null?null:devices.inputs.FirstOrDefault(device=>device.name==oldInput.name);output.SelectedItem=oldOutput==null?null:devices.outputs.FirstOrDefault(device=>device.name==oldOutput.name);if(input.SelectedItem==null&&input.Items.Count>0)input.SelectedIndex=0;if(output.SelectedItem==null&&output.Items.Count>0)output.SelectedIndex=0;if(!voiceDeviceHandlersBound){input.SelectionChanged+=(s,e)=>SelectVoiceDevices();output.SelectionChanged+=(s,e)=>SelectVoiceDevices();voiceDeviceHandlersBound=true;}loadingVoiceDevices=false;SelectVoiceDevices();}
+    void LoadVoiceDevices(bool preserveSelection){var input=Find<ComboBox>("VoiceInput");var output=Find<ComboBox>("VoiceOutput");var oldInput=preserveSelection?input.SelectedItem as VoiceDevice:null;var oldOutput=preserveSelection?output.SelectedItem as VoiceDevice:null;loadingVoiceDevices=true;var devices=core.VoiceDevices();input.ItemsSource=devices.inputs;output.ItemsSource=devices.outputs;input.SelectedItem=oldInput==null?null:(devices.inputs.FirstOrDefault(device=>device.id==oldInput.id&&device.name==oldInput.name)??devices.inputs.FirstOrDefault(device=>device.name==oldInput.name));output.SelectedItem=oldOutput==null?null:(devices.outputs.FirstOrDefault(device=>device.id==oldOutput.id&&device.name==oldOutput.name)??devices.outputs.FirstOrDefault(device=>device.name==oldOutput.name));if(input.SelectedItem==null&&input.Items.Count>0)input.SelectedIndex=0;if(output.SelectedItem==null&&output.Items.Count>0)output.SelectedIndex=0;if(!voiceDeviceHandlersBound){input.SelectionChanged+=(s,e)=>SelectVoiceDevices();output.SelectionChanged+=(s,e)=>SelectVoiceDevices();voiceDeviceHandlersBound=true;}loadingVoiceDevices=false;SelectVoiceDevices();}
     void RefreshVoiceDevices(){if(!model.VoiceState.StartsWith("Idle",StringComparison.Ordinal)){Notify("End the active call before refreshing audio devices.");return;}LoadVoiceDevices(true);voiceAudioError="";model.Status="Audio device list refreshed.";RefreshVoiceUi();}
     void SelectVoiceDevices(){if(loadingVoiceDevices)return;var input=Find<ComboBox>("VoiceInput").SelectedItem as VoiceDevice;var output=Find<ComboBox>("VoiceOutput").SelectedItem as VoiceDevice;if(input!=null&&output!=null)core.SelectVoiceDevices(input.id,output.id);}
     void EndVoiceCall(){if(!String.IsNullOrEmpty(model.VoiceCallId))core.EndVoiceCall(model.VoiceCallId);}
     bool voiceMuted,voiceDeafened;
     void ToggleVoiceMute(){voiceMuted=!voiceMuted;if(!core.SetVoiceMuted(voiceMuted))voiceMuted=!voiceMuted;recentVoiceMuted=voiceMuted;RefreshVoiceUi();}
     void ToggleVoiceDeafen(){voiceDeafened=!voiceDeafened;if(!core.SetVoiceDeafened(voiceDeafened))voiceDeafened=!voiceDeafened;recentVoiceDeafened=voiceDeafened;RefreshVoiceUi();}
+    void ShowVoiceDiagnostics(){var panel=Find<StackPanel>("ContextVoice");bool opening=panel.Visibility!=Visibility.Visible;panel.Visibility=opening?Visibility.Visible:Visibility.Collapsed;Find<Expander>("VoiceAdvancedExpander").IsExpanded=false;Find<TextBox>("VoiceDiagnosticsText").Text="Expand to load the bounded diagnostic snapshot.";}
+    async void RefreshVoiceDiagnosticsText(){if(Find<StackPanel>("ContextVoice").Visibility!=Visibility.Visible||!Find<Expander>("VoiceAdvancedExpander").IsExpanded)return;string native=await Task.Run(()=>core.VoiceDiagnostics());bool active=!model.VoiceState.StartsWith("Idle",StringComparison.Ordinal);string peer=active?model.VoicePeerId:recentVoicePeerId;var input=Find<ComboBox>("VoiceInput").SelectedItem as VoiceDevice;var output=Find<ComboBox>("VoiceOutput").SelectedItem as VoiceDevice;var text="call_id="+(active?model.VoiceCallId:recentVoiceCallId)+"\nexpected_peer_id="+(String.IsNullOrEmpty(peer)?"none":peer)+"\ncall_state="+(active?model.VoiceState:recentVoiceState)+"\ninput_device="+(input==null?"none":input.name)+"\noutput_device="+(output==null?"none":output.name)+"\nmuted="+voiceMuted+"\ndeafened="+voiceDeafened+"\n"+(native??"media_state=unavailable");if(text.Length>8192)text=text.Substring(0,8192);if(Find<StackPanel>("ContextVoice").Visibility==Visibility.Visible&&Find<Expander>("VoiceAdvancedExpander").IsExpanded)Find<TextBox>("VoiceDiagnosticsText").Text=text;}
     void ShowIncomingVoiceCall(){if(incomingVoiceWindow!=null||!model.VoiceState.StartsWith("Incoming",StringComparison.Ordinal))return;var conversation=model.FindByPeer(model.VoicePeerId);string friend=conversation==null?"Verified friend":conversation.Name;var dialog=new Window{Title="Incoming Voice Call",Owner=window,Width=430,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources,ShowInTaskbar=false};var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;panel.Children.Add(new TextBlock{Text="Incoming voice call",FontSize=24,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text=friend+" · verified PeerChat identity",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,7,0,20)});var row=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var decline=new Button{Content="Decline",Margin=new Thickness(0,0,8,0)};var answer=new Button{Content="Answer",Background=Brush("#275AA7")};decline.Click+=(s,e)=>{core.DeclineVoiceCall(model.VoiceCallId);dialog.Close();};answer.Click+=(s,e)=>{core.AnswerVoiceCall(model.VoiceCallId);dialog.Close();};row.Children.Add(decline);row.Children.Add(answer);panel.Children.Add(row);dialog.Closed+=(s,e)=>{if(incomingVoiceWindow==dialog)incomingVoiceWindow=null;};incomingVoiceWindow=dialog;try{MessageBeep(0xFFFFFFFF);}catch{}dialog.Show();dialog.Activate();}
-    void HandleVoiceEvent(CoreEvent e){string state=e.text??"Idle";string name=(model.FindByPeer(e.peer)==null?"Verified friend":model.FindByPeer(e.peer).Name);if(!String.IsNullOrEmpty(e.detail))recentVoiceCallId=e.detail;if(!String.IsNullOrEmpty(e.peer))recentVoicePeerId=e.peer;if(!state.StartsWith("Idle",StringComparison.Ordinal))recentVoiceState=state;if(state.StartsWith("Outgoing",StringComparison.Ordinal)||state.StartsWith("Incoming",StringComparison.Ordinal)){voiceAudioError="";voiceStartedUtc=DateTime.UtcNow;voiceEndedUtc=DateTime.MinValue;voiceLastConnectedUtc=DateTime.MinValue;recentVoiceMuted=recentVoiceDeafened=false;}RecordConnection("voice",model.FindByPeer(e.peer),"call="+(e.detail??"")+"; state="+state);if(state.StartsWith("Incoming",StringComparison.Ordinal))ShowIncomingVoiceCall();if(state.StartsWith("Connected",StringComparison.Ordinal)){voiceConnectedUtc=voiceLastConnectedUtc=DateTime.UtcNow;voiceTimer.Start();}if(state.StartsWith("Idle",StringComparison.Ordinal)){voiceTimer.Stop();voiceConnectedUtc=DateTime.MinValue;voiceEndedUtc=DateTime.UtcNow;voiceMuted=voiceDeafened=false;voiceAudioError="";if(incomingVoiceWindow!=null){incomingVoiceWindow.Close();incomingVoiceWindow=null;}}model.Status=state.StartsWith("Idle",StringComparison.Ordinal)?"Voice call ended · normal messaging ready":"Voice call with "+name+" · "+state+(String.IsNullOrEmpty(voiceAudioError)?"":" · Audio unavailable: "+voiceAudioError);RefreshVoiceUi();}
+    void HandleVoiceEvent(CoreEvent e){string state=e.text??"Idle";string name=(model.FindByPeer(e.peer)==null?"Verified friend":model.FindByPeer(e.peer).Name);if(!String.IsNullOrEmpty(e.detail))recentVoiceCallId=e.detail;if(!String.IsNullOrEmpty(e.peer))recentVoicePeerId=e.peer;if(!state.StartsWith("Idle",StringComparison.Ordinal))recentVoiceState=state;if(state.StartsWith("Outgoing",StringComparison.Ordinal)||state.StartsWith("Incoming",StringComparison.Ordinal)){voiceAudioError="";voiceStartedUtc=DateTime.UtcNow;voiceEndedUtc=DateTime.MinValue;voiceLastConnectedUtc=DateTime.MinValue;recentVoiceMuted=recentVoiceDeafened=false;}RecordConnection("voice",model.FindByPeer(e.peer),"call="+(e.detail??"")+"; state="+state);if(state.StartsWith("Incoming",StringComparison.Ordinal))ShowIncomingVoiceCall();if(state.StartsWith("Connected",StringComparison.Ordinal)){voiceConnectedUtc=voiceLastConnectedUtc=DateTime.UtcNow;voiceTimer.Start();}if(state.StartsWith("Idle",StringComparison.Ordinal)){voiceTimer.Stop();voiceConnectedUtc=DateTime.MinValue;voiceEndedUtc=DateTime.UtcNow;voiceMuted=voiceDeafened=false;voiceAudioError="";if(incomingVoiceWindow!=null){incomingVoiceWindow.Close();incomingVoiceWindow=null;}LoadVoiceDevices(true);}model.Status=state.StartsWith("Idle",StringComparison.Ordinal)?"Voice call ended · normal messaging ready":"Voice call with "+name+" · "+state+(String.IsNullOrEmpty(voiceAudioError)?"":" · Audio unavailable: "+voiceAudioError);RefreshVoiceUi();}
     void RefreshVoiceUi(){
         bool active=!model.VoiceState.StartsWith("Idle",StringComparison.Ordinal),connected=model.VoiceState.StartsWith("Connected",StringComparison.Ordinal);
-        Find<Border>("VoiceCard").Visibility=active||(!model.Groups&&model.Selected!=null)?Visibility.Visible:Visibility.Collapsed;
+        Find<Border>("VoiceCard").Visibility=active?Visibility.Visible:Visibility.Collapsed;
+        if(!active){Find<StackPanel>("ContextVoice").Visibility=Visibility.Collapsed;Find<Expander>("VoiceAdvancedExpander").IsExpanded=false;}
         Find<ComboBox>("VoiceInput").IsEnabled=!active;Find<ComboBox>("VoiceOutput").IsEnabled=!active;Find<Button>("VoiceRefreshDevices").IsEnabled=!active;
-        var conversation=model.FindByPeer(active?model.VoicePeerId:(model.Selected==null?"":model.Selected.Contact.peer));Find<TextBlock>("VoiceFriend").Text=conversation==null?"Voice devices":conversation.Name;
-        Find<TextBlock>("VoiceState").Text=model.VoiceState+(String.IsNullOrEmpty(voiceAudioError)?"":"\nAudio unavailable: "+voiceAudioError);Find<TextBlock>("VoiceDuration").Text="00:00";
+        string userState=model.VoiceState.StartsWith("Connected",StringComparison.Ordinal)?"Connected":model.VoiceState.StartsWith("Incoming",StringComparison.Ordinal)?"Ringing":model.VoiceState.StartsWith("Outgoing",StringComparison.Ordinal)?"Ringing":model.VoiceState.StartsWith("Ending",StringComparison.Ordinal)?"Ending":"Connecting";Find<TextBlock>("VoiceState").Text=userState+(String.IsNullOrEmpty(voiceAudioError)?"":" · Audio unavailable");Find<TextBlock>("VoiceDuration").Text="00:00";
         if(voiceConnectedUtc!=DateTime.MinValue){var duration=DateTime.UtcNow-voiceConnectedUtc;Find<TextBlock>("VoiceDuration").Text=((int)duration.TotalMinutes).ToString("00")+":"+duration.Seconds.ToString("00");}
-        Find<Button>("VoiceMute").IsEnabled=connected;Find<Button>("VoiceMute").Content=voiceMuted?"Unmute":"Mute";Find<Button>("VoiceDeafen").IsEnabled=connected;Find<Button>("VoiceDeafen").Content=voiceDeafened?"Undeafen":"Deafen";Find<Button>("VoiceHangUp").IsEnabled=active&&!model.VoiceState.StartsWith("Ending",StringComparison.Ordinal);
+        var input=Find<ComboBox>("VoiceInput").SelectedItem as VoiceDevice;var output=Find<ComboBox>("VoiceOutput").SelectedItem as VoiceDevice;Find<TextBlock>("VoiceDeviceSummary").Text="Mic: "+(input==null?"Unavailable":input.name)+" · Output: "+(output==null?"Unavailable":output.name);Find<Button>("VoiceMute").IsEnabled=connected;Find<Button>("VoiceMute").Content=voiceMuted?"Unmute":"Mute";Find<Button>("VoiceDeafen").IsEnabled=connected;Find<Button>("VoiceDeafen").Content=voiceDeafened?"Undeafen":"Deafen";Find<Button>("VoiceHangUp").IsEnabled=active&&!model.VoiceState.StartsWith("Ending",StringComparison.Ordinal);
     }
+    void RefreshVoiceTelemetry(){
+        var telemetry=core.VoiceTelemetry();bool connected=model.VoiceState.StartsWith("Connected",StringComparison.Ordinal);
+        double input=connected&&!voiceMuted&&telemetry.inputAvailable?telemetry.input:0;double output=connected&&!voiceDeafened&&telemetry.outputAvailable?telemetry.output:0;
+        Find<ProgressBar>("VoiceInputMeter").Value=MeterValue(input);Find<ProgressBar>("VoiceOutputMeter").Value=MeterValue(output);
+        Find<TextBlock>("VoiceInputStatus").Text=!connected?"Mic: No Signal":voiceMuted?"Mic: Muted":!telemetry.inputAvailable?"Mic: Device Error":input>=0.001?"Mic: Active":"Mic: No Signal";
+        Find<TextBlock>("VoiceOutputStatus").Text=!connected?"Output: No Incoming Audio":voiceDeafened?"Output: Deafened":!telemetry.outputAvailable?"Output: Device Error":output>=0.001?"Output: Receiving":"Output: No Incoming Audio";
+    }
+    static double MeterValue(double rms){if(rms<=0.001)return 0;double decibels=20*Math.Log10(Math.Min(1,rms));return Math.Max(0,Math.Min(100,(decibels+60)*100/60));}
     async void CopyVoiceDiagnostics(){string native=await Task.Run(()=>core.VoiceDiagnostics());var input=Find<ComboBox>("VoiceInput").SelectedItem as VoiceDevice;var output=Find<ComboBox>("VoiceOutput").SelectedItem as VoiceDevice;bool active=!model.VoiceState.StartsWith("Idle",StringComparison.Ordinal);string peer=active&&!String.IsNullOrEmpty(model.VoicePeerId)?model.VoicePeerId:recentVoicePeerId;var conversation=model.FindByPeer(peer);var text=new StringBuilder();text.AppendLine("PeerChat voice diagnostics");text.AppendLine("snapshot_utc="+DateTime.UtcNow.ToString("O"));text.AppendLine("scope="+(active?"current call":"most recent call"));text.AppendLine("call_id="+(active&&!String.IsNullOrEmpty(model.VoiceCallId)?model.VoiceCallId:String.IsNullOrEmpty(recentVoiceCallId)?"none":recentVoiceCallId));text.AppendLine("expected_peer_id="+(String.IsNullOrEmpty(peer)?"none":peer));text.AppendLine("verified_peer_id="+(conversation!=null&&conversation.Contact!=null&&conversation.Contact.verified?conversation.Contact.peer:"not verified/available"));text.AppendLine("call_state="+(active?model.VoiceState:recentVoiceState));text.AppendLine("input_device="+(input==null?"none":input.name+" ("+input.id+")"));text.AppendLine("output_device="+(output==null?"none":output.name+" ("+output.id+")"));text.AppendLine("muted="+(active?voiceMuted:recentVoiceMuted));text.AppendLine("deafened="+(active?voiceDeafened:recentVoiceDeafened));text.AppendLine("started_utc="+(voiceStartedUtc==DateTime.MinValue?"unknown":voiceStartedUtc.ToString("O")));text.AppendLine("connected_utc="+((active?voiceConnectedUtc:voiceLastConnectedUtc)==DateTime.MinValue?"unknown":(active?voiceConnectedUtc:voiceLastConnectedUtc).ToString("O")));text.AppendLine("ended_utc="+(voiceEndedUtc==DateTime.MinValue?"not ended/unknown":voiceEndedUtc.ToString("O")));text.AppendLine(native??"media_state=unavailable");text.AppendLine("latest_persistent_audio_error="+latestVoiceAudioError);string details=text.ToString();if(details.Length>8192)details=details.Substring(0,8192);for(int attempt=0;attempt<6;attempt++){bool copied=false;try{Clipboard.SetText(details);copied=true;}catch(COMException){}if(copied){model.Status="Voice diagnostics copied.";Refresh();return;}await Task.Delay(100);}model.Status="Clipboard is busy. Try Copy Voice Diagnostics again.";Refresh();}
     async void CopyConnectionDetails(){string details=ConnectionDiagnosticsText();for(int attempt=0;attempt<6;attempt++){bool copied=false;try{Clipboard.SetText(details);copied=true;}catch(COMException){}if(copied){model.Status="Connection details copied.";Refresh();return;}await Task.Delay(100);}model.Status="Clipboard is busy. Try Copy Details again.";Refresh();}
     void ViewConnectionLog(){var dialog=new Window{Title="Connection Log",Owner=window,Width=760,Height=500,MinWidth=520,MinHeight=320,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources};var layout=new DockPanel{Margin=new Thickness(18)};var close=new Button{Content="Close",HorizontalAlignment=HorizontalAlignment.Right,Padding=new Thickness(18,8,18,8),Margin=new Thickness(0,10,0,0)};close.Click+=(s,e)=>dialog.Close();DockPanel.SetDock(close,Dock.Bottom);layout.Children.Add(close);layout.Children.Add(new TextBox{Text=connectionLog.Read(),IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.NoWrap,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,FontFamily=new FontFamily("Consolas"),FontSize=12});dialog.Content=layout;dialog.ShowDialog();}
-    void Older(){if(model.Groups||model.Selected==null)return;long before=model.Selected.Messages.Where(m=>m.Data.sequence>0).Select(m=>m.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();core.History(model.Selected.Contact.peer,before);}
+    void Older(){
+        var viewer=Find<ScrollViewer>("MessageScroll");
+        if(model.Groups){
+            var group=model.SelectedGroup;if(group==null||group.HistoryLoading||group.HistoryExhausted)return;
+            long before=group.Messages.Where(message=>message.Data.logical>0).Select(message=>message.Data.logical).DefaultIfEmpty(long.MaxValue).Min();
+            group.HistoryLoading=true;historyScrollKey="group:"+group.Id;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.GroupHistory(group.Id,before);return;
+        }
+        var conversation=model.Selected;if(conversation==null||conversation.HistoryLoading||conversation.HistoryExhausted)return;
+        string peer=(new[]{conversation.Contact==null?"":conversation.Contact.peer}.Concat(conversation.KnownPeerIds)).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal).FirstOrDefault(value=>!conversation.HistoryExhaustedPeers.Contains(value));
+        if(String.IsNullOrEmpty(peer)){conversation.HistoryExhausted=true;Refresh();return;}
+        long dmBefore=conversation.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
+        conversation.HistoryLoading=true;conversation.LoadingHistoryPeer=peer;conversation.RequestedPeerHistory.Add(peer);historyScrollKey=conversation.ConversationId;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.History(peer,dmBefore);
+    }
     void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;bool queued=model.Groups&&model.SelectedGroup!=null?core.SendGroup(model.SelectedGroup.Id,text):model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
     void Notify(string text){Notify(text,null);}
     void Notify(string text,Window owner){Dialog("PeerChat",new string[0],new string[0],"OK",text,false,owner);}
@@ -511,25 +3343,26 @@ public class DesktopApplication {
     static LocalProfileInfo ChooseLocalProfile(LocalProfileManager manager,string requestedId){
         var catalog=manager.Initialize();
         if(!String.IsNullOrEmpty(requestedId)){var requested=catalog.Profiles.FirstOrDefault(p=>p.Id==requestedId);if(requested==null)throw new InvalidOperationException("Requested local profile was not found.");manager.Select(requested.Id);return requested;}
-        LocalProfileInfo result=null;var dialog=new Window{Title="Choose local profile",Width=580,Height=560,MinHeight=480,WindowStartupLocation=WindowStartupLocation.CenterScreen,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),FontSize=15};
+        LocalProfileInfo result=null;var primary=Brush("#EDF1F5");var muted=Brush("#A1AEBB");var secondary=Brush("#B5C0CB");var disabled=Brush("#758390");var dialog=new Window{Title="Choose local profile",Width=620,Height=590,MinHeight=500,WindowStartupLocation=WindowStartupLocation.CenterScreen,Background=Brush("#101820"),Foreground=primary,FontFamily=new FontFamily("Segoe UI"),FontSize=15};dialog.Resources.Add("PeerChatPrimaryText",primary);dialog.Resources.Add("PeerChatMutedText",muted);var textBlockStyle=new Style(typeof(TextBlock));textBlockStyle.Setters.Add(new Setter(TextBlock.ForegroundProperty,primary));dialog.Resources.Add(typeof(TextBlock),textBlockStyle);var buttonStyle=new Style(typeof(Button));buttonStyle.Setters.Add(new Setter(Control.ForegroundProperty,primary));buttonStyle.Setters.Add(new Setter(Control.BackgroundProperty,Brush("#19222B")));buttonStyle.Setters.Add(new Setter(Control.BorderBrushProperty,Brush("#303D49")));buttonStyle.Setters.Add(new Setter(Control.BorderThicknessProperty,new Thickness(1)));buttonStyle.Setters.Add(new Setter(Control.PaddingProperty,new Thickness(12,8,12,8)));buttonStyle.Setters.Add(new Setter(Control.CursorProperty,Cursors.Hand));var buttonDisabled=new Trigger{Property=UIElement.IsEnabledProperty,Value=false};buttonDisabled.Setters.Add(new Setter(Control.ForegroundProperty,disabled));buttonDisabled.Setters.Add(new Setter(UIElement.OpacityProperty,0.65));buttonStyle.Triggers.Add(buttonDisabled);dialog.Resources.Add(typeof(Button),buttonStyle);var textStyle=new Style(typeof(TextBox));textStyle.Setters.Add(new Setter(Control.ForegroundProperty,primary));textStyle.Setters.Add(new Setter(Control.BackgroundProperty,Brush("#151D25")));textStyle.Setters.Add(new Setter(Control.BorderBrushProperty,Brush("#344351")));textStyle.Setters.Add(new Setter(Control.BorderThicknessProperty,new Thickness(1)));textStyle.Setters.Add(new Setter(Control.PaddingProperty,new Thickness(11,8,11,8)));textStyle.Setters.Add(new Setter(TextBox.CaretBrushProperty,Brush("#FFFFFF")));dialog.Resources.Add(typeof(TextBox),textStyle);var itemStyle=new Style(typeof(ListBoxItem));itemStyle.Setters.Add(new Setter(Control.ForegroundProperty,primary));itemStyle.Setters.Add(new Setter(Control.BackgroundProperty,Brush("Transparent")));itemStyle.Setters.Add(new Setter(Control.BorderBrushProperty,Brush("Transparent")));itemStyle.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty,HorizontalAlignment.Stretch));dialog.Resources.Add(typeof(ListBoxItem),itemStyle);var contextStyle=new Style(typeof(ContextMenu));contextStyle.Setters.Add(new Setter(Control.ForegroundProperty,primary));contextStyle.Setters.Add(new Setter(Control.BackgroundProperty,Brush("#111920")));contextStyle.Setters.Add(new Setter(Control.BorderBrushProperty,Brush("#344351")));dialog.Resources.Add(typeof(ContextMenu),contextStyle);var menuStyle=new Style(typeof(MenuItem));menuStyle.Setters.Add(new Setter(Control.ForegroundProperty,primary));menuStyle.Setters.Add(new Setter(Control.BackgroundProperty,Brush("#111920")));menuStyle.Setters.Add(new Setter(Control.PaddingProperty,new Thickness(11,8,11,8)));var menuDisabled=new Trigger{Property=UIElement.IsEnabledProperty,Value=false};menuDisabled.Setters.Add(new Setter(Control.ForegroundProperty,disabled));menuStyle.Triggers.Add(menuDisabled);dialog.Resources.Add(typeof(MenuItem),menuStyle);
         var root=new Grid{Margin=new Thickness(26)};root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});root.RowDefinitions.Add(new RowDefinition());root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});dialog.Content=root;
-        var heading=new StackPanel();heading.Children.Add(new TextBlock{Text="Choose a local profile",FontSize=26,FontWeight=FontWeights.SemiBold});heading.Children.Add(new TextBlock{Text="Each profile has its own Peer ID, trust, encrypted history, contacts, account session, and settings.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,7,0,16)});root.Children.Add(heading);
-        var list=new ListBox{Padding=new Thickness(6),Margin=new Thickness(0,0,0,14),Background=Brush("#0C1116"),BorderBrush=Brush("#2E3C49")};Grid.SetRow(list,1);root.Children.Add(list);
-        var footer=new StackPanel();var createRow=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,9)};var name=new TextBox{Width=250,Text="New local profile",Margin=new Thickness(0,0,8,0)};var create=new Button{Content="Add Profile",Padding=new Thickness(15,8,15,8)};var rename=new Button{Content="Rename Profile",Padding=new Thickness(15,8,15,8),Margin=new Thickness(8,0,0,0)};createRow.Children.Add(name);createRow.Children.Add(create);createRow.Children.Add(rename);footer.Children.Add(createRow);var actionRow=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var remove=new Button{Content="Remove Local Profile",Padding=new Thickness(15,8,15,8),Margin=new Thickness(0,0,8,0)};var open=new Button{Content="Open Selected",Padding=new Thickness(18,8,18,8),IsDefault=true,Background=Brush("#275AA7")};actionRow.Children.Add(remove);actionRow.Children.Add(open);footer.Children.Add(actionRow);Grid.SetRow(footer,2);root.Children.Add(footer);
-        Func<LocalProfileInfo> selectedProfile=()=>{var item=list.SelectedItem as ListBoxItem;return item==null?null:item.Tag as LocalProfileInfo;};Action rebuild=null;rebuild=()=>{var current=manager.Load();list.Items.Clear();ListBoxItem selectedItem=null;foreach(var profile in current.Profiles){string initials=String.Join("",profile.Name.Split(new[]{' '},StringSplitOptions.RemoveEmptyEntries).Take(2).Select(part=>Char.ToUpperInvariant(part[0]).ToString()));if(initials.Length==0)initials="P";DateTime used;string last=DateTime.TryParse(profile.LastUsedUtc,out used)?"Last used "+used.ToLocalTime().ToString("g"):"Not opened yet";bool wasSelected=profile.Id==current.SelectedProfileId;ProfileAccountLink linked=null;try{linked=new ProfileAccountStore(manager.ProfilePath(profile.Id)).Load();}catch{}string account=linked==null?"Not linked to a server account":"@"+linked.Username;var text=new StackPanel{Margin=new Thickness(12,6,6,6)};text.Children.Add(new TextBlock{Text=profile.Name,FontSize=17,FontWeight=FontWeights.SemiBold});text.Children.Add(new TextBlock{Text=account,FontSize=12,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,3,0,0)});text.Children.Add(new TextBlock{Text=(wasSelected?"● Selected · ":"")+last,FontSize=12,Foreground=Brush(wasSelected?"#78BFFF":"#A1AEBB"),Margin=new Thickness(0,3,0,0)});var card=new StackPanel{Orientation=Orientation.Horizontal};card.Children.Add(new Border{Width=46,Height=46,CornerRadius=new CornerRadius(23),Background=Brush("#365D89"),Child=new TextBlock{Text=initials,FontSize=16,FontWeight=FontWeights.SemiBold,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});card.Children.Add(text);var item=new ListBoxItem{Content=card,Tag=profile,Padding=new Thickness(10),Margin=new Thickness(3),HorizontalContentAlignment=HorizontalAlignment.Stretch};list.Items.Add(item);if(wasSelected)selectedItem=item;}list.SelectedItem=selectedItem??list.Items.Cast<object>().FirstOrDefault();};
-        Action openSelected=()=>{var selected=selectedProfile();if(selected==null)return;manager.Select(selected.Id);result=manager.Load().Profiles.First(p=>p.Id==selected.Id);dialog.DialogResult=true;};open.Click+=(s,e)=>openSelected();list.MouseDoubleClick+=(s,e)=>openSelected();create.Click+=(s,e)=>{var added=manager.Create(name.Text);rebuild();foreach(ListBoxItem item in list.Items)if(((LocalProfileInfo)item.Tag).Id==added.Id){list.SelectedItem=item;break;}};rename.Click+=(s,e)=>{var selected=selectedProfile();if(selected==null)return;manager.Rename(selected.Id,name.Text);rebuild();};remove.Click+=(s,e)=>{var selected=selectedProfile();if(selected==null)return;if(MessageBox.Show(dialog,"Remove local profile '"+selected.Name+"'?\n\nIts Peer ID, trust, encrypted history, contacts, account session, endpoints, and settings will be removed from PeerChat. A recoverable copy is retained locally.","Remove Local Profile",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;try{manager.Remove(selected.Id);rebuild();}catch(Exception error){MessageBox.Show(dialog,error.Message,"PeerChat",MessageBoxButton.OK,MessageBoxImage.Information);}};rebuild();dialog.ShowDialog();return result;
+        var heading=new StackPanel();heading.Children.Add(new TextBlock{Text="Choose a local profile",FontSize=26,FontWeight=FontWeights.SemiBold,Foreground=primary});heading.Children.Add(new TextBlock{Text="Each profile has its own Peer ID, trust, encrypted history, contacts, account session, and settings.",TextWrapping=TextWrapping.Wrap,Foreground=muted,Margin=new Thickness(0,7,0,16)});root.Children.Add(heading);
+        var list=new ListBox{Padding=new Thickness(0),Margin=new Thickness(0,0,0,14),Background=Brush("Transparent"),Foreground=primary,BorderThickness=new Thickness(0)};Grid.SetRow(list,1);root.Children.Add(list);
+        var footer=new StackPanel();var editor=new Grid{Visibility=Visibility.Collapsed,Margin=new Thickness(0,0,0,10)};editor.ColumnDefinitions.Add(new ColumnDefinition());editor.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});editor.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});var name=new TextBox{Margin=new Thickness(0,0,7,0),MaxLength=64};var commit=new Button{Content="Create Profile",Background=Brush("#275AA7"),Foreground=primary,IsEnabled=false,Margin=new Thickness(0,0,7,0)};var cancelEdit=new Button{Content="Cancel"};Grid.SetColumn(commit,1);Grid.SetColumn(cancelEdit,2);editor.Children.Add(name);editor.Children.Add(commit);editor.Children.Add(cancelEdit);name.TextChanged+=(s,e)=>commit.IsEnabled=!String.IsNullOrWhiteSpace(name.Text);footer.Children.Add(editor);var actionRow=new Grid();actionRow.ColumnDefinitions.Add(new ColumnDefinition());actionRow.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});var newProfile=new Button{Content="＋ New Profile",HorizontalAlignment=HorizontalAlignment.Left,Background=Brush("#111920"),BorderBrush=Brush("#25313C")};var open=new Button{Content="Open Profile",Padding=new Thickness(20,10,20,10),IsDefault=true,Background=Brush("#275AA7"),HorizontalContentAlignment=HorizontalAlignment.Center};Grid.SetColumn(open,1);actionRow.Children.Add(newProfile);actionRow.Children.Add(open);footer.Children.Add(actionRow);Grid.SetRow(footer,2);root.Children.Add(footer);
+        Func<LocalProfileInfo> selectedProfile=()=>{var item=list.SelectedItem as ListBoxItem;return item==null?null:item.Tag as LocalProfileInfo;};var overflowButtons=new Dictionary<ListBoxItem,Button>();Action rebuild=null;Action<LocalProfileInfo> removeProfile=profile=>{if(MessageBox.Show(dialog,"Delete local profile '"+profile.Name+"'?\n\nIts Peer ID, trust, encrypted history, contacts, account session, endpoints, and settings will be removed from PeerChat. A recoverable copy is retained locally.","Delete Local Profile",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;try{manager.Remove(profile.Id);rebuild();}catch(Exception error){MessageBox.Show(dialog,error.Message,"PeerChat",MessageBoxButton.OK,MessageBoxImage.Information);}};string editMode="";LocalProfileInfo editProfile=null;Action<string,LocalProfileInfo> showEditor=(mode,profile)=>{editMode=mode;editProfile=profile;name.Text=profile==null?"":profile.Name;commit.Content=mode=="rename"?"Save Name":"Create Profile";editor.Visibility=Visibility.Visible;open.IsDefault=false;commit.IsDefault=true;name.Focus();name.SelectAll();};rebuild=()=>{var current=manager.Load();list.Items.Clear();overflowButtons.Clear();ListBoxItem selectedItem=null;foreach(var profile in current.Profiles){string initials=String.Join("",profile.Name.Split(new[]{' '},StringSplitOptions.RemoveEmptyEntries).Take(2).Select(part=>Char.ToUpperInvariant(part[0]).ToString()));if(initials.Length==0)initials="P";DateTime used;string last=DateTime.TryParse(profile.LastUsedUtc,out used)?"Last used "+used.ToLocalTime().ToString("g"):"Not opened yet";bool wasSelected=profile.Id==current.SelectedProfileId;ProfileAccountLink linked=null;try{linked=new ProfileAccountStore(manager.ProfilePath(profile.Id)).Load();}catch{}string account=linked==null?"No linked account":"@"+linked.Username;var text=new StackPanel{Margin=new Thickness(12,2,6,2)};text.Children.Add(new TextBlock{Text=profile.Name,FontSize=17,FontWeight=FontWeights.SemiBold,Foreground=primary});text.Children.Add(new TextBlock{Text=account,FontSize=12,Foreground=secondary,Margin=new Thickness(0,3,0,0)});text.Children.Add(new TextBlock{Text=last,FontSize=11,Foreground=disabled,Margin=new Thickness(0,3,0,0)});var card=new Grid{Margin=new Thickness(10,9,8,9)};card.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(46)});card.ColumnDefinitions.Add(new ColumnDefinition());card.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(38)});card.Children.Add(new Border{Width=40,Height=40,CornerRadius=new CornerRadius(20),Background=Brush(wasSelected?"#315F9E":"#29455F"),Child=new TextBlock{Text=initials,FontSize=15,FontWeight=FontWeights.SemiBold,Foreground=primary,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});Grid.SetColumn(text,1);card.Children.Add(text);var overflow=new Button{Content="…",Padding=new Thickness(8,4,8,7),HorizontalContentAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Visibility=Visibility.Collapsed,Background=Brush("#16212A"),BorderBrush=Brush("#2B3A46")};var menu=new ContextMenu{Background=Brush("#111920"),Foreground=primary,BorderBrush=Brush("#344351"),BorderThickness=new Thickness(1)};var rename=new MenuItem{Header="Rename",Foreground=primary};var delete=new MenuItem{Header="Delete",Foreground=Brush("#FF9B9B")};rename.Click+=(s,e)=>showEditor("rename",profile);delete.Click+=(s,e)=>removeProfile(profile);menu.Items.Add(rename);menu.Items.Add(new Separator());menu.Items.Add(delete);overflow.Click+=(s,e)=>{menu.PlacementTarget=overflow;menu.IsOpen=true;};Grid.SetColumn(overflow,2);card.Children.Add(overflow);var item=new ListBoxItem{Content=card,Tag=profile,Foreground=primary,Padding=new Thickness(0),Margin=new Thickness(3,2,3,2),HorizontalContentAlignment=HorizontalAlignment.Stretch,Background=Brush(wasSelected?"#152536":"Transparent"),BorderBrush=Brush(wasSelected?"#31506B":"Transparent"),BorderThickness=new Thickness(1)};overflowButtons[item]=overflow;list.Items.Add(item);if(wasSelected)selectedItem=item;}list.SelectedItem=selectedItem??list.Items.Cast<object>().FirstOrDefault();};
+        Action updateSelection=()=>{foreach(var pair in overflowButtons){bool selected=Object.ReferenceEquals(pair.Key,list.SelectedItem);pair.Value.Visibility=selected?Visibility.Visible:Visibility.Collapsed;pair.Key.Background=Brush(selected?"#152536":"Transparent");pair.Key.BorderBrush=Brush(selected?"#31506B":"Transparent");}};list.SelectionChanged+=(s,e)=>updateSelection();Action openSelected=()=>{var selected=selectedProfile();if(selected==null)return;manager.Select(selected.Id);result=manager.Load().Profiles.First(p=>p.Id==selected.Id);dialog.DialogResult=true;};open.Click+=(s,e)=>openSelected();list.MouseDoubleClick+=(s,e)=>openSelected();newProfile.Click+=(s,e)=>showEditor("new",null);cancelEdit.Click+=(s,e)=>{editor.Visibility=Visibility.Collapsed;commit.IsDefault=false;open.IsDefault=true;};commit.Click+=(s,e)=>{if(String.IsNullOrWhiteSpace(name.Text))return;if(editMode=="rename"&&editProfile!=null)manager.Rename(editProfile.Id,name.Text);else manager.Create(name.Text);editor.Visibility=Visibility.Collapsed;commit.IsDefault=false;open.IsDefault=true;rebuild();updateSelection();};rebuild();updateSelection();dialog.ShowDialog();return result;
     }
     [STAThread] public static int Main(string[] args){
         string startupRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PeerChat");
         try{
-            string installRoot=startupRoot,directory=null,profileId=null;ushort port=0;string capture=null;bool compact=args.Contains("--compact");
-            for(int index=0;index+1<args.Length;index++){if(args[index]=="--data-dir")directory=args[++index];else if(args[index]=="--install-root"){installRoot=Path.GetFullPath(args[++index]);startupRoot=installRoot;}else if(args[index]=="--profile-id")profileId=args[++index];else if(args[index]=="--port")port=UInt16.Parse(args[++index]);else if(args[index]=="--capture")capture=args[++index];}
+            string installRoot=startupRoot,directory=null,profileId=null,healthToken=null;ushort port=0;string capture=null;bool compact=args.Contains("--compact");
+            for(int index=0;index+1<args.Length;index++){if(args[index]=="--data-dir")directory=args[++index];else if(args[index]=="--install-root"){installRoot=Path.GetFullPath(args[++index]);startupRoot=installRoot;}else if(args[index]=="--profile-id")profileId=args[++index];else if(args[index]=="--port")port=UInt16.Parse(args[++index]);else if(args[index]=="--capture")capture=args[++index];else if(args[index]=="--peerchat-update-health-token")healthToken=args[++index];}
             // The chooser is intentionally shown before Application.Run and before CoreAdapter
             // construction. Keep WPF alive when that temporary last window closes; otherwise WPF
             // permanently begins shutdown and silently refuses to run the main window.
             var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};LocalProfileManager manager=null;LocalProfileInfo selected=null;TraceStartup(installRoot,"bootstrap-start");
             if(directory==null){manager=new LocalProfileManager(installRoot);TraceStartup(installRoot,"chooser-open");selected=ChooseLocalProfile(manager,profileId);if(selected==null){TraceStartup(installRoot,"chooser-cancelled");app.Shutdown();return 0;}directory=manager.ProfilePath(selected.Id);TraceStartup(installRoot,"profile-selected id="+selected.Id+" path="+directory);}
-            var desktop=new DesktopApplication(directory,port,capture,compact,manager,selected);app.ShutdownMode=ShutdownMode.OnMainWindowClose;TraceStartup(installRoot,"main-run-enter");desktop.Run(app);TraceStartup(installRoot,"main-run-exit");app.Shutdown(0);
+            var profileLease=LocalProfileLease.TryAcquire(directory);if(profileLease==null){TraceStartup(installRoot,"profile-already-open path="+directory);MessageBox.Show("This local profile is already open in another PeerChat window. Choose a different profile or close the existing window first.","PeerChat profile already open",MessageBoxButton.OK,MessageBoxImage.Information);app.Shutdown(2);return 2;}
+            var desktop=new DesktopApplication(directory,port,capture,compact,manager,selected,healthToken);app.ShutdownMode=ShutdownMode.OnMainWindowClose;TraceStartup(installRoot,"main-run-enter");desktop.Run(app);TraceStartup(installRoot,"main-run-exit");app.Shutdown(0);profileLease.Dispose();
             // The window close path has already joined/released the native core. Terminate the
             // packaged host explicitly so dormant WPF infrastructure cannot leave a windowless
             // process that collides with a restart replacement.

@@ -59,7 +59,40 @@ public sealed class ConnectionDiagnosticLog {
 
 public sealed class ConnectionAttemptDetails {
     public long AttemptId;
-    public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="local/direct",Route="None",TransportState="Offline",TrustState="No verification pending",Failure="None";
+    public long CandidateSeenUtc;
+    public string Presence="Unknown",RefreshResult="Not requested";
+    public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="local/direct",Route="None",TransportState="Offline",TrustState="No verification pending",Failure="None",LocalSubnetDiagnostics="Not evaluated";
+    public bool HasLiveSession;
+    public long LiveConnectionId,LatestFailedAttemptId;
+    public string LiveCandidate="None",LiveSource="None",LiveRoute="None",LiveDirection="unknown",LatestFailedCandidate="None",LatestFailedSource="None",LatestFailedRoute="None",LatestFailure="None";
+}
+
+public sealed class LocalSubnetInterface {
+    public string Name="",Address="",Mask="",IgnoredReason="";
+}
+
+public sealed class LocalSubnetDecision {
+    public bool SameSubnet;
+    public string Diagnostics="Not evaluated";
+}
+
+// Pure subnet evaluation is kept separate from Windows interface enumeration so both
+// automatic and manual connection paths use identical, directly testable semantics.
+public static class LocalSubnetClassifier {
+    static bool Parse(string value,out byte[] bytes){System.Net.IPAddress address;if(!System.Net.IPAddress.TryParse(value,out address)||address.AddressFamily!=System.Net.Sockets.AddressFamily.InterNetwork){bytes=null;return false;}bytes=address.GetAddressBytes();return true;}
+    static int Prefix(byte[] mask){int prefix=0;bool zero=false;foreach(byte value in mask)for(int bit=7;bit>=0;bit--){bool set=(value&(1<<bit))!=0;if(set){if(zero)return -1;prefix++;}else zero=true;}return prefix;}
+    public static LocalSubnetDecision Evaluate(string candidate,IEnumerable<LocalSubnetInterface> interfaces){
+        var result=new LocalSubnetDecision();byte[] remote;if(!Parse(candidate,out remote)){result.Diagnostics="candidate="+(candidate??"")+"; same_subnet=no; reason=not an IPv4 address";return result;}
+        var lines=new List<string>();foreach(var item in interfaces??Enumerable.Empty<LocalSubnetInterface>()){
+            string label=String.IsNullOrEmpty(item.Name)?"unnamed interface":item.Name;
+            if(!String.IsNullOrEmpty(item.IgnoredReason)){lines.Add("interface="+label+"; candidate="+candidate+"; same_subnet=no; ignored="+item.IgnoredReason);continue;}
+            byte[] local,mask;if(!Parse(item.Address,out local)||!Parse(item.Mask,out mask)){lines.Add("interface="+label+"; local="+item.Address+"; mask="+item.Mask+"; candidate="+candidate+"; same_subnet=no; ignored=invalid IPv4 address or mask");continue;}
+            int prefix=Prefix(mask);if(prefix<=0){lines.Add("interface="+label+"; local="+item.Address+"; mask="+item.Mask+"; candidate="+candidate+"; same_subnet=no; ignored=invalid/non-contiguous subnet mask");continue;}
+            bool same=true;for(int index=0;index<4;index++)if((remote[index]&mask[index])!=(local[index]&mask[index])){same=false;break;}
+            if(same)result.SameSubnet=true;lines.Add("interface="+label+"; local="+item.Address+"/"+prefix+"; mask="+item.Mask+"; candidate="+candidate+"; same_subnet="+(same?"yes":"no"));
+        }
+        result.Diagnostics=lines.Count==0?"candidate="+candidate+"; same_subnet=no; reason=no usable current IPv4 interfaces":String.Join("\n",lines);return result;
+    }
 }
 
 // Connection facts are keyed by the expected cryptographic peer identity. An event for one
@@ -68,6 +101,17 @@ public sealed class ConnectionAttemptTracker {
     readonly Dictionary<string,ConnectionAttemptDetails> attempts=new Dictionary<string,ConnectionAttemptDetails>(StringComparer.Ordinal);
     static string Key(CoreEvent e,ConversationModel conversation){if(e!=null&&!String.IsNullOrEmpty(e.expected))return e.expected;if(conversation!=null&&conversation.Contact!=null&&!String.IsNullOrEmpty(conversation.Contact.peer))return conversation.Contact.peer;if(e!=null&&!String.IsNullOrEmpty(e.peer))return e.peer;return conversation==null?"":conversation.ConversationId;}
     public ConnectionAttemptDetails For(ConversationModel conversation){string key=Key(null,conversation);ConnectionAttemptDetails value;return !String.IsNullOrEmpty(key)&&attempts.TryGetValue(key,out value)?value:new ConnectionAttemptDetails();}
-    public ConnectionAttemptDetails Update(CoreEvent e,ConversationModel conversation,string transport=null,string trust=null,string failure=null){string key=Key(e,conversation);ConnectionAttemptDetails value;if(!attempts.TryGetValue(key,out value)){value=new ConnectionAttemptDetails();attempts[key]=value;}if(e!=null){if(e.kind==14){value.PresentedPeer="";value.Failure="None";}if(e.attempt>0)value.AttemptId=e.attempt;if(!String.IsNullOrEmpty(e.expected))value.ExpectedPeer=e.expected;if(!String.IsNullOrEmpty(e.peer)&&(e.peer!=e.expected||e.kind==3))value.PresentedPeer=e.peer;if(!String.IsNullOrEmpty(e.candidate))value.Candidate=e.candidate;if(!String.IsNullOrEmpty(e.source))value.Source=e.source;if(!String.IsNullOrEmpty(e.route))value.Route=e.route;}if(!String.IsNullOrEmpty(transport))value.TransportState=transport;if(!String.IsNullOrEmpty(trust))value.TrustState=trust;if(!String.IsNullOrEmpty(failure))value.Failure=failure;return value;}
+    static void Project(ConnectionAttemptDetails value){if(value.HasLiveSession){value.AttemptId=value.LiveConnectionId;value.Candidate=value.LiveCandidate;value.Source=value.LiveSource;value.Route=value.LiveRoute;value.TransportState="Ready";value.TrustState="Verified";value.Failure="None";}}
+    public ConnectionAttemptDetails Update(CoreEvent e,ConversationModel conversation,string transport=null,string trust=null,string failure=null){
+        string key=Key(e,conversation);ConnectionAttemptDetails value;if(!attempts.TryGetValue(key,out value)){value=new ConnectionAttemptDetails();attempts[key]=value;}
+        if(e!=null){
+            if(!String.IsNullOrEmpty(e.expected))value.ExpectedPeer=e.expected;if(!String.IsNullOrEmpty(e.peer)&&(e.peer!=e.expected||e.kind==3))value.PresentedPeer=e.peer;
+            if(e.kind==3){value.HasLiveSession=true;value.LiveConnectionId=e.attempt;value.LiveCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LiveSource=String.IsNullOrEmpty(e.source)?"Direct":e.source;value.LiveRoute=String.IsNullOrEmpty(e.route)?"authenticated":e.route;value.LiveDirection=String.IsNullOrEmpty(e.detail)?"unknown":e.detail;}
+            else if(e.kind==4&&value.HasLiveSession&&(e.attempt==0||e.attempt==value.LiveConnectionId)){value.HasLiveSession=false;}
+            bool failed=e.kind==8||e.kind==16;if(failed){value.LatestFailedAttemptId=e.attempt;value.LatestFailedCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LatestFailedSource=String.IsNullOrEmpty(e.source)?"Unknown":e.source;value.LatestFailedRoute=String.IsNullOrEmpty(e.route)?"Unknown":e.route;value.LatestFailure=String.IsNullOrEmpty(failure)?(e.text??"Connection attempt failed"):failure;}
+            if(!value.HasLiveSession){if(e.attempt>0)value.AttemptId=e.attempt;if(e.kind==14)value.PresentedPeer="";if(!String.IsNullOrEmpty(e.candidate))value.Candidate=e.candidate;if(!String.IsNullOrEmpty(e.source))value.Source=e.source;if(!String.IsNullOrEmpty(e.route))value.Route=e.route;}
+        }
+        if(!value.HasLiveSession){if(!String.IsNullOrEmpty(transport))value.TransportState=transport;if(!String.IsNullOrEmpty(trust))value.TrustState=trust;if(!String.IsNullOrEmpty(failure))value.Failure=failure;}Project(value);return value;
+    }
 }
 }

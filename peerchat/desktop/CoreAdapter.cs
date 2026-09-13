@@ -17,6 +17,8 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_start(IntPtr handle,string directory,ushort port,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_connect(IntPtr handle,string host,ushort port,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_connect_ex(IntPtr handle,string host,ushort port,string peer,string source,string route,int force);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr handle,ulong generation,string fingerprint);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_approve(IntPtr handle,string peer,int accepted);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_send(IntPtr handle,string peer,string text);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_remove(IntPtr handle,string peer);
@@ -31,6 +33,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_role(IntPtr handle,string group,ulong account,int admin);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_send(IntPtr handle,string group,string text);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_groups(IntPtr handle);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_history(IntPtr handle,string group,long before);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_voice_call(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_answer(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_decline(IntPtr handle,string call);
@@ -40,6 +43,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_devices(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_devices_select(IntPtr handle,int input,int output);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_diagnostics(IntPtr handle);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_telemetry(IntPtr handle,out float input,out float output,out uint flags);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_share(IntPtr handle,string host,ushort port,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_add(IntPtr handle,string invite,string ownPeer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr handle);
@@ -57,6 +61,8 @@ public sealed class CoreAdapter : IDisposable {
     }
     public void Start(string directory,ushort port,string name){if(ui_start(handle,directory,port,name)==0)throw new InvalidOperationException("Could not start the peer core.");}
     public void Connect(string host,ushort port,string peer,string source="Direct",string route="manual",bool force=false){if(ui_connect_ex(handle,host,port,peer,source,route,force?1:0)==0)throw new InvalidOperationException("Invalid connection details.");}
+    public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false){if(!String.IsNullOrEmpty(peer))ui_invalidate_route(handle,peer,staleHost??"",stalePort,allRoutes?1:0);}
+    public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}
     public void Approve(string peer,bool accepted){ui_approve(handle,peer,accepted?1:0);}
     public bool Send(string peer,string text){return ui_send(handle,peer,text)!=0;}
     public bool Remove(string peer){return ui_remove(handle,peer)!=0;}
@@ -71,6 +77,7 @@ public sealed class CoreAdapter : IDisposable {
     public bool SetGroupAdmin(string group,long account,bool admin){return account>0&&ui_group_role(handle,group,(ulong)account,admin?1:0)!=0;}
     public bool SendGroup(string group,string text){return ui_group_send(handle,group,text)!=0;}
     public void LoadGroups(){ui_groups(handle);}
+    public void GroupHistory(string group,long before){ui_group_history(handle,group,before);}
     public string StartVoiceCall(string peer){return Marshal.PtrToStringUni(ui_voice_call(handle,peer));}
     public bool AnswerVoiceCall(string call){return ui_voice_answer(handle,call)!=0;}
     public bool DeclineVoiceCall(string call){return ui_voice_decline(handle,call)!=0;}
@@ -80,6 +87,7 @@ public sealed class CoreAdapter : IDisposable {
     public VoiceDevices VoiceDevices(){return serializer.Deserialize<VoiceDevices>(Marshal.PtrToStringUni(ui_voice_devices(handle)));}
     public bool SelectVoiceDevices(int input,int output){return ui_voice_devices_select(handle,input,output)!=0;}
     public string VoiceDiagnostics(){return Marshal.PtrToStringUni(ui_voice_diagnostics(handle));}
+    public VoiceTelemetry VoiceTelemetry(){float input,output;uint flags;if(ui_voice_telemetry(handle,out input,out output,out flags)==0)return new VoiceTelemetry();return new VoiceTelemetry{input=Math.Max(0,Math.Min(1,input)),output=Math.Max(0,Math.Min(1,output)),active=(flags&1)!=0,inputAvailable=(flags&2)!=0,outputAvailable=(flags&4)!=0};}
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}
     public string Add(string invite,string ownPeer){return Marshal.PtrToStringUni(ui_add(handle,invite,ownPeer));}
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
@@ -93,4 +101,5 @@ public class GroupMemberData { public long account; public string peer,name; pub
 public class GroupEventData { public string id,group,sender,text; public long account,time,logical; }
 public class VoiceDevices { public VoiceDevice[] inputs,outputs; }
 public class VoiceDevice { public int id; public string name; public override string ToString(){return name;} }
+public class VoiceTelemetry { public float input,output; public bool active,inputAvailable,outputAvailable; }
 }

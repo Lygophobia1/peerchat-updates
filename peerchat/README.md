@@ -62,6 +62,18 @@ Current v0.3-beta development is focused on automatic direct friend-to-chat conn
 integration, and deterministic message ordering. Friend-request cards are backed by the server
 state; direct P2P remains usable without the discovery service.
 
+## Updates
+
+The package includes a standalone updater. In **Settings → Updates**, Release is the normal
+installation-wide channel and Development is an explicit pre-release channel; neither changes a
+profile, its history, or account session. An update is downloaded with resume support, verified,
+staged, applied only after PeerChat exits, and rolled back if the replacement does not complete
+native profile/core startup.
+
+See [updater/README.md](updater/README.md) for the feed, Development test, signing-key backup, and
+exact-byte Release-promotion workflow. Release updates require a manifest signed by an embedded
+trusted key and remain fail-closed for unsigned or invalid packages.
+
 ## Tests
 
 ```powershell

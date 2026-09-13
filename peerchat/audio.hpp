@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "media_telemetry.hpp"
 
 namespace peerchat {
 
@@ -18,19 +19,23 @@ public:
     Audio(const Audio&) = delete;
     Audio& operator=(const Audio&) = delete;
 
-    // Opens playback, initially muted. No microphone is opened by start().
+    // Opens capture before playback so a Bluetooth hands-free duplex endpoint
+    // is not blocked by an already-open stereo output. Playback may still
+    // start when capture fails; in that case error describes the microphone.
     bool start(std::wstring& error);
     void setDevices(int inputId, int outputId);
     static std::vector<Device> inputDevices();
     static std::vector<Device> outputDevices();
     void stop();
-    // Only an explicit setMuted(false) opens and starts the microphone.
-    // Muting closes the microphone and discards all pending capture frames.
+    // Muting closes the microphone and discards all pending capture frames;
+    // unmuting reopens it.
     bool setMuted(bool muted, std::wstring& error);
     void play(int sender, const std::vector<unsigned char>& pcm);
     std::vector<std::vector<unsigned char>> takeCaptured();
     void setCaptureHandler(std::function<void(const std::vector<unsigned char>&)> handler);
     std::wstring takeError();
+    std::wstring diagnostics();
+    MediaTelemetry telemetry();
 
 private:
     struct Impl;

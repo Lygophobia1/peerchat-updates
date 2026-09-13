@@ -19,6 +19,17 @@ offline outbox, contacts, identity keys, encrypted local history, and the client
 forwards bounded logs, and uses a local named pipe for status and graceful stop. The server does
 not require the Admin application.
 
+The WPF conversation shell keeps normal actions in the selected conversation header. DMs expose a
+compact Call action; an active call expands that header into a slim state/duration/mute/deafen/end
+strip. Engineering call details remain in that call area and load only when the user opens Details
+and expands Advanced / Diagnostics; the expanded content is height-capped and scrolls internally.
+The right side panel is a stable, compact global Security & Status surface. Conversation details
+open from the DM header, while group members, invitations, settings, rename/leave, and applicable
+member administration open in anchored group-header flyouts. Only one header flyout is active at a
+time, and group creation remains available from the Groups tab regardless of selection. These are
+presentation projections over the existing view models and do not introduce a second call, group,
+connection, or polling path.
+
 ## Identity and trust boundaries
 
 - **Account identity:** username, login, friend relationships, discovery, and presence.
@@ -54,13 +65,24 @@ session automatically signs in; an unlinked new profile offers Sign In, Create A
 Offline. An unavailable server leaves the profile in Offline / Direct P2P mode with local history,
 manual connections, and saved direct reconnects available.
 
+The chooser uses flat dark selectable rows showing profile name, linked `@handle` when present, and
+last-used time. Creation is an explicit `+ New Profile` editor state; Open Profile is the primary
+action, while Rename and confirmed recoverable Delete live in the selected row's overflow menu.
+Keyboard selection, double-click/open, profile locking, and the bootstrap order are unchanged.
+
 v0.3-beta switching is restart-based. The active client stops discovery events/heartbeats, P2P
 sessions and listener, joins/releases the native worker off the UI thread, flushes/closes SQLite,
 and only then starts the chooser in a replacement process using the current executable path and
 installation root. The temporary chooser uses an explicit WPF lifetime so closing it cannot end
-the application before the selected profile's main window opens. Only one selected profile is opened. In-memory friend state,
+the application before the selected profile's main window opens. Each process opens only one selected profile. In-memory friend state,
 unread counts, endpoint caches, connection generations, and pending trust prompts therefore cannot
-cross the switch. Profile removal is confirmed and recoverable under `RemovedProfiles`.
+cross the switch. Before native startup, the process acquires an exclusive lock file inside that
+profile directory. A second process targeting the same profile exits with a clear message instead
+of contending for DPAPI/SQLite state; processes targeting different profiles may run concurrently.
+If two distinct profiles contain the same saved listener port, the first keeps it and a later
+profile atomically binds an available port and persists that port before emitting native Ready.
+An explicit command-line port override remains strict and fails instead of silently changing.
+Profile removal is confirmed and recoverable under `RemovedProfiles`.
 
 Account ID and device Peer ID remain separate fields so several devices per account can be added
 later. The server refuses to attach a device Peer ID already owned by one account to another account.
@@ -89,16 +111,24 @@ group outbox survives disconnect/restart and sends signed group envelopes only o
 mutual-TLS peer connections that advertise the signed-groups capability. Inviting a verified friend
 queues the accepted ledger history to that device; later accepted events fan out across current
 members/invitees, so connected members can forward events to temporarily indirect peers. Pending
-causal events are reconsidered when predecessors arrive. Only one profile/core/ledger set is open,
-and group keys, events, outboxes, and account binding are cleared with the rest of native state on a
-profile restart.
+causal events are reconsidered when predecessors arrive. Each process owns one profile/core/ledger
+set, and group keys, events, outboxes, and account binding are cleared with the rest of native state
+on a profile restart. Separate processes may own separate profiles.
 
-The WPF layer invokes groups through the existing C ABI and renders replicated state; it does not
+The WPF layer invokes groups through the existing C ABI and renders replicated state, including
+pending invite count in the group list and named `Pending Invite` rows in group details; it does not
 become an authority. Discovery may help locate a friend's account/device endpoint for an invitation,
 but the server creates no Group ID, membership row, role, metadata, invite, removal, or history. If
 discovery disappears, persisted groups and direct group messaging continue. A future relay may carry
 the same encrypted signed envelopes in Direct Only, Automatic, or Relay / Privacy transport modes,
 but transport choice cannot change the logical group or its client authority.
+
+Conversation history is retrieved for presentation in bounded newest-first pages (100 messages),
+not by materializing an encrypted DM history or a group's complete signed ledger into WPF. The
+desktop anchors a selected conversation at its newest loaded message and requests an older page only
+when the reader reaches the top. Existing message-ID deduplication and deterministic logical ordering
+remain the presentation merge boundary. Group pagination reads a page from the already-validated
+local ledger; it does not alter ledger validation, storage, or replication.
 
 ## Endpoint model
 
@@ -126,8 +156,21 @@ username search returns public profile/device fields without endpoints.
 
 ## Candidate selection and direct connection
 
+One WPF friend-snapshot reconciliation path serves normal refresh, friend dialogs and manual repair.
+Concurrent refresh callers share its task and responses are rejected after account sign-out/change.
+Try Reconnect refreshes presence/friends when possible, then invokes the existing candidate selector.
+Explicit retry retires stale attempts for that expected identity; unchanged presence does not destroy
+an in-progress trust handshake. Wrong-identity suspension begins at detection, before socket cleanup.
+Group invite candidates come from `ChatViewModel.GroupInviteCandidates`, keyed by established account
+membership rather than endpoint/presence. The open picker updates on friend/group model events.
+
 Opening a friend DM consumes the authoritative friend snapshot. The client compares a private LAN
-candidate against every active local IPv4 interface using that interface's real subnet mask.
+candidate against a freshly enumerated snapshot of active local IPv4 interfaces using each
+interface's real subnet mask. Enumeration and mask failures are isolated per adapter/address so a
+broken virtual adapter cannot make a later valid Ethernet/Wi-Fi subnet appear remote. Automatic
+presence refresh also re-detects the advertised physical LAN address after network changes; an
+explicit user-configured endpoint remains unchanged. Per-peer diagnostics retain every evaluated
+local address/prefix, the candidate, the match result, and why an interface was ignored.
 Same-subnet candidates are preferred; otherwise a valid public candidate is selected. A LAN route
 failure may fall through to public promptly. TLS or identity failures do not trigger route fallback.
 
@@ -148,7 +191,9 @@ and route. Saved-contact failures use exponential retry backoff with per-attempt
 seconds up to a five-minute cap. A changed presence/candidate or Try Reconnect can request an
 immediate attempt without clearing trust or failure history. If an endpoint presents a different
 Peer ID, that attempt remains behind explicit verification; rejection suspends automatic retry for
-that endpoint until a manual retry or candidate update.
+that endpoint until a manual retry or candidate update. A fresh authoritative candidate matching an
+already-running endpoint updates that attempt's source/route metadata in place rather than leaving
+it labelled as a saved-contact attempt or interrupting an active trust decision.
 
 ## Discovery events and presence
 
@@ -161,6 +206,35 @@ A separate 60-second presence heartbeat updates the current device/candidates on
 identical heartbeat does not broadcast another friend event. Presence expires after 90 seconds and
 the server emits an offline notification.
 
+Windows `NetworkAddressChanged` is the event-driven runtime recovery trigger; bursts are debounced
+without polling. A real active-address/subnet fingerprint change closes the old direct sessions,
+cancels their resolvers/backoff, and removes saved private endpoints outside every current subnet
+while retaining contact identity, trust, conversation, history, and outbox state. The client then
+publishes its newly detected candidate, forces a fresh authoritative friend snapshot, and runs the
+same candidate selector again. Discovery-channel recovery performs publish-before-snapshot as well,
+so an interface change that occurred while discovery was unreachable is repaired on reconnection.
+An authoritative endpoint change retires the former route before replacement only when no live
+verified session exists. Exact endpoint invalidation in the native core also retains a healthy
+authenticated winner and records that decision, so a delayed discovery refresh cannot tear down the
+call/control session when the network generation did not change. Only the client whose own network
+generation changed uses whole-peer route invalidation, before it starts replacement attempts.
+
+Authenticated duplicate arbitration prefers a newly proven session over an older session with no
+recent transport progress, then uses the stable Peer-ID direction rule for genuinely simultaneous
+fresh connections. Superseded duplicates emit diagnostic lifecycle events without marking the
+surviving conversation offline. Final disconnect events carry an explicit bounded origin such as
+remote EOF/TLS close, local route invalidation, socket error, authentication timeout, protocol
+rejection, or duplicate arbitration. Discovery presence remains advisory and never closes an
+otherwise live authenticated P2P session merely because a snapshot reports offline.
+
+The managed connection projection tracks a winning native connection ID independently from the
+latest attempt/failure. Connected events pin the winning endpoint, source, route, and inbound/outbound
+direction. Attempt, retry, trust, lifecycle, and error events remain available as secondary
+diagnostics but cannot replace the winner or downgrade `ConversationModel.Online`. Only a final
+disconnect carrying the winning connection ID clears that state. Native reconnect cleanup already
+checks for another usable session before scheduling backoff, so the UI now mirrors that ownership
+rule instead of treating an individual loser as conversation-wide failure.
+
 ## One-to-one voice boundary
 
 Voice call signaling is carried only after the existing direct peer connection has completed mutual
@@ -170,28 +244,66 @@ are never persisted. The native core owns the one-call-per-profile state machine
 Incoming Ringing, Connecting, Connected, Ending, then Idle. It handles answer, decline, hang-up,
 busy, timeout, deterministic simultaneous-call convergence, peer disconnect, and profile shutdown.
 Duplicate or completed call IDs are bounded in memory for replay suppression.
+Audio-device errors no longer mark the authenticated text peer offline. Media-device startup is
+owned by the node's `VoiceMedia.poll` lifecycle, not a libdatachannel callback. Teardown detaches
+callbacks, stops audio, explicitly deletes independently registered C API track handles, then deletes
+the peer connection and codecs. Reuse resets call media counters and mute/deafen state. Each call
+creates a distinct PeerConnection/ICE agent tagged with the current WPF network generation and
+active IPv4 fingerprint; candidates never survive call teardown or a network transition. A capture
+generation check prevents a buffer from being requeued after mute closes/reopens its device.
 
 The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
-the call ID. `VoiceMedia` is a one-call native boundary: libdatachannel 0.24.3 owns direct ICE,
+the call ID. Each send resolves the current authenticated winning peer connection, while call state
+remains keyed by call ID and stable Peer ID, so duplicate arbitration cannot strand negotiation on
+a retired socket. Diagnostics correlate the winning connection at call start and the connection used
+for each offer, answer, and candidate without recording SDP. `VoiceMedia` is a one-call native
+boundary: libdatachannel 0.24.3 owns direct ICE,
 ECDSA DTLS-SRTP, RTP and jitter handling; libopus 1.5.2 encodes 16 kHz mono 20 ms capture frames
 with the required 48 kHz RTP clock advanced by 960 ticks per frame; the event-driven WinMM engine
-owns selected capture/playback devices and falls back safely when a selected/default device ID is
-stale. Only Opus/RTP crosses the
+owns selected capture/playback devices. Capture resolves the Windows default through
+`waveInMessage(DRVM_MAPPER_PREFERRED_GET)` and validates its concrete ID against current WinMM
+enumeration before `waveInOpen`; the mapper sentinel is used only for the query. Default fallback
+uses concrete enumerated devices and honors Windows preferred-only policy. Explicit capture choices
+are never replaced by another mic. Refresh preserves a matching ID/name, then matches by name when
+enumeration has reordered. Capture is opened before playback; Bluetooth duplex hardware acceptance
+is still pending. Only Opus/RTP crosses the
 media transport. Raw PCM stays in memory and is never logged, persisted, or written to temporary files.
 
 libdatachannel represents the negotiated audio m-line as one reused bidirectional `sendrecv` track.
 PeerChat installs receive/RTCP handling and open/closed callbacks directly on that track; it does not
 assume the library will report a second remote track. Capture may begin with the peer connection, but
 Opus submission is gated on the negotiated track being open.
+The pinned 0.24.3 C API media interceptor is intentionally unused: its implementation moves input
+messages to a local result vector without returning that vector, breaking delivery. Diagnostics use
+track callbacks and explicitly label pre-track transport counters unavailable rather than intercepting
+media. The pinned dependency itself is unchanged.
 
 Callbacks from libdatachannel and capture are reduced to bounded native queues/events consumed by
 the existing node worker. The stable C ABI exposes call lifecycle, refreshable device enumeration/
 selection, mute, deafen, and an on-demand bounded diagnostic snapshot. That snapshot contains only
-safe call state, device labels, media counters, timestamps, and the latest error; it never contains
+safe call state, device labels, media counters, timestamps, and the latest error. Capture diagnostics
+include requested/resolved ID/name, bounded enumeration/attempts, exact waveInOpen MMRESULT, default
+query result, and fallback use, retained in the most-recent-call snapshot. On-demand capture details
+also report prepare/queue/start results, worker event counts, completed buffers/bytes, header state,
+Windows capture position, and actual playback device. ICE diagnostics include gathering, connection,
+and signaling state, bounded host/server-reflexive candidate classes, candidate exchange counts,
+network generation, and selected pair. These are metadata only; no audio samples are read for
+diagnostics and no new polling is introduced. It never contains
 audio or cryptographic/session secrets. WPF orchestrates controls and duration. Profile switching disposes the old core,
 closes peer connection/audio devices, then releases identity/database state. Discovery is not in the
-established media path. The current implementation uses host candidates only; STUN/TURN/privacy
-relay remain future transport additions and cannot become call authority.
+established media path. Standard STUN gathering supplements offline-capable host candidates for
+common NAT traversal. STUN is coordination only; TURN/privacy relay remains a future fallback for
+NAT combinations that cannot form a direct candidate pair and cannot become call authority.
+
+Live level meters use a generic `MediaTelemetry` snapshot rather than exposing PCM to managed code.
+The existing native capture worker calculates normalized RMS before its Opus callback; decoded PCM
+updates output level as it enters the existing playback queue. Native time-based decay returns stale
+levels to zero. The node publishes two atomic floats plus active/input/output availability flags, and
+the existing 60 ms WPF event tick renders read-only meters and human-readable states. Muting,
+deafening, call teardown and profile shutdown force the appropriate level to zero. No second device
+path, audio retention, sample logging, diagnostic-string parsing or additional timer is involved.
+WPF maps normalized RMS onto a -60 dBFS to 0 dBFS display range so quiet decoded speech remains
+visible without changing gain or playback volume.
 
 ## Storage, migration, reset, and backup
 
@@ -199,6 +311,10 @@ Each stable profile under LocalAppData contains identity, DPAPI-protected config
 state, protected account/device conversation mappings, bounded safe connection diagnostics, trusted
 contacts, encrypted SQLite history/WAL/SHM, outbox, message metadata, and unread state. Installation
 metadata contains profile IDs/names/last-used state, but no keys or messages.
+
+DPAPI failures retain their underlying Win32 result in the local error text for diagnosis, without
+logging plaintext, key material, entropy, or protected bytes. Current-user DPAPI scope and the
+existing record/entropy format remain unchanged so existing encrypted profile data stays compatible.
 
 Connection recovery remains event-driven through the existing candidate selection and native
 session path. Native attempt/schedule/failure events carry their own expected identity and route
@@ -242,8 +358,43 @@ rewrite the machine-wide rule for their harness executable path.
 build scripts expect them. `tests`, `docs`, and `scripts` contain their named support files.
 `build\v0.3-beta` is replaceable output, `releases\v0.3-beta` is the active package, and
 `releases\v0.1-beta` is the immutable fallback. `shared/VersionInfo.cs` centralizes the version.
-The packaged `PeerChat.Core.dll` statically contains the pinned native media/security dependencies
+The packaged Client always carries the desktop EXE/config, native core, updater EXE/core/config,
+and update-feed map as one runtime set. Packaging rejects a missing required managed file and inspects
+the desktop assembly reference metadata before running the native audit. The packaged `PeerChat.Core.dll` statically contains the pinned native media/security dependencies
 and MinGW support runtimes; it may dynamically import only Windows inbox DLLs. The managed bridge
 preloads the exact adjacent core with DLL search restricted to its directory and System32, reports
 the Windows loader code/message on failure, and does not rely on `PATH`. Packaging fails unless an
-import-table audit and restricted-search native load smoke both pass.
+managed runtime-set check, import-table audit, and restricted-search native load smoke all pass.
+
+## Client updates
+
+The updater is a separate managed executable packaged beside the client, but the desktop copies its
+three updater runtime files to `%LOCALAPPDATA%\PeerChat\Updates` before launching it. It therefore
+never tries to rename a directory containing its own loaded executable. The desktop-side
+`DesktopUpdateClient` is a narrow service boundary: it owns installation-wide channel preference,
+feed selection, check/download/prepare actions, and updater launch; profiles never own update
+configuration or payload state.
+
+An update manifest binds product, channel, semantic version, upgrade floor, HTTPS package URL,
+size, SHA-256, entry executable, release-notes URL, and publication time. Release manifests sign a
+canonical UTF-8, LF-delimited representation of those fields (including schema version) with
+RSA-3072/SHA-256 PKCS#1 v1.5. The signature itself is excluded from the signed bytes. Because the
+signed SHA-256 and byte size bind the ZIP, the signature authenticates the exact package bytes. The updater
+rejects unsafe manifests/ZIP paths, downgrades, oversized downloads/extractions, bad hashes, and
+unhealthy first launches. It journals staged replacement, retains a sibling backup, launches the
+new client, and waits for the desktop to write its health token only after native local-profile/core
+startup succeeds. Failed health confirmation restores and restarts the prior installation.
+
+Before moving the old Client directory to its sibling backup, the installer waits for the original
+PeerChat process to exit. That single rename retries only transient Windows sharing/lock failures
+on a short bounded backoff; every attempt, delay, success, or final failure is logged. No retry is
+applied to validation, extraction, replacement activation, health confirmation, or rollback.
+
+Release is the default channel and fails closed for an absent signature, unknown/revoked key ID,
+wrong algorithm, malformed signature, invalid signature, or package/hash/size mismatch. The updater
+embeds only a key-ID-indexed public-key registry; the Release private key remains in the release
+operator's Current User Windows certificate store. Development may use the existing explicit unsigned
+opt-in only for authorized Development packages; HTTPS, size, and SHA-256 verification remain mandatory.
+Key rotation overlaps keys: a release signed by the old key first distributes the new public key,
+the publisher changes keys only after adoption, and a later signed release retires the old key.
+Feed hosting and update delivery stay outside discovery, profiles, peer sessions, and transport.

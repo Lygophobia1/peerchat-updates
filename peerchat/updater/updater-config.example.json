@@ -1,0 +1,11 @@
+{
+  "ManifestUrl": "https://raw.githubusercontent.com/Lygophobia1/peerchat-updates/main/release/manifest.json",
+  "Channel": "release",
+  "StagingRoot": "%LOCALAPPDATA%\\PeerChat\\Updates",
+  "RequireSignature": true,
+  "AllowInsecureDevelopmentUrls": false,
+  "MaximumPackageBytes": 536870912,
+  "MaximumExtractedBytes": 1073741824,
+  "MaximumArchiveFiles": 4096,
+  "FirstLaunchTimeoutSeconds": 30
+}

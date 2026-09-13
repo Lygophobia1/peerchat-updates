@@ -20,6 +20,20 @@ public sealed class LocalProfileCatalog {
     public List<LocalProfileInfo> Profiles {get;set;}
 }
 
+// One process exclusively owns one profile directory. Different profile directories use
+// different lock files and remain intentionally runnable at the same time.
+public sealed class LocalProfileLease : IDisposable {
+    readonly FileStream stream;
+    LocalProfileLease(FileStream value){stream=value;}
+    public static LocalProfileLease TryAcquire(string profileDirectory){
+        try{
+            string directory=Path.GetFullPath(profileDirectory);Directory.CreateDirectory(directory);
+            return new LocalProfileLease(new FileStream(Path.Combine(directory,".peerchat-profile.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None));
+        }catch(IOException){return null;}catch(UnauthorizedAccessException){return null;}
+    }
+    public void Dispose(){stream.Dispose();}
+}
+
 // Installation metadata lives above Profiles. Nothing beneath one stable profile ID is ever
 // consulted while another profile is active. Usernames are deliberately not directory names.
 public sealed class LocalProfileManager {

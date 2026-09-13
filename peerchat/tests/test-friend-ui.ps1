@@ -1,13 +1,13 @@
+param([string]$ApplicationDirectory='releases\v0.3-beta\Client')
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
-    $outputDirectory='build\tests\friend-ui'
+    $outputDirectory='build\tests\friend-ui-'+[Guid]::NewGuid().ToString('N')
     $dataA=Join-Path $outputDirectory 'alpha';$dataB=Join-Path $outputDirectory 'beta'
-    Remove-Item -LiteralPath $outputDirectory -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $outputDirectory,$dataA,$dataB | Out-Null
     & .\scripts\build-server.ps1 -OutputDirectory $outputDirectory
-    Copy-Item releases\v0.3-beta\Client\PeerChat.Desktop.exe,releases\v0.3-beta\Client\PeerChat.Core.dll,releases\v0.3-beta\Client\PeerChat.Desktop.exe.config,releases\v0.3-beta\Client\peerchat-client.ico $outputDirectory -Force
+    Copy-Item "$ApplicationDirectory\PeerChat.Desktop.exe","$ApplicationDirectory\PeerChat.Core.dll","$ApplicationDirectory\PeerChat.Desktop.exe.config","$ApplicationDirectory\peerchat-client.ico","$ApplicationDirectory\PeerChat.Updater.Core.dll","$ApplicationDirectory\PeerChat.Updater.exe","$ApplicationDirectory\PeerChat.Updater.exe.config","$ApplicationDirectory\update-feeds.json" $outputDirectory -Force
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $references=@('System.dll','System.Core.dll','System.Xaml.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }
     & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$outputDirectory\FriendUiSmoke.exe" "/reference:$outputDirectory\PeerChat.Desktop.exe" $references .\tests\FriendUiSmoke.cs

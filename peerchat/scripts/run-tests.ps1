@@ -26,6 +26,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Voice media transport test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\audio_test.cpp -o "$outputDirectory\audio-test.exe" -lwinmm
     if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test build failed' }
+    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\audio_lifecycle_test.cpp -o "$outputDirectory\audio-lifecycle-test.exe" -lwinmm
+    if ($LASTEXITCODE -ne 0) { throw 'Native audio lifecycle test build failed' }
     & g++ -Ibuild\native\install\include -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\opus_voice_test.cpp -Lbuild\native\install\lib -lopus -lssp -o "$outputDirectory\opus-voice-test.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Opus voice test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\share_id_test.cpp share_id.cpp -o "$outputDirectory\share-id-test.exe"
@@ -43,9 +45,11 @@ try {
     & ".\$outputDirectory\reconnect-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Reconnect/diagnostics test failed' }
     & ".\$outputDirectory\voice-media-transport-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Voice media transport test failed' }
     & ".\$outputDirectory\audio-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test failed' }
+    & ".\$outputDirectory\audio-lifecycle-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Native audio lifecycle test failed' }
     & ".\$outputDirectory\opus-voice-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Opus voice test failed' }
     & ".\$outputDirectory\tls-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'TLS test failed' }
     & ".\$outputDirectory\node-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'Node test failed' }
     & python .\tests\test_six_processes.py; if ($LASTEXITCODE -ne 0) { throw 'Six-process test failed' }
+    & .\tests\test-updater.ps1; if ($LASTEXITCODE -ne 0) { throw 'Updater test failed' }
     Write-Host 'All PeerChat regression tests passed.'
 } finally { Pop-Location }

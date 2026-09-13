@@ -31,6 +31,20 @@ int main() {
     using namespace std::chrono_literals;
     try {
         const Clock::time_point now{};
+        const std::vector<peerchat::Audio::Device> devices{{-1,L"Windows default microphone"},{0,L"Other mic"},{3,L"JLab Hands-Free"}};
+        require(captureCandidates(-1,devices,3,false)==std::vector<UINT>({3,0}),
+                "Default must resolve to the concrete JLab ID before fallback");
+        require(captureCandidates(0,devices,3,false)==std::vector<UINT>({0}),
+                "Explicit microphone must not be replaced by the default or another device");
+        require(captureCandidates(7,devices,3,false).empty(),"Missing explicit mic must not silently switch");
+        require(captureCandidates(-1,devices,3,true)==std::vector<UINT>({3}),"Windows preferred-only policy ignored");
+        require(captureCandidates(-1,devices,WAVE_MAPPER,false)==std::vector<UINT>({0,3}),
+                "Unresolved default must use concrete enumerated IDs, never WAVE_MAPPER");
+        require(pcmLevel(tone(0)) == 0.0f,"Silence must produce a zero media level");
+        require(pcmLevel(tone(16384)) > 0.49f && pcmLevel(tone(16384)) < 0.51f,
+                "PCM RMS media level was not normalized");
+        require(decayedLevel(0.8f,now,now+500ms)<0.05f,
+                "Media level decay did not return stale audio toward zero");
         Mixer mixer;
 
         checkFrame(mixer.mix(now), 0);
@@ -92,6 +106,9 @@ int main() {
         require(audio.takeError().empty(), "Unexpected worker error");
         audio.stop();
         audio.stop();
+        const auto telemetry=audio.telemetry();
+        require(!telemetry.active&&!telemetry.inputAvailable&&!telemetry.outputAvailable&&telemetry.inputLevel==0&&telemetry.outputLevel==0,
+                "Closed audio retained media telemetry between calls");
         const auto defaults = deviceCandidates(-1, true);
         require(!defaults.empty() && defaults.front() == WAVE_MAPPER,
                 "Default capture fallback must try the Windows mapper first");

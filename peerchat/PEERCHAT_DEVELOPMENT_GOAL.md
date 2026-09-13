@@ -9,11 +9,11 @@
 
 ## CURRENT VERSION
 
-**v0.3-beta**
+**v4-dev.2**
 
 ## CURRENT PHASE
 
-**Milestone 3 — Automatic Direct Connection + Message Ordering**
+**v4 Development updater delivery proof**
 
 Milestone 1 — Account + Discovery Foundation is complete and has passed real packaged-client testing.
 
@@ -101,6 +101,12 @@ for troubleshooting, development, and server-independent fallback use.
 Voice diagnostics remain local and privacy-safe: current/recent call state, selected device labels,
 media counters, and errors may be copied for troubleshooting, but audio content and secret key or
 session material must never be recorded or included.
+Direct voice may use standard STUN coordination while retaining host candidates for LAN/offline
+operation. TURN/privacy relay remains a future fallback; neither service owns call identity,
+signaling authority, or media content.
+Device errors must not invalidate the logical friend/session. Invite eligibility belongs to stable
+friend accounts, independent of reachability. Reliability candidates are kept separate from the
+existing release until automated checks and physical acceptance establish their status.
 
 ---
 
@@ -593,6 +599,47 @@ Do not force reliable ordered text semantics onto latency-sensitive media simply
 
 ---
 
+# PLANNED CLIENT ARCHITECTURE / REFACTOR DIRECTION
+
+> Planned direction, not the currently implemented architecture. Preserve proven networking and
+> security behavior while responsibilities are migrated incrementally and verified.
+
+PeerChat will move toward a transport-independent logical `PeerSession`, where session continuity
+does not depend on continuity of any individual transport. Future ownership should be separated
+across `PeerSession`, `SessionTransportManager`, `TransportRouter`, and narrow `ITransport`
+implementations. That shared boundary should centralize identity verification, winner selection,
+route generations, stale-callback protection, retry/backoff, failover, and transport handoff.
+
+Future route changes should use make-before-break handoff where possible:
+
+**establish alternate route → authenticate and verify the expected peer → confirm ready → promote
+the new route → drain and retire the old route**
+
+Keep peer/account identity separate from endpoint/route identity. Messaging, voice, and future
+screen sharing, video, and file transfer should consume the shared session/channel abstraction
+instead of creating separate reconnect stacks. Feature-specific recovery should remain small—for
+example, resending unacknowledged message IDs, resuming a file from an offset, or requesting a media
+keyframe after handoff.
+
+New features must not add substantial reconnect, route-selection, stale-route, winner-selection, or
+identity-verification logic of their own. New orchestration should use narrow controllers/services
+instead of continuing to grow `App.cs`; native functionality should be wrapped by adapters/services
+rather than scattered direct P/Invoke calls throughout WPF. Keep Windows-specific behavior behind
+platform adapters where practical so the portable core remains suitable for future Android reuse.
+
+The auto-updater remains self-contained and outside the session/transport abstraction. Continue
+using mature libraries for TLS, WebRTC, ICE, STUN/TURN, DTLS-SRTP, Opus, and cryptographic
+primitives. Do not replace the working networking stack with a new P2P framework without a
+demonstrated need, and do not introduce a plugin architecture or broad rewrite before this planned
+incremental refactor.
+
+Intended sequence:
+
+**stable Windows baseline → updater integration → session/transport abstraction → prove
+messaging/voice continuity → screen sharing → video/files**
+
+---
+
 # FUTURE DISCORD / EXTERNAL SERVICE BRIDGE
 
 PeerChat is intended to eventually support Discord interoperability where supported Discord APIs permit it.
@@ -613,7 +660,10 @@ Do not show PeerChat's native E2E privacy indicator for content that an external
 
 # AUTOMATIC CLIENT UPDATE SERVICE
 
-PeerChat public infrastructure should eventually provide automatic update information so new builds do not need to be manually distributed.
+PeerChat now has an isolated updater foundation and client handoff; production feed/signing
+configuration and the first physical in-place update proof remain the next update milestone.
+Public infrastructure should provide automatic update information so new builds do not need to be
+manually distributed.
 
 Support:
 
@@ -630,6 +680,10 @@ Support:
 The client must NEVER trust an executable solely because the public server says it is an update.
 
 Updates must be cryptographically signed and independently verified by the client using a trusted update-signing public key.
+
+Release remains fail-closed until that verifier and trusted public key are configured. An explicitly
+authorized Development-only unsigned package may use the existing opt-in boundary, but must still
+use HTTPS plus exact size and SHA-256 verification.
 
 Compromise of the account/discovery server alone must not be sufficient to distribute trusted malicious executables.
 
@@ -1017,17 +1071,17 @@ Reassess detailed requirements before implementation.
 
 Everything above defines PeerChat's architectural direction.
 
-**Milestones 1–3, the first client-owned group-text foundation, and native one-to-one direct
-WebRTC/DTLS-SRTP + Opus calls are implemented in code; physical packaged voice acceptance is
-tracked in `PROJECT_STATUS.md`.**
+**Milestones 1–3, scalable client-owned group text, and native one-to-one direct
+WebRTC/DTLS-SRTP + Opus calls are implemented. Packaged two-way voice and 3+ client group behavior
+have passed physical acceptance; exact current evidence remains in `PROJECT_STATUS.md`.**
 
 The current development target is:
 
-# 1-TO-1 VOICE PACKAGED ACCEPTANCE
+# v0.3-beta STABILIZATION
 
-Focus now on verifying the packaged two-client voice workflow:
+Focus now on eliminating lifecycle and projection defects without expanding scope:
 
-**WPF call state** → **C ABI lifecycle** → **native WebRTC/Opus media** → **authenticated 1-to-1 voice**
+**live-route ownership** → **profile process ownership** → **complete group invitation state**
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and
 encrypted-history behavior. Current implementation details and test state belong in
@@ -1035,7 +1089,7 @@ encrypted-history behavior. Current implementation details and test state belong
 
 Do NOT begin:
 
-- NAT traversal
+- additional NAT traversal or TURN/relay work beyond the implemented direct ICE/STUN path
 - relay implementation
 - updater implementation
 - disappearing messages
@@ -1055,9 +1109,20 @@ Preserve:
 - modern WPF UI
 - Server Admin/headless-server separation
 
-Keep group state client-owned and transport-independent. Implement voice incrementally with device
-selection, ringing/accept/reject/end, mute/deafen, failure states, profile-switch teardown, and tests
-that do not weaken peer identity or message isolation.
+Keep group state client-owned and transport-independent. Preserve the verified voice device,
+ringing/accept/reject/end, mute/deafen, failure, profile-switch teardown, and identity boundaries.
+Voice device controls and read-only input/output meters should use the existing dark UI theme.
+Level telemetry must be derived from PCM already crossing the native media path, expose only small
+normalized values/state to WPF, reset with the call/profile lifecycle, and never retain audio.
+
+Keep everyday conversation actions header-driven and the desktop visually flat. Active-call controls
+belong in a slim conversation-header strip; engineering diagnostics stay collapsed, height-capped,
+and internally scrollable inside that call area. The right sidebar remains a compact global Security
+& Status surface. DM details and group members, invites, settings, rename/leave, and applicable
+member administration open from anchored conversation-header actions instead of replacing or
+stacking cards in the global sidebar. The local profile chooser should match the dark client, keep
+creation progressive, and place rename/delete behind the selected profile's overflow without changing
+bootstrap or isolation semantics.
 
 ---
 

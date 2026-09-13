@@ -1,8 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <vector>
+#include "media_telemetry.hpp"
 
 namespace peerchat {
 
@@ -18,7 +20,7 @@ public:
         std::string detail;
     };
 
-    VoiceMedia(int inputDevice=-1, int outputDevice=-1);
+    VoiceMedia(int inputDevice=-1, int outputDevice=-1, std::uint64_t networkGeneration=0, std::string networkFingerprint={});
     ~VoiceMedia();
     VoiceMedia(const VoiceMedia&) = delete;
     VoiceMedia& operator=(const VoiceMedia&) = delete;
@@ -29,6 +31,7 @@ public:
     bool addCandidate(const std::string& candidate, const std::string& mid, std::wstring& error);
     bool setMuted(bool muted, std::wstring& error);
     void setDeafened(bool deafened);
+    MediaTelemetry telemetry();
     std::wstring diagnostics();
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
     void testInjectPcm(const std::vector<unsigned char>& pcm);

@@ -1,0 +1,6 @@
+{
+  "ReleaseManifestUrl": "https://raw.githubusercontent.com/Lygophobia1/peerchat-updates/main/release/manifest.json",
+  "DevelopmentManifestUrl": "https://raw.githubusercontent.com/Lygophobia1/peerchat-updates/main/development/manifest.json",
+  "DevelopmentAllowsUnsignedPackages": true,
+  "DevelopmentAllowsInsecureUrls": false
+}
