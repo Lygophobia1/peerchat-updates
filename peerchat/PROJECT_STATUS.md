@@ -35,6 +35,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `372663a` (`Extract Stage 4 durable delivery ownership`).
 - Stage 4 documentation checkpoint and Stage 5 starting point:
   `dfe1926e6af7be56de64de88152fd91a98f6fb7d`; worktree was clean before Stage 5.
+- Stage 5 implementation checkpoint: `eeb15fc` (`Implement Stage 5 capability-gated direct
+  transport handoff`). Automated gates passed; physical two-PC handoff acceptance remains pending.
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
