@@ -74,6 +74,7 @@ namespace PeerChat.Server {
         public bool DeviceIdentityExists(string publicIdentity) { lock(gate) return ScalarLong(database,"SELECT count(*) FROM devices WHERE public_identity="+Quote(publicIdentity))>0; }
         public bool PasswordMatches(string username, Func<byte[], byte[], bool> verifier, out long accountId) { lock(gate) { IntPtr s=IntPtr.Zero; accountId=0; try { if(SqliteNative.prepare(database,"SELECT id,password_salt,password_hash FROM accounts WHERE username="+Quote(username),out s)!=0||SqliteNative.step(s)!=100)return false; accountId=SqliteNative.columnLong(s,0); return verifier(SqliteNative.columnBlob(s,1),SqliteNative.columnBlob(s,2)); } finally { if(s!=IntPtr.Zero)SqliteNative.finalize(s); } } }
         public bool AddDevice(long accountId,string publicIdentity) { lock(gate){long owner=ScalarLong(database,"SELECT account_id FROM devices WHERE public_identity="+Quote(publicIdentity));if(owner!=0)return owner==accountId;Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+accountId+","+Quote(publicIdentity)+","+UnixNow()+");");return true;} }
+        public bool OwnsDevice(long accountId,string publicIdentity){lock(gate)return ScalarLong(database,"SELECT count(*) FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity))>0;}
         public void CreateSession(string tokenHash,long accountId,long expires) { lock(gate) Execute("DELETE FROM sessions WHERE expires_utc<"+UnixNow()+"; INSERT INTO sessions(token_hash,account_id,expires_utc) VALUES("+Quote(tokenHash)+","+accountId+","+expires+");"); }
         public long Authenticate(string tokenHash) { lock(gate)return ScalarLong(database,"SELECT account_id FROM sessions WHERE token_hash="+Quote(tokenHash)+" AND expires_utc>="+UnixNow()); }
         public void RevokeSession(string tokenHash) { lock(gate) Execute("DELETE FROM sessions WHERE token_hash="+Quote(tokenHash)+";"); }
@@ -88,6 +89,7 @@ namespace PeerChat.Server {
         // Used by the notification layer only to decide whether a presence update is
         // appropriate for a subscriber. It never exposes friendship data to the client.
         public bool Friends(long a,long b){return ScalarLong(database,"SELECT count(*) FROM friendships WHERE account_low="+Low(a,b)+" AND account_high="+High(a,b))>0;}
+        public bool RelayAuthorized(long a,long b){lock(gate)return Friends(a,b)||ScalarLong(database,"SELECT count(*) FROM friend_requests WHERE state='pending' AND ((sender_id="+a+" AND recipient_id="+b+") OR (sender_id="+b+" AND recipient_id="+a+"))")>0;}
         void MakeFriends(long a,long b){Execute("INSERT OR IGNORE INTO friendships(account_low,account_high,created_utc) VALUES("+Low(a,b)+","+High(a,b)+","+UnixNow()+");");}
         // Every state transition is serialized and transactional. The authenticated account ID is
         // supplied by the server session lookup, never by a client-provided sender field.
@@ -115,8 +117,14 @@ namespace PeerChat.Server {
         internal static int prepare(IntPtr d,string q,out IntPtr s){return sqlite3_prepare_v2(d,q,-1,out s,IntPtr.Zero);} internal static int step(IntPtr s){return sqlite3_step(s);} internal static void finalize(IntPtr s){sqlite3_finalize(s);} internal static long columnLong(IntPtr s,int c){return sqlite3_column_int64(s,c);} internal static string columnText(IntPtr s,int c){var p=sqlite3_column_text(s,c);return p==IntPtr.Zero?null:Marshal.PtrToStringAnsi(p);} internal static byte[] columnBlob(IntPtr s,int c){int n=sqlite3_column_bytes(s,c);var p=sqlite3_column_blob(s,c);var b=new byte[n];if(n>0)Marshal.Copy(p,b,0,n);return b;}
     }
         sealed class DiscoveryServer {
-        const int ProtocolVersion=1, MaxRequestBytes=4096; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=MaxRequestBytes}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
+        const int ProtocolVersion=1, MaxRequestBytes=4096, MaxRelayPayloadBytes=64*1024; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=MaxRequestBytes}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
         sealed class EventClient : IDisposable { public readonly TcpClient Client; public readonly SslStream Tls; public readonly long AccountId; public readonly object Gate=new object(); public EventClient(TcpClient client,SslStream tls,long accountId){Client=client;Tls=tls;AccountId=accountId;} public void Dispose(){try{Tls.Dispose();}catch{}try{Client.Close();}catch{}} }
+        sealed class RelayEndpoint {
+            public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId;public readonly string DeviceId,TargetDeviceId,Binding;public readonly object WriteGate=new object();public readonly ManualResetEvent Ready=new ManualResetEvent(false);
+            public RelayEndpoint Peer;public string SessionId;public bool Incoming;
+            public RelayEndpoint(TcpClient client,SslStream tls,long account,string device,long target,string targetDevice){Client=client;Tls=tls;AccountId=account;DeviceId=device;TargetAccountId=target;TargetDeviceId=targetDevice;Binding=account+":"+device+">"+target+":"+targetDevice;}
+        }
+        readonly object relayGate=new object();readonly List<RelayEndpoint> waitingRelays=new List<RelayEndpoint>();readonly HashSet<string> activeRelayBindings=new HashSet<string>(StringComparer.Ordinal);
         // A certificate can be loaded from a PFX for ordinary deployment or from CurrentUser\My
         // during local development. Neither path ever exposes its private key to clients.
         public DiscoveryServer(ServerConfiguration c){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);certificate=LoadCertificate(c);}
@@ -169,7 +177,33 @@ namespace PeerChat.Server {
         static byte[] ReadFrame(Stream stream,int maximum){var header=ReadExact(stream,4);if(header==null)return null;int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];return length<1||length>maximum?null:ReadExact(stream,length);}
         static byte[] ReadExact(Stream stream,int length){var bytes=new byte[length];int offset=0;while(offset<length){int read=stream.Read(bytes,offset,length-offset);if(read==0)return null;offset+=read;}return bytes;}
         static void WriteFrame(Stream stream,byte[] bytes){var header=new[]{(byte)(bytes.Length>>24),(byte)(bytes.Length>>16),(byte)(bytes.Length>>8),(byte)bytes.Length};stream.Write(header,0,header.Length);stream.Write(bytes,0,bytes.Length);}
+        bool PairRelay(RelayEndpoint endpoint){
+            lock(relayGate){
+                if(activeRelayBindings.Contains(endpoint.Binding))return false;
+                activeRelayBindings.Add(endpoint.Binding);
+                RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
+                if(peer==null){waitingRelays.Add(endpoint);return true;}
+                waitingRelays.Remove(peer);string session=RandomToken();endpoint.Peer=peer;peer.Peer=endpoint;endpoint.SessionId=peer.SessionId=session;
+                endpoint.Incoming=String.CompareOrdinal(endpoint.DeviceId,peer.DeviceId)>0;peer.Incoming=!endpoint.Incoming;endpoint.Ready.Set();peer.Ready.Set();return true;
+            }
+        }
+        void RemoveRelay(RelayEndpoint endpoint){lock(relayGate){waitingRelays.Remove(endpoint);activeRelayBindings.Remove(endpoint.Binding);}try{if(endpoint.Peer!=null)endpoint.Peer.Client.Close();}catch{}endpoint.Ready.Dispose();}
+        void ServeRelay(TcpClient client,SslStream tls,Dictionary<string,object> request){
+            long accountId=accounts.Authenticate(TokenHash(Text(request,"sessionToken"))),targetAccountId;string device=Text(request,"publicIdentity"),targetDevice=Text(request,"targetPublicIdentity");
+            if(accountId==0){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
+            if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||accountId==targetAccountId||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
+            if(!accounts.RelayAuthorized(accountId,targetAccountId)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
+            var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice);
+            if(!PairRelay(endpoint)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
+            try{
+                if(!endpoint.Ready.WaitOne(TimeSpan.FromSeconds(15))){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_pair_timeout"))));return;}
+                var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming}})));lock(endpoint.WriteGate)WriteFrame(tls,ready);
+                byte[] session=Encoding.ASCII.GetBytes(endpoint.SessionId);
+                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
+            }finally{RemoveRelay(endpoint);Log("DEBUG","Authenticated opaque relay channel closed for account "+accountId+".");}
+        }
         void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);Log("DEBUG","Discovery client connected.");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");
+                if(requestType=="relay_attach"){ServeRelay(client,tls,request);return;}
                 // Event subscriptions are authenticated with the same short-lived session token
                 // as ordinary requests. The server sends notifications only; clients fetch the
                 // authoritative friend snapshot after each notification. This keeps the channel

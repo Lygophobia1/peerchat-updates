@@ -27,7 +27,6 @@ public class ConversationModel : ObservableModel {
     public string LoadingHistoryPeer="";
     public long WinningConnectionId;
     public long SessionEpoch,SessionRevision;
-    public bool PublicAttempted;
     // Presentation state mirrors the core's connection lifecycle. It is deliberately
     // separate from account/friend state so a direct P2P chat can work offline.
     public string ConnectionState="Offline";

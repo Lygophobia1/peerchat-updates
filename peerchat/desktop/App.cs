@@ -75,6 +75,7 @@ public class DesktopApplication {
     readonly HashSet<string> trustPrompted=new HashSet<string>(StringComparer.Ordinal);
     readonly HashSet<string> trustSuppressed=new HashSet<string>(StringComparer.Ordinal);
     readonly ConnectionAttemptTracker connectionAttempts=new ConnectionAttemptTracker();
+    readonly object relayGate=new object();readonly Dictionary<ulong,RelayTransport> relayTransports=new Dictionary<ulong,RelayTransport>();
     string lastPublicCandidate="Unavailable",lastPublicCandidateSource="Unavailable",lastObservedAddressClassification="Unavailable";
     string shareHost=DefaultReachableHost(),networkFingerprint="";ulong networkGeneration=1;bool shareHostManuallyConfigured;
     DiscoveryClient discovery;
@@ -120,7 +121,7 @@ public class DesktopApplication {
         window.SourceInitialized+=(s,e)=>{int enabled=1;var handle=new System.Windows.Interop.WindowInteropHelper(window).Handle;try{if(DwmSetWindowAttribute(handle,20,ref enabled,4)!=0)DwmSetWindowAttribute(handle,19,ref enabled,4);}catch(EntryPointNotFoundException){}};
         BindActions();LoadVoiceDevices();timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>core.Dispose());closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>{StopRelays();core.Dispose();});closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -258,9 +259,10 @@ public class DesktopApplication {
                 if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online&&attempting.SessionRevision==0){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
                 if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online&&scheduled.SessionRevision==0){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
                 if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);}
+                if(e.kind==18)StartRelay(e);
                 if(e.kind==2){var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId))e.text="Peer identity changed for "+identityConversation.Name+". Previously verified "+identityConversation.PreviousVerifiedPeerId+"; current device "+e.peer+". Explicit verification is required.";string failure=identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId)?"Peer identity changed":"Identity verification required";connectionAttempts.Update(e,identityConversation,"TLS identity mismatch","Verification required",failure);RecordConnection("trust",identityConversation,failure,e);string key=(e.expected??"")+"|"+(e.peer??"")+"|"+e.attempt;if(!trustPrompted.Contains(key)&&!trustSuppressed.Contains(key)){trustPrompted.Add(key);trustRequests.Enqueue(Tuple.Create(e,key));}TraceUi("Identity diagnostics: expected Peer ID="+(String.IsNullOrEmpty(e.expected)?"unspecified":e.expected)+"; presented Peer ID="+(e.peer??"unknown")+"; attempt="+e.attempt);}
                 if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){voiceAudioError=(e.text??"").Substring("Voice audio device error:".Length).Trim();latestVoiceAudioError=voiceAudioError;var voiceConversation=model.FindByPeer(e.peer);RecordConnection("voice-audio",voiceConversation,voiceAudioError,e);model.Status="Voice audio unavailable · "+voiceAudioError;RefreshVoiceUi();}
-                else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);if(IsRouteFailure(e.text)&&failed!=null&&!failed.Online&&failed.Contact!=null&&(String.IsNullOrEmpty(e.expected)||e.expected==failed.Contact.peer)&&!failed.PublicAttempted&&!String.IsNullOrWhiteSpace(failed.Contact.publicHost)&&failed.Contact.publicPort>0&&failed.Contact.host!=failed.Contact.publicHost){failed.PublicAttempted=true;if(failed.SessionRevision==0){failed.ConnectionState="Retrying public endpoint";failed.Refresh();}DiscoverySearchResult friend;string source=failed.AccountId>0&&friendDirectory.TryGetValue(failed.AccountId,out friend)&&!String.IsNullOrEmpty(friend.PublicCandidateSource)?friend.PublicCandidateSource:"Discovery public candidate";try{core.Connect(failed.Contact.publicHost,failed.Contact.publicPort,failed.Contact.peer,source,"LAN route failed; public fallback",false);}catch{}}}
+                 else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);}
                 if(e.kind==3&&!model.Groups){var connected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??model.Get(e.peer);connectionAttempts.Update(e,connected,"Ready","Verified","None");RecordConnection("connected",connected,"TCP and TLS authenticated; identity verified",e);model.Selected=connected;RequestConversationHistory(model.Selected);ShowConversation();}
                 if(e.kind==4){var disconnected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,disconnected,e.text??"Disconnected",null,null);RecordConnection("disconnected",disconnected,e.text??"Disconnected",e);}
                 if(e.kind==16){var lifecycle=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,lifecycle,null,null,null);RecordConnection("connection-lifecycle",lifecycle,e.text??"connection lifecycle transition",e);}
@@ -274,6 +276,13 @@ public class DesktopApplication {
             if(!trustDialog&&trustRequests.Count>0){trustDialog=true;var pending=trustRequests.Dequeue();var request=pending.Item1;string trustKey=pending.Item2;TraceUi("trust dialog construction started for "+request.peer);var dialogTimer=Stopwatch.StartNew();bool identityChanged=(request.text??"").IndexOf("identity changed",StringComparison.OrdinalIgnoreCase)>=0;var title=identityChanged?"Verify new device identity":"Verify your friend";var action=identityChanged?"Trust new identity":"Trust peer";bool accepted=Confirm(title,request.text+"\n\nPeer fingerprint:\n"+request.peer+"\n\nCompare this fingerprint over your trusted channel. Trust this identity?",action);TraceUi("trust dialog closed after "+dialogTimer.ElapsedMilliseconds+" ms");string trustResult=accepted?"Explicitly trusted":"Rejected for this connection attempt";var trustConversation=model.FindByPeer(request.expected)??model.FindByPeer(request.peer);connectionAttempts.Update(request,trustConversation,null,trustResult,accepted?"None":null);RecordConnection("trust",trustConversation,trustResult,request);if(!accepted&&!String.IsNullOrEmpty(trustKey))trustSuppressed.Add(trustKey);core.Approve(request.peer,accepted);trustDialog=false;}
         }catch(Exception error){model.Status="UI adapter: "+error.Message;Refresh();}
     }
+    void StartRelay(CoreEvent request){
+        ulong attempt=request.attempt>0?(ulong)request.attempt:0;var conversation=model.FindByPeer(request.expected)??model.FindByPeer(request.peer);var service=discovery;
+        if(attempt==0||request.networkGeneration!=(long)networkGeneration||conversation==null||conversation.AccountId<=0||service==null||String.IsNullOrEmpty(service.SessionToken)||String.IsNullOrEmpty(model.OwnId)){core.RelayClosed(attempt,"Relay request is stale or the authenticated account is unavailable.");return;}
+        try{RelayTransport relay=null;relay=new RelayTransport(service,core,attempt,model.OwnId,conversation.AccountId,request.expected,value=>{lock(relayGate)relayTransports.Remove(value);});lock(relayGate){if(relayTransports.ContainsKey(attempt)){relay.Dispose();return;}relayTransports.Add(attempt,relay);}relay.Start();}
+        catch(Exception error){core.RelayClosed(attempt,"Relay startup failed: "+error.GetType().Name);}
+    }
+    void StopRelays(){RelayTransport[] values;lock(relayGate){values=relayTransports.Values.ToArray();relayTransports.Clear();}foreach(var relay in values)try{relay.Dispose();}catch{}}
     string CurrentHistoryKey(){return model.Groups&&model.SelectedGroup!=null?"group:"+model.SelectedGroup.Id:!model.Groups&&model.Selected!=null?model.Selected.ConversationId:"";}
     void Switch(bool groups){model.Groups=groups;if(groups){core.LoadGroups();RequestGroupHistory(model.SelectedGroup);}RefreshList();ShowConversation();Refresh();}
     void CreateGroup(){
@@ -1076,11 +1085,14 @@ public class DesktopApplication {
 	private async void SignOut()
 	{
 		DiscoveryClient signedOut = discovery;
+		var knownFriends=friendDirectory.Values.ToArray();
 		if (signedOut != null)
 		{
 			signedOut.StopEventChannel();
 		}
 		discovery = null;
+		StopRelays();
+		foreach(var friend in knownFriends){var conversation=model.FindByPeer(friend.PublicIdentity);if(conversation!=null)ConnectFriendCandidate(friend,conversation,false,"account signed out");}
 		discoveryRestored = true;
 		accountLink = accountStore.ClearSession();
 		friendState = new FriendState();
@@ -1477,10 +1489,7 @@ public class DesktopApplication {
 			};
 			conversationModel.Refresh();
 			TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + item.AccountId + "; username=" + item.Username + "; device Peer ID=" + item.PublicIdentity + "; local conversation=" + conversationModel.ConversationId + "; endpoint=" + (item.EndpointHost ?? "") + ":" + item.EndpointPort);
-			if (item.Online && !conversationModel.Online && (flag2 || flag3))
-			{
-				ConnectFriendCandidate(item, conversationModel, true, "candidate update");
-			}
+			ConnectFriendCandidate(item,conversationModel,false,(flag2||flag3)?"candidate update":"authoritative refresh");
 		}
 		model.ReconcileFriends(hashSet);
 		RefreshList();
@@ -2652,122 +2661,15 @@ public class DesktopApplication {
 
 	private void ConnectFriendCandidate(DiscoverySearchResult friend, ConversationModel conversation, bool force, string trigger)
 	{
-		ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.Update(new CoreEvent
-		{
-			expected = friend.PublicIdentity
-		}, conversation);
-		connectionAttemptDetails.Presence = (friend.Online ? "Online" : "Offline");
-		connectionAttemptDetails.CandidateSeenUtc = friend.CandidateSeenUtc;
-		string text = friend.EndpointHost ?? "";
-		string text2 = friend.PublicEndpointHost ?? "";
-		int endpointPort = friend.EndpointPort;
-		int publicEndpointPort = friend.PublicEndpointPort;
-		bool flag = !string.IsNullOrWhiteSpace(text) && endpointPort > 0 && endpointPort <= 65535;
-		bool flag2 = !string.IsNullOrWhiteSpace(text2) && publicEndpointPort > 0 && publicEndpointPort <= 65535;
-		LocalSubnetDecision localSubnetDecision2;
-		if (!flag)
-		{
-			LocalSubnetDecision localSubnetDecision = new LocalSubnetDecision();
-			localSubnetDecision.SameSubnet = false;
-			localSubnetDecision.Diagnostics = "LAN candidate unavailable; subnet classification not performed";
-			localSubnetDecision2 = localSubnetDecision;
-		}
-		else
-		{
-			localSubnetDecision2 = CurrentLocalSubnetDecision(text);
-		}
-		LocalSubnetDecision localSubnetDecision3 = localSubnetDecision2;
-		connectionAttemptDetails.LocalSubnetDiagnostics = localSubnetDecision3.Diagnostics;
-		bool flag3 = flag && localSubnetDecision3.SameSubnet;
-		string text3 = text;
-		string text4 = "same LAN";
-		string source = "Discovery LAN candidate";
-		int num = endpointPort;
-		if (!flag && flag2)
-		{
-			text3 = text2;
-			num = publicEndpointPort;
-			text4 = "public candidate (no LAN candidate)";
-			source = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery public candidate" : friend.PublicCandidateSource);
-			conversation.PublicAttempted = true;
-		}
-		else if (!flag3 && flag2)
-		{
-			text3 = text2;
-			num = publicEndpointPort;
-			text4 = "public candidate (LAN candidate is outside local subnets)";
-			source = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery public candidate" : friend.PublicCandidateSource);
-			conversation.PublicAttempted = true;
-		}
-		else if (flag && !flag3)
-		{
-			text3 = "";
-			num = 0;
-			text4 = "no reachable candidate (LAN candidate is outside local subnets)";
-			source = "Discovery friend state";
-		}
-		switch (trigger)
-		{
-		case "candidate update":
-			text4 = "candidate update · " + text4;
-			break;
-		case "manual retry":
-			text4 = "manual retry · " + text4;
-			break;
-		case "network change":
-			text4 = "network change · " + text4;
-			break;
-		}
-		lastPublicCandidate = (flag2 ? (text2 + ":" + publicEndpointPort) : "Unavailable");
-		lastPublicCandidateSource = (string.IsNullOrEmpty(friend.PublicCandidateSource) ? "Discovery friend state" : friend.PublicCandidateSource);
-		lastObservedAddressClassification = (string.IsNullOrEmpty(friend.ObservedAddressClassification) ? "Unavailable" : friend.ObservedAddressClassification);
-		TraceUi("Candidate diagnostics: account=" + friend.AccountId + "; LAN candidate: " + (flag ? (text + ":" + endpointPort) : "none") + "; Public candidate: " + (flag2 ? (text2 + ":" + publicEndpointPort) : "none") + "; Selected candidate: " + (string.IsNullOrEmpty(text3) ? "none" : (text3 + ":" + num)) + "; Selection reason: " + text4 + "; interfaces=" + localSubnetDecision3.Diagnostics.Replace('\n', '|'));
-		if (string.IsNullOrWhiteSpace(text3) || num < 1)
-		{
-			model.Status = (friend.Online ? "Finding peer… no reachable endpoint has been published yet." : "Offline — waiting for this friend to publish a reachable endpoint.");
-			CoreEvent coreEvent = new CoreEvent();
-			coreEvent.peer = friend.PublicIdentity;
-			coreEvent.expected = friend.PublicIdentity;
-			coreEvent.candidate = "None";
-			coreEvent.source = "Discovery friend state";
-			coreEvent.route = trigger;
-			coreEvent.attempt = 0L;
-			CoreEvent coreEvent2 = coreEvent;
-			connectionAttempts.Update(coreEvent2, conversation, "Offline", null, "No reachable candidates");
-			RecordConnection("failure", conversation, "No reachable candidates", coreEvent2);
-			Refresh();
-			return;
-		}
-		if (conversation.SessionRevision == 0)
-		{
-			conversation.ConnectionState = "Connecting" + (conversation.PublicAttempted ? " via public endpoint" : " via LAN endpoint");
-			conversation.Refresh();
-		}
-		model.Status = "Connecting to " + friend.Username + " (" + text4 + ")…";
-		Refresh();
-		try
-		{
-			core.Connect(text3, (ushort)num, friend.PublicIdentity, source, text4, force);
-		}
-		catch (Exception ex)
-		{
-			if (conversation.SessionRevision == 0)
-			{
-				conversation.ConnectionState = "Connection failed";
-				conversation.Refresh();
-			}
-			CoreEvent coreEvent3 = new CoreEvent();
-			coreEvent3.peer = friend.PublicIdentity;
-			coreEvent3.expected = friend.PublicIdentity;
-			coreEvent3.candidate = text3 + ":" + num;
-			coreEvent3.source = source;
-			coreEvent3.route = text4;
-			CoreEvent coreEvent4 = coreEvent3;
-			connectionAttempts.Update(coreEvent4, conversation, "Failed", null, ConnectionFailureSummary(ex.Message));
-			RecordConnection("failure", conversation, ConnectionFailureSummary(ex.Message), coreEvent4);
-			model.Status = "Connection failed: " + ex.Message;
-			Refresh();
-		}
+		var details=connectionAttempts.Update(new CoreEvent{expected=friend.PublicIdentity},conversation);details.Presence=friend.Online?"Online":"Offline";details.CandidateSeenUtc=friend.CandidateSeenUtc;
+		string lan=friend.EndpointHost??"",publicHost=friend.PublicEndpointHost??"";int lanPort=friend.EndpointPort,publicPort=friend.PublicEndpointPort;
+		bool validLan=!String.IsNullOrWhiteSpace(lan)&&lanPort>0&&lanPort<=65535,validPublic=!String.IsNullOrWhiteSpace(publicHost)&&publicPort>0&&publicPort<=65535;
+		var subnet=validLan?CurrentLocalSubnetDecision(lan):new LocalSubnetDecision{SameSubnet=false,Diagnostics="LAN candidate unavailable; subnet classification not performed"};details.LocalSubnetDiagnostics=subnet.Diagnostics;
+		bool eligibleLan=validLan&&subnet.SameSubnet,relayAvailable=discovery!=null&&!String.IsNullOrEmpty(discovery.SessionToken);
+		lastPublicCandidate=validPublic?publicHost+":"+publicPort:"Unavailable";lastPublicCandidateSource=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery friend state":friend.PublicCandidateSource;lastObservedAddressClassification=String.IsNullOrEmpty(friend.ObservedAddressClassification)?"Unavailable":friend.ObservedAddressClassification;
+		TraceUi("Candidate provider update: account="+friend.AccountId+"; generation="+networkGeneration+"; LAN="+(eligibleLan?lan+":"+lanPort:"ineligible")+"; public="+(validPublic?publicHost+":"+publicPort:"none")+"; relay="+relayAvailable+"; trigger="+trigger+"; interfaces="+subnet.Diagnostics.Replace('\n','|'));
+		core.UpdateCandidates(friend.PublicIdentity,eligibleLan?lan:"",eligibleLan?(ushort)lanPort:(ushort)0,validPublic?publicHost:"",validPublic?(ushort)publicPort:(ushort)0,relayAvailable,networkGeneration,force);
+		if(conversation.SessionRevision==0){conversation.ConnectionState="Finding best route";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · direct preferred"+(relayAvailable?", secure relay fallback available":"")+"…";Refresh();
 	}
 
 	private void OpenFriendConversation(DiscoverySearchResult requested, bool force = false, string trigger = "selection")
@@ -2799,7 +2701,6 @@ public class DesktopApplication {
 			publicPort = (ushort)Math.Max(0, Math.Min(65535, publicEndpointPort)),
 			verified = verified
 		};
-		conversationModel.PublicAttempted = false;
 		if (conversationModel.SessionRevision == 0)
 		{
 			conversationModel.ConnectionState = (friend.Online ? "Finding peer" : "Offline");

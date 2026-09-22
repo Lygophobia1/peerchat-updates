@@ -14,18 +14,24 @@ exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native
 P2P sockets, Schannel sessions, peer trust, reconnect, delivery acknowledgements, logical ordering,
 offline outbox, contacts, identity keys, encrypted local history, and the client-owned group ledger.
 
-App.cs observes Windows network-address and discovery/friend changes and performs the existing
-candidate selection. It sends immutable retry/invalidation intents with the current network generation
-through the bridge. The native profile-scoped `SessionTransportManager` is now the single decision
-owner for the existing direct path's attempt/instance tokens, active winner, duplicate arbitration,
-bounded retry/backoff, route cancellation and stale-callback protection. Node retains its one worker,
-resolvers, sockets and Schannel objects and executes manager decisions. `DirectTransportAdapter`
+App.cs observes Windows network-address and discovery/friend changes and supplies current LAN/public
+candidate observations plus authenticated relay availability and the current network generation.
+The native profile-scoped `SessionTransportManager` is the single decision owner for direct/relay
+attempt tokens, ordered route attempts, bounded relay fallback, active winner, duplicate arbitration,
+retry/backoff, promotion/drain, route cancellation and stale-callback protection. Node retains its one
+worker, resolvers, sockets and Schannel objects and executes manager decisions. `DirectTransportAdapter`
 wraps each legacy connection and reports lifecycle/capability observations without owning a socket.
 The profile-scoped `DeliveryManager` owns durable DM/group send eligibility, transport-scoped ACK
 authorization, resend eligibility and incoming-DM deduplication above individual connections.
 `SessionTransportManager` composes `DirectHandoff` for capability-gated direct-route coordination;
 the latter owns transaction state but no socket, scheduler or authoritative channel binding.
 Media continuity remains outside the implemented boundary.
+
+`desktop/RelayTransport.cs` is the concrete server-relay byte-stream adapter. It has no route policy:
+it opens the certificate-pinned outer server TLS connection only when the manager emits a relay
+attempt, applies the returned framed session binding, and passes opaque bytes between that stream and
+the native core. The native core runs its existing Schannel peer TLS session inside those bytes, so
+peer identity/trust and application framing stay above both direct and relay physical transports.
 
 The local-only types distinguish the profile scope, local/verified-remote device identity,
 runtime session epoch, transport instance ID, independent route revision, channel requirements,
@@ -151,9 +157,10 @@ The WPF layer invokes groups through the existing C ABI and renders replicated s
 pending invite count in the group list and named `Pending Invite` rows in group details; it does not
 become an authority. Discovery may help locate a friend's account/device endpoint for an invitation,
 but the server creates no Group ID, membership row, role, metadata, invite, removal, or history. If
-discovery disappears, persisted groups and direct group messaging continue. A future relay may carry
-the same encrypted signed envelopes in Direct Only, Automatic, or Relay / Privacy transport modes,
-but transport choice cannot change the logical group or its client authority.
+discovery disappears, persisted groups and direct group messaging continue. The Stage 5.5 reliable
+relay can carry the same inner peer-TLS stream in Automatic mode; Direct Only remains available and
+Relay / Privacy mode is still future work. Transport choice cannot change the logical group or its
+client authority.
 
 Conversation history is retrieved for presentation in bounded newest-first pages (100 messages),
 not by materializing an encrypted DM history or a group's complete signed ledger into WPF. The
@@ -203,8 +210,10 @@ broken virtual adapter cannot make a later valid Ethernet/Wi-Fi subnet appear re
 presence refresh also re-detects the advertised physical LAN address after network changes; an
 explicit user-configured endpoint remains unchanged. Per-peer diagnostics retain every evaluated
 local address/prefix, the candidate, the match result, and why an interface was ignored.
-Same-subnet candidates are preferred; otherwise a valid public candidate is selected. A LAN route
-failure may fall through to public promptly. TLS or identity failures do not trigger route fallback.
+WPF publishes a same-subnet LAN candidate and a valid public candidate without selecting between
+them. The manager tries LAN before public, advances promptly after route failure, and may request an
+authenticated relay after an eight-second bounded direct window. TLS identity mismatch suspends that
+attempt behind the existing trust boundary and never triggers silent rebinding.
 
 The WPF conversation identity is `account:<account-id>`, not an endpoint, session, presence state,
 or device Peer ID. A DPAPI-protected index inside the selected profile attaches current and known
@@ -217,6 +226,22 @@ The chosen endpoint is passed through the existing adapter to the C++ P2P transp
 friend's expected Peer ID. TCP, TLS, peer authentication, and explicit trust remain distinct
 states. Once authenticated, direct chat no longer depends on discovery. Advanced → Direct P2P
 remains a permanent server-independent fallback.
+
+For reliable control/text fallback, both clients authenticate their account/device to the server and
+request reciprocal attachment to the exact expected account/device pair. The server permits this only
+for established friends or a current pending friend request, returns a random short-lived 43-character
+session ID and opposite peer-TLS roles, then forwards frames whose prefix matches that session. Frames
+are capped at 64 KiB; the native client relay queue is capped at 1 MiB and server writes are synchronous,
+so slow consumers exert socket/TLS backpressure instead of creating an unbounded application queue.
+The server terminates only outer account TLS. It cannot authenticate the remote peer on the client's
+behalf and cannot decrypt the inner peer TLS. Duplicate, stale, third-party and mismatched-device
+attachments are rejected. The inner verified Peer ID remains authoritative; changing direct/relay
+route for the same key does not prompt again, while a changed key uses the existing verification UX.
+
+While relay is active, direct probes continue on manager-owned bounded backoff. Failed candidates do
+not affect the relay winner. A fully authenticated direct candidate uses the existing Stage 5 handoff
+before promotion and relay drain. Relay never replaces a healthy direct winner. Voice signaling/media
+are explicitly excluded from relay in Stage 5.5 and continue using the existing direct-only path.
 
 Each native outbound attempt has an ID plus expected Peer ID, concrete endpoint, candidate source,
 and route. Saved-contact failures use exponential retry backoff with per-attempt jitter from five

@@ -18,6 +18,40 @@ template<class Check> static void until(Node& node,std::vector<Seen>& seen,Check
 static std::vector<Seen> attempts(const std::vector<Seen>& seen,const std::string& peer){std::vector<Seen> result;for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::ConnectionAttempt&&value.event.expectedPeerId==peer)result.push_back(value);return result;}
 static size_t schedules(const std::vector<Seen>& seen,const std::string& peer){size_t result=0;for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::ReconnectScheduled&&value.event.expectedPeerId==peer)result++;return result;}
 
+static void relayManagerContracts(){
+    using namespace session;const std::string local(64,'a'),peer(64,'b');SessionEpoch epoch{81};SessionTransportManager manager("relay-profile",local,epoch,40,400);
+    require(manager.observeNetwork(epoch,7),"relay manager rejected current network generation");
+    RouteObservation lan{{1},"192.168.1.9:7777","discovery","LAN",false,7,TransportKind::Direct};
+    RouteObservation internet{{2},"203.0.113.9:7777","discovery","public",false,7,TransportKind::Direct};
+    require(manager.replaceCandidates(epoch,peer,{lan,internet},true,7,100),"candidate plan was rejected");
+    auto direct=manager.takeDueRetries(100);require(direct.size()==1&&direct[0].route.endpointUtf8==lan.endpointUtf8,"manager did not prefer the LAN candidate");
+    require(manager.takeDueRelayAttempts(399).empty(),"relay started before the bounded direct window");
+    auto relays=manager.takeDueRelayAttempts(400);require(relays.size()==1&&relays[0].remoteDeviceId==peer,"relay fallback was not manager-owned and bounded");
+    RouteObservation relay{{3},"relay:"+peer,"server","opaque relay",false,7,TransportKind::Relay};
+    require(manager.registerAttempt(epoch,{30},peer,relay,400),"relay attempt was not registered");DirectTransportAdapter relayAdapter(epoch,{30},relay,peer);
+    manager.observeTransport(relayAdapter.identityPresented(peer,protocol::CapabilityMutualTls|protocol::CapabilityDirectHandoff),401);manager.markLocallyTrusted(epoch,{30});manager.markRemoteAccepted(epoch,{30});require(manager.arbitrateWinner(epoch,{30},402).activated(),"authenticated relay did not activate");
+    require(manager.replaceCandidates(epoch,peer,{lan,internet},true,7,450),"authoritative refresh rejected an unchanged relay plan");
+    auto probe=manager.takeDueRetries(500);require(!probe.empty(),"direct recovery probing stopped while relay was healthy");
+    require(manager.scheduleRetry(peer,probe.front().route,500,0).scheduled,"failed direct probe was not backed off above relay");require(manager.snapshot(peer)->activeTransport.value==30,"failed direct probe disturbed relay winner");
+    manager.suspendRetry(peer);require(manager.takeDueRetries(2000).empty()&&manager.takeDueRelayAttempts(2000).empty(),"identity suspension did not stop every automatic route");require(manager.replaceCandidates(epoch,peer,{lan,internet},true,7,2100),"unchanged authoritative refresh was rejected");require(manager.takeDueRetries(2100).empty(),"unchanged presence bypassed identity suspension");require(manager.replaceCandidates(epoch,peer,{lan,internet},true,7,2200,true),"manual candidate retry was rejected");require(!manager.takeDueRetries(2200).empty(),"manual retry did not resume the manager-owned plan");
+    RouteObservation stale=lan;stale.networkRevision=6;require(!manager.replaceCandidates(epoch,peer,{stale},true,6,600),"stale candidate generation replaced current plan");
+    require(manager.observeNetwork(epoch,8),"new network generation was rejected");require(!manager.attachablePeer(epoch,{30}),"old-generation relay completion remained attachable");
+    SessionTransportManager directWinner("direct-profile",local,{82},40,400);directWinner.observeNetwork({82},1);require(directWinner.registerAttempt({82},{1},peer,lan,0),"direct winner registration failed");DirectTransportAdapter directAdapter({82},{1},lan,peer);directWinner.observeTransport(directAdapter.identityPresented(peer,protocol::CapabilityMutualTls|protocol::CapabilityDirectHandoff),0);directWinner.markLocallyTrusted({82},{1});directWinner.markRemoteAccepted({82},{1});require(directWinner.arbitrateWinner({82},{1},0).activated(),"direct winner did not activate");require(directWinner.replaceCandidates({82},peer,{lan},true,1,1),"direct winner plan failed");require(directWinner.takeDueRelayAttempts(10000).empty(),"server/relay availability disturbed healthy direct winner");
+    require(directWinner.registerAttempt({82},{2},peer,relay,2),"delayed relay registration failed");DirectTransportAdapter lateRelay({82},{2},relay,peer);directWinner.observeTransport(lateRelay.identityPresented(peer,protocol::CapabilityMutualTls|protocol::CapabilityDirectHandoff),2);directWinner.markLocallyTrusted({82},{2});directWinner.markRemoteAccepted({82},{2});require(directWinner.arbitrateWinner({82},{2},3).disposition==WinnerDisposition::RejectedDuplicate,"relay replaced a healthy direct winner");
+}
+
+static void relayNodeContracts(){
+    Node left,right;std::string leftId,rightId;std::uint64_t leftAttempt=0,rightAttempt=0;bool leftOnline=false,rightOnline=false,leftReceived=false,rightReceived=false,leftDelivered=false,rightDelivered=false;
+    auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/("relay-"+Storage::newMessageId());left.start((root/L"left").wstring(),0,L"Relay left");right.start((root/L"right").wstring(),0,L"Relay right");
+    auto poll=[&]{for(auto& event:left.poll()){if(event.kind==NodeEvent::Kind::Ready)leftId=event.peerId;if(event.kind==NodeEvent::Kind::RelayRequested)leftAttempt=event.attemptId;if(event.kind==NodeEvent::Kind::TrustRequired)left.approve(event.peerId,true);if(event.kind==NodeEvent::Kind::Connected)leftOnline=true;if(event.kind==NodeEvent::Kind::Message)leftReceived=true;if(event.kind==NodeEvent::Kind::Delivered)leftDelivered=true;}for(auto& event:right.poll()){if(event.kind==NodeEvent::Kind::Ready)rightId=event.peerId;if(event.kind==NodeEvent::Kind::RelayRequested)rightAttempt=event.attemptId;if(event.kind==NodeEvent::Kind::TrustRequired)right.approve(event.peerId,true);if(event.kind==NodeEvent::Kind::Connected)rightOnline=true;if(event.kind==NodeEvent::Kind::Message)rightReceived=true;if(event.kind==NodeEvent::Kind::Delivered)rightDelivered=true;}};
+    auto untilLocal=[&](auto predicate,const char* failure,int milliseconds=5000){auto deadline=Clock::now()+std::chrono::milliseconds(milliseconds);while(Clock::now()<deadline){poll();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(5));}throw std::runtime_error(failure);};
+    untilLocal([&]{return !leftId.empty()&&!rightId.empty();},"relay nodes did not start");left.setNetworkContext(1,L"relay-fixture");right.setNetworkContext(1,L"relay-fixture");left.updateCandidates(rightId,L"",0,L"",0,true,1);right.updateCandidates(leftId,L"",0,L"",0,true,1);
+    untilLocal([&]{return leftAttempt&&rightAttempt;},"manager did not request bounded relay fallback",2500);require(left.relayReady(leftAttempt,leftId>rightId)&&right.relayReady(rightAttempt,rightId>leftId),"relay physical adapter rejected current attempts");
+    auto pump=[&]{unsigned char bytes[64*1024];for(;;){int count=left.takeRelayOutput(leftAttempt,bytes,sizeof(bytes),0);if(count<=0)break;require(right.relayReceive(rightAttempt,bytes,count),"right relay input rejected opaque peer TLS");}for(;;){int count=right.takeRelayOutput(rightAttempt,bytes,sizeof(bytes),0);if(count<=0)break;require(left.relayReceive(leftAttempt,bytes,count),"left relay input rejected opaque peer TLS");}poll();};
+    auto pumpUntil=[&](auto predicate,const char* failure){auto deadline=Clock::now()+std::chrono::seconds(8);while(Clock::now()<deadline){pump();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(2));}throw std::runtime_error(failure);};
+    pumpUntil([&]{return leftOnline&&rightOnline;},"inner peer TLS/trust did not authenticate over opaque relay");require(!left.send(rightId,L"relay left to right").empty()&&!right.send(leftId,L"relay right to left").empty(),"relay winner rejected durable messages");pumpUntil([&]{return leftReceived&&rightReceived&&leftDelivered&&rightDelivered;},"message/ACK delivery did not survive relay transport");left.stop();right.stop();
+}
+
 static void handoffContracts(){
     using namespace session;
     const std::string a(64,'a'),b(64,'b');const SessionEpoch epoch{71};
@@ -135,6 +169,8 @@ static void liveHandoff(){
 int main(int argc,char** argv){
     try{
         handoffContracts();
+        relayManagerContracts();
+        relayNodeContracts();
         // Retain the Stage 2 adapter-contract checks while Stage 3 moves the
         // direct-path continuity decisions into the manager below.
         session::SessionEpoch epoch{41};

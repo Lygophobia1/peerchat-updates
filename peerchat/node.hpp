@@ -6,7 +6,7 @@
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -36,6 +36,13 @@ public:
     void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={},const std::wstring& candidateSource=L"Direct",const std::wstring& route=L"manual",bool forceImmediate=false);
     void invalidateRoute(const std::string& expectedIdentity,const std::wstring& staleHost={},std::uint16_t stalePort=0,bool allRoutes=false,std::uint64_t expectedNetworkGeneration=0);
     void setNetworkContext(std::uint64_t generation,const std::wstring& fingerprint);
+    void updateCandidates(const std::string& peerId,const std::wstring& lanHost,std::uint16_t lanPort,
+                          const std::wstring& publicHost,std::uint16_t publicPort,bool relayAvailable,
+                          std::uint64_t networkGeneration,bool forceImmediate=false);
+    bool relayReady(std::uint64_t attemptId,bool incoming);
+    bool relayReceive(std::uint64_t attemptId,const unsigned char* bytes,std::size_t length);
+    void relayClosed(std::uint64_t attemptId,const std::wstring& reason);
+    int takeRelayOutput(std::uint64_t attemptId,unsigned char* bytes,std::size_t capacity,std::uint32_t waitMilliseconds);
     void saveContact(const Contact& contact);
     void removeContact(const std::string& peerId);
     void approve(const std::string& peerId,bool accepted);

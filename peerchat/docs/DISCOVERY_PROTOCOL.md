@@ -111,10 +111,35 @@ Group invite eligibility, pending-state projection and signed-event validation r
 documented in ARCHITECTURE.md; discovery results alone never authorize a group-state change.
 
 Group state is a client-owned signed event ledger replicated between members. Existing groups and
-their direct text transport continue when this service is unavailable. A future service version may
-relay opaque encrypted group-state or message envelopes for `Automatic — prefer P2P, relay fallback`
-or `Relay / Privacy Mode`; `Direct Only` remains available. Relay acceptance, ordering, storage, or
-availability must not turn the service into the source of truth or change the logical group.
+their direct text transport continue when this service is unavailable. The implemented reliable
+relay may carry the same inner peer-TLS application stream for `Automatic — prefer P2P, relay
+fallback`; `Direct Only` remains available. Relay acceptance, ordering, storage, or availability
+does not turn the service into the source of truth or change the logical group.
+
+## Opaque reliable relay channel
+
+`relay_attach` is sent as one ordinary framed JSON request on a dedicated certificate-pinned server
+TLS connection. It contains the authenticated `sessionToken`, the caller's registered
+`publicIdentity`, `targetAccountId`, and exact `targetPublicIdentity`. Authorization requires both
+device IDs to belong to their authenticated accounts and either an established friendship or one
+current pending friend request between the accounts. Pending authorization exists only so the inner
+peer TLS exchange can establish/verify Peer ID; server authorization itself grants no peer trust.
+
+Both exact account/device directions must attach reciprocally. The server rejects unrelated users,
+device/account mismatches, duplicate attachment and cross-profile reuse. Pairing expires after 15
+seconds. A matched pair receives `relay_ready` with one random 256-bit base64url session ID and
+opposite `incoming` roles. The session ID is 43 ASCII characters and is never a peer identity.
+
+After `relay_ready`, each outer frame is `session-id || opaque-inner-peer-TLS-bytes`. JSON discovery
+messages are not valid relay frames and relay bytes are never processed by the account dispatcher.
+The server verifies the session prefix and caps opaque payloads at 64 KiB before synchronously
+forwarding the unchanged frame to the reciprocal authenticated attachment. It does not persist or
+log payloads and holds no unbounded relay queue. Disconnecting either side closes the pair.
+
+The existing peer TLS certificate/Peer ID, expected-identity check, explicit trust, application
+framing, delivery ACK authorization and deduplication remain inside this stream and authoritative.
+Voice/media are not routed by this channel. Relay retry/fallback/promotion policy is client-side
+`SessionTransportManager` state, not a server operation.
 
 ## Voice signaling boundary
 

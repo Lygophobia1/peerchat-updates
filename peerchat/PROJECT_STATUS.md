@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 5 engineering complete after targeted automated gates; physical acceptance pending.
-**Next action:** physical two-PC direct-text handoff acceptance; stop before Stage 6.
+**Current stage:** Stage 5.5 direct/relay connection-reliability implementation complete after targeted automated gates; physical acceptance pending.
+**Next action:** physical direct-failure → relay → authenticated direct-recovery acceptance; stop before Stage 6.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -37,6 +37,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `dfe1926e6af7be56de64de88152fd91a98f6fb7d`; worktree was clean before Stage 5.
 - Stage 5 implementation checkpoint: `eeb15fc` (`Implement Stage 5 capability-gated direct
   transport handoff`). Automated gates passed; physical two-PC handoff acceptance remains pending.
+- Stage 5 documentation checkpoint and Stage 5.5 starting point: `f58ef81`. Stage 5.5 retains the
+  completed Stage 3–5 ownership model and does not migrate voice/media.
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -93,12 +95,13 @@ separate; no publication, final tag, key change or package rebuild in this docum
 
 ## Current recovery limits relevant to the refactor
 
-These are the current boundaries after Stage 5.
+These are the current boundaries after Stage 5.5.
 
-- WPF still observes Windows network/friend changes and selects discovery candidates, but it sends
-  immutable recovery intents and the current network generation to the native boundary. The native
-  `SessionTransportManager` is the single owner for direct attempt identity, active-winner selection,
-  retry/backoff, route cancellation, stale-token rejection and authoritative session state.
+- WPF observes Windows network/friend changes and supplies current same-subnet LAN, public and relay
+  availability observations with the network generation. It no longer selects LAN versus public or
+  launches a failure-triggered public fallback. The native `SessionTransportManager` is the single
+  owner for direct/relay attempt identity, fallback timing, active-winner selection, retry/backoff,
+  route cancellation, stale-token rejection, promotion/drain and authoritative session state.
 - Whole-peer invalidation is generation-checked. A delayed old-network invalidation cannot cancel a
   newly authenticated route, exact-endpoint refresh preserves the active verified winner, and an old
   transport close cannot clear a newer winner.
@@ -116,8 +119,34 @@ These are the current boundaries after Stage 5.
 - Native/managed events now carry complete profile/session epoch and monotonically revisioned session
   snapshots. WPF applies only newer snapshots for online state and winning-connection projection;
   failed/superseded legacy attempt events remain diagnostics and cannot downgrade a live winner.
-- Candidate selection and physical connection execution remain existing code. Stage 5 adds only
-  direct control/text handoff, not media-route migration or a second reconnect stack.
+- Direct remains preferred. After an 8-second bounded direct window the manager may request one
+  authenticated server relay route; failed direct probes continue on manager-owned backoff while a
+  healthy relay remains the winner. A relay can never replace a healthy direct winner. Direct
+  recovery uses the Stage 5 authenticated handoff before relay drain. Voice/media remain direct-only.
+
+## Stage 5.5 implemented boundary
+
+- `SessionTransportManager` owns the ordered LAN/public candidate plan, bounded relay fallback,
+  per-route backoff, stale generation rejection, direct preference, relay winner lifetime and
+  direct recovery. Candidate providers do not choose or promote a route.
+- `RelayTransport` is a managed physical adapter only. It opens the existing certificate-pinned
+  authenticated server TLS connection, attaches to the manager-issued attempt, and carries bounded
+  framed opaque bytes. It owns no retry, fallback, winner, trust or identity policy.
+- The native core runs the unchanged Schannel peer TLS protocol inside the relay byte stream.
+  Expected Peer ID, certificate/key verification, explicit changed-device trust, durable delivery,
+  destination-scoped ACK authorization, resend and deduplication are identical to direct transport.
+  Server authorization never grants peer trust.
+- The server authorizes relay pairing only when both authenticated accounts/devices attach
+  reciprocally and are established friends or have a current pending friend request in either
+  direction. Pairing IDs are random, short-lived, bound to the exact account/device pair, and each
+  side may attach once. Third-party, stale, duplicate and cross-profile attachment fails closed.
+  Per-frame size is capped at 64 KiB; the native outgoing relay queue is capped at 1 MiB, while
+  synchronous server forwarding relies on TLS/socket backpressure rather than an unbounded queue.
+- The outer account/server TLS stream and framed relay session are distinct from the inner peer TLS
+  stream. Discovery JSON cannot be interpreted as peer bytes. The server does not decrypt, persist,
+  inspect or log message content, peer TLS material or relay payloads.
+- Existing manual/server-independent Direct P2P remains available. A discovery/relay outage cannot
+  disturb a healthy direct winner. No call signaling/media is accepted on relay, and Stage 6 has not begun.
 
 ## Stage 2 implemented boundary
 
@@ -313,6 +342,23 @@ to implement protocol/media behavior in Stage 2.
   Run both candidates, exchange text while changing the route without restarting, confirm stable
   conversation/trust and no missing/duplicate messages, then repeat in reverse. Local loopback is
   not physical network-change acceptance. Voice continuity migration and Stage 6 have not begun.
+
+### Stage 5.5 targeted verification
+
+- Strict-warning native reconnect/session build and full reconnect integration passed under the
+  normal Windows user. New coverage proves the bounded direct window, LAN-before-public ordering,
+  relay fallback, relay-active direct probing/backoff, failed-candidate winner preservation, stale
+  network rejection, direct-winner priority and delayed-relay loser rejection.
+- Two native nodes passed the unchanged inner peer TLS and explicit trust exchange over an in-memory
+  opaque relay adapter, then exchanged durable messages and authorized ACKs in both directions.
+- Discovery/server integration passed for pending friend-add relay bootstrap, established-friend
+  relay, reciprocal account/device pairing, exact opaque-byte forwarding and unrelated-account
+  rejection. Durable account/friend restart coverage remained green.
+- Fresh desktop/native build and managed profile/adapter regressions passed. The sandbox-token DPAPI
+  limitation reproduced once; the intended normal Windows user run passed without weakening DPAPI.
+- Physical two-PC fallback/recovery remains required: make direct unavailable, confirm messaging over
+  relay with unchanged trust, restore direct, confirm authenticated make-before-break promotion and
+  bounded relay retirement. Voice is expected to remain direct-only and is outside this gate.
 
 ### Historical regression and physical evidence
 

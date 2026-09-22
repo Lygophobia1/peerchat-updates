@@ -40,9 +40,14 @@ public sealed class DiscoveryClient {
     public DiscoveryClient(string host,int port,string certificateSha256,Func<string,int,string,bool,bool> trustPrompt=null){Host=host;Port=port;CertificateSha256=NormalizePin(certificateSha256);certificateTrustPrompt=trustPrompt;}
     static string NormalizePin(string value){return (value??"").Replace(" ","").Replace(":","").ToUpperInvariant();}
     static string CertificateFingerprint(X509Certificate certificate){using(var hash=SHA256.Create())return BitConverter.ToString(hash.ComputeHash(certificate.GetRawCertData())).Replace("-","");}
-    static byte[] ReadExact(Stream stream,int length){var buffer=new byte[length];int offset=0;while(offset<length){int read=stream.Read(buffer,offset,length-offset);if(read==0)throw new IOException("Discovery server closed the connection.");offset+=read;}return buffer;}
-    static void WriteFrame(Stream stream,byte[] data){var header=new[]{(byte)(data.Length>>24),(byte)(data.Length>>16),(byte)(data.Length>>8),(byte)data.Length};stream.Write(header,0,4);stream.Write(data,0,data.Length);}
-    static byte[] ReadFrame(Stream stream){var h=ReadExact(stream,4);int length=(h[0]<<24)|(h[1]<<16)|(h[2]<<8)|h[3];if(length<1||length>16*1024)throw new InvalidDataException("Invalid discovery response size.");return ReadExact(stream,length);}
+    internal static byte[] ReadExact(Stream stream,int length){var buffer=new byte[length];int offset=0;while(offset<length){int read=stream.Read(buffer,offset,length-offset);if(read==0)throw new IOException("Discovery server closed the connection.");offset+=read;}return buffer;}
+    internal static void WriteFrame(Stream stream,byte[] data){var header=new[]{(byte)(data.Length>>24),(byte)(data.Length>>16),(byte)(data.Length>>8),(byte)data.Length};stream.Write(header,0,4);stream.Write(data,0,data.Length);}
+    internal static byte[] ReadFrame(Stream stream,int maximum=16*1024){var h=ReadExact(stream,4);int length=(h[0]<<24)|(h[1]<<16)|(h[2]<<8)|h[3];if(length<1||length>maximum)throw new InvalidDataException("Invalid server response size.");return ReadExact(stream,length);}
+    internal SslStream OpenAuthenticatedStream(out TcpClient tcp){
+        tcp=new TcpClient();tcp.ReceiveTimeout=10000;tcp.SendTimeout=10000;tcp.Connect(Host,Port);
+        var tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});
+        try{tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);return tls;}catch{tls.Dispose();tcp.Close();throw;}
+    }
     Dictionary<string,object> Request(string type,Dictionary<string,object> fields) {
         if(String.IsNullOrWhiteSpace(Host)||Port<1||Port>65535)throw new InvalidOperationException("The configured PeerChat server endpoint is invalid.");
         fields["version"]=1;fields["type"]=type;

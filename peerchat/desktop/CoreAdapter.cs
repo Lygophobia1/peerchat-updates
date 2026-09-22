@@ -20,6 +20,11 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route_v2(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes,ulong expectedNetworkGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr handle,ulong generation,string fingerprint);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_candidates(IntPtr handle,string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,int relay,ulong generation,int force);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr handle,ulong attempt,int incoming);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_receive(IntPtr handle,ulong attempt,byte[] bytes,uint length);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern void ui_relay_closed(IntPtr handle,ulong attempt,string reason);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_take_output(IntPtr handle,ulong attempt,[Out] byte[] bytes,uint capacity,uint waitMilliseconds);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_approve(IntPtr handle,string peer,int accepted);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_send(IntPtr handle,string peer,string text);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_remove(IntPtr handle,string peer);
@@ -64,6 +69,11 @@ public sealed class CoreAdapter : IDisposable {
     public void Connect(string host,ushort port,string peer,string source="Direct",string route="manual",bool force=false){if(ui_connect_ex(handle,host,port,peer,source,route,force?1:0)==0)throw new InvalidOperationException("Invalid connection details.");}
     public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false,ulong expectedNetworkGeneration=0){if(!String.IsNullOrEmpty(peer))ui_invalidate_route_v2(handle,peer,staleHost??"",stalePort,allRoutes?1:0,expectedNetworkGeneration);}
     public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}
+    public void UpdateCandidates(string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,bool relay,ulong generation,bool force=false){ui_candidates(handle,peer,lanHost??"",lanPort,publicHost??"",publicPort,relay?1:0,generation,force?1:0);}
+    public bool RelayReady(ulong attempt,bool incoming){return ui_relay_ready(handle,attempt,incoming?1:0)!=0;}
+    public bool RelayReceive(ulong attempt,byte[] bytes,int length){return bytes!=null&&length>0&&ui_relay_receive(handle,attempt,bytes,(uint)length)!=0;}
+    public void RelayClosed(ulong attempt,string reason){ui_relay_closed(handle,attempt,reason??"Relay closed");}
+    public int TakeRelayOutput(ulong attempt,byte[] bytes,int waitMilliseconds){return ui_relay_take_output(handle,attempt,bytes,(uint)bytes.Length,(uint)Math.Max(0,waitMilliseconds));}
     public void Approve(string peer,bool accepted){ui_approve(handle,peer,accepted?1:0);}
     public bool Send(string peer,string text){return ui_send(handle,peer,text)!=0;}
     public bool Remove(string peer){return ui_remove(handle,peer)!=0;}

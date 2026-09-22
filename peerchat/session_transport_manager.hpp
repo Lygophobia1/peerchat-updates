@@ -148,6 +148,15 @@ public:
         if (continuity.activeTransport.value) {
             auto existing = transports_.find(continuity.activeTransport.value);
             if (existing != transports_.end() && !existing->second.closed) {
+                // A delayed relay completion can never replace a healthy direct
+                // winner. Direct candidates may replace relay only through the
+                // authenticated Stage 5 make-before-break exchange below.
+                if(existing->second.route.kind==TransportKind::Direct&&candidate.route.kind==TransportKind::Relay){
+                    candidate.state=TransportState::Closing;candidate.cancelled=true;
+                    decision.disposition=WinnerDisposition::RejectedDuplicate;
+                    decision.reasonUtf8="relay candidate superseded by healthy direct winner";
+                    touch(peer);return decision;
+                }
                 if (candidate.handoffCandidate&&(candidate.capabilities & DirectHandoffCapability) &&
                     (existing->second.capabilities & DirectHandoffCapability) && handoff_.ready(existing->second.instance)) {
                     const auto required=existing->second.capabilities&~HandoffCandidateIntent;
@@ -185,8 +194,16 @@ public:
         continuity.activeTransport = instance;
         continuity.sessionEstablished = true;
         continuity.session.observeLegacyActive(instance);
-        retries_.erase(peer);
-        if (!candidate.expectedRemoteDeviceId.empty()) retries_.erase(candidate.expectedRemoteDeviceId);
+        if(candidate.route.kind==TransportKind::Direct){
+            retries_.erase(peer);
+            if (!candidate.expectedRemoteDeviceId.empty()) retries_.erase(candidate.expectedRemoteDeviceId);
+        }
+        auto plan=plans_.find(peer);
+        if(plan!=plans_.end()){
+            if(candidate.route.kind==TransportKind::Relay){
+                for(auto& route:plan->second.direct)if(route.dueMilliseconds==never())route.dueMilliseconds=nowMilliseconds+retryBaseMilliseconds_;
+            }else plan->second.relayDueMilliseconds=never();
+        }
         touch(peer);
         return decision;
     }
@@ -309,10 +326,13 @@ public:
     void requestImmediateRetry(const std::string& peer, RouteObservation route,
                                std::uint64_t nowMilliseconds) {
         if (peer.empty()) return;
+        auto plan=plans_.find(peer);
+        if(plan!=plans_.end()){plan->second.suspended=false;touch(peer);return;}
         auto& retry = retries_[peer];
         retry.target = {peer, std::move(route)};
         retry.suspended = false;
-        retry.dueMilliseconds = hasActiveWinner(peer) ? never() : nowMilliseconds;
+        auto activeKind=activeTransportKind(peer);
+        retry.dueMilliseconds = activeKind&&*activeKind==TransportKind::Direct ? never() : nowMilliseconds;
         touch(peer);
     }
 
@@ -320,7 +340,23 @@ public:
                                 std::uint64_t nowMilliseconds, std::uint32_t randomValue,
                                 bool suspend = false) {
         RetrySchedule result;
-        if (peer.empty() || route.endpointUtf8.empty() || hasActiveWinner(peer)) return result;
+        if (peer.empty() || route.endpointUtf8.empty()) return result;
+        auto plan=plans_.find(peer);
+        if(plan!=plans_.end()&&route.kind==TransportKind::Direct){
+            if(suspend){plan->second.suspended=true;for(auto& candidate:plan->second.direct)candidate.dueMilliseconds=never();plan->second.relayDueMilliseconds=never();result.suspended=true;result.target={peer,route};touch(peer);return result;}
+            CandidateRoute* failed=nullptr;
+            for(auto& candidate:plan->second.direct)if(candidate.route.endpointUtf8==route.endpointUtf8){failed=&candidate;break;}
+            if(failed){
+                failed->failures=std::min<std::uint32_t>(failed->failures+1,31);
+                failed->delayMilliseconds=backoffDelay(failed->failures,randomValue);
+                failed->dueMilliseconds=nowMilliseconds+failed->delayMilliseconds;
+                for(auto& candidate:plan->second.direct)if(candidate.priority>failed->priority&&candidate.failures==0){candidate.dueMilliseconds=nowMilliseconds;break;}
+                result.scheduled=true;result.failureCount=failed->failures;result.delayMilliseconds=failed->delayMilliseconds;
+                result.dueMilliseconds=failed->dueMilliseconds;result.target={peer,failed->route};touch(peer);return result;
+            }
+        }
+        auto activeKind=activeTransportKind(peer);
+        if(activeKind&&*activeKind==TransportKind::Direct)return result;
         auto& retry = retries_[peer];
         retry.target = {peer, std::move(route)};
         if (suspend) {
@@ -338,6 +374,7 @@ public:
     }
 
     void suspendRetry(const std::string& peer) {
+        auto plan=plans_.find(peer);if(plan!=plans_.end()){plan->second.suspended=true;for(auto& candidate:plan->second.direct)candidate.dueMilliseconds=never();plan->second.relayDueMilliseconds=never();touch(peer);return;}
         auto& retry = retries_[peer];
         retry.target.remoteDeviceId = peer;
         retry.suspended = true;
@@ -356,7 +393,86 @@ public:
                 touch(item.first);
             }
         }
+        for(auto& item:plans_){
+            const auto activeKind=activeTransportKind(item.first);
+            if(item.second.suspended||item.second.networkRevision<networkRevision_)continue;
+            if(activeKind&&*activeKind==TransportKind::Direct)continue;
+            if(hasPendingAttempt(item.first,{}))continue;
+            CandidateRoute* selected=nullptr;
+            for(auto& candidate:item.second.direct)
+                if(candidate.dueMilliseconds<=nowMilliseconds&&(!selected||candidate.priority<selected->priority))selected=&candidate;
+            if(selected){selected->dueMilliseconds=never();due.push_back({item.first,selected->route});touch(item.first);}
+        }
         return due;
+    }
+
+    // Candidate providers replace observations; they never choose a winner or
+    // start a transport. Stale network generations are rejected here.
+    bool replaceCandidates(SessionEpoch epoch,const std::string& peer,
+                           std::vector<RouteObservation> direct,bool relayAvailable,
+                           std::uint64_t networkRevision,std::uint64_t nowMilliseconds,bool forceImmediate=false) {
+        if(epoch!=epoch_||peer.empty()||networkRevision<networkRevision_)return false;
+        auto& plan=plans_[peer];
+        const auto previousRevision=plan.networkRevision,previousRelayDue=plan.relayDueMilliseconds;
+        const bool previousRelayAvailable=plan.relayAvailable;const bool hadDirect=!plan.direct.empty();
+        std::map<std::string,CandidateRoute> previous;
+        for(auto& item:plan.direct)previous.emplace(item.route.endpointUtf8,item);
+        bool changed=forceImmediate||previousRevision!=networkRevision||previous.size()!=direct.size();
+        if(!changed)for(const auto& route:direct)if(!previous.count(route.endpointUtf8)){changed=true;break;}
+        auto legacyRetry=retries_.find(peer);if(legacyRetry!=retries_.end()){if(legacyRetry->second.suspended)plan.suspended=true;retries_.erase(legacyRetry);}
+        if(changed)plan.suspended=false;
+        plan.direct.clear();unsigned priority=0;
+        for(auto& route:direct){
+            if(route.endpointUtf8.empty()||route.kind!=TransportKind::Direct||route.networkRevision!=networkRevision)continue;
+            CandidateRoute candidate;candidate.route=std::move(route);candidate.priority=priority++;candidate.dueMilliseconds=never();
+            auto old=previous.find(candidate.route.endpointUtf8);
+            if(old!=previous.end()){candidate.failures=old->second.failures;candidate.delayMilliseconds=old->second.delayMilliseconds;candidate.dueMilliseconds=old->second.dueMilliseconds;}
+            plan.direct.push_back(std::move(candidate));
+        }
+        plan.networkRevision=networkRevision;plan.relayAvailable=relayAvailable;
+        plan.beganMilliseconds=nowMilliseconds;
+        const auto activeKind=activeTransportKind(peer);
+        if(!activeKind||*activeKind==TransportKind::Relay){
+            if(!plan.suspended&&!plan.direct.empty()&&(!hadDirect||changed))plan.direct.front().dueMilliseconds=nowMilliseconds;
+            plan.relayDueMilliseconds=!plan.suspended&&relayAvailable?(previousRelayAvailable&&!changed?previousRelayDue:nowMilliseconds+DirectFallbackWindowMilliseconds):never();
+        }else plan.relayDueMilliseconds=never();
+        touch(peer);return true;
+    }
+
+    struct RelayAttempt { std::string remoteDeviceId;std::uint64_t networkRevision=0; };
+    std::vector<RelayAttempt> takeDueRelayAttempts(std::uint64_t nowMilliseconds) {
+        std::vector<RelayAttempt> result;
+        for(auto& item:plans_){auto& plan=item.second;
+            auto activeKind=activeTransportKind(item.first);
+            if(plan.suspended||!plan.relayAvailable||plan.networkRevision<networkRevision_||
+               (activeKind&&*activeKind==TransportKind::Direct)||
+               plan.relayDueMilliseconds>nowMilliseconds)continue;
+            bool relayPending=false;
+            for(const auto& transport:transports_)if(!transport.second.closed&&!transport.second.cancelled&&
+                transport.second.matches(item.first)&&transport.second.route.kind==TransportKind::Relay){relayPending=true;break;}
+            if(relayPending)continue;
+            plan.relayDueMilliseconds=never();result.push_back({item.first,plan.networkRevision});touch(item.first);
+        }
+        return result;
+    }
+
+    std::optional<std::string> attachablePeer(SessionEpoch epoch,TransportInstanceId instance) const {
+        if(epoch!=epoch_)return {};
+        auto found=transports_.find(instance.value);
+        if(found==transports_.end()||found->second.closed||found->second.cancelled||
+           found->second.route.networkRevision<networkRevision_)return {};
+        auto peer=found->second.continuityKey();
+        return peer.empty()?std::optional<std::string>{}:std::optional<std::string>{peer};
+    }
+
+    RetrySchedule scheduleRelayRetry(const std::string& peer,std::uint64_t nowMilliseconds,
+                                     std::uint32_t randomValue) {
+        RetrySchedule result;auto found=plans_.find(peer);if(found==plans_.end()||found->second.suspended||!found->second.relayAvailable)return result;
+        auto& plan=found->second;plan.relayFailures=std::min<std::uint32_t>(plan.relayFailures+1,31);
+        plan.relayDelayMilliseconds=backoffDelay(plan.relayFailures,randomValue);
+        plan.relayDueMilliseconds=nowMilliseconds+plan.relayDelayMilliseconds;
+        result.scheduled=true;result.failureCount=plan.relayFailures;result.delayMilliseconds=plan.relayDelayMilliseconds;
+        result.dueMilliseconds=plan.relayDueMilliseconds;result.target={peer,{}};touch(peer);return result;
     }
 
     bool hasRepresentation(const std::string& peer) const {
@@ -370,6 +486,7 @@ public:
 
     void removePeer(const std::string& peer) {
         retries_.erase(peer);
+        plans_.erase(peer);
         for(auto& item:transports_)if(item.second.matches(peer))item.second.locallyTrusted=false;
         auto continuity = continuities_.find(peer);
         if (continuity != continuities_.end() && !continuity->second.activeTransport.value)
@@ -400,6 +517,14 @@ public:
             result.retrySuspended = retry->second.suspended;
             result.retryDelayMilliseconds = retry->second.delayMilliseconds;
         }
+        auto plan=plans_.find(peer);
+        if(plan!=plans_.end()){
+            result.retrySuspended=result.retrySuspended||plan->second.suspended;
+            if(!plan->second.suspended){
+                if(plan->second.relayDueMilliseconds!=never()){result.retryScheduled=true;result.retryDelayMilliseconds=std::max(result.retryDelayMilliseconds,plan->second.relayDelayMilliseconds);}
+                for(const auto& candidate:plan->second.direct)if(candidate.dueMilliseconds!=never()){result.retryScheduled=true;result.retryDelayMilliseconds=std::max(result.retryDelayMilliseconds,candidate.delayMilliseconds);}
+            }
+        }
         return result;
     }
 
@@ -424,7 +549,8 @@ public:
         if(!state||!state->connected||route.networkRevision<networkRevision_||state->activeRoute.endpointUtf8==route.endpointUtf8||
            handoff_.busy(peer)||hasPendingAttempt(peer,{}))return false;
         auto found=transports_.find(state->activeTransport.value);
-        return found!=transports_.end()&&(found->second.capabilities&DirectHandoffCapability)&&handoff_.ready(found->second.instance);
+        return found!=transports_.end()&&(found->second.capabilities&DirectHandoffCapability)&&handoff_.ready(found->second.instance)&&
+            !(found->second.route.kind==TransportKind::Direct&&route.kind==TransportKind::Relay);
     }
     std::vector<HandoffEffect> attachHandoff(SessionEpoch epoch,TransportInstanceId id,
                                             const std::string& nonce,std::uint64_t now) {
@@ -462,6 +588,17 @@ public:
 
 private:
     static constexpr std::uint64_t never() { return std::numeric_limits<std::uint64_t>::max(); }
+#ifdef PEERCHAT_TEST_SHORT_RECONNECT_BACKOFF
+    static constexpr std::uint64_t DirectFallbackWindowMilliseconds=300;
+#else
+    static constexpr std::uint64_t DirectFallbackWindowMilliseconds=8000;
+#endif
+
+    struct CandidateRoute {RouteObservation route;unsigned priority=0;std::uint32_t failures=0,delayMilliseconds=0;std::uint64_t dueMilliseconds=never();};
+    struct CandidatePlan {
+        std::vector<CandidateRoute> direct;bool relayAvailable=false,suspended=false;std::uint64_t networkRevision=0,beganMilliseconds=0;
+        std::uint64_t relayDueMilliseconds=never();std::uint32_t relayFailures=0,relayDelayMilliseconds=0;
+    };
 
     struct TransportRecord {
         TransportInstanceId instance;
@@ -537,6 +674,12 @@ private:
         return false;
     }
 
+    std::optional<TransportKind> activeTransportKind(const std::string& peer) const {
+        auto continuity=continuities_.find(peer);if(continuity==continuities_.end()||!continuity->second.activeTransport.value)return {};
+        auto transport=transports_.find(continuity->second.activeTransport.value);
+        return transport==transports_.end()?std::optional<TransportKind>{}:transport->second.route.kind;
+    }
+
     bool hasPendingAttempt(const std::string& peer, TransportInstanceId except) const {
         for (const auto& item : transports_) {
             const auto& record = item.second;
@@ -563,6 +706,7 @@ private:
     std::map<std::uint64_t, TransportRecord> transports_;
     std::map<std::string, ContinuityState> continuities_;
     std::map<std::string, RetryState> retries_;
+    std::map<std::string, CandidatePlan> plans_;
     DirectHandoff handoff_;
     std::vector<HandoffEffect> pendingHandoffEffects_;
 

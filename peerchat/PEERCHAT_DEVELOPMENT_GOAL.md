@@ -1108,11 +1108,11 @@ Everything above defines PeerChat's architectural direction.
 WebRTC/DTLS-SRTP + Opus calls are implemented. Packaged two-way voice and 3+ client group behavior
 have passed physical acceptance; exact current evidence remains in `PROJECT_STATUS.md`.**
 
-Stage 3 of the approved session/transport migration is implemented: the existing direct path has one
-native winner/retry/cancellation authority with lifetime tokens and revisioned snapshots. Do not begin
-Stage 4 delivery/ACK migration until it is explicitly authorized. Networking/session migration comes
-before broad client modularization. Preserve the accepted baseline and the open CLR/WPF and
-false-route-teardown backlog; do not infer closure from general product acceptance.
+Stages 3–5 and the focused Stage 5.5 reliable connection work are implemented: one native manager
+owns direct/relay attempts, retry/fallback, winners, stale callbacks, handoff and draining, while
+durable delivery/trust remain transport-independent above it. Do not begin Stage 6 voice migration
+until explicitly authorized. Networking/session migration comes before broad client modularization.
+Preserve the accepted baseline and the open CLR/WPF and false-route-teardown backlog.
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and
 encrypted-history behavior. Current implementation details and test state belong in
@@ -1120,8 +1120,8 @@ encrypted-history behavior. Current implementation details and test state belong
 
 Do NOT begin:
 
-- additional NAT traversal or TURN/relay work beyond the implemented direct ICE/STUN path
-- relay implementation
+- additional NAT traversal, TURN/privacy relay, relay-only policy or media relay beyond the
+  implemented opaque reliable control/text fallback
 - changes to the independent updater or Release signing/publication workflow in this refactor
 - client modularization before session/messaging/voice continuity is accepted
 - disappearing messages
