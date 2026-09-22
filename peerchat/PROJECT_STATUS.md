@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 4 durable delivery ownership above connections complete after targeted gates.
-**Next action:** await separate authorization and protocol review for Stage 5; do not begin it implicitly.
+**Current stage:** Stage 5 engineering complete after targeted automated gates; physical acceptance pending.
+**Next action:** physical two-PC direct-text handoff acceptance; stop before Stage 6.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -33,6 +33,8 @@ separate; no publication, final tag, key change or package rebuild in this docum
   `6b5934dc196b56431a9480167f5c4fc1eea1e2b3` (`Record Stage 3 implementation checkpoint`).
 - Stage 4 implementation checkpoint on `refactor/session-transport`:
   `372663a` (`Extract Stage 4 durable delivery ownership`).
+- Stage 4 documentation checkpoint and Stage 5 starting point:
+  `dfe1926e6af7be56de64de88152fd91a98f6fb7d`; worktree was clean before Stage 5.
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -89,7 +91,7 @@ separate; no publication, final tag, key change or package rebuild in this docum
 
 ## Current recovery limits relevant to the refactor
 
-These are the current boundaries after Stage 4.
+These are the current boundaries after Stage 5.
 
 - WPF still observes Windows network/friend changes and selects discovery candidates, but it sends
   immutable recovery intents and the current network generation to the native boundary. The native
@@ -98,22 +100,22 @@ These are the current boundaries after Stage 4.
 - Whole-peer invalidation is generation-checked. A delayed old-network invalidation cannot cancel a
   newly authenticated route, exact-endpoint refresh preserves the active verified winner, and an old
   transport close cannot clear a newer winner.
-- Duplicate arbitration remains immediate and deterministic. The manager records the winning
-  transport instance and rejects or retires losers; retry work remains dormant while a usable winner
-  exists. Physical sockets still run on the existing Node worker.
+- Ordinary startup/legacy duplicate arbitration remains immediate and deterministic. Explicit
+  alternate routes for mutually capable peers use authenticated readiness, coordinated promotion
+  and bounded draining. The manager remains the sole winner/retry owner on the existing Node worker.
 - The profile-scoped `DeliveryManager` owns DM/group pending retrieval, authenticated transport
   submission eligibility, destination-scoped ACK authorization, resend after transport retirement,
   and incoming DM deduplication. Individual connections no longer own inflight message/event sets.
 - A draining transport can acknowledge only IDs it submitted to its authenticated destination and
-  cannot accept new application sends. Current duplicate losers are still immediately retired, so
-  Stage 4 adds the ownership rule but no overlap interval or make-before-break lifecycle.
+  cannot accept new DM/group submissions. Stage 5 now exercises that ownership during real overlap;
+  immediate candidate failure can restore the retained, still-trusted route.
 - TCP control/text and WebRTC media are separate live paths; current call teardown still depends
   on control disconnect/invalidation. Logical call/control/media lifetime separation is planned.
 - Native/managed events now carry complete profile/session epoch and monotonically revisioned session
   snapshots. WPF applies only newer snapshots for online state and winning-connection projection;
   failed/superseded legacy attempt events remain diagnostics and cannot downgrade a live winner.
-- Candidate selection and physical connection execution remain existing code. There is no alternate
-  route overlap, make-before-break handoff, transport drain or negotiated handoff protocol yet.
+- Candidate selection and physical connection execution remain existing code. Stage 5 adds only
+  direct control/text handoff, not media-route migration or a second reconnect stack.
 
 ## Stage 2 implemented boundary
 
@@ -164,6 +166,27 @@ These are the current boundaries after Stage 4.
   bridge/UI contract, media behavior or voice state changed. No Stage 5 handoff capability, message,
   route overlap or make-before-break policy was introduced.
 
+## Stage 5 implemented boundary
+
+- `DirectHandoff` is a small state machine composed by `SessionTransportManager`, not another
+  socket, winner or retry owner. Hello capability 16 gates type-14 coordination; connection intent
+  bit 32 distinguishes deliberate candidates from simultaneous startup duplicates. Legacy peers
+  retain existing frames/arbitration and receive no new coordination packets.
+- Mutual TLS, verified expected identity, trust and exchanged per-connection nonce pairs bind
+  candidate readiness to the current profile epoch, local instance and retained route. The lower
+  verified Peer ID coordinates simultaneous proposals. Old-generation candidate callbacks cannot
+  promote over the live winner; revoking trust also prevents fallback.
+- Prepare/Ready/Commit/Promoted/Confirm messages coordinate promotion, with 500 ms bounded retries,
+  a 10-second preparation/confirmation limit and 3-second drain. Candidates cannot downgrade a
+  healthy winner on failure; completed/expired attempts cannot extend their deadline through replay.
+  Persistent coordination loss may fall back to ordinary reconnect; atomic agreement under permanent
+  partition is not claimed. Exact wire/phase details are in `ARCHITECTURE.md`.
+- Stage 4 delivery eligibility supports overlap, authorized ACKs on old transports, resend/dedup,
+  and restoration of the retained route. Close-completion diagnostics retain local/remote origins
+  even when the logical session stays connected.
+- No voice/media routing, storage format, discovery API, account/trust model, WPF, updater or release
+  behavior changed. Physical direct-text network handoff remains an explicit acceptance gate.
+
 ## Approved direction and remaining stage gates
 
 The approved direction is in PEERCHAT_DEVELOPMENT_GOAL.md. The Desktop
@@ -190,8 +213,8 @@ runtime epoch, instance ID, route revision and handoff ID must have explicit lif
 validate their applicable tokens. Candidate failure and discovery loss cannot close healthy winners.
 Durable delivery is above transports; control/messages and media may have separate active bindings.
 
-Before Stage 5, review exact wire capability/envelopes, simultaneous-proposal arbitration and bounded
-drain/fallback policy. Before Stages 6–7, review control-loss/hang-up semantics and pinned-library
+Stage 5 wire capability/envelopes, simultaneous-proposal arbitration and bounded drain/fallback are
+recorded in ARCHITECTURE.md and exercised by the existing reconnect suite. Before Stages 6–7, review control-loss/hang-up semantics and pinned-library
 ICE-restart versus PeerConnection-replacement evidence. These are later design gates, not permission
 to implement protocol/media behavior in Stage 2.
 
@@ -258,6 +281,36 @@ to implement protocol/media behavior in Stage 2.
 - A fresh desktop/native bridge build passed. Existing VersionInfo, unused-local and unawaited-call
   warnings were unchanged. No UI/package/updater or physical test was run because Stage 4 changes no
   wire, bridge, media, packaging or presentation boundary.
+
+### Stage 5 targeted verification
+
+- Strict-warning native builds passed. Existing reconnect contracts cover authenticated readiness,
+  loss/replay of each promotion phase, total coordination loss, stale profile/instance/network tokens,
+  bounded drain, immediate promoted-route failure/fallback, trust revocation and legacy gating.
+- Real local TLS handoff passed with simultaneous startup and alternate-route attempts, 24 messages
+  each direction during overlap plus one after drain, authorized ACKs, no duplicate visible messages,
+  and no disconnected session snapshot. Both old sockets must close; one may observe remote EOF
+  before its own timer. The test now checks close completion rather than requiring two timer events.
+- Existing backoff/route/diagnostic/identity tests passed. The three-real-connect-failures collection
+  deadline increased from 5 to 15 seconds after repeat timing failures; exponential minimums, cap,
+  manual/presence retry and wrong-identity checks remain unchanged. Production retry timing is unchanged.
+- Storage passed overlapping/draining ACK, cross-destination/unsent rejection, fallback send eligibility,
+  restart/resend, dedup, ciphertext scan and tamper checks. Six-node messaging/outbox/restart,
+  four-member group-node and unchanged voice call-state regressions passed during implementation.
+- Retained pre-handoff harness interoperability passed in both initiation directions with explicit
+  trust, Unicode text/ACK and changed endpoint hints; no unexpected protocol messages.
+- Final native/desktop build and managed adapter suite passed: encrypted profile isolation,
+  migration/reset/restore, changed-device approval and existing group/call integration. Existing
+  C# VersionInfo/unused-local/unawaited-call warnings remain. DPAPI tests used the normal Windows user.
+- Final runtime audit passed: required managed updater files, Windows-only native imports and
+  package/System32-only restricted load. Candidate: `build/stage5/Client/PeerChat.Desktop.exe`,
+  still `4.0.0-dev.2`; copy the entire Client directory, not only the EXE.
+  Core SHA-256: `c3630523babc913995f86459df3c7432dc3d0551c18b2589351b90b0fe8ce41f`.
+  Desktop SHA-256: `3c36c5243e5022c68684212604e4c36ac7a863b3cbaec63e10c7c2e5d1f094bd`.
+- Physical two-PC direct-text continuity and LAN→hotspot→LAN overlap/fallback remain untested here.
+  Run both candidates, exchange text while changing the route without restarting, confirm stable
+  conversation/trust and no missing/duplicate messages, then repeat in reverse. Local loopback is
+  not physical network-change acceptance. Voice continuity migration and Stage 6 have not begun.
 
 ### Historical regression and physical evidence
 
@@ -337,6 +390,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-Stage 5 handoff, client modularization, screen sharing, video, files, group voice, TURN,
+Stage 6 voice/control migration, client modularization, screen sharing, video, files, group voice, TURN,
 encrypted relay, onion, disappearing messages, external bridge and multi-device synchronization remain
 deferred. Preserve the accepted stack and begin the next stage only with separate authorization.

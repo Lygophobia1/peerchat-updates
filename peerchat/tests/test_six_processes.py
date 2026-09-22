@@ -22,9 +22,9 @@ def available_port():
 
 
 class Peer:
-    def __init__(self, directory, port):
+    def __init__(self, directory, port, executable=None):
         self.process = subprocess.Popen(
-            [str(BIN_ROOT / 'peer-harness.exe'), str(directory), str(port)],
+            [str(executable or BIN_ROOT / 'peer-harness.exe'), str(directory), str(port)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding='utf-8', bufsize=1)
         self.lines = queue.Queue()
@@ -145,5 +145,47 @@ def main():
                 raise
 
 
+def legacy_compatibility(current, legacy):
+    """Run a current harness against a retained pre-handoff harness in both directions."""
+    run = PROJECT_ROOT / 'build' / 'tests' / 'runtime' / ('legacy-handoff-' + uuid.uuid4().hex)
+    for initiator in (0, 1):
+        ports = [available_port(), available_port()]
+        peers = [Peer(run / str(initiator) / 'new', ports[0], current),
+                 Peer(run / str(initiator) / 'legacy', ports[1], legacy)]
+        identities = set()
+        def wait(predicate):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                for peer in peers:
+                    peer.drain(identities)
+                    assert peer.errors == 0, 'Legacy/new peer rejected a protocol message'
+                if predicate():
+                    return
+                time.sleep(.02)
+            raise AssertionError('Legacy/new direct messaging timed out')
+        try:
+            wait(lambda: all(peer.identity for peer in peers))
+            identities.update(peer.identity for peer in peers)
+            target = 1 - initiator
+            peers[initiator].command(f'CONNECT 127.0.0.1 {ports[target]} {peers[target].identity}')
+            wait(lambda: all(len(peer.connected) == 1 for peer in peers))
+            # A changed route hint must not send handoff frames to a legacy peer.
+            peers[0].command(f'CONNECT localhost {ports[1]} {peers[1].identity}')
+            for index, peer in enumerate(peers):
+                peer.command('SEND ' + peers[1-index].identity)
+            wait(lambda: all(len(peer.received) == 1 and len(peer.delivered) == 1 for peer in peers))
+            print('PASS: legacy/new TLS trust, text and ACK; initiating side=' + str(initiator))
+        finally:
+            for peer in peers:
+                peer.close()
+
+
 if __name__ == '__main__':
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--handoff-compatibility', nargs=2, metavar=('CURRENT_HARNESS', 'LEGACY_HARNESS'))
+    args = parser.parse_args()
+    if args.handoff_compatibility:
+        legacy_compatibility(*(Path(path).resolve(strict=True) for path in args.handoff_compatibility))
+    else:
+        main()

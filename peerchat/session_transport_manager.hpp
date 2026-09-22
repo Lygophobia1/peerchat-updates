@@ -1,6 +1,7 @@
 #pragma once
 
 #include "peer_session.hpp"
+#include "direct_handoff.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -27,7 +28,7 @@ public:
         : localProfileScope_(std::move(localProfileScope)),
           localDeviceId_(std::move(localDeviceId)), epoch_(epoch),
           retryBaseMilliseconds_(retryBaseMilliseconds),
-          retryCapMilliseconds_(retryCapMilliseconds) {}
+          retryCapMilliseconds_(retryCapMilliseconds), handoff_(localDeviceId_) {}
 
     bool registerAttempt(SessionEpoch epoch, TransportInstanceId instance,
                          std::string expectedRemoteDeviceId,
@@ -38,6 +39,7 @@ public:
             return found->second.expectedRemoteDeviceId == expectedRemoteDeviceId;
         }
         TransportRecord record;
+        record.handoffCandidate=canPrepareHandoff(expectedRemoteDeviceId,route);
         record.instance = instance;
         record.expectedRemoteDeviceId = std::move(expectedRemoteDeviceId);
         record.route = std::move(route);
@@ -64,6 +66,7 @@ public:
         if (!event.expectedRemoteDeviceId().empty()) record.expectedRemoteDeviceId = event.expectedRemoteDeviceId();
         if (!event.presentedRemoteDeviceId().empty()) record.presentedRemoteDeviceId = event.presentedRemoteDeviceId();
         record.capabilities = event.capabilities();
+        if((record.capabilities&DirectHandoffCapability)&&(record.capabilities&HandoffCandidateIntent))record.handoffCandidate=true;
         if (event.kind() == TransportEventKind::ReceiveAvailable ||
             event.kind() == TransportEventKind::SendAccepted)
             record.lastProgressMilliseconds = nowMilliseconds;
@@ -134,6 +137,10 @@ public:
             return decision;
         }
         auto& continuity = continuityFor(peer);
+        if(candidate.handoffCandidate&&!continuity.activeTransport.value){
+            decision.disposition=WinnerDisposition::RejectedNotReady;
+            decision.reasonUtf8="handoff has no retained original binding";return decision;
+        }
         if (continuity.activeTransport.value == instance.value) {
             decision.disposition = WinnerDisposition::Activated;
             return decision;
@@ -141,6 +148,17 @@ public:
         if (continuity.activeTransport.value) {
             auto existing = transports_.find(continuity.activeTransport.value);
             if (existing != transports_.end() && !existing->second.closed) {
+                if (candidate.handoffCandidate&&(candidate.capabilities & DirectHandoffCapability) &&
+                    (existing->second.capabilities & DirectHandoffCapability) && handoff_.ready(existing->second.instance)) {
+                    const auto required=existing->second.capabilities&~HandoffCandidateIntent;
+                    if((candidate.capabilities&required)!=required){
+                        decision.disposition=WinnerDisposition::RejectedNotReady;
+                        decision.reasonUtf8="candidate lacks active channel capabilities";return decision;
+                    }
+                    decision.disposition = WinnerDisposition::AwaitingHandoff;
+                    decision.reasonUtf8 = "authenticated candidate awaiting coordinated handoff";
+                    return decision;
+                }
                 const bool existingStale = nowMilliseconds >= existing->second.lastProgressMilliseconds &&
                     nowMilliseconds - existing->second.lastProgressMilliseconds > 2000;
                 const bool candidateLosesDirection = candidate.route.incoming == (localDeviceId_ < peer);
@@ -184,6 +202,8 @@ public:
         record.closed = true;
         record.state = failed ? TransportState::Failed : TransportState::Closed;
         const auto peer = decision.remoteDeviceId;
+        auto recovery = applyHandoff(handoff_.closed(instance));
+        pendingHandoffEffects_.insert(pendingHandoffEffects_.end(),recovery.begin(),recovery.end());
         if (!peer.empty()) {
             auto continuity = continuities_.find(peer);
             if (continuity != continuities_.end()) {
@@ -215,6 +235,7 @@ public:
             auto& record = item.second;
             if (record.closed || !record.matches(peer)) continue;
             if (isActive(record.instance)) { decision.retainedActiveWinner = true; continue; }
+            if(handoff_.draining(record.instance)||handoff_.busy(peer))continue;
             if (!manual && record.route.endpointUtf8 == replacement.endpointUtf8) {
                 record.route = replacement;
                 decision.updateRoute.push_back(record.instance);
@@ -247,7 +268,8 @@ public:
                 ? (!expectedNetworkRevision || record.route.networkRevision < expectedNetworkRevision)
                 : record.route.endpointUtf8 == endpointUtf8;
             if (!matches) continue;
-            if (!allRoutes && isActive(record.instance)) {
+            if (isActive(record.instance)&&(!allRoutes||
+                ((record.capabilities&DirectHandoffCapability)&&handoff_.ready(record.instance)))) {
                 decision.retainedActiveWinner = true;
                 continue;
             }
@@ -348,6 +370,7 @@ public:
 
     void removePeer(const std::string& peer) {
         retries_.erase(peer);
+        for(auto& item:transports_)if(item.second.matches(peer))item.second.locallyTrusted=false;
         auto continuity = continuities_.find(peer);
         if (continuity != continuities_.end() && !continuity->second.activeTransport.value)
             continuities_.erase(continuity);
@@ -389,6 +412,54 @@ public:
     SessionEpoch epoch() const { return epoch_; }
     std::uint64_t networkRevision() const { return networkRevision_; }
 
+    static constexpr std::uint64_t DirectHandoffCapability=16;
+    static constexpr std::uint64_t HandoffCandidateIntent=32;
+    bool handoffCandidate(TransportInstanceId id) const {
+        auto found=transports_.find(id.value);return found!=transports_.end()&&found->second.handoffCandidate;
+    }
+    bool active(TransportInstanceId id) const { return isActive(id); }
+    bool draining(TransportInstanceId id) const { return handoff_.draining(id); }
+    bool canPrepareHandoff(const std::string& peer,const RouteObservation& route) const {
+        auto state=snapshot(peer);
+        if(!state||!state->connected||route.networkRevision<networkRevision_||state->activeRoute.endpointUtf8==route.endpointUtf8||
+           handoff_.busy(peer)||hasPendingAttempt(peer,{}))return false;
+        auto found=transports_.find(state->activeTransport.value);
+        return found!=transports_.end()&&(found->second.capabilities&DirectHandoffCapability)&&handoff_.ready(found->second.instance);
+    }
+    std::vector<HandoffEffect> attachHandoff(SessionEpoch epoch,TransportInstanceId id,
+                                            const std::string& nonce,std::uint64_t now) {
+        auto found=current(epoch,id);if(!found||!trusted(**found)||!((*found)->capabilities&DirectHandoffCapability))return {};
+        auto& record=**found;record.handoffAttached=true;record.handoffBegan=now;
+        handoff_.attach(id,record.remoteDeviceId(),nonce,now);return handoff_.hello(id);
+    }
+    std::vector<HandoffEffect> receiveHandoff(SessionEpoch epoch,TransportInstanceId id,
+                                             const HandoffEnvelope& envelope,std::uint64_t now) {
+        auto found=current(epoch,id);if(!found||!trusted(**found)||!(*found)->handoffAttached)return {};
+        if(!isActive(id)&&!handoff_.draining(id)&&(*found)->route.networkRevision<networkRevision_)
+            return applyHandoff({{HandoffEffect::Kind::Retire,id,{},{},"candidate network generation superseded"}});
+        auto state=snapshot((*found)->remoteDeviceId());if(!state)return {};
+        return applyHandoff(handoff_.receive(id,state->activeTransport,envelope,now));
+    }
+    std::vector<HandoffEffect> handoffTick(SessionEpoch epoch,std::uint64_t now) {
+        if(epoch!=epoch_)return {};
+        auto result=std::move(pendingHandoffEffects_);pendingHandoffEffects_.clear();
+        auto timed=applyHandoff(handoff_.tick(now));result.insert(result.end(),timed.begin(),timed.end());
+        for(auto& item:transports_) {
+            auto& record=item.second;if(record.closed||record.cancelled||!record.handoffAttached||!trusted(record)||handoff_.draining(record.instance))continue;
+            if(!isActive(record.instance)&&record.route.networkRevision<networkRevision_){
+                auto expired=applyHandoff({{HandoffEffect::Kind::Retire,record.instance,{},{},"candidate network generation superseded"}});
+                result.insert(result.end(),expired.begin(),expired.end());continue;
+            }
+            if(!isActive(record.instance)&&!handoff_.draining(record.instance)&&now-record.handoffBegan>=DirectHandoff::PrepareTimeout) {
+                result.push_back({HandoffEffect::Kind::Retire,record.instance,{},{},"unselected handoff candidate expired"});continue;
+            }
+            auto state=snapshot(record.remoteDeviceId());if(!state)continue;
+            auto effects=applyHandoff(handoff_.consider(record.instance,state->activeTransport,now));
+            result.insert(result.end(),effects.begin(),effects.end());
+        }
+        return result;
+    }
+
 private:
     static constexpr std::uint64_t never() { return std::numeric_limits<std::uint64_t>::max(); }
 
@@ -405,6 +476,9 @@ private:
         bool remoteAccepted = false;
         bool cancelled = false;
         bool closed = false;
+        bool handoffAttached = false;
+        bool handoffCandidate = false;
+        std::uint64_t handoffBegan = 0;
         std::string remoteDeviceId() const { return presentedRemoteDeviceId.empty() ? expectedRemoteDeviceId : presentedRemoteDeviceId; }
         std::string continuityKey() const { return !locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId(); }
         bool matches(const std::string& peer) const { return !peer.empty() && (expectedRemoteDeviceId == peer || presentedRemoteDeviceId == peer); }
@@ -467,7 +541,7 @@ private:
         for (const auto& item : transports_) {
             const auto& record = item.second;
             if (record.instance.value == except.value || record.closed || record.cancelled) continue;
-            if (record.matches(peer) && !isActive(record.instance)) return true;
+            if (record.matches(peer) && !isActive(record.instance)&&!handoff_.draining(record.instance)) return true;
         }
         return false;
     }
@@ -489,6 +563,32 @@ private:
     std::map<std::uint64_t, TransportRecord> transports_;
     std::map<std::string, ContinuityState> continuities_;
     std::map<std::string, RetryState> retries_;
+    DirectHandoff handoff_;
+    std::vector<HandoffEffect> pendingHandoffEffects_;
+
+    static bool trusted(const TransportRecord& r) {
+        return !r.closed&&!r.cancelled&&r.locallyTrusted&&r.remoteAccepted&&!r.presentedRemoteDeviceId.empty()&&
+            (r.expectedRemoteDeviceId.empty()||r.expectedRemoteDeviceId==r.presentedRemoteDeviceId);
+    }
+    std::vector<HandoffEffect> applyHandoff(std::vector<HandoffEffect> effects) {
+        std::vector<HandoffEffect> applied;
+        for(auto& effect:effects) {
+            auto found=current(epoch_,effect.instance);
+            if(!found)continue;
+            auto& record=**found;
+            if(effect.kind==HandoffEffect::Kind::Retire){record.cancelled=true;record.state=TransportState::Closing;}
+            else if(!trusted(record))continue;
+            if(effect.kind==HandoffEffect::Kind::Promote||effect.kind==HandoffEffect::Kind::Restore) {
+                if(!trusted(record))continue;
+                auto& continuity=continuityFor(record.remoteDeviceId());
+                if(continuity.activeTransport.value!=effect.previous.value)continue;
+                continuity.activeTransport=effect.instance;continuity.session.observeLegacyActive(effect.instance);
+                record.state=TransportState::Active;retries_.erase(record.remoteDeviceId());touch(record.remoteDeviceId());
+            }
+            applied.push_back(std::move(effect));
+        }
+        return applied;
+    }
 };
 
 } // namespace peerchat::session

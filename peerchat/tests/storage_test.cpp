@@ -35,7 +35,10 @@ int main() {
             require(!deliveries.acknowledgeMessage(b.peerId,{101},Storage::newMessageId()),"Unsent message ID was acknowledged");
             require(deliveries.beginDraining({101}),"Authorized transport did not enter draining state");
             require(!deliveries.submittedMessage(b.peerId,sent[1].id,{101}),"Draining transport accepted a new application send");
+            require(deliveries.authorizeTransport({103},b.peerId)&&deliveries.submittedMessage(b.peerId,sent[0].id,{103}),"Replacement could not resend an overlapping ID");
             require(deliveries.acknowledgeMessage(b.peerId,{101},sent[0].id),"Authorized draining transport ACK was rejected");
+            require(!deliveries.acknowledgeMessage(b.peerId,{103},sent[0].id),"Late overlapping ACK completed delivery twice");
+            require(deliveries.restoreTransport({101})&&deliveries.submittedMessage(b.peerId,sent[1].id,{101}),"Retained route could not resume sends on fallback");
             db.acknowledge(sent[0].id,Delivery::Sent);
             auto changed=sent[0];changed.text=L"conflicting payload";bool rejected=false;
             try{db.append(b.peerId,changed);}catch(const std::runtime_error&){rejected=true;}

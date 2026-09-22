@@ -22,8 +22,10 @@ bounded retry/backoff, route cancellation and stale-callback protection. Node re
 resolvers, sockets and Schannel objects and executes manager decisions. `DirectTransportAdapter`
 wraps each legacy connection and reports lifecycle/capability observations without owning a socket.
 The profile-scoped `DeliveryManager` owns durable DM/group send eligibility, transport-scoped ACK
-authorization, resend eligibility and incoming-DM deduplication above individual connections. Media
-and coordinated handoff remain outside the implemented boundary.
+authorization, resend eligibility and incoming-DM deduplication above individual connections.
+`SessionTransportManager` composes `DirectHandoff` for capability-gated direct-route coordination;
+the latter owns transaction state but no socket, scheduler or authoritative channel binding.
+Media continuity remains outside the implemented boundary.
 
 The local-only types distinguish the profile scope, local/verified-remote device identity,
 runtime session epoch, transport instance ID, independent route revision, channel requirements,
@@ -257,10 +259,10 @@ live LAN→hotspot→LAN transition.
 Authenticated duplicate arbitration prefers a newly proven session over an older session with no
 recent transport progress, then uses the stable Peer-ID direction rule for genuinely simultaneous
 fresh connections. The stale heuristic is over two seconds without recorded transport progress;
-an idle connection is not thereby proven failed. Losers are marked dead for immediate retirement,
-not intentionally drained. The manager's active binding is authoritative; normal resolve avoids
-another attempt while a usable winner exists, and retry state remains dormant until that winner ends.
-There is no authorized candidate-overlap state today. Superseded duplicates emit diagnostic lifecycle events without marking the
+an idle connection is not thereby proven failed. Ordinary startup duplicates and legacy peers retain
+this immediate-arbitration path. A deliberate alternate endpoint for a verified handoff-capable peer
+can instead create one candidate while the current binding remains active. Retry state stays dormant
+while a usable winner exists. Superseded duplicates emit diagnostic lifecycle events without marking the
 surviving conversation offline. Final disconnect events carry an explicit bounded origin such as
 remote EOF/TLS close, local route invalidation, socket error, authentication timeout, protocol
 rejection, or duplicate arbitration. Discovery presence remains advisory and never closes an
@@ -275,24 +277,65 @@ snapshot is self-contained rather than a delta that depends on every prior lifec
 
 ## Current peer protocol and delivery ownership
 
-Peer frames use the existing fixed version byte and Hello capability bits for mutual TLS, logical
-ordering, groups and voice. Unknown packet types are rejected; there is no negotiated handoff
-message set. No handoff capability or compatibility fallback has been implemented.
+Peer frames retain version byte 1 and the existing Hello, Accepted, text, ACK, group and voice
+formats. Optional Hello capability bit 16 enables direct handoff. Bit 32 is a per-connection
+replacement-intent marker: only an outbound attempt deliberately created alongside a known
+handoff-capable winner advertises it. This distinguishes simultaneous startup duplicates from
+intentional overlap. Peers without bit 16 receive no new packet types and retain legacy arbitration.
 
 Storage persists the encrypted DM/group outboxes and message IDs/order independently of sockets.
 The profile-scoped `DeliveryManager` loads those pending entries and records which authenticated
 transport instance submitted each ID to each exact destination. A DM or group ACK may change durable
 state only when that same destination and an authorized submitting transport present the ID; another
 peer, an unsent ID, or an unrelated transport cannot acknowledge it. A transport marked draining
-cannot accept new application sends, but can still complete ACKs for IDs it previously submitted.
+cannot accept new DM/group submissions, but can still complete ACKs for IDs it previously submitted.
 Retiring a transport removes only its runtime ACK eligibility, so still-pending data can be resent on
 an authenticated replacement and survives process restart through the existing encrypted storage.
 Incoming DM storage and the group ledger retain their existing message/event-ID duplicate suppression.
 
-Current duplicate losers are still retired immediately by the Stage 3 policy; Stage 4 does not add a
-drain interval, route overlap, make-before-break messages, capability negotiation, or coordinated
-handoff. The draining ACK rule is an ownership invariant ready for an authorized later transport
-overlap, not a new wire or lifecycle behavior.
+### Stage 5 direct handoff contract
+
+The optional `Handoff` frame (type 14) contains a phase number and two length-prefixed ASCII strings,
+using the existing Writer/Reader encoding. The phase is 0–5; each string is at most 64 characters
+(maximum body 156 bytes). Frames are processed only after mutual TLS, expected-device verification,
+local trust and remote Accepted. Current contact/key trust is checked again on receipt; promotion
+and fallback also require a live, non-cancelled, trusted manager record. Contact removal revokes
+handoff eligibility. No discovery operation or application message format changed.
+
+| Phase | Authenticated exchange and effect |
+|---|---|
+| 0 — Hello | Each connection exchanges a fresh 16-byte UUID-shaped nonce from the existing BCrypt-backed ID generator (122 random bits) as 32 hex characters; the second string is empty. |
+| 1 — Prepare | The lower verified Peer ID coordinates the first ready candidate. The first string is the candidate nonce pair, ordered by Peer ID; the second is the retained old connection's nonce pair. |
+| 2 — Ready | The responder matches both connection lifetimes and the retained binding, then echoes the transaction and old binding. |
+| 3 — Commit | The coordinator confirms readiness. The responder promotes locally, puts the old route into draining, and replies. |
+| 4 — Promoted | The coordinator receives promotion acknowledgement, promotes locally, and sends Confirm. |
+| 5 — Confirm | Confirms completion to the responder and begins its bounded old-route drain. |
+
+The nonce pairs identify transactions and connection lifetimes; they are not credentials. Local
+profile/session epochs and instance IDs remain local and are independently checked at the owner.
+Replies from another instance, another transaction or an old epoch cannot promote a route. Replays
+of a current exchange receive idempotent replies without extending deadlines. The coordinator
+serializes simultaneous intentional candidates; competitors are retired without demoting the old
+winner. Replacement capabilities must cover the active bundle's capabilities.
+
+Preparation/confirmation is limited to 10 seconds, phase retries to one per 500 ms, and completed
+draining to 3 seconds. Unselected authenticated candidates expire after 10 seconds. The existing
+worker services these deadlines; no new polling thread or reconnect scheduler exists. Existing
+connection/queue limits and the delivery owner's 16-submission backpressure still apply.
+
+Only the active binding receives new DM/group outbox submissions. Previously submitted frames and
+authorized ACKs can finish on the draining route, with storage/ledger deduplication handling overlap.
+If the new route fails while the old route is still retained, live, trusted and not cancelled, the
+manager restores the old binding and the delivery owner resumes its submissions. Otherwise normal
+reconnect/backoff and encrypted pending delivery apply. Exhausted coordination closes the candidate
+and preserves/restores a usable old binding; it does not promise uninterrupted recovery after all
+routes have failed. Socket EOF/error remains stronger evidence than advisory discovery state.
+
+For handoff-capable established bindings, network/candidate invalidation preserves a usable winner
+while fresh endpoint selection may prepare an alternate. Explicit cancellation still invalidates
+obsolete candidate instances; old-generation callbacks cannot promote them. Ordinary duplicates
+remain immediate retirement. Call signaling lookup, call lifetime and WebRTC/media routing have
+not migrated in Stage 5; voice continuity across handoff remains a later stage and physical gate.
 
 ## One-to-one voice boundary
 

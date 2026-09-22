@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <set>
 #include <thread>
 
 using namespace peerchat;
@@ -17,8 +18,123 @@ template<class Check> static void until(Node& node,std::vector<Seen>& seen,Check
 static std::vector<Seen> attempts(const std::vector<Seen>& seen,const std::string& peer){std::vector<Seen> result;for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::ConnectionAttempt&&value.event.expectedPeerId==peer)result.push_back(value);return result;}
 static size_t schedules(const std::vector<Seen>& seen,const std::string& peer){size_t result=0;for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::ReconnectScheduled&&value.event.expectedPeerId==peer)result++;return result;}
 
+static void handoffContracts(){
+    using namespace session;
+    const std::string a(64,'a'),b(64,'b');const SessionEpoch epoch{71};
+    for(int dropped=-1;dropped<=7;++dropped){
+        SessionTransportManager left("left",a,epoch),right("right",b,epoch);
+        struct Wire{bool toLeft;TransportInstanceId target;HandoffEnvelope envelope;};
+        std::vector<Wire> wire;bool lost=false;std::uint64_t now=100;
+        auto effects=[&](bool fromLeft,const std::vector<HandoffEffect>& values){
+            for(const auto& e:values)if(e.kind==HandoffEffect::Kind::Send){
+                if(dropped==6&&e.envelope.message!=HandoffMessage::Hello)continue;
+                if(dropped==static_cast<int>(e.envelope.message)&&!lost&&e.envelope.message!=HandoffMessage::Hello){lost=true;continue;}
+                wire.push_back({!fromLeft,{fromLeft?e.instance.value+100:e.instance.value-100},e.envelope});
+            }else if(e.kind==HandoffEffect::Kind::Retire){
+                (fromLeft?left:right).closeTransport(epoch,e.instance,e.reason,false);
+            }
+        };
+        auto authenticated=[&](SessionTransportManager& owner,const std::string& peer,std::uint64_t id,bool incoming){
+            RouteObservation route{{id},"loopback:"+std::to_string(id),"fixture","direct",incoming,1};
+            require(owner.registerAttempt(epoch,{id},peer,route,now),"handoff attempt registration failed");
+            DirectTransportAdapter adapter(epoch,{id},route,peer);
+            owner.observeTransport(adapter.identityPresented(peer,protocol::CapabilityMutualTls|protocol::CapabilityDirectHandoff),now);
+            owner.markLocallyTrusted(epoch,{id});owner.markRemoteAccepted(epoch,{id});
+            return owner.arbitrateWinner(epoch,{id},now);
+        };
+        auto pump=[&]{
+            for(int rounds=0;!wire.empty()&&rounds<30;++rounds){auto batch=std::move(wire);wire.clear();for(const auto& w:batch)
+                effects(w.toLeft,(w.toLeft?left:right).receiveHandoff(epoch,w.target,w.envelope,now));}
+            require(wire.empty(),"handoff messages formed an unbounded reply loop");
+        };
+        require(authenticated(left,b,1,false).activated()&&authenticated(right,a,101,true).activated(),"initial handoff binding failed");
+        effects(true,left.attachHandoff(epoch,{1},std::string(32,'1'),now));effects(false,right.attachHandoff(epoch,{101},std::string(32,'2'),now));pump();
+        require(left.canPrepareHandoff(b,{{2},"alternate","fixture","direct",false,1}),"alternate route was blocked behind winner");
+        require(authenticated(left,b,2,false).disposition==WinnerDisposition::AwaitingHandoff&&authenticated(right,a,102,true).disposition==WinnerDisposition::AwaitingHandoff,"candidate bypassed readiness");
+        require(left.snapshot(b)->activeTransport.value==1&&right.snapshot(a)->activeTransport.value==101,"preparation demoted healthy winner");
+        effects(true,left.attachHandoff(epoch,{2},std::string(32,'3'),now));effects(false,right.attachHandoff(epoch,{102},std::string(32,'4'),now));
+        if(dropped==7){left.observeNetwork(epoch,2);right.observeNetwork(epoch,2);}
+        pump();
+        for(int step=0;step<5;++step){now+=500;effects(true,left.handoffTick(epoch,now));effects(false,right.handoffTick(epoch,now));pump();}
+        if(dropped>=6){
+            now+=11000;effects(true,left.handoffTick(epoch,now));effects(false,right.handoffTick(epoch,now));pump();
+            require(left.snapshot(b)->activeTransport.value==1&&right.snapshot(a)->activeTransport.value==101,"lost coordination tore down healthy original binding");
+            continue;
+        }
+        if(dropped>0)require(lost,"loss fixture never intercepted its handoff phase");
+        require(left.snapshot(b)->activeTransport.value==2&&right.snapshot(a)->activeTransport.value==102,"lost/replayed promotion did not converge");
+        HandoffEnvelope stale{HandoffMessage::Commit,std::string(32,'3')+std::string(32,'4'),std::string(32,'1')+std::string(32,'2')};
+        require(right.receiveHandoff({70},{102},stale,now).empty(),"old profile lifetime mutated handoff");
+        require(right.receiveHandoff(epoch,{101},stale,now).empty(),"handoff replay crossed transport instances");
+        if(dropped==-1){
+            left.closeTransport(epoch,{2},"new winner failed",true);effects(true,left.handoffTick(epoch,now));
+            require(left.snapshot(b)->activeTransport.value==1,"retained trusted route was not restored after immediate candidate failure");
+            right.closeTransport(epoch,{102},"remote candidate EOF",true);effects(false,right.handoffTick(epoch,now));
+            require(right.snapshot(a)->activeTransport.value==101,"remote peer did not restore its retained binding after candidate EOF");
+        }else if(dropped==0){
+            left.removePeer(b);left.closeTransport(epoch,{2},"new winner failed after trust revocation",true);effects(true,left.handoffTick(epoch,now));
+            require(!left.snapshot(b)->connected,"fallback promoted a route after trust revocation");
+        }else{
+            now+=4000;effects(true,left.handoffTick(epoch,now));effects(false,right.handoffTick(epoch,now));pump();
+            require(left.snapshot(b)->activeTransport.value==2&&right.snapshot(a)->activeTransport.value==102,"bounded old drain cleared replacement");
+            require(!left.draining({1})&&!right.draining({101}),"draining ownership was not bounded");
+        }
+    }
+    // Legacy peers advertise no new bit, so the manager must never emit handoff.
+    SessionTransportManager legacy("legacy",a,epoch);RouteObservation route{{1},"legacy:1","fixture","direct",false,1};
+    legacy.registerAttempt(epoch,{1},b,route,0);DirectTransportAdapter adapter(epoch,{1},route,b);
+    legacy.observeTransport(adapter.identityPresented(b,protocol::CapabilityMutualTls),0);legacy.markLocallyTrusted(epoch,{1});legacy.markRemoteAccepted(epoch,{1});
+    require(legacy.arbitrateWinner(epoch,{1},0).activated(),"legacy peer did not activate");
+    require(legacy.attachHandoff(epoch,{1},std::string(32,'1'),0).empty()&&legacy.handoffTick(epoch,1).empty(),"new packets were sent to a legacy peer");
+}
+
+static void liveHandoff(){
+    Node left,right;std::string a,b;std::uint64_t leftWinner=0,rightWinner=0;
+    std::set<std::string> receivedLeft,receivedRight,deliveredLeft,deliveredRight;
+    auto token=Storage::newMessageId();auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/("handoff-"+token);
+    auto port=static_cast<std::uint16_t>(31000+std::stoul(token.substr(0,4),nullptr,16)%10000);
+    bool requireContinuity=false;int promotions=0;
+    std::set<std::pair<bool,std::uint64_t>> retired;
+    auto collect=[&]{
+        auto receive=[&](Node& node,bool isLeft){for(const auto& e:node.poll()){
+            if(e.kind==NodeEvent::Kind::Ready)(isLeft?a:b)=e.peerId;
+            if(e.kind==NodeEvent::Kind::TrustRequired)node.approve(e.peerId,true);
+            if(e.kind==NodeEvent::Kind::SessionSnapshot){
+                if(requireContinuity)require(e.sessionConnected,"candidate attempt downgraded a live text session");
+                if(e.sessionConnected)(isLeft?leftWinner:rightWinner)=e.attemptId;
+            }
+            if(e.kind==NodeEvent::Kind::ConnectionLifecycle){
+                if(e.text.find(L"handoff commit authenticated")!=std::wstring::npos||e.text.find(L"handoff promotion acknowledged")!=std::wstring::npos)++promotions;
+                if(e.text.find(L"transport closed: ")==0)retired.insert({isLeft,e.attemptId});
+            }
+            if(e.kind==NodeEvent::Kind::Message)for(const auto& m:e.messages)if(m.recipient==(isLeft?a:b))
+                require((isLeft?receivedLeft:receivedRight).insert(m.id).second,"handoff duplicated a visible message");
+            if(e.kind==NodeEvent::Kind::Delivered)for(const auto& m:e.messages)(isLeft?deliveredLeft:deliveredRight).insert(m.id);
+        }};receive(left,true);receive(right,false);
+    };
+    auto wait=[&](auto predicate,const char* error){auto deadline=Clock::now()+std::chrono::seconds(15);do{collect();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(10));}while(Clock::now()<deadline);throw std::runtime_error(error);};
+    left.start((root/L"left").wstring(),port,L"Handoff left");right.start((root/L"right").wstring(),port+1,L"Handoff right");
+    wait([&]{return !a.empty()&&!b.empty();},"handoff nodes did not start");left.connect(L"127.0.0.1",port+1,b);right.connect(L"127.0.0.1",port,a);
+    wait([&]{return leftWinner&&rightWinner;},"initial handoff text route failed");
+    // Let the already queued authenticated connection-token exchange arrive.
+    auto settle=Clock::now()+std::chrono::milliseconds(250);while(Clock::now()<settle){collect();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+    const auto oldLeft=leftWinner,oldRight=rightWinner;requireContinuity=true;
+    left.connect(L"localhost",port+1,b,L"Alternate direct candidate",L"manual retry",true);
+    right.connect(L"localhost",port,a,L"Alternate direct candidate",L"manual retry",true);
+    for(int i=0;i<24;++i){left.send(b,L"synthetic handoff message");right.send(a,L"synthetic handoff message");collect();std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+    wait([&]{return promotions>=2&&leftWinner!=oldLeft&&rightWinner!=oldRight;},"both peers did not coordinate direct handoff");
+    wait([&]{return receivedLeft.size()==24&&receivedRight.size()==24&&deliveredLeft.size()==24&&deliveredRight.size()==24;},"text/ACK continuity failed across simultaneous handoff");
+    // Either drain timer can close the shared old socket first; the other end
+    // then observes EOF, not necessarily its own timer. Require both closes.
+    wait([&]{return retired.count({true,oldLeft})&&retired.count({false,oldRight});},"old direct transports did not drain within the bound");
+    left.send(b,L"synthetic after drain");right.send(a,L"synthetic after drain");
+    wait([&]{return receivedLeft.size()==25&&receivedRight.size()==25&&deliveredLeft.size()==25&&deliveredRight.size()==25;},"text did not survive old route retirement");
+    left.stop();right.stop();
+}
+
 int main(int argc,char** argv){
     try{
+        handoffContracts();
         // Retain the Stage 2 adapter-contract checks while Stage 3 moves the
         // direct-path continuity decisions into the manager below.
         session::SessionEpoch epoch{41};
@@ -112,14 +228,18 @@ int main(int argc,char** argv){
         const Blob expectedAcceptedWire={0,0,0,4,'P','T',1,static_cast<unsigned char>(protocol::Accepted)};
         require(acceptedWire==expectedAcceptedWire,"legacy protocol framing changed");
         if(argc==2&&std::string(argv[1])=="--contract-only"){
-            std::cout<<"PASS: Stage 3 continuity owner, deterministic winner/retry/cancellation tokens, revisioned snapshots, direct-wrapper channel separation, and unchanged protocol framing.\n";
+            std::cout<<"PASS: Stage 3 continuity plus Stage 5 readiness, lost/replayed handoff, promotion/drain/fallback, stale lifetimes, legacy gating and unchanged legacy framing.\n";
             return 0;
         }
+        liveHandoff();
 
         auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/std::filesystem::path(L"reconnect-"+std::to_wstring(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         const std::string peerA(64,'a'),peerB(64,'b');Node node;std::vector<Seen> seen;node.start((root/L"main").wstring(),29761,L"Reconnect test");until(node,seen,[&]{for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::Ready)return true;return false;},"node did not start");
         node.saveContact({peerA,L"Peer A",{},{{L"127.0.0.1",29881}},true});node.saveContact({peerB,L"Peer B",{},{{L"127.0.0.1",29882}},true});
-        until(node,seen,[&]{return attempts(seen,peerA).size()>=3&&attempts(seen,peerB).size()>=3;},"two peers did not retry with backoff");
+        // This includes three real Winsock connect failures, not just the short
+        // injected backoff. Keep delay/cap assertions below independent of the
+        // OS's variable refusal latency and build-machine scheduling.
+        until(node,seen,[&]{return attempts(seen,peerA).size()>=3&&attempts(seen,peerB).size()>=3;},"two peers did not retry with backoff",15000);
         auto a=attempts(seen,peerA),b=attempts(seen,peerB);require(a[0].event.candidate==L"127.0.0.1:29881"&&b[0].event.candidate==L"127.0.0.1:29882","simultaneous peer diagnostics crossed candidates");require(a[0].event.candidateSource==L"Saved contact"&&a[0].event.route==L"automatic reconnect","automatic retry metadata was not propagated");
         auto gapOne=std::chrono::duration_cast<std::chrono::milliseconds>(a[1].at-a[0].at).count(),gapTwo=std::chrono::duration_cast<std::chrono::milliseconds>(a[2].at-a[1].at).count();require(gapOne>=50&&gapTwo>=110&&gapTwo>gapOne,"reconnect delay did not grow exponentially");
         for(const auto& value:seen)if(value.event.kind==NodeEvent::Kind::ReconnectScheduled)require(value.event.retryDelayMilliseconds>0&&value.event.retryDelayMilliseconds<=800,"reconnect jitter exceeded the configured cap");
@@ -130,6 +250,6 @@ int main(int argc,char** argv){
 
         Node target,verifier;std::vector<Seen> targetEvents,verifierEvents;target.start((root/L"target").wstring(),29762,L"Actual peer");verifier.start((root/L"verifier").wstring(),29763,L"Verifier");std::string targetId;until(target,targetEvents,[&]{for(const auto& value:targetEvents)if(value.event.kind==NodeEvent::Kind::Ready){targetId=value.event.peerId;return true;}return false;},"target did not start");until(verifier,verifierEvents,[&]{for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::Ready)return true;return false;},"verifier did not start");const std::string expected(64,'e');verifier.saveContact({expected,L"Expected peer",{},{{L"127.0.0.1",29762}},true});
         NodeEvent mismatch;until(verifier,verifierEvents,[&]{drain(target,targetEvents);for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::TrustRequired&&value.event.expectedPeerId==expected){mismatch=value.event;return true;}return false;},"wrong identity did not reach verification");require(mismatch.peerId==targetId&&mismatch.candidate==L"127.0.0.1:29762"&&mismatch.route==L"automatic reconnect","wrong-identity attempt lost correlation");size_t pendingAttempts=attempts(verifierEvents,expected).size();verifier.connect(L"127.0.0.1",29762,expected,L"Discovery LAN candidate",L"candidate update - same LAN",true);std::this_thread::sleep_for(std::chrono::milliseconds(30));drain(verifier,verifierEvents);verifier.connect(L"127.0.0.1",29762,expected,L"Refreshed candidate",L"manual retry",true);until(verifier,verifierEvents,[&]{drain(target,targetEvents);return attempts(verifierEvents,expected).size()>pendingAttempts;},"Manual repair was blocked by outstanding trust/transport state");bool refreshedMetadata=false;for(const auto& value:verifierEvents)if(value.event.kind==NodeEvent::Kind::Disconnected&&value.event.expectedPeerId==expected&&value.event.candidateSource==L"Discovery LAN candidate"&&value.event.route==L"candidate update - same LAN")refreshedMetadata=true;require(refreshedMetadata,"Authoritative same-endpoint refresh left the active attempt labeled Saved contact");until(verifier,verifierEvents,[&]{drain(target,targetEvents);int prompts=0;for(const auto& value:verifierEvents){require(value.event.kind!=NodeEvent::Kind::Connected,"Repair bypassed identity verification");if(value.event.kind==NodeEvent::Kind::TrustRequired&&value.event.expectedPeerId==expected)++prompts;}return prompts>=2;},"Retried wrong identity did not require verification");verifier.approve(targetId,false);size_t mismatchAttempts=attempts(verifierEvents,expected).size();auto quietUntil=Clock::now()+std::chrono::milliseconds(1100);while(Clock::now()<quietUntil){drain(verifier,verifierEvents);drain(target,targetEvents);std::this_thread::sleep_for(std::chrono::milliseconds(10));}require(attempts(verifierEvents,expected).size()==mismatchAttempts,"wrong-identity endpoint retried without a manual/presence trigger");target.stop();verifier.stop();
-        std::cout<<"PASS: Stage 3 direct continuity ownership, unchanged wire framing, authoritative snapshots, two-peer reconnect backoff, route invalidation, retry diagnostics, and wrong-identity suspension.\n";return 0;
+        std::cout<<"PASS: Stage 5 direct-text handoff, simultaneous candidates, bidirectional ACK/dedup, bounded drain; Stage 3 reconnect, snapshots, route invalidation, diagnostics and identity suspension.\n";return 0;
     }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

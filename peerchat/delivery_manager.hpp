@@ -39,6 +39,11 @@ public:
         return true;
     }
 
+    bool restoreTransport(session::TransportInstanceId instance) {
+        auto found=transports_.find(instance.value);if(found==transports_.end())return false;
+        found->second.draining=false;return true;
+    }
+
     void retireTransport(session::TransportInstanceId instance) {
         transports_.erase(instance.value);
         for (auto it = submissions_.begin(); it != submissions_.end();) {

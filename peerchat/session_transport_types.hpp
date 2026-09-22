@@ -100,6 +100,7 @@ struct RetrySchedule {
 enum class WinnerDisposition : std::uint8_t {
     Activated,
     ReplacedExisting,
+    AwaitingHandoff,
     RejectedDuplicate,
     RejectedStaleToken,
     RejectedNotReady
