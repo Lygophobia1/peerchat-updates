@@ -18,6 +18,8 @@ enum class CallType { Voice };
 enum class Direction { Outgoing, Incoming };
 enum class State { Idle, Outgoing, Incoming, Negotiating, ConnectingMedia, Connected, Ending, Ended, Failed };
 enum class ParticipantState { Invited, Ringing, Negotiating, Connected, Left, Failed };
+enum class MediaState { Idle, Negotiating, Connected, Interrupted, Recovering, Failed, Closed };
+enum class MediaRoute { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
 
 struct Participant {
     std::string peerId;
@@ -36,6 +38,15 @@ struct CallSession {
     std::map<std::string, Participant> participants;
     bool muted = false;
     bool deafened = false;
+    MediaState mediaState = MediaState::Idle;
+    std::uint64_t mediaGeneration = 0;
+    std::uint64_t mediaRecoveryDeadlineMilliseconds = 0;
+    std::uint64_t nextMediaAttemptMilliseconds = 0;
+    unsigned mediaRecoveryAttempts = 0;
+    bool mediaRecoveryCapable = false;
+    bool controlAvailable = true;
+    std::uint64_t controlGraceDeadlineMilliseconds = 0;
+    MediaRoute mediaRoute = MediaRoute::Unknown;
 };
 
 enum class IncomingDisposition { Started, Duplicate, ReplaceOutgoing, Busy, Replay };
@@ -70,6 +81,9 @@ public:
     bool matches(std::uint64_t lifetime, const std::string& id, const std::string& peerId) const noexcept {
         return active_ && active_->lifetime == lifetime && active_->id.value == id && active_->participants.count(peerId) != 0;
     }
+    bool matchesMedia(std::uint64_t lifetime, const std::string& id, const std::string& peerId, std::uint64_t generation) const noexcept {
+        return matches(lifetime,id,peerId) && active_->mediaGeneration == generation;
+    }
     bool beginOutgoing(CallId id, CallType type, const std::vector<std::string>& peers, std::uint64_t deadline) {
         if (active_ || id.value.empty() || peers.empty()) return false;
         CallSession session; session.id = std::move(id); session.type = type; session.direction = Direction::Outgoing;
@@ -102,6 +116,17 @@ public:
     }
     bool setMuted(bool value) noexcept { if (!active_) return false; active_->muted = value; return true; }
     bool setDeafened(bool value) noexcept { if (!active_) return false; active_->deafened = value; return true; }
+    bool setMediaRecoveryCapable(const std::string& peerId,bool value) noexcept { if(!active_||!active_->participants.count(peerId))return false;active_->mediaRecoveryCapable=value;return true; }
+    bool beginInitialMedia(const std::string& id) noexcept {if(!active_||active_->id.value!=id)return false;active_->mediaGeneration=1;active_->mediaState=MediaState::Negotiating;active_->mediaRoute=MediaRoute::Unknown;return true;}
+    bool interruptMedia(std::uint64_t now,std::uint64_t deadline) noexcept {if(!active_||!active_->mediaRecoveryCapable)return false;bool alreadyRecovering=active_->mediaState==MediaState::Interrupted||active_->mediaState==MediaState::Recovering;active_->mediaState=MediaState::Interrupted;active_->mediaRoute=MediaRoute::Unknown;if(!alreadyRecovering||!active_->mediaRecoveryDeadlineMilliseconds){active_->mediaRecoveryDeadlineMilliseconds=deadline;active_->mediaRecoveryAttempts=0;}active_->nextMediaAttemptMilliseconds=now;return true;}
+    std::uint64_t beginMediaRecovery(std::uint64_t now,std::uint64_t retryDelay) noexcept {if(!active_||!active_->mediaRecoveryCapable||now<active_->nextMediaAttemptMilliseconds||now>=active_->mediaRecoveryDeadlineMilliseconds)return 0;++active_->mediaGeneration;active_->mediaState=MediaState::Recovering;++active_->mediaRecoveryAttempts;active_->nextMediaAttemptMilliseconds=now+retryDelay;return active_->mediaGeneration;}
+    bool acceptMediaGeneration(std::uint64_t generation,std::uint64_t deadline) noexcept {if(!active_||!active_->mediaRecoveryCapable||generation<=active_->mediaGeneration)return false;active_->mediaGeneration=generation;active_->mediaState=MediaState::Recovering;active_->mediaRoute=MediaRoute::Unknown;if(!active_->mediaRecoveryDeadlineMilliseconds||deadline<active_->mediaRecoveryDeadlineMilliseconds)active_->mediaRecoveryDeadlineMilliseconds=deadline;active_->nextMediaAttemptMilliseconds=0;return true;}
+    bool transitionMedia(std::uint64_t generation,MediaState state,MediaRoute route=MediaRoute::Unknown) noexcept {if(!active_||active_->mediaGeneration!=generation)return false;active_->mediaState=state;if(route!=MediaRoute::Unknown)active_->mediaRoute=route;if(state==MediaState::Connected){active_->mediaRecoveryDeadlineMilliseconds=0;active_->nextMediaAttemptMilliseconds=0;active_->mediaRecoveryAttempts=0;}return true;}
+    bool mediaRetryDue(std::uint64_t now)const noexcept{return active_&&active_->mediaRecoveryCapable&&(active_->mediaState==MediaState::Interrupted||active_->mediaState==MediaState::Recovering)&&active_->mediaRecoveryDeadlineMilliseconds&&now>=active_->nextMediaAttemptMilliseconds&&now<active_->mediaRecoveryDeadlineMilliseconds;}
+    bool mediaTimedOut(std::uint64_t now)const noexcept{return active_&&active_->mediaRecoveryDeadlineMilliseconds&&now>=active_->mediaRecoveryDeadlineMilliseconds&&active_->mediaState!=MediaState::Connected;}
+    void deferMediaRetry(std::uint64_t now,std::uint64_t delay)noexcept{if(active_)active_->nextMediaAttemptMilliseconds=now+delay;}
+    void observeControl(bool available,std::uint64_t deadline=0)noexcept{if(!active_)return;active_->controlAvailable=available;active_->controlGraceDeadlineMilliseconds=available?0:deadline;}
+    bool controlAndMediaTimedOut(std::uint64_t now)const noexcept{return active_&&!active_->controlAvailable&&active_->controlGraceDeadlineMilliseconds&&now>=active_->controlGraceDeadlineMilliseconds&&active_->mediaState!=MediaState::Connected;}
     bool timedOut(std::uint64_t now) const noexcept { return active_ && active_->deadlineMilliseconds && now >= active_->deadlineMilliseconds; }
     std::optional<CallSession> finish(State terminal) {
         if (!active_) return {};

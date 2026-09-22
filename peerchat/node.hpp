@@ -24,8 +24,13 @@ struct NodeEvent {
     std::uint64_t callLifetime=0;
     std::uint32_t callState=0;
     std::uint32_t callType=0;
+    std::uint32_t mediaState=0;
+    std::uint64_t mediaGeneration=0;
     bool callMuted=false;
     bool callDeafened=false;
+    bool callControlAvailable=true;
+    std::uint32_t reliableRoute=0;
+    std::uint32_t mediaRoute=0;
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;

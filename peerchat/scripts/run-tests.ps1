@@ -18,7 +18,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Group ledger test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\group_node_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\group-node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Group network test build failed' }
-    & g++ -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test build failed' }
     & g++ -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\reconnect_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\reconnect-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Reconnect/diagnostics test build failed' }

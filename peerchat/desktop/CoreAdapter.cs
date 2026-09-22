@@ -106,7 +106,7 @@ public sealed class CoreAdapter : IDisposable {
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
     public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
-public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime; public int retryMs,callState,callType; public bool connected,callMuted,callDeafened; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
+public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration; public int retryMs,callState,callType,mediaState,reliableRoute,mediaRoute; public bool connected,callMuted,callDeafened,callControlAvailable; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
 public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }

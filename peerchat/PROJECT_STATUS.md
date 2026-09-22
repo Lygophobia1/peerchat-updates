@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 6 voice-control ownership and profile audio settings implemented after accepted Stage 5.5; automated acceptance complete, physical voice acceptance pending.
-**Next action:** physical two-client Stage 6 voice/settings acceptance; stop before Stage 7 media continuity.
+**Current stage:** Stage 7 media continuity and voice recovery implementation and automated gates are complete; Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
+**Next action:** physically test repeated network changes with two packaged clients, confirming the same CallId, recovered two-way audio and preserved controls; stop before Stage 8 screen sharing.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -118,8 +118,9 @@ These are the current boundaries after Stage 5.5.
   cannot accept new DM/group submissions. Stage 5 now exercises that ownership during real overlap;
   immediate candidate failure can restore the retained, still-trusted route.
 - TCP/relay control and WebRTC media are separate live paths. Call signaling may use either verified
-  reliable winner; audio remains on independent direct ICE/DTLS-SRTP. Final control loss still ends
-  the Stage 6 call, while media handoff/control-gap continuity remains deferred to Stage 7.
+  reliable winner; audio remains on independent ICE/DTLS-SRTP. Temporary control loss and media
+  interruption are projected independently; Stage 5.5 alone restores the reliable route while the
+  Stage 7 call owner waits within its bounded control/media recovery deadline.
 - Native/managed events now carry complete profile/session epoch and monotonically revisioned session
   snapshots. WPF applies only newer snapshots for online state and winning-connection projection;
   failed/superseded legacy attempt events remain diagnostics and cannot downgrade a live winner.
@@ -175,7 +176,30 @@ These are the current boundaries after Stage 5.5.
 - Settings → Voice exposes working device refresh/selection and native software levels. Existing
   mute/deafen and bounded input/output telemetry remain call controls. WinMM/Opus does not provide
   supported AEC, noise suppression, AGC, sensitivity or push-to-talk, so no nonfunctional toggles are
-  exposed. Stage 7 media continuity, TURN/media relay and group calls remain deferred.
+  exposed. TURN/media relay and group calls remain deferred.
+
+## Stage 7 implemented boundary
+
+- The logical `CallSession` now owns a separate media state, monotonically increasing generation,
+  recovery capability, bounded deadline/retry pacing, control-availability grace and authoritative
+  selected-media route. A stable CallId and call lifetime survive successful media replacement.
+- Every recovery offer, answer and candidate is capability-gated and generation-tagged. Media events
+  are accepted only for the current call lifetime, participant and generation; late old-generation
+  candidates, answers, connected and failed completions are ignored.
+- Meaningful network-generation changes and ICE disconnect/failure interrupt only `VoiceMedia`.
+  Recovery recreates a fresh libdatachannel PeerConnection and exchanges negotiation over whichever
+  authenticated direct/opaque-relay control winner Stage 5.5 currently provides. Audio is never sent
+  through the PeerChat server relay.
+- Recovery is bounded to 30 seconds in production with paced attempts. Missing control suppresses
+  negotiation without starting another reconnect owner. Healthy media may continue during temporary
+  control loss; unavailable control plus unavailable media eventually ends cleanly. Local hangup
+  always tears down local media immediately.
+- Mute, deafen, selected devices and input/output software gain survive media replacement. Older
+  clients without the recovery capability keep compatible Stage 6 initiation and terminate cleanly
+  rather than receiving new recovery frames.
+- Security & Status renders authoritative reliable and media methods separately: Direct LAN/Internet
+  or PeerChat Server Relay with peer TLS, versus LAN/NAT-traversed ICE (and TURN only if genuinely
+  selected) with DTLS-SRTP. Media recovery state/generation is native-owned; WPF does not infer it.
 
 ## Stage 2 implemented boundary
 
@@ -262,11 +286,14 @@ Interfaces/factories need concrete value.
 | 3 | Single winner/retry/cancellation owner, tokens and snapshots; deterministic old-callback/loser/presence cases plus affected friend/profile integration. |
 | 4 | Delivery above sockets; destination ACK, drain, resend/dedup, storage/restart and group-node tests. |
 | 5 | Capability-gated direct handoff; two-peer arbitration/loss/replay/fallback and legacy compatibility, then physical text handoff. |
-| 6 | Voice control migration; call/control/media separation, stale epochs, control-gap hang-up and repeated-call/profile tests, plus physical voice. |
-| 7 | Pinned-library media transition proof before implementation; injected media/lifecycle plus physical network-change and audible continuity tests. |
-| 8 | Significant-checkpoint full regression, package audit and physical messaging/voice/network-transition acceptance. |
-| 9 | Retire proven-obsolete paths with affected gates; client modularization only afterward under separate authorization. |
-| 10 | Separately authorized screen sharing, then video/files; no implicit TURN/relay/onion implementation. |
+| 6 | One-to-one voice ownership and profile voice settings; implementation complete at `c9943b5`, physical acceptance pending. |
+| 7 | Implementation/automated gates complete: bounded replaceable media generations, stale-generation rejection and voice recovery; physical network-change/audio continuity pending. |
+| 8 | Next, not begun: one-to-one screen sharing using the proven call/media lifecycle. |
+| 9 | Webcam video. |
+| 10 | Group calls without replacing the participant-oriented call owner. |
+| 11 | File transfer and richer messaging features. |
+| 12 | Product usability, reliability, packaging and UX polish. |
+| 13 | Node retirement, source-tree organization, proven legacy-path removal and remaining architectural cleanup. |
 
 During migration, require exactly one production reconnect/winner decision owner per moved responsibility. Planned
 runtime epoch, instance ID, route revision and handoff ID must have explicit lifetimes; callbacks
@@ -414,7 +441,27 @@ to implement protocol/media behavior in Stage 2.
   Windows-inbox imports in `PeerChat.Core.dll`.
 - Physical two-client acceptance remains required for real microphone/output selection, persisted
   levels, direct call audio, call control while reliable messaging uses relay, and repeated teardown.
-  Stage 6 is not marked physically accepted and Stage 7 has not begun.
+  Stage 6 is not marked physically accepted.
+
+### Stage 7 verification
+
+- Focused native voice coverage passes stable-CallId recovery, repeated media replacement,
+  old-generation rejection, preserved mute/deafen, bounded deadline ownership, local and remote
+  hangup during recovery, simultaneous-call arbitration and normal Stage 6 lifecycle behavior.
+- The existing reconnect/relay suite now answers a voice call over an authenticated opaque relay,
+  establishes independent ICE media, changes network generation, and proves replacement-media
+  negotiation crosses relay control without disturbing its reliable winner.
+- The complete native/checkpoint gate passes: encrypted storage, groups, durable delivery,
+  reconnect/handoff/relay, TLS, six-node/process messaging, WebRTC/Opus/audio and 42 updater
+  assertions. DPAPI-backed suites were run under the normal interactive Windows user context.
+- Desktop adapter/profile tests and the two-instance packaged WPF smoke pass. The voice UI smoke
+  verifies stale-generation rejection, accepted current-generation close, capped diagnostics, and
+  separate authoritative PeerChat-relay/Direct-LAN versus NAT-traversed-media labels.
+- `build\stage7-media-continuity\Client` passes managed-runtime completeness, restricted native
+  load and import audit; `PeerChat.Core.dll` imports Windows-inbox DLLs only.
+- Physical acceptance remains pending: two real clients must verify two-way audio, repeated network
+  switches, same logical CallId, recovered media generation, preserved devices/gain/mute/deafen,
+  control recovery through direct or server relay, and clean hangup/profile shutdown.
 
 ### Historical regression and physical evidence
 
@@ -494,6 +541,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-Stage 7 media continuity, client modularization, screen sharing, video, files, group voice, TURN/media
-relay, onion, disappearing messages, external bridge and multi-device synchronization remain deferred.
+Stage 8 screen sharing, client modularization, video, files, group voice, configured TURN/media relay,
+onion, disappearing messages, external bridge and multi-device synchronization remain deferred.
 Preserve the accepted stack and begin the next stage only with separate authorization.

@@ -27,6 +27,7 @@ struct RouteRevision {
 };
 
 enum class TransportKind : std::uint8_t { Direct, Relay };
+enum class RouteClass : std::uint8_t { Unknown, DirectLan, DirectInternet, ServerRelay };
 
 struct PeerSessionIdentity {
     // localProfileScope is an opaque local-only profile identifier. It is not
@@ -84,6 +85,7 @@ struct RouteObservation {
     // delayed invalidation may retire only instances from an older observation.
     std::uint64_t networkRevision = 0;
     TransportKind kind = TransportKind::Direct;
+    RouteClass routeClass = RouteClass::Unknown;
 };
 
 struct RetryTarget {

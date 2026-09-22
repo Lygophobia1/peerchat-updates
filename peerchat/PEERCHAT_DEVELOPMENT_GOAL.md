@@ -658,12 +658,24 @@ primitives. Do not replace the working networking stack with a new P2P framework
 demonstrated need, and do not introduce a plugin architecture or broad rewrite before this planned
 incremental refactor.
 
-Intended sequence:
+Current feature-first sequence:
 
-**accepted baseline/updater checkpoint → types and direct wrapper without behavior changes →
-single winner/retry/lifetime owner → delivery continuity → capability-gated direct handoff →
-voice control migration → media continuity proof → packaged physical acceptance → retire proven
-legacy paths → client modularization → screen sharing → video/files**
+1. Stage 5.5 — reliable direct/relay control transport: complete and physically accepted.
+2. Stage 6 — one-to-one voice ownership and voice settings: implementation complete at `c9943b5`;
+   physical two-client voice/settings acceptance remains pending.
+3. Stage 7 — media continuity and voice recovery: implementation and automated verification complete;
+   physical two-client network-change/audio acceptance pending.
+4. Stage 8 — one-to-one screen sharing: next, not begun.
+5. Stage 9 — webcam video.
+6. Stage 10 — group calls.
+7. Stage 11 — file transfer and richer messaging features.
+8. Stage 12 — product usability, reliability, packaging and UX polish.
+9. Stage 13 — Node retirement, source-tree organization, proven legacy-path removal and remaining
+   architectural cleanup.
+
+The large Node retirement/source-tree cleanup is deliberately postponed until the usable feature
+set is present. New features must still have focused owners and must not add another large state
+machine or feature authority to Node; Node may remain temporary wiring while ownership migrates.
 
 Use incremental engineering checkpoints and separate physical-acceptance milestones. Full regression
 belongs at significant checkpoints; local and affected integration gates cover smaller stages.
@@ -1112,8 +1124,9 @@ Stages 3–5 and the focused Stage 5.5 reliable connection work are implemented 
 accepted: one native manager owns direct/relay attempts, retry/fallback, winners, stale callbacks,
 handoff and draining, while durable delivery/trust remain transport-independent above it. Stage 6
 voice-control ownership and working profile audio settings are implemented with physical acceptance
-pending. Do not begin Stage 7 media continuity until explicitly authorized. Networking/session
-migration comes before broad client modularization.
+pending. Stage 7 media continuity is implemented and awaiting physical acceptance. Do not begin
+Stage 8 screen sharing without a separate stage authorization. Broad Node retirement and source-tree reorganization remain deferred to
+Stage 13; new features still require narrow ownership outside Node wherever practical.
 Preserve the accepted baseline and the open CLR/WPF and false-route-teardown backlog.
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and

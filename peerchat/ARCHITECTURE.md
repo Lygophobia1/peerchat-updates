@@ -362,17 +362,19 @@ routes have failed. Socket EOF/error remains stronger evidence than advisory dis
 For handoff-capable established bindings, network/candidate invalidation preserves a usable winner
 while fresh endpoint selection may prepare an alternate. Explicit cancellation still invalidates
 obsolete candidate instances; old-generation callbacks cannot promote them. Ordinary duplicates
-remain immediate retirement. Call signaling lookup, call lifetime and WebRTC/media routing have
-not migrated in Stage 5; voice continuity across handoff remains a later stage and physical gate.
+remain immediate retirement. Stage 7 observes this authoritative control availability but does not
+own, duplicate, or alter the Stage 5.5 transport recovery policy.
 
 ## One-to-one voice boundary
 
 Text, group envelopes and call signaling use the authenticated reliable peer-TLS binding, whether
 its physical transport is direct TCP or the Stage 5.5 opaque server relay. Voice
 media uses an independent libdatachannel WebRTC/ICE/DTLS-SRTP path, which may select a different
-endpoint pair. Reliable transport kind is not a proxy for media capability. Final control loss still
-ends the Stage 6 call even if media was healthy; no control-gap resume protocol or media-route
-continuity abstraction is implemented yet.
+endpoint pair. Reliable transport kind is not a proxy for media capability. Temporary final-control
+loss is projected independently and receives a bounded grace period: healthy media may continue,
+but new negotiation waits for a restored authenticated direct or relay control binding. Local hangup
+always stops local media immediately. If unavailable control and media exceed their bounded recovery
+deadline, `CallManager` terminates the logical call cleanly.
 
 Voice call signaling is carried only after the existing peer connection has completed mutual
 TLS, expected Peer ID verification, and explicit local trust. Protocol capability negotiation gates
@@ -389,13 +391,15 @@ owned by the node's `VoiceMedia.poll` lifecycle, not a libdatachannel callback. 
 callbacks, stops audio, explicitly deletes independently registered C API track handles, then deletes
 the peer connection and codecs. Reuse resets call media counters and mute/deafen state. Each call
 creates a distinct PeerConnection/ICE agent tagged with the current WPF network generation and
-active IPv4 fingerprint; candidates are cleared with call teardown. The existing network-invalidation
-path ends affected calls; the recorded generation is not a general stale-callback guard. A capture
-generation check prevents a buffer from being requeued after mute closes/reopens its device.
+active IPv4 fingerprint; candidates are cleared with call teardown. A meaningful network-generation
+change or media disconnect now interrupts only the current media generation. A capture generation
+check prevents a buffer from being requeued after mute closes/reopens its device.
 
 The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
-the call ID. Each asynchronous media event is also bound to the native call lifetime and expected
-participant, so a stale completion cannot mutate a newer call. Each send resolves the current
+the call ID. Capability-gated recovery frames additionally carry the monotonically increasing media
+generation. Each asynchronous media event is bound to call ID, native call lifetime, expected
+participant and media generation, so a stale candidate, answer, connected or failed completion cannot
+mutate a replacement generation. Each send resolves the current
 authenticated reliable winner, while call state remains keyed by call ID and stable Peer ID, so
 duplicate arbitration cannot strand negotiation on a retired socket. Diagnostics correlate the
 winning connection at call start and the connection used
@@ -435,8 +439,20 @@ diagnostics and no new polling is introduced. It never contains
 audio or cryptographic/session secrets. WPF orchestrates controls and duration. Profile switching disposes the old core,
 closes peer connection/audio devices, then releases identity/database state. Discovery is not in the
 established media path. Standard STUN gathering supplements offline-capable host candidates for
-common NAT traversal. STUN is coordination only; TURN/privacy relay remains a future fallback for
-NAT combinations that cannot form a direct candidate pair and cannot become call authority.
+common NAT traversal. Recovery recreates a fresh pinned-library PeerConnection rather than assuming
+unsupported in-place ICE restart behavior. `CallManager` owns Interrupted/Recovering state, a
+30-second production deadline and retry pacing; `VoiceMedia` still reports facts only. The same
+logical CallId survives successful replacement, and mute/deafen, selected devices and software gain
+are reapplied. Older peers without the media-recovery capability retain the Stage 6 terminate-on-loss
+behavior and never receive the new frame types. STUN is coordination only; TURN remains configured
+as a future `VoiceMedia` route class but no TURN server is configured or deployed. The PeerChat
+server relay carries recovery signaling only and never carries audio.
+
+The bridge exports typed authoritative route facts. Reliable control reports Direct LAN, Direct
+Internet or PeerChat Server Relay from the active `SessionTransportManager` route. Voice reports
+Direct LAN ICE, server-reflexive/NAT-traversed ICE or TURN only from the selected media candidate
+pair; unavailable/recovering state and media generation come from `CallManager`. WPF renders those
+facts separately with Peer TLS versus DTLS-SRTP and does not infer route type from display strings.
 
 Live level meters use a generic `MediaTelemetry` snapshot rather than exposing PCM to managed code.
 The existing native capture worker calculates normalized RMS before its Opus callback; decoded PCM

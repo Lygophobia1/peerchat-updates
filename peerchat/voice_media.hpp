@@ -13,6 +13,7 @@ namespace peerchat {
 // a bounded event queue so the PeerChat node remains the signaling authority.
 class VoiceMedia {
 public:
+    enum class Route { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
     enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError };
     struct Event {
         EventKind kind;
@@ -33,6 +34,7 @@ public:
     void setDeafened(bool deafened);
     void setVolumes(float inputGain, float outputGain);
     MediaTelemetry telemetry();
+    Route route();
     std::wstring diagnostics();
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
     void testInjectPcm(const std::vector<unsigned char>& pcm);
