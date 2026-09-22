@@ -48,6 +48,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_deafen(IntPtr handle,int deafened);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_devices(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_devices_select(IntPtr handle,int input,int output);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_levels(IntPtr handle,int input,int output);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_diagnostics(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_telemetry(IntPtr handle,out float input,out float output,out uint flags);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_share(IntPtr handle,string host,ushort port,string peer);
@@ -97,6 +98,7 @@ public sealed class CoreAdapter : IDisposable {
     public bool SetVoiceDeafened(bool deafened){return ui_voice_deafen(handle,deafened?1:0)!=0;}
     public VoiceDevices VoiceDevices(){return serializer.Deserialize<VoiceDevices>(Marshal.PtrToStringUni(ui_voice_devices(handle)));}
     public bool SelectVoiceDevices(int input,int output){return ui_voice_devices_select(handle,input,output)!=0;}
+    public bool SetVoiceVolumes(int input,int output){return ui_voice_levels(handle,input,output)!=0;}
     public string VoiceDiagnostics(){return Marshal.PtrToStringUni(ui_voice_diagnostics(handle));}
     public VoiceTelemetry VoiceTelemetry(){float input,output;uint flags;if(ui_voice_telemetry(handle,out input,out output,out flags)==0)return new VoiceTelemetry();return new VoiceTelemetry{input=Math.Max(0,Math.Min(1,input)),output=Math.Max(0,Math.Min(1,output)),active=(flags&1)!=0,inputAvailable=(flags&2)!=0,outputAvailable=(flags&4)!=0};}
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}
@@ -104,7 +106,7 @@ public sealed class CoreAdapter : IDisposable {
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
     public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
-public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration; public int retryMs; public bool connected; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
+public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime; public int retryMs,callState,callType; public bool connected,callMuted,callDeafened; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
 public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }

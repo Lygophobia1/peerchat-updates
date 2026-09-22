@@ -71,6 +71,7 @@ struct VoiceMedia::Impl {
     std::string networkFingerprint,mediaState="created",iceState="new",gatheringState="new",signalingState="stable",latestAudioError="none",latestMediaError="none";
     std::deque<std::string> localCandidateSummaries,remoteCandidateSummaries;
     int inputDevice=-1,outputDevice=-1;
+    float inputGain=1.0f,outputGain=1.0f;
 
     void push(EventKind kind, std::string value = {}, std::string detail = {}) {
         if (stopping) return;
@@ -171,6 +172,7 @@ struct VoiceMedia::Impl {
         opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(1));
         audio = std::make_unique<Audio>();
         audio->setDevices(inputDevice,outputDevice);
+        audio->setVolumes(inputGain,outputGain);
         audio->setCaptureHandler([this](const std::vector<unsigned char>& frame){ captured(frame); });
         rtcConfiguration config{};
         const char* iceServers[]={"stun:stun.l.google.com:19302"};
@@ -234,6 +236,7 @@ bool VoiceMedia::setAnswer(const std::string& answer,std::wstring& error){if(imp
 bool VoiceMedia::addCandidate(const std::string& candidate,const std::string& mid,std::wstring& error){if(impl_->pc<0||rtcAddRemoteCandidate(impl_->pc,candidate.c_str(),mid.c_str())<0){error=L"The remote ICE candidate was invalid.";return false;}{std::lock_guard<std::mutex> lock(impl_->mutex);++impl_->remoteCandidatesReceived;if(impl_->remoteCandidateSummaries.size()>=16)impl_->remoteCandidateSummaries.pop_front();impl_->remoteCandidateSummaries.push_back(candidateSummary(candidate));}return true;}
 bool VoiceMedia::setMuted(bool muted,std::wstring& error){return impl_->audio&&impl_->audio->setMuted(muted,error);}
 void VoiceMedia::setDeafened(bool value){impl_->deafened=value;}
+void VoiceMedia::setVolumes(float inputGain,float outputGain){impl_->inputGain=inputGain;impl_->outputGain=outputGain;if(impl_->audio)impl_->audio->setVolumes(inputGain,outputGain);}
 MediaTelemetry VoiceMedia::telemetry(){
     auto result=impl_->audio?impl_->audio->telemetry():MediaTelemetry{};
     if(impl_->deafened)result.outputLevel=0.0f;

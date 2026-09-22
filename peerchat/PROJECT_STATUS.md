@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 5.5 direct/relay connection-reliability implementation complete after targeted automated gates; physical acceptance pending.
-**Next action:** physical direct-failure → relay → authenticated direct-recovery acceptance; stop before Stage 6.
+**Current stage:** Stage 6 voice-control ownership and profile audio settings implemented after accepted Stage 5.5; automated acceptance complete, physical voice acceptance pending.
+**Next action:** physical two-client Stage 6 voice/settings acceptance; stop before Stage 7 media continuity.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -39,6 +39,9 @@ separate; no publication, final tag, key change or package rebuild in this docum
   transport handoff`). Automated gates passed; physical two-PC handoff acceptance remains pending.
 - Stage 5 documentation checkpoint and Stage 5.5 starting point: `f58ef81`. Stage 5.5 retains the
   completed Stage 3–5 ownership model and does not migrate voice/media.
+- Stage 5.5 accepted checkpoint: `f5368fd0738a5556d0924fe3b3bb3ad0a4ff2a05`. Physical direct →
+  relay → direct recovery, idle relay, failed direct probe, ACK/message continuity, friend-add relay,
+  established-friend relay, trust and network-switch acceptance passed before Stage 6 began.
 - The checkpoint retained existing client/native, tests, updater, packaging and docs. Generated
   packages/builds/fixtures, credentials/private keys and profile/history data were excluded.
   Historical packages, updater evidence and the existing master branch were preserved.
@@ -114,15 +117,17 @@ These are the current boundaries after Stage 5.5.
 - A draining transport can acknowledge only IDs it submitted to its authenticated destination and
   cannot accept new DM/group submissions. Stage 5 now exercises that ownership during real overlap;
   immediate candidate failure can restore the retained, still-trusted route.
-- TCP control/text and WebRTC media are separate live paths; current call teardown still depends
-  on control disconnect/invalidation. Logical call/control/media lifetime separation is planned.
+- TCP/relay control and WebRTC media are separate live paths. Call signaling may use either verified
+  reliable winner; audio remains on independent direct ICE/DTLS-SRTP. Final control loss still ends
+  the Stage 6 call, while media handoff/control-gap continuity remains deferred to Stage 7.
 - Native/managed events now carry complete profile/session epoch and monotonically revisioned session
   snapshots. WPF applies only newer snapshots for online state and winning-connection projection;
   failed/superseded legacy attempt events remain diagnostics and cannot downgrade a live winner.
 - Direct remains preferred. After an 8-second bounded direct window the manager may request one
   authenticated server relay route; failed direct probes continue on manager-owned backoff while a
   healthy relay remains the winner. A relay can never replace a healthy direct winner. Direct
-  recovery uses the Stage 5 authenticated handoff before relay drain. Voice/media remain direct-only.
+  recovery uses the Stage 5 authenticated handoff before relay drain. Voice media remains direct ICE;
+  authenticated call control is transport-independent across the reliable direct/relay winner.
 
 ## Stage 5.5 implemented boundary
 
@@ -148,7 +153,29 @@ These are the current boundaries after Stage 5.5.
   stream. Discovery JSON cannot be interpreted as peer bytes. The server does not decrypt, persist,
   inspect or log message content, peer TLS material or relay payloads.
 - Existing manual/server-independent Direct P2P remains available. A discovery/relay outage cannot
-  disturb a healthy direct winner. No call signaling/media is accepted on relay, and Stage 6 has not begun.
+  disturb a healthy direct winner. Stage 5.5 remains frozen; Stage 6 only permits authenticated call
+  control on its reliable relay winner and never routes media/audio through the server relay.
+
+## Stage 6 implemented boundary
+
+- A profile-scoped native `CallManager` is authoritative for the typed `CallId`, monotonically
+  increasing lifetime, direction, state, participants, timeout and mute/deafen state. Stage 6 still
+  permits one active one-to-one voice call, but its state is minimally participant-shaped rather than
+  embedding one remote peer into the ownership model. No group call, mesh or SFU behavior exists.
+- WPF sends commands and renders explicit call state/type/lifetime events; it no longer infers call
+  lifecycle from display strings. Native media callbacks carry call ID, participant and lifetime, so
+  completion from an older call cannot mutate a replacement call. `VoiceMedia` remains a direct
+  ICE/DTLS-SRTP media engine that reports facts; it does not own call state or retry policy.
+- Verified call-control frames use the current `SessionTransportManager` reliable winner, whether
+  direct or opaque relay. Relay availability is not treated as media capability. The inner peer TLS,
+  expected Peer ID and existing trust checks remain authoritative; audio never enters the relay.
+- Per-profile DPAPI-protected voice preferences persist only selected input/output device identity
+  and real native input/output software gain (0–200%). Missing saved devices fall back to current
+  Windows system defaults. Ephemeral call state and audio are not persisted.
+- Settings → Voice exposes working device refresh/selection and native software levels. Existing
+  mute/deafen and bounded input/output telemetry remain call controls. WinMM/Opus does not provide
+  supported AEC, noise suppression, AGC, sensitivity or push-to-talk, so no nonfunctional toggles are
+  exposed. Stage 7 media continuity, TURN/media relay and group calls remain deferred.
 
 ## Stage 2 implemented boundary
 
@@ -364,9 +391,30 @@ to implement protocol/media behavior in Stage 2.
   loser remains separately correlated, and no duplicate relay attempt starts.
 - Fresh desktop/native build and managed profile/adapter regressions passed. The sandbox-token DPAPI
   limitation reproduced once; the intended normal Windows user run passed without weakening DPAPI.
-- Physical two-PC fallback/recovery remains required: make direct unavailable, confirm messaging over
-  relay with unchanged trust, restore direct, confirm authenticated make-before-break promotion and
-  bounded relay retirement. Voice is expected to remain direct-only and is outside this gate.
+- Physical Stage 5.5 acceptance passed at `f5368fd`: direct unavailable → opaque relay messaging with
+  unchanged trust → authenticated make-before-break direct recovery, idle relay stability, failed
+  direct recovery without relay loss, friend-add/established-friend relay and network switching.
+
+### Stage 6 targeted verification
+
+- The full native regression gate passed after the ownership migration: encrypted storage, delivery,
+  groups, direct handoff/reconnect, Stage 5.5 relay, TLS, six-node/process messaging, WebRTC media,
+  Opus and audio lifecycle. The relay fixture additionally exchanges an authenticated call invite and
+  decline over the opaque reliable winner while durable messaging remains connected.
+- Voice lifecycle coverage passes outgoing/incoming, answer, decline, caller cancel before answer,
+  timeout, either-side end, repeated calls, deterministic simultaneous calls, stale lifetime rejection,
+  negotiation/active disconnect and profile shutdown. Injected PCM still crosses direct ICE/DTLS-SRTP.
+- Native audio coverage verifies saturating 0–200% software gain without opening physical devices.
+  Managed adapter coverage verifies explicit call state/type/lifetime projection, old-call event
+  rejection, mute/deafen, device selection, volume bounds, DPAPI preference restart, missing-device
+  fallback and no persisted call state.
+- The packaged hidden-WPF smoke passes Settings navigation, the working Voice device/volume controls,
+  active call strip, capped diagnostics, dark device selectors, meters and refresh selection retention.
+  The packaged runtime dependency/import audit passes with updater assemblies present and only
+  Windows-inbox imports in `PeerChat.Core.dll`.
+- Physical two-client acceptance remains required for real microphone/output selection, persisted
+  levels, direct call audio, call control while reliable messaging uses relay, and repeated teardown.
+  Stage 6 is not marked physically accepted and Stage 7 has not begun.
 
 ### Historical regression and physical evidence
 
@@ -427,10 +475,10 @@ Broader or uncertain changes remain open with the missing evidence.
 - **Open — intermittent CLR/WPF `0xe0434352`.** No matching actionable stack/reliable reproduction
   in the reviewed evidence. Needs packaged exception/Windows crash evidence; general baseline
   acceptance is not proof this intermittent condition is resolved.
-- **Open pending physical validation — false `Network route changed` / `Network connection lost`
-  teardown.** Stage 3 now centralizes generation-checked invalidation and proves with automated tests
-  that delayed old-generation work cannot close a newer verified winner. A live LAN→hotspot→LAN
-  transition has not been physically retested, so this bug is not silently closed.
+- **Resolved by Stage 5.5 physical acceptance — false `Network route changed` / `Network connection
+  lost` teardown.** Generation-checked invalidation and stale-completion rejection passed automated
+  coverage, then the accepted `f5368fd` direct/relay/network-switch run confirmed the healthy winner
+  remains usable across the tested transition. Reopen only if new physical evidence reproduces it.
 - **Resolved — isolated encrypted-data regression (test-host context).** First CryptProtectData
   failed with Win32 2 / ERROR_FILE_NOT_FOUND under CodexSandboxOffline inheriting Livel profile paths.
   Existing storage, node and group-node tests passed under the normal interactive user token.
@@ -446,6 +494,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-Stage 6 voice/control migration, client modularization, screen sharing, video, files, group voice, TURN,
-encrypted relay, onion, disappearing messages, external bridge and multi-device synchronization remain
-deferred. Preserve the accepted stack and begin the next stage only with separate authorization.
+Stage 7 media continuity, client modularization, screen sharing, video, files, group voice, TURN/media
+relay, onion, disappearing messages, external bridge and multi-device synchronization remain deferred.
+Preserve the accepted stack and begin the next stage only with separate authorization.

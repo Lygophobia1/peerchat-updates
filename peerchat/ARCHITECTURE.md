@@ -242,8 +242,9 @@ route for the same key does not prompt again, while a changed key uses the exist
 
 While relay is active, direct probes continue on manager-owned bounded backoff. Failed candidates do
 not affect the relay winner. A fully authenticated direct candidate uses the existing Stage 5 handoff
-before promotion and relay drain. Relay never replaces a healthy direct winner. Voice signaling/media
-are explicitly excluded from relay in Stage 5.5 and continue using the existing direct-only path.
+before promotion and relay drain. Relay never replaces a healthy direct winner. Stage 6 call-control
+frames can use either authenticated reliable winner; WebRTC audio remains an independent direct
+ICE/DTLS-SRTP path and is never carried by the reliable server relay.
 
 Each native outbound attempt has an ID plus expected Peer ID, concrete endpoint, candidate source,
 and route. Saved-contact failures use exponential retry backoff with per-attempt jitter from five
@@ -366,21 +367,23 @@ not migrated in Stage 5; voice continuity across handoff remains a later stage a
 
 ## One-to-one voice boundary
 
-Text, group envelopes and call signaling use authenticated TCP/TLS control connections. Voice
+Text, group envelopes and call signaling use the authenticated reliable peer-TLS binding, whether
+its physical transport is direct TCP or the Stage 5.5 opaque server relay. Voice
 media uses an independent libdatachannel WebRTC/ICE/DTLS-SRTP path, which may select a different
-endpoint pair. These are separate existing resources, not implemented logical channel bindings.
-Current call lifetime is still coupled to control loss: final peer disconnect/route invalidation
-can clearVoice even if media was healthy. mediaEvents requires a control winner for descriptions
-and can omit trickled candidates while no winner is available. No control-gap resume protocol or
-media-route continuity abstraction is implemented yet.
+endpoint pair. Reliable transport kind is not a proxy for media capability. Final control loss still
+ends the Stage 6 call even if media was healthy; no control-gap resume protocol or media-route
+continuity abstraction is implemented yet.
 
-Voice call signaling is carried only after the existing direct peer connection has completed mutual
+Voice call signaling is carried only after the existing peer connection has completed mutual
 TLS, expected Peer ID verification, and explicit local trust. Protocol capability negotiation gates
 voice support. Random 128-bit call IDs identify ephemeral calls; they are not social identities and
-are never persisted. The native core owns the one-call-per-profile state machine: Idle, Outgoing or
-Incoming Ringing, Connecting, Connected, Ending, then Idle. It handles answer, decline, hang-up,
-busy, timeout, deterministic simultaneous-call convergence, peer disconnect, and profile shutdown.
-Duplicate or completed call IDs are bounded in memory for replay suppression.
+are never persisted. The profile-scoped native `CallManager` owns the authoritative typed call ID,
+monotonic runtime lifetime, direction, participants, timeout, mute/deafen state and one-call-per-profile
+state machine: Idle, Outgoing, Incoming, Negotiating, ConnectingMedia, Connected, Ending, Ended or
+Failed. It handles answer, decline, cancel, hang-up, busy, timeout, deterministic simultaneous-call
+convergence, peer disconnect, and profile shutdown. Duplicate/completed IDs are bounded for replay
+suppression. The participant collection is a future extension point only; Stage 6 implements no group
+membership, multi-peer negotiation, mesh, SFU or group UI.
 Audio-device errors no longer mark the authenticated text peer offline. Media-device startup is
 owned by the node's `VoiceMedia.poll` lifecycle, not a libdatachannel callback. Teardown detaches
 callbacks, stops audio, explicitly deletes independently registered C API track handles, then deletes
@@ -391,11 +394,13 @@ path ends affected calls; the recorded generation is not a general stale-callbac
 generation check prevents a buffer from being requeued after mute closes/reopens its device.
 
 The authenticated channel carries bounded SDP offer/answer and trickled ICE candidates tagged with
-the call ID. Each send resolves the current authenticated winning peer connection, while call state
-remains keyed by call ID and stable Peer ID, so duplicate arbitration cannot strand negotiation on
-a retired socket. Diagnostics correlate the winning connection at call start and the connection used
+the call ID. Each asynchronous media event is also bound to the native call lifetime and expected
+participant, so a stale completion cannot mutate a newer call. Each send resolves the current
+authenticated reliable winner, while call state remains keyed by call ID and stable Peer ID, so
+duplicate arbitration cannot strand negotiation on a retired socket. Diagnostics correlate the
+winning connection at call start and the connection used
 for each offer, answer, and candidate without recording SDP. `VoiceMedia` is a one-call native
-boundary: libdatachannel 0.24.3 owns direct ICE,
+engine which reports media facts/events and never owns call state: libdatachannel 0.24.3 owns direct ICE,
 ECDSA DTLS-SRTP, RTP and jitter handling; libopus 1.5.2 encodes 16 kHz mono 20 ms capture frames
 with the required 48 kHz RTP clock advanced by 960 ticks per frame; the event-driven WinMM engine
 owns selected capture/playback devices. Capture resolves the Windows default through
@@ -442,6 +447,14 @@ deafening, call teardown and profile shutdown force the appropriate level to zer
 path, audio retention, sample logging, diagnostic-string parsing or additional timer is involved.
 WPF maps normalized RMS onto a -60 dBFS to 0 dBFS display range so quiet decoded speech remains
 visible without changing gain or playback volume.
+
+Profile voice preferences are stored separately as a small CurrentUser-DPAPI-protected record. They
+contain only input/output device ID and name plus bounded 0–200% software-gain values; call IDs,
+state, participants and audio are never persisted. Missing devices resolve to the current Windows
+default on load. Gain is applied with saturating signed-PCM scaling in the existing native capture
+and mixed-playback paths before encode and after decode respectively. Settings exposes no AEC,
+noise suppression, AGC, input sensitivity, push-to-talk or microphone-test switch because the
+current WinMM/Opus stack does not implement those facilities.
 
 ## Storage, migration, reset, and backup
 

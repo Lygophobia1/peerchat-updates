@@ -1108,10 +1108,12 @@ Everything above defines PeerChat's architectural direction.
 WebRTC/DTLS-SRTP + Opus calls are implemented. Packaged two-way voice and 3+ client group behavior
 have passed physical acceptance; exact current evidence remains in `PROJECT_STATUS.md`.**
 
-Stages 3–5 and the focused Stage 5.5 reliable connection work are implemented: one native manager
-owns direct/relay attempts, retry/fallback, winners, stale callbacks, handoff and draining, while
-durable delivery/trust remain transport-independent above it. Do not begin Stage 6 voice migration
-until explicitly authorized. Networking/session migration comes before broad client modularization.
+Stages 3–5 and the focused Stage 5.5 reliable connection work are implemented and physically
+accepted: one native manager owns direct/relay attempts, retry/fallback, winners, stale callbacks,
+handoff and draining, while durable delivery/trust remain transport-independent above it. Stage 6
+voice-control ownership and working profile audio settings are implemented with physical acceptance
+pending. Do not begin Stage 7 media continuity until explicitly authorized. Networking/session
+migration comes before broad client modularization.
 Preserve the accepted baseline and the open CLR/WPF and false-route-teardown backlog.
 
 Preserve the completed account, friend, manual P2P, TLS identity, firewall, notification, and

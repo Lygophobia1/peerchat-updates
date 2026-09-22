@@ -53,6 +53,19 @@ float decayedLevel(float level, Clock::time_point updated, Clock::time_point now
         static_cast<float>(level * std::exp(-6.0 * std::max(0.0, seconds)))));
 }
 
+template<class Bytes>
+void scalePcm(Bytes& pcm, float gain) {
+    gain = std::max(0.0f, std::min(2.0f, gain));
+    for (std::size_t offset = 0; offset + 1 < pcm.size(); offset += 2) {
+        const int raw = static_cast<int>(pcm[offset]) | (static_cast<int>(pcm[offset + 1]) << 8);
+        const int sample = raw >= 32768 ? raw - 65536 : raw;
+        const int scaled = std::max(-32768, std::min(32767, static_cast<int>(sample * gain)));
+        const unsigned bits = static_cast<unsigned>(scaled) & 0xffffu;
+        pcm[offset] = static_cast<unsigned char>(bits & 0xffu);
+        pcm[offset + 1] = static_cast<unsigned char>((bits >> 8) & 0xffu);
+    }
+}
+
 // Pure queue/mixer logic is separate from the devices so it can be tested
 // without opening either a microphone or a speaker.
 class Mixer {
@@ -248,6 +261,7 @@ struct Audio::Impl {
     std::uint64_t inputWakes = 0, outputWakes = 0, completedBuffers = 0,
                   completedBytes = 0, deliveredFrames = 0, partialBuffers = 0;
     int inputDevice = -1, outputDevice = -1;
+    float inputGain = 1.0f, outputGain = 1.0f;
     std::uint64_t inputGeneration = 0;
     float inputLevel = 0.0f, outputLevel = 0.0f;
     audio_detail::Clock::time_point inputLevelUpdated{}, outputLevelUpdated{};
@@ -316,7 +330,9 @@ struct Audio::Impl {
                 if (buffer.header.dwBytesRecorded != audio_detail::frameBytes) ++partialBuffers;
                 if (buffer.header.dwBytesRecorded == audio_detail::frameBytes) {
                     const auto levelNow = audio_detail::Clock::now();
-                    inputLevel = std::max(audio_detail::pcmLevel(buffer.data),
+                    std::vector<unsigned char> frame(buffer.data.begin(), buffer.data.end());
+                    audio_detail::scalePcm(frame, inputGain);
+                    inputLevel = std::max(audio_detail::pcmLevel(frame),
                         audio_detail::decayedLevel(inputLevel, inputLevelUpdated, levelNow));
                     inputLevelUpdated = levelNow;
                     if (captured.size() == audio_detail::maxQueuedFrames) captured.pop_front();
@@ -324,7 +340,6 @@ struct Audio::Impl {
                     auto handler = captureHandler;
                     const auto generation = inputGeneration;
                     if (handler) ++deliveredFrames;
-                    std::vector<unsigned char> frame(buffer.data.begin(), buffer.data.end());
                     lock.unlock();
                     if (handler) handler(frame);
                     lock.lock();
@@ -346,6 +361,7 @@ struct Audio::Impl {
                 auto& buffer = outputBuffers[nextOutput];
                 if (!(buffer.header.dwFlags & WHDR_DONE)) break;
                 buffer.data = mixer.mix(audio_detail::Clock::now());
+                audio_detail::scalePcm(buffer.data, outputGain);
                 const MMRESULT result = waveOutWrite(output, &buffer.header, sizeof(WAVEHDR));
                 if (result != MMSYSERR_NOERROR) {
                     pendingError = audio_detail::deviceError(L"Voice playback stopped", result, false);
@@ -361,6 +377,7 @@ struct Audio::Impl {
 
 Audio::Audio() : impl_(std::make_unique<Impl>()) {}
 Audio::~Audio() { stop(); }
+void Audio::setVolumes(float inputGain,float outputGain){std::lock_guard<std::mutex> lock(impl_->mutex);impl_->inputGain=std::max(0.0f,std::min(2.0f,inputGain));impl_->outputGain=std::max(0.0f,std::min(2.0f,outputGain));}
 
 bool Audio::start(std::wstring& error) {
     error.clear();

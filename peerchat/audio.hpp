@@ -30,6 +30,7 @@ public:
     // Muting closes the microphone and discards all pending capture frames;
     // unmuting reopens it.
     bool setMuted(bool muted, std::wstring& error);
+    void setVolumes(float inputGain, float outputGain);
     void play(int sender, const std::vector<unsigned char>& pcm);
     std::vector<std::vector<unsigned char>> takeCaptured();
     void setCaptureHandler(std::function<void(const std::vector<unsigned char>&)> handler);

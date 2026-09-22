@@ -147,8 +147,9 @@ Voice/media are not routed by this channel. Relay retry/fallback/promotion polic
 
 The discovery/account protocol does not own calls and stores no call state, voice diagnostics, or
 voice content. Local bounded voice diagnostics and normalized live level telemetry are never uploaded
-by this protocol. Current call SDP/ICE signaling travels on the verified peer control channel, not
-the discovery API. Discovery loss does not itself terminate a call. Current call teardown and media
+by this protocol. Current call SDP/ICE signaling travels inside the verified peer-TLS control channel,
+which may use a direct transport or the opaque reliable relay; the discovery API does not interpret
+those frames and audio/media never uses that relay. Discovery loss does not itself terminate a call. Current call teardown and media
 implementation are described in ARCHITECTURE.md; they are not discovery protocol commands.
 
 Future ICE/TURN signaling may use coordination infrastructure, but it must remain authenticated to

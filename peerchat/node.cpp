@@ -13,6 +13,7 @@
 #include "tls.hpp"
 #include "protocol.hpp"
 #include "voice_media.hpp"
+#include "call_manager.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -70,7 +71,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceDiagnostics };
+    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;Blob bytes;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -87,15 +88,13 @@ struct Node::Impl {
     std::uint64_t nextRouteRevision=1;
     session::SessionEpoch sessionEpoch{};
     std::unique_ptr<session::SessionTransportManager> sessionTransports;
-    enum class VoiceState { Idle,Outgoing,Ringing,Connecting,Connected,Ending };
-    VoiceState voiceState=VoiceState::Idle;std::string voiceCallId,voicePeerId,voiceOffer;Clock::time_point voiceDeadline{};bool voiceOutgoing=false;
+    calls::CallManager calls;
     std::uint64_t networkGeneration=0,voiceNetworkGeneration=0,voiceConnectionAtStart=0,voiceRequestSentOn=0,voiceRequestReceivedOn=0,voiceOfferSentOn=0,voiceOfferReceivedOn=0,voiceAnswerSentOn=0,voiceAnswerReceivedOn=0,voiceLastSignalConnection=0,voiceCandidatesSent=0,voiceCandidatesReceived=0;
     std::wstring networkFingerprint,voiceNetworkFingerprint;
-    std::unique_ptr<VoiceMedia> voiceMedia;std::vector<std::pair<std::string,std::string>> voiceCandidates;std::wstring lastVoiceDiagnostics=L"media_state=idle\nice_dtls_srtp_state=idle\ntrack_open=false\ncodec=Opus not active\ntransport=not active\ncapture_frames=0\nencoded_frames=0\nopus_submitted=0\nsend_api_accepted=0\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets=0\npayload_delivered=0\nreceived_packets=0\ndecoded_frames=0\nplayback_frames=0\nlatest_audio_error=none\nlatest_media_error=none";
-    int voiceInputDevice=-1,voiceOutputDevice=-1;
+    std::unique_ptr<VoiceMedia> voiceMedia;std::uint64_t voiceMediaLifetime=0;std::wstring lastVoiceDiagnostics=L"media_state=idle\nice_dtls_srtp_state=idle\ntrack_open=false\ncodec=Opus not active\ntransport=not active\ncapture_frames=0\nencoded_frames=0\nopus_submitted=0\nsend_api_accepted=0\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets=0\npayload_delivered=0\nreceived_packets=0\ndecoded_frames=0\nplayback_frames=0\nlatest_audio_error=none\nlatest_media_error=none";
+    int voiceInputDevice=-1,voiceOutputDevice=-1,voiceInputPercent=100,voiceOutputPercent=100;
     std::atomic<float> voiceInputLevel{0.0f},voiceOutputLevel{0.0f};
     std::atomic<unsigned> voiceTelemetryFlags{0};
-    std::deque<std::string> finishedVoiceCalls;
     SOCKET listener=INVALID_SOCKET;
     ~Impl(){stop();}
     void emit(NodeEvent e){std::lock_guard<std::mutex> lock(eventMutex);if(events.size()>=4096)events.pop_front();events.push_back(std::move(e));}
@@ -179,32 +178,37 @@ struct Node::Impl {
         if(schedule.scheduled){NodeEvent event;event.kind=NodeEvent::Kind::ReconnectScheduled;event.peerId=event.expectedPeerId=peer;event.candidate=widenUtf8(schedule.target.route.endpointUtf8);event.candidateSource=widenUtf8(schedule.target.route.sourceUtf8);event.route=widenUtf8(schedule.target.route.routeUtf8);event.retryDelayMilliseconds=schedule.delayMilliseconds;event.text=L"Reconnect scheduled";emit(std::move(event));}
         emitSessionSnapshot(peer);
     }
-    static const wchar_t* voiceStateName(VoiceState state){switch(state){case VoiceState::Idle:return L"Idle";case VoiceState::Outgoing:return L"Outgoing / Ringing";case VoiceState::Ringing:return L"Incoming / Ringing";case VoiceState::Connecting:return L"Connecting";case VoiceState::Connected:return L"Connected";case VoiceState::Ending:return L"Ending";}return L"Idle";}
-    void voiceEvent(VoiceState state,const std::wstring& reason={}){voiceState=state;NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.peerId=voicePeerId;event.detail=std::wstring(voiceCallId.begin(),voiceCallId.end());event.text=voiceStateName(state);if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
-    Connection* voiceConnection(const std::string& peer){for(auto& connection:connections)if(connection->online&&!connection->dead&&!connection->relay&&connection->peerId==peer&&connection->voiceCalls)return connection.get();return nullptr;}
+    static const wchar_t* voiceStateName(calls::State state){switch(state){case calls::State::Idle:return L"Idle";case calls::State::Outgoing:return L"Outgoing / Ringing";case calls::State::Incoming:return L"Incoming / Ringing";case calls::State::Negotiating:return L"Negotiating";case calls::State::ConnectingMedia:return L"Connecting Media";case calls::State::Connected:return L"Connected";case calls::State::Ending:return L"Ending";case calls::State::Ended:return L"Ended";case calls::State::Failed:return L"Failed";}return L"Idle";}
+    void voiceEvent(calls::State state,const std::wstring& reason={}){auto active=calls.active();NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.callState=static_cast<std::uint32_t>(state);if(active){event.peerId=calls.peer();event.detail=std::wstring(active->id.value.begin(),active->id.value.end());event.callLifetime=active->lifetime;event.callType=static_cast<std::uint32_t>(active->type);event.callMuted=active->muted;event.callDeafened=active->deafened;}event.text=voiceStateName(state);if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
+    Connection* voiceConnection(const std::string& peer){
+        std::uint64_t winner=0;if(sessionTransports){auto snapshot=sessionTransports->snapshot(peer);if(snapshot&&snapshot->connected)winner=snapshot->activeTransport.value;}
+        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
+        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
+        return nullptr;
+    }
     void resetVoiceSignaling(Connection* connection=nullptr){voiceNetworkGeneration=networkGeneration;voiceNetworkFingerprint=networkFingerprint;voiceConnectionAtStart=connection?connection->attemptId:0;voiceRequestSentOn=voiceRequestReceivedOn=voiceOfferSentOn=voiceOfferReceivedOn=voiceAnswerSentOn=voiceAnswerReceivedOn=voiceLastSignalConnection=voiceCandidatesSent=voiceCandidatesReceived=0;}
     std::wstring voiceSignalingDiagnostics()const{std::wostringstream out;out<<L"winning_peerchat_connection_id_at_call_start="<<voiceConnectionAtStart<<L"\nvoice_network_generation="<<voiceNetworkGeneration<<L"\ncurrent_network_generation="<<networkGeneration<<L"\npeer_connection_matches_current_network="<<(voiceNetworkGeneration==networkGeneration?L"true":L"false")<<L"\nvoice_network_fingerprint="<<voiceNetworkFingerprint<<L"\ncall_request_sent_connection_id="<<voiceRequestSentOn<<L"\ncall_request_received_connection_id="<<voiceRequestReceivedOn<<L"\ncall_answer_sent_connection_id="<<voiceAnswerSentOn<<L"\ncall_answer_received_connection_id="<<voiceAnswerReceivedOn<<L"\nsdp_offer_created="<<(voiceOfferSentOn?L"true":L"false")<<L"\nsdp_offer_sent_connection_id="<<voiceOfferSentOn<<L"\nsdp_offer_received_connection_id="<<voiceOfferReceivedOn<<L"\nsdp_answer_created="<<(voiceAnswerSentOn?L"true":L"false")<<L"\nsdp_answer_sent_connection_id="<<voiceAnswerSentOn<<L"\nsdp_answer_received_connection_id="<<voiceAnswerReceivedOn<<L"\nlast_voice_signaling_connection_id="<<voiceLastSignalConnection<<L"\nlocal_ice_candidates_sent="<<voiceCandidatesSent<<L"\nremote_ice_candidates_received="<<voiceCandidatesReceived;return out.str();}
-    void rememberVoiceCall(const std::string& id){if(id.empty())return;finishedVoiceCalls.push_back(id);while(finishedVoiceCalls.size()>64)finishedVoiceCalls.pop_front();}
-    bool finishedVoiceCall(const std::string& id)const{return std::find(finishedVoiceCalls.begin(),finishedVoiceCalls.end(),id)!=finishedVoiceCalls.end();}
     void resetVoiceTelemetry(){voiceInputLevel=0.0f;voiceOutputLevel=0.0f;voiceTelemetryFlags=0;}
     void publishVoiceTelemetry(){if(!voiceMedia){resetVoiceTelemetry();return;}auto telemetry=voiceMedia->telemetry();voiceInputLevel=telemetry.inputLevel;voiceOutputLevel=telemetry.outputLevel;voiceTelemetryFlags=(telemetry.active?1u:0u)|(telemetry.inputAvailable?2u:0u)|(telemetry.outputAvailable?4u:0u);}
-    void clearVoice(const std::wstring& reason){if(voiceState==VoiceState::Idle&&!voiceMedia&&voiceCallId.empty())return;voiceEvent(VoiceState::Ending,reason);resetVoiceTelemetry();lastVoiceDiagnostics=voiceSignalingDiagnostics();if(voiceMedia){lastVoiceDiagnostics+=L"\n"+voiceMedia->diagnostics();voiceMedia->stop();}voiceMedia.reset();rememberVoiceCall(voiceCallId);voiceCallId.clear();voicePeerId.clear();voiceOffer.clear();voiceCandidates.clear();voiceOutgoing=false;voiceDeadline={};voiceEvent(VoiceState::Idle,reason);}
+    void clearVoice(const std::wstring& reason,bool failed=false){auto active=calls.active();if(!active&&!voiceMedia)return;std::string callId=active?active->id.value:std::string{},peer=active?calls.peer():std::string{};std::uint64_t lifetime=active?active->lifetime:0;voiceEvent(calls::State::Ending,reason);resetVoiceTelemetry();lastVoiceDiagnostics=voiceSignalingDiagnostics();if(voiceMedia){lastVoiceDiagnostics+=L"\n"+voiceMedia->diagnostics();voiceMedia->stop();}voiceMedia.reset();voiceMediaLifetime=0;calls.finish(failed?calls::State::Failed:calls::State::Ended);NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.peerId=peer;event.detail=std::wstring(callId.begin(),callId.end());event.callLifetime=lifetime;event.callState=static_cast<std::uint32_t>(calls::State::Idle);event.callType=static_cast<std::uint32_t>(calls::CallType::Voice);event.text=L"Idle";if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
     void mediaEvents(){
-        if(!voiceMedia||voiceState==VoiceState::Idle)return;
-        auto connection=voiceConnection(voicePeerId);
+        auto active=calls.active();if(!voiceMedia||!active)return;
+        const auto lifetime=active->lifetime;const auto callId=active->id.value;const auto peer=calls.peer();if(voiceMediaLifetime!=lifetime){voiceMedia->stop();voiceMedia.reset();resetVoiceTelemetry();return;}
+        auto connection=voiceConnection(peer);
         for(auto& event:voiceMedia->poll()){
+            if(!calls.matches(lifetime,callId,peer))return;
             if(event.kind==VoiceMedia::EventKind::Description){
                 if(!connection){clearVoice(L"Peer disconnected");return;}
                 voiceLastSignalConnection=connection->attemptId;if(event.detail=="offer")voiceRequestSentOn=voiceOfferSentOn=connection->attemptId;else voiceAnswerSentOn=connection->attemptId;
-                protocol::Writer signal(event.detail=="offer"?protocol::CallOffer:protocol::CallAnswer);signal.string(voiceCallId);signal.string(event.value);packet(*connection,signal);
+                protocol::Writer signal(event.detail=="offer"?protocol::CallOffer:protocol::CallAnswer);signal.string(callId);signal.string(event.value);packet(*connection,signal);
             }else if(event.kind==VoiceMedia::EventKind::Candidate){
-                if(connection){voiceLastSignalConnection=connection->attemptId;++voiceCandidatesSent;protocol::Writer signal(protocol::CallCandidate);signal.string(voiceCallId);signal.string(event.value);signal.string(event.detail);packet(*connection,signal);}
+                if(connection){voiceLastSignalConnection=connection->attemptId;++voiceCandidatesSent;protocol::Writer signal(protocol::CallCandidate);signal.string(callId);signal.string(event.value);signal.string(event.detail);packet(*connection,signal);}
             }else if(event.kind==VoiceMedia::EventKind::Connected){
-                voiceDeadline={};voiceEvent(VoiceState::Connected,L"Direct WebRTC · Opus · DTLS-SRTP");
-                if(connection){protocol::Writer ready(protocol::CallConnected);ready.string(voiceCallId);packet(*connection,ready);}
+                calls.transition(callId,calls::State::Connected);voiceEvent(calls::State::Connected,L"Direct WebRTC · Opus · DTLS-SRTP");
+                if(connection){protocol::Writer ready(protocol::CallConnected);ready.string(callId);packet(*connection,ready);}
             }else if(event.kind==VoiceMedia::EventKind::AudioError){
-                notice(NodeEvent::Kind::Error,L"Voice audio device error: "+std::wstring(event.value.begin(),event.value.end()),voicePeerId);
-            }else {if(connection){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}clearVoice(event.kind==VoiceMedia::EventKind::Failed?L"Secure media connection failed":L"Media disconnected");return;}
+                notice(NodeEvent::Kind::Error,L"Voice audio device error: "+std::wstring(event.value.begin(),event.value.end()),peer);
+            }else {if(connection){protocol::Writer end(protocol::CallEnd);end.string(callId);packet(*connection,end);}clearVoice(event.kind==VoiceMedia::EventKind::Failed?L"Secure media connection failed":L"Media disconnected",event.kind==VoiceMedia::EventKind::Failed);return;}
         }
         publishVoiceTelemetry();
     }
@@ -363,19 +367,18 @@ struct Node::Impl {
             auto known=contacts.find(c.peerId);protocol::check(known!=contacts.end()&&known->second.verified&&known->second.publicKey==c.tls->remotePublicKey());
             handoffEffects(sessionTransports->receiveHandoff(sessionEpoch,{c.attemptId},{static_cast<session::HandoffMessage>(phase),transaction,previous},nowMilliseconds()));return;
         }
-        if(c.relay&&r.type()>=protocol::CallOffer&&r.type()<=protocol::CallCandidate)
-            throw std::runtime_error("Voice signaling is not enabled on the reliable relay");
         if(r.type()==protocol::CallOffer){
-            auto callId=r.string();auto sdp=r.string();r.end();protocol::check(c.voiceCalls&&protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);if(finishedVoiceCall(callId))return;
-            if(voiceState==VoiceState::Idle){resetVoiceSignaling(&c);voiceRequestReceivedOn=voiceOfferReceivedOn=voiceLastSignalConnection=c.attemptId;voiceCallId=callId;voicePeerId=c.peerId;voiceOffer=sdp;voiceOutgoing=false;voiceDeadline=Clock::now()+VoiceRingTimeout;voiceEvent(VoiceState::Ringing);return;}
-            if(voiceCallId==callId&&voicePeerId==c.peerId)return;
-            if(voiceState==VoiceState::Outgoing&&voicePeerId==c.peerId&&profile.peerId>c.peerId){auto abandoned=voiceCallId;protocol::Writer end(protocol::CallEnd);end.string(abandoned);packet(c,end);if(voiceMedia)voiceMedia->stop();voiceMedia.reset();rememberVoiceCall(abandoned);resetVoiceSignaling(&c);voiceRequestReceivedOn=voiceOfferReceivedOn=voiceLastSignalConnection=c.attemptId;voiceCallId=callId;voiceOffer=sdp;voiceOutgoing=false;voiceDeadline=Clock::now()+VoiceRingTimeout;voiceEvent(VoiceState::Ringing,L"simultaneous call resolved");return;}
-            protocol::Writer busy(protocol::CallBusy);busy.string(callId);packet(c,busy);return;
+            auto callId=r.string();auto sdp=r.string();r.end();protocol::check(c.voiceCalls&&protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);
+            auto previous=calls.active()?calls.active()->id.value:std::string{};auto disposition=calls.beginIncoming({callId},calls::CallType::Voice,c.peerId,sdp,profile.peerId,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceRingTimeout).count()));
+            if(disposition==calls::IncomingDisposition::Replay||disposition==calls::IncomingDisposition::Duplicate)return;
+            if(disposition==calls::IncomingDisposition::Busy){protocol::Writer busy(protocol::CallBusy);busy.string(callId);packet(c,busy);return;}
+            if(disposition==calls::IncomingDisposition::ReplaceOutgoing){protocol::Writer end(protocol::CallEnd);end.string(previous);packet(c,end);if(voiceMedia)voiceMedia->stop();voiceMedia.reset();voiceMediaLifetime=0;}
+            resetVoiceSignaling(&c);voiceRequestReceivedOn=voiceOfferReceivedOn=voiceLastSignalConnection=c.attemptId;voiceEvent(calls::State::Incoming,disposition==calls::IncomingDisposition::ReplaceOutgoing?L"simultaneous call resolved":L"");return;
         }
-        if(r.type()==protocol::CallAnswer){auto callId=r.string();auto sdp=r.string();r.end();protocol::check(protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);if(voiceState==VoiceState::Outgoing&&voiceOutgoing&&voicePeerId==c.peerId&&voiceCallId==callId&&voiceMedia){voiceAnswerReceivedOn=voiceLastSignalConnection=c.attemptId;std::wstring error;if(!voiceMedia->setAnswer(sdp,error)){clearVoice(error);return;}voiceDeadline=Clock::now()+VoiceConnectTimeout;voiceEvent(VoiceState::Connecting);}return;}
-        if(r.type()==protocol::CallCandidate){auto callId=r.string();auto candidate=r.string();auto mid=r.string();r.end();protocol::check(protocol::id(callId,32)&&candidate.size()<=4096&&mid.size()<=64);if(voiceCallId==callId&&voicePeerId==c.peerId){voiceLastSignalConnection=c.attemptId;++voiceCandidatesReceived;if(voiceMedia){std::wstring error;if(!voiceMedia->addCandidate(candidate,mid,error))notice(NodeEvent::Kind::Error,error,voicePeerId);}else if(voiceCandidates.size()<64)voiceCandidates.emplace_back(std::move(candidate),std::move(mid));}return;}
+        if(r.type()==protocol::CallAnswer){auto callId=r.string();auto sdp=r.string();r.end();protocol::check(protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);auto active=calls.active();if(active&&active->state==calls::State::Outgoing&&active->direction==calls::Direction::Outgoing&&calls.peer()==c.peerId&&active->id.value==callId&&voiceMedia){voiceAnswerReceivedOn=voiceLastSignalConnection=c.attemptId;std::wstring error;if(!voiceMedia->setAnswer(sdp,error)){clearVoice(error,true);return;}calls.transition(callId,calls::State::ConnectingMedia,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceConnectTimeout).count()));voiceEvent(calls::State::ConnectingMedia);}return;}
+        if(r.type()==protocol::CallCandidate){auto callId=r.string();auto candidate=r.string();auto mid=r.string();r.end();protocol::check(protocol::id(callId,32)&&candidate.size()<=4096&&mid.size()<=64);auto active=calls.active();if(active&&active->id.value==callId&&active->participants.count(c.peerId)){voiceLastSignalConnection=c.attemptId;++voiceCandidatesReceived;if(voiceMedia){std::wstring error;if(!voiceMedia->addCandidate(candidate,mid,error))notice(NodeEvent::Kind::Error,error,c.peerId);}else{auto& pending=active->participants[c.peerId].candidates;if(pending.size()<64)pending.emplace_back(std::move(candidate),std::move(mid));}}return;}
         if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));return;}
-        if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));if(voiceCallId==callId&&voicePeerId==c.peerId){clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");}else rememberVoiceCall(callId);return;}
+        if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));auto active=calls.active();if(active&&active->id.value==callId&&active->participants.count(c.peerId))clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");return;}
         if(r.type()==protocol::Text){
             StoredMessage m;m.id=r.string();if(c.logicalOrdering)m.logicalOrder=r.number();m.utcMilliseconds=r.number();m.text=r.text();r.end();protocol::check(protocol::id(m.id,32));m.sender=c.peerId;m.recipient=profile.peerId;m.delivery=Delivery::Delivered;store->observeLogicalOrder(m.logicalOrder);
             if(!deliveries)throw std::runtime_error("Delivery owner is unavailable");
@@ -412,7 +415,9 @@ struct Node::Impl {
         if(c.tls->ready()&&!c.hello&&c.peerId.empty()) {
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());
             auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|protocol::CapabilitySignedGroups|protocol::CapabilityDirectHandoff;
-            if(!c.relay)capabilities|=protocol::CapabilityVoiceCalls;
+            // Voice capability describes authenticated call control. The media
+            // path remains independent ICE/DTLS-SRTP and is never put on relay.
+            capabilities|=protocol::CapabilityVoiceCalls;
             if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
             protocol::Writer hello(protocol::Hello);hello.number(capabilities);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
@@ -474,7 +479,7 @@ struct Node::Impl {
                 auto hasId=[&](std::uint64_t id){return std::any_of(decision.cancel.begin(),decision.cancel.end(),[&](auto value){return value.value==id;});};
                 for(auto it=resolvers.begin();it!=resolvers.end();){if(hasId((*it)->attemptId)){sessionTransports->closeTransport(sessionEpoch,{(*it)->attemptId},"route invalidation cancelled resolver",false);it=resolvers.erase(it);}else ++it;}
                 for(auto it=connections.begin();it!=connections.end();){auto& c=**it;if(hasId(c.attemptId)){c.source=command.accepted?L"Runtime network change":L"Authoritative candidate refresh";c.route=command.accepted?L"old-network route invalidated":L"exact stale endpoint invalidated";emit(connectionEvent(NodeEvent::Kind::Disconnected,command.accepted?L"local network generation superseded":L"local stale-route invalidation",c,command.peer));sessionTransports->closeTransport(sessionEpoch,{c.attemptId},"route invalidated",false);if(deliveries)deliveries->retireTransport({c.attemptId});it=connections.erase(it);}else{if(decision.retainedActiveWinner&&(c.expected==command.peer||c.peerId==command.peer)&&c.online)emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"authoritative endpoint changed; live verified session retained",c,command.peer));++it;}}
-                auto contact=contacts.find(command.peer);if(contact!=contacts.end()&&!command.text.empty()&&command.port){auto& endpoints=contact->second.endpoints;endpoints.erase(std::remove_if(endpoints.begin(),endpoints.end(),[&](const Endpoint& endpoint){return endpoint.host==command.text&&endpoint.port==command.port;}),endpoints.end());store->saveContact(contact->second);}if(decision.activeWinnerCancelled&&voiceState!=VoiceState::Idle&&voicePeerId==command.peer)clearVoice(L"Network route changed");emitSessionSnapshot(command.peer);
+                auto contact=contacts.find(command.peer);if(contact!=contacts.end()&&!command.text.empty()&&command.port){auto& endpoints=contact->second.endpoints;endpoints.erase(std::remove_if(endpoints.begin(),endpoints.end(),[&](const Endpoint& endpoint){return endpoint.host==command.text&&endpoint.port==command.port;}),endpoints.end());store->saveContact(contact->second);}auto activeCall=calls.active();if(decision.activeWinnerCancelled&&activeCall&&calls.peer()==command.peer)clearVoice(L"Call-control route changed");emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::NetworkContext){networkGeneration=command.accountId;networkFingerprint=command.text;if(sessionTransports)sessionTransports->observeNetwork(sessionEpoch,networkGeneration);}
             else if(command.action==Action::SaveContact){
@@ -494,29 +499,31 @@ struct Node::Impl {
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
             else if(command.action==Action::VoiceStart){
-                if(voiceState!=VoiceState::Idle)throw std::runtime_error("A voice call is already active");
+                if(!calls.idle())throw std::runtime_error("A voice call is already active");
                 auto contact=contacts.find(command.peer);
                 if(contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify this peer before calling");
                 auto connection=voiceConnection(command.peer);
-                if(!connection)throw std::runtime_error("The verified peer is not connected or does not support voice calls");
-                resetVoiceSignaling(connection);voiceCallId=command.id;voicePeerId=command.peer;voiceOutgoing=true;voiceDeadline=Clock::now()+VoiceRingTimeout;voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice,voiceNetworkGeneration,std::string(voiceNetworkFingerprint.begin(),voiceNetworkFingerprint.end()));std::wstring error;
-                if(!voiceMedia->startOffer(error)){clearVoice(error);continue;}voiceEvent(VoiceState::Outgoing);
+                if(!connection)throw std::runtime_error("The verified peer is unavailable or does not advertise voice call control");
+                if(!calls.beginOutgoing({command.id},calls::CallType::Voice,{command.peer},nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceRingTimeout).count())))throw std::runtime_error("A voice call is already active");
+                resetVoiceSignaling(connection);voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice,voiceNetworkGeneration,std::string(voiceNetworkFingerprint.begin(),voiceNetworkFingerprint.end()));voiceMedia->setVolumes(voiceInputPercent/100.0f,voiceOutputPercent/100.0f);voiceMediaLifetime=calls.lifetime();std::wstring error;
+                if(!voiceMedia->startOffer(error)){clearVoice(error,true);continue;}voiceEvent(calls::State::Outgoing);
             }else if(command.action==Action::VoiceAnswer){
-                if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)throw std::runtime_error("That incoming call is no longer available");
-                auto connection=voiceConnection(voicePeerId);if(!connection){clearVoice(L"Peer disconnected");continue;}
-                voiceDeadline=Clock::now()+VoiceConnectTimeout;voiceEvent(VoiceState::Connecting);voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice,voiceNetworkGeneration,std::string(voiceNetworkFingerprint.begin(),voiceNetworkFingerprint.end()));std::wstring error;
-                if(!voiceMedia->startAnswer(voiceOffer,error)){clearVoice(error);continue;}for(const auto& candidate:voiceCandidates)voiceMedia->addCandidate(candidate.first,candidate.second,error);voiceCandidates.clear();
+                auto active=calls.active();if(!active||active->state!=calls::State::Incoming||active->direction!=calls::Direction::Incoming||active->id.value!=command.id)throw std::runtime_error("That incoming call is no longer available");
+                auto peer=calls.peer();auto connection=voiceConnection(peer);if(!connection){clearVoice(L"Peer unavailable for call control");continue;}
+                calls.transition(command.id,calls::State::ConnectingMedia,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceConnectTimeout).count()));voiceEvent(calls::State::ConnectingMedia);voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice,voiceNetworkGeneration,std::string(voiceNetworkFingerprint.begin(),voiceNetworkFingerprint.end()));voiceMedia->setVolumes(voiceInputPercent/100.0f,voiceOutputPercent/100.0f);voiceMediaLifetime=calls.lifetime();std::wstring error;
+                auto& participant=active->participants[peer];if(!voiceMedia->startAnswer(participant.remoteDescription,error)){clearVoice(error,true);continue;}for(const auto& candidate:participant.candidates)voiceMedia->addCandidate(candidate.first,candidate.second,error);participant.candidates.clear();
             }else if(command.action==Action::VoiceDecline){
-                if(voiceState!=VoiceState::Ringing||voiceOutgoing||voiceCallId!=command.id)continue;
-                if(auto connection=voiceConnection(voicePeerId)){protocol::Writer decline(protocol::CallDecline);decline.string(voiceCallId);packet(*connection,decline);}
+                auto active=calls.active();if(!active||active->state!=calls::State::Incoming||active->direction!=calls::Direction::Incoming||active->id.value!=command.id)continue;
+                if(auto connection=voiceConnection(calls.peer())){protocol::Writer decline(protocol::CallDecline);decline.string(active->id.value);packet(*connection,decline);}
                 clearVoice(L"Declined");
             }else if(command.action==Action::VoiceEnd){
-                if(voiceState==VoiceState::Idle||voiceCallId!=command.id)continue;
-                if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}
+                auto active=calls.active();if(!active||active->id.value!=command.id)continue;
+                if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}
                 clearVoice(L"Call ended");
-            }else if(command.action==Action::VoiceMute){std::wstring error;if(!voiceMedia||!voiceMedia->setMuted(command.accepted,error))notice(NodeEvent::Kind::Error,error.empty()?L"No connected voice call.":L"Voice audio device error: "+error,voicePeerId);
-            }else if(command.action==Action::VoiceDeafen){if(voiceMedia)voiceMedia->setDeafened(command.accepted);
-            }else if(command.action==Action::VoiceDevices){if(voiceState==VoiceState::Idle){voiceInputDevice=static_cast<int>(command.port)-1;voiceOutputDevice=static_cast<int>(command.before);}
+            }else if(command.action==Action::VoiceMute){std::wstring error;if(!voiceMedia||!voiceMedia->setMuted(command.accepted,error))notice(NodeEvent::Kind::Error,error.empty()?L"No connected voice call.":L"Voice audio device error: "+error,calls.peer());else{calls.setMuted(command.accepted);voiceEvent(calls.state());}
+            }else if(command.action==Action::VoiceDeafen){if(voiceMedia){voiceMedia->setDeafened(command.accepted);calls.setDeafened(command.accepted);voiceEvent(calls.state());}
+            }else if(command.action==Action::VoiceDevices){if(calls.idle()){voiceInputDevice=static_cast<int>(command.port)-1;voiceOutputDevice=static_cast<int>(command.before);}
+            }else if(command.action==Action::VoiceLevels){voiceInputPercent=static_cast<int>(command.port);voiceOutputPercent=static_cast<int>(command.before);if(voiceMedia)voiceMedia->setVolumes(voiceInputPercent/100.0f,voiceOutputPercent/100.0f);
             }else if(command.action==Action::VoiceDiagnostics){if(command.response)command.response->set_value(voiceMedia?voiceSignalingDiagnostics()+L"\n"+voiceMedia->diagnostics():lastVoiceDiagnostics);
             }
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
@@ -568,7 +575,7 @@ struct Node::Impl {
             for(const auto& c:contacts)if(!c.second.endpoints.empty()){const auto& endpoint=c.second.endpoints.front();sessionTransports->seedRetry(c.first,routeObservation(endpoint.host,endpoint.port,L"Saved contact",L"automatic reconnect",false,{nextRouteRevision++}),nowMilliseconds());emitSessionSnapshot(c.first);}
             while(running){
                 drain();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();
-                if(voiceState!=VoiceState::Idle&&voiceDeadline!=Clock::time_point{}&&Clock::now()>=voiceDeadline){if(auto connection=voiceConnection(voicePeerId)){protocol::Writer end(protocol::CallEnd);end.string(voiceCallId);packet(*connection,end);}clearVoice(L"Call timed out");}
+                if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 for(const auto& retry:sessionTransports->takeDueRetries(nowMilliseconds())){auto split=retry.route.endpointUtf8.rfind(':');if(split==std::string::npos)continue;auto host=widenUtf8(retry.route.endpointUtf8.substr(0,split));std::uint16_t port=static_cast<std::uint16_t>(std::stoul(retry.route.endpointUtf8.substr(split+1)));auto source=widenUtf8(retry.route.sourceUtf8),route=widenUtf8(retry.route.routeUtf8);try{resolve(host,port,retry.remoteDeviceId,source,route.empty()?L"automatic reconnect":route);}catch(...){scheduleReconnect(retry.remoteDeviceId,host,port,source,route);}}
                 for(const auto& relay:sessionTransports->takeDueRelayAttempts(nowMilliseconds())){
                     if(relay.networkRevision<networkGeneration)continue;
@@ -604,7 +611,7 @@ struct Node::Impl {
                     if(wasRelay&&connection.relayPipe){std::lock_guard<std::mutex> lock(connection.relayPipe->mutex);connection.relayPipe->closed=true;connection.relayPipe->changed.notify_all();}
                     {std::lock_guard<std::mutex> lock(relayMutex);relayPipes.erase(connection.attemptId);}it=connections.erase(it);
                     if(!id.empty()&&!close.hasActiveWinner&&!close.hasPendingAttempt){
-                        if(close.wasActiveWinner&&voiceState!=VoiceState::Idle&&voicePeerId==id)clearVoice(L"Network connection lost");
+                        auto activeCall=calls.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeCall&&calls.peer()==id)clearVoice(L"Call-control connection lost",true);
                         emit(std::move(disconnected));
                         if(wasRelay){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
                         else scheduleReconnect(id,host,port,source,route,mismatch);
@@ -612,7 +619,7 @@ struct Node::Impl {
                 }else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};finishedVoiceCalls.clear();if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -650,6 +657,7 @@ bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))r
 bool Node::setVoiceMuted(bool muted){Impl::Command command{};command.action=Impl::Action::VoiceMute;command.accepted=muted;return impl_->command(std::move(command));}
 bool Node::setVoiceDeafened(bool deafened){Impl::Command command{};command.action=Impl::Action::VoiceDeafen;command.accepted=deafened;return impl_->command(std::move(command));}
 bool Node::setVoiceDevices(int inputDevice,int outputDevice){if(inputDevice < -1||outputDevice < -1)return false;Impl::Command command{};command.action=Impl::Action::VoiceDevices;command.port=static_cast<std::uint16_t>(inputDevice+1);command.before=outputDevice;return impl_->command(std::move(command));}
+bool Node::setVoiceVolumes(int inputPercent,int outputPercent){if(inputPercent<0||inputPercent>200||outputPercent<0||outputPercent>200)return false;Impl::Command command{};command.action=Impl::Action::VoiceLevels;command.port=static_cast<std::uint16_t>(inputPercent);command.before=outputPercent;return impl_->command(std::move(command));}
 std::wstring Node::voiceDiagnostics(){auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command command{};command.action=Impl::Action::VoiceDiagnostics;command.response=response;if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return L"media_state=unavailable\nlatest_audio_error=diagnostic request timed out";return result.get();}
 MediaTelemetry Node::voiceTelemetry() const {MediaTelemetry result;result.inputLevel=impl_->voiceInputLevel.load();result.outputLevel=impl_->voiceOutputLevel.load();auto flags=impl_->voiceTelemetryFlags.load();result.active=(flags&1u)!=0;result.inputAvailable=(flags&2u)!=0;result.outputAvailable=(flags&4u)!=0;return result;}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}

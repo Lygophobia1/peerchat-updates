@@ -45,6 +45,9 @@ int main() {
                 "PCM RMS media level was not normalized");
         require(decayedLevel(0.8f,now,now+500ms)<0.05f,
                 "Media level decay did not return stale audio toward zero");
+        auto half=tone(10000);scalePcm(half,0.5f);require(std::equal(half.begin(),half.end(),tone(5000).begin()),"Input/output software gain did not scale PCM");
+        auto clipped=tone(25000);scalePcm(clipped,2.0f);require(std::equal(clipped.begin(),clipped.end(),tone(32767).begin()),"Software gain did not clip safely");
+        auto silent=tone(10000);scalePcm(silent,-1.0f);require(std::equal(silent.begin(),silent.end(),tone(0).begin()),"Software gain did not clamp below zero");
         Mixer mixer;
 
         checkFrame(mixer.mix(now), 0);

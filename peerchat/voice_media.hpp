@@ -31,6 +31,7 @@ public:
     bool addCandidate(const std::string& candidate, const std::string& mid, std::wstring& error);
     bool setMuted(bool muted, std::wstring& error);
     void setDeafened(bool deafened);
+    void setVolumes(float inputGain, float outputGain);
     MediaTelemetry telemetry();
     std::wstring diagnostics();
 #ifdef PEERCHAT_TEST_VOICE_FRAMES

@@ -21,6 +21,11 @@ struct NodeEvent {
     std::uint64_t sessionRevision=0;
     std::uint64_t networkGeneration=0;
     bool sessionConnected=false;
+    std::uint64_t callLifetime=0;
+    std::uint32_t callState=0;
+    std::uint32_t callType=0;
+    bool callMuted=false;
+    bool callDeafened=false;
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;
@@ -67,6 +72,7 @@ public:
     bool setVoiceMuted(bool muted);
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
+    bool setVoiceVolumes(int inputPercent, int outputPercent);
     std::wstring voiceDiagnostics();
     MediaTelemetry voiceTelemetry() const;
     std::vector<NodeEvent> poll();

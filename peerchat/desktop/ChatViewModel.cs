@@ -80,6 +80,9 @@ public class ChatViewModel {
     public ushort Port=7777;
     public bool Listening,Groups;
     public string VoiceState="Idle",VoiceCallId="",VoicePeerId="";
+    public int VoiceStateCode,VoiceCallType;
+    public long VoiceCallLifetime;
+    public bool VoiceMuted,VoiceDeafened;
     public ConversationModel Selected;
     public GroupModel SelectedGroup;
     public ConversationModel Get(string peer){ConversationModel result;if(!String.IsNullOrEmpty(peer)&&conversationsByPeer.TryGetValue(peer,out result))return result;string key="peer:"+(peer??"");result=new ConversationModel{ConversationId=key,Contact=new ContactData{peer=peer,name="Friend",host=""}};if(!String.IsNullOrEmpty(peer)){result.KnownPeerIds.Add(peer);conversationsByPeer[peer]=result;}Conversations[key]=result;return result;}
@@ -134,7 +137,7 @@ public class ChatViewModel {
             GroupModel group;
             if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=!outgoing&&member!=null?member.name+"\n"+value.text:value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,delivery=2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
         }
-        if(e.kind==13){VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";}
+        if(e.kind==13){if(e.callLifetime<VoiceCallLifetime)return;VoiceCallLifetime=e.callLifetime;VoiceStateCode=e.callState;VoiceCallType=e.callType;VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";VoiceMuted=e.callMuted;VoiceDeafened=e.callDeafened;}
         if(e.kind==17){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);bool newer=e.sessionEpoch>item.SessionEpoch||(e.sessionEpoch==item.SessionEpoch&&e.sessionRevision>item.SessionRevision);if(newer){item.SessionEpoch=e.sessionEpoch;item.SessionRevision=e.sessionRevision;item.Online=e.connected;item.WinningConnectionId=e.connected?e.attempt:0;item.ConnectionState=String.IsNullOrEmpty(e.text)?(e.connected?"Ready":"Offline"):e.text;item.Refresh();}}
     }
     static string ClassifyConnectionError(string text){

@@ -1,4 +1,5 @@
 #include "node.hpp"
+#include "call_manager.hpp"
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -27,6 +28,16 @@ int main(){
     auto wait=[&](auto predicate,const char* failure){auto deadline=Clock::now()+std::chrono::seconds(20);while(Clock::now()<deadline){collect();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(20));}throw std::runtime_error(failure);};
     auto state=[&](size_t index,const wchar_t* prefix){return calls[index].state.rfind(prefix,0)==0;};
     try{
+        calls::CallManager ownership;
+        require(ownership.beginOutgoing({"call-one"},calls::CallType::Voice,{"peer-one"},1000),"CallManager rejected a valid 1:1 call");
+        const auto firstLifetime=ownership.lifetime();
+        require(ownership.active()->participants.size()==1&&ownership.active()->type==calls::CallType::Voice,"Call ownership is not participant-oriented or typed");
+        require(ownership.matches(firstLifetime,"call-one","peer-one"),"Current call lifetime was not accepted");
+        ownership.finish(calls::State::Ended);
+        require(ownership.beginOutgoing({"call-two"},calls::CallType::Voice,{"peer-one"},2000),"A new call could not start after teardown");
+        require(ownership.lifetime()>firstLifetime&&!ownership.matches(firstLifetime,"call-one","peer-one"),"An older asynchronous call completion matched the replacement call");
+        ownership.finish(calls::State::Ended);
+
         for(size_t index=0;index<nodes.size();++index){auto path=(root/std::to_wstring(index)).wstring();{Storage store(path);auto profile=store.profile();profile.listenPort=static_cast<unsigned short>(base+index);profile.name=index?L"Beta":L"Alpha";store.saveProfile(profile);}nodes[index].start(path);}
         wait([&]{return ready[0]&&ready[1];},"Voice peers did not start");nodes[0].setNetworkContext(2,L"10.211.241.175/255.255.255.0");nodes[1].setNetworkContext(1,L"192.168.1.17/255.255.255.0");nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),identities[1]);wait([&]{return online[0]&&online[1];},"Voice peers did not establish verified mutual TLS");
 
@@ -35,6 +46,8 @@ int main(){
 
         std::string declined=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==declined;},"Second call did not ring");require(nodes[1].declineVoiceCall(declined),"Decline command was rejected");wait([&]{return state(0,L"Idle")&&state(1,L"Idle");},"Decline did not clear both call states");
 
+        std::string cancelled=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==cancelled;},"Caller-cancel test did not ring");require(nodes[0].endVoiceCall(cancelled),"Caller cancel before answer was rejected");wait([&]{return state(0,L"Idle")&&state(1,L"Idle");},"Caller cancel before answer did not clear both call states");
+
         std::string timedOut=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==timedOut;},"Timeout test did not ring");wait([&]{return state(0,L"Idle")&&state(1,L"Idle");},"Unanswered call did not time out on both peers");
 
         std::string abandoned=nodes[0].startVoiceCall(identities[1]);wait([&]{return state(1,L"Incoming")&&calls[1].callId==abandoned;},"Disconnect-during-ringing test did not ring");nodes[1].stop();wait([&]{return state(0,L"Idle");},"Peer disappearance during ringing did not clean the caller");ready[1]=online[1]=false;calls[1]={};nodes[1].start((root/L"1").wstring());wait([&]{return ready[1]&&identities[1].size()==64&&online[0]&&online[1];},"Stopped profile did not restart and reconnect after ringing cleanup");
@@ -42,7 +55,7 @@ int main(){
         std::string left=nodes[0].startVoiceCall(identities[1]);std::string right=nodes[1].startVoiceCall(identities[0]);require(left!=right,"Independent simultaneous calls reused an ID");wait([&]{return (state(0,L"Incoming")&&state(1,L"Outgoing"))||(state(1,L"Incoming")&&state(0,L"Outgoing"));},"Simultaneous calls did not converge to one ringing call");size_t receiver=state(0,L"Incoming")?0:1;std::string surviving=calls[receiver].callId;require(nodes[receiver].answerVoiceCall(surviving),"Simultaneous-call winner could not be answered");wait([&]{return state(0,L"Connected")&&state(1,L"Connected");},"Simultaneous call resolution did not connect");
 
         nodes[1].stop();wait([&]{return state(0,L"Idle");},"Peer disappearance did not clean the active call");nodes[0].stop();
-        require(calls[0].connectedCount>=2&&calls[0].idleCount>=5,"Call lifecycle events were incomplete");
+        require(calls[0].connectedCount>=2&&calls[0].idleCount>=6,"Call lifecycle events were incomplete");
         std::cout<<"PASS: verified-peer WebRTC voice, ring/answer/decline/timeout/hang-up, ringing disconnect/restart, simultaneous-call convergence, text coexistence, active disconnect and shutdown cleanup.\n";return 0;
     }catch(const std::exception& error){for(auto& node:nodes)node.stop();std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }
