@@ -131,7 +131,9 @@ These are the current boundaries after Stage 5.5.
   direct recovery. Candidate providers do not choose or promote a route.
 - `RelayTransport` is a managed physical adapter only. It opens the existing certificate-pinned
   authenticated server TLS connection, attaches to the manager-issued attempt, and carries bounded
-  framed opaque bytes. It owns no retry, fallback, winner, trust or identity policy.
+  framed opaque bytes. Relay reads have no discovery-request timeout, so a healthy idle winner stays
+  open until a peer/server/shutdown close; writes retain their bounded timeout. It owns no retry,
+  fallback, winner, trust or identity policy.
 - The native core runs the unchanged Schannel peer TLS protocol inside the relay byte stream.
   Expected Peer ID, certificate/key verification, explicit changed-device trust, durable delivery,
   destination-scoped ACK authorization, resend and deduplication are identical to direct transport.
@@ -353,7 +355,13 @@ to implement protocol/media behavior in Stage 2.
   opaque relay adapter, then exchanged durable messages and authorized ACKs in both directions.
 - Discovery/server integration passed for pending friend-add relay bootstrap, established-friend
   relay, reciprocal account/device pairing, exact opaque-byte forwarding and unrelated-account
-  rejection. Durable account/friend restart coverage remained green.
+  rejection. A physical VM/NAT test exposed that the relay had inherited the discovery request's
+  10-second receive timeout; the log showed the authenticated relay closing on that exact read timeout.
+  The targeted integration now keeps an established relay idle beyond that former cutoff and then
+  proves unchanged byte forwarding. Durable account/friend restart coverage remained green.
+- Reconnect/session coverage now registers a direct-recovery probe beside an active relay, closes the
+  probe with a local authentication timeout, and proves the relay remains the connected winner, the
+  loser remains separately correlated, and no duplicate relay attempt starts.
 - Fresh desktop/native build and managed profile/adapter regressions passed. The sandbox-token DPAPI
   limitation reproduced once; the intended normal Windows user run passed without weakening DPAPI.
 - Physical two-PC fallback/recovery remains required: make direct unavailable, confirm messaging over

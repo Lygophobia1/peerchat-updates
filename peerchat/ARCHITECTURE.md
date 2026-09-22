@@ -30,8 +30,10 @@ Media continuity remains outside the implemented boundary.
 `desktop/RelayTransport.cs` is the concrete server-relay byte-stream adapter. It has no route policy:
 it opens the certificate-pinned outer server TLS connection only when the manager emits a relay
 attempt, applies the returned framed session binding, and passes opaque bytes between that stream and
-the native core. The native core runs its existing Schannel peer TLS session inside those bytes, so
-peer identity/trust and application framing stay above both direct and relay physical transports.
+the native core. Relay reads are long-lived and may remain idle indefinitely; adapter shutdown closes
+the socket to interrupt the read, while writes keep the bounded socket timeout used for backpressure.
+The native core runs its existing Schannel peer TLS session inside those bytes, so peer identity/trust
+and application framing stay above both direct and relay physical transports.
 
 The local-only types distinguish the profile scope, local/verified-remote device identity,
 runtime session epoch, transport instance ID, independent route revision, channel requirements,

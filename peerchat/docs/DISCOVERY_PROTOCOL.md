@@ -134,7 +134,9 @@ After `relay_ready`, each outer frame is `session-id || opaque-inner-peer-TLS-by
 messages are not valid relay frames and relay bytes are never processed by the account dispatcher.
 The server verifies the session prefix and caps opaque payloads at 64 KiB before synchronously
 forwarding the unchanged frame to the reciprocal authenticated attachment. It does not persist or
-log payloads and holds no unbounded relay queue. Disconnecting either side closes the pair.
+log payloads and holds no unbounded relay queue. An authenticated matched channel may remain idle;
+clients must not apply the short discovery-request receive timeout to its long-lived read. Closing
+either attachment, including an explicit client shutdown close, closes the pair.
 
 The existing peer TLS certificate/Peer ID, expected-identity check, explicit trust, application
 framing, delivery ACK authorization and deduplication remain inside this stream and authoritative.

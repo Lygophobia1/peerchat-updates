@@ -20,7 +20,11 @@ public sealed class RelayTransport : IDisposable {
     public void Start(){worker=new Thread(Run){IsBackground=true,Name="PeerChat opaque relay"};worker.Start();}
     static bool ValidSession(string value){if(String.IsNullOrEmpty(value)||value.Length!=43)return false;foreach(char c in value)if(!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))return false;return true;}
     void Run(){string failure="Relay closed";SslStream tls=null;Thread writer=null;try{
-        tls=discovery.OpenAuthenticatedStream(out tcp);
+        // Discovery request sockets are deliberately short-lived, but an authenticated
+        // relay winner may be quiet indefinitely. Closing it on the request timeout
+        // creates a false disconnect/retry loop. TcpClient.Close still interrupts this
+        // unbounded read during profile shutdown; writes retain their bounded timeout.
+        tls=discovery.OpenAuthenticatedStream(out tcp,true);
         var request=new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",discovery.SessionToken??""},{"publicIdentity",localPeer},{"targetAccountId",targetAccount.ToString()},{"targetPublicIdentity",targetPeer}};
         DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(request)));
         var response=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(tls)));object ok,error,sessionValue,incomingValue;
