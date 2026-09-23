@@ -12,10 +12,11 @@ $vsDevCmd = Join-Path $install 'Common7\Tools\VsDevCmd.bat'
 $winrt = Join-Path $sdk.FullName 'cppwinrt'
 $output = Join-Path $projectRoot 'build\stage8-probe'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
+& (Join-Path $projectRoot 'scripts\build-screen-media.ps1') -OutputDirectory 'build\stage8-probe'
 Push-Location $output
 try {
     $source = Join-Path $projectRoot 'tests\screen_media_local_pipeline_probe.cpp'
-    $build = '"{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /EHsc /MD /W4 /I"{1}" /Fo:screen_media_local_pipeline_probe.obj /Fe:screen_media_local_pipeline_probe.exe "{2}" /link windowsapp.lib d3d11.lib dxgi.lib mfplat.lib mfuuid.lib mfreadwrite.lib user32.lib' -f $vsDevCmd, $winrt, $source
+    $build = '"{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /EHsc /MD /W4 /I"{1}" /Fo:screen_media_local_pipeline_probe.obj /Fe:screen_media_local_pipeline_probe.exe "{2}" /link PeerChat.ScreenMedia.lib windowsapp.lib d3d11.lib dxgi.lib mfplat.lib mfuuid.lib mfreadwrite.lib user32.lib' -f $vsDevCmd, $winrt, $source
     & cmd.exe /d /c $build
     if ($LASTEXITCODE -ne 0) { throw "Stage 8 GPU pipeline probe compilation failed ($LASTEXITCODE)." }
     if ($Run) {

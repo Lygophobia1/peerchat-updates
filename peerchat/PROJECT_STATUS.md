@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 8 screen sharing is in progress. The local Windows GPU capture/codec/presentation pipeline is verified; no PeerChat screen-share protocol, adapter, UI, or package is implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
-**Next action:** implement the narrow MSVC C-ABI Windows media adapter and then integrate it with the existing authenticated signaling, libdatachannel media and Stage 7 generation ownership. Do not treat the local probe as two-client screen-sharing acceptance.
+**Current stage:** Stage 8 screen sharing is in progress. The local Windows GPU capture/codec/presentation pipeline and an initial MSVC C-ABI source/capability adapter are verified; no continuous PeerChat screen-share media, protocol, UI, or package is implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
+**Next action:** extend the narrow MSVC adapter with bounded continuous capture/encode/decode/presentation mechanics, then integrate it with authenticated signaling, libdatachannel media and Stage 7 generation ownership. Do not treat the local probe as two-client screen-sharing acceptance.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -22,9 +22,15 @@ separate; no publication, final tag, key change or package rebuild in this docum
   NV12→BGRA conversion, and DXGI swap-chain presentation.
 - The captured/decoded raw frames remained on GPU surfaces with no raw-pixel CPU readback. The
   H.264 compressed bytes crossed GPU/CPU boundaries for the prospective libdatachannel API.
-- This is a local manual hardware smoke test only. Monitor/window selection, C ABI adapter,
+- This is a local manual hardware smoke test only. User-facing monitor/window selection,
   negotiated media transport, receiver UI, recovery, settings, packaging and physical two-client
   acceptance remain open. Production MinGW core/dependencies/build scripts are unchanged.
+- `windows_media/peerchat_screen_media.h` now defines the narrow Windows DLL ABI, and its first
+  implementation enumerates current monitors/windows and reports Media Foundation hardware
+  encode/decode availability. The test enumerated two monitors and nine windows and reported
+  H.264/HEVC hardware encode plus H.264/HEVC decode; AV1 was unavailable. The DLL is not yet
+  packaged or invoked by the desktop client. Its MSVC runtime is statically linked; import audit
+  showed Windows-inbox dependencies only. The adapter owns no session/call/trust/route state.
 
 ## Frozen checkpoint and branches
 

@@ -1,6 +1,7 @@
 // Manual Windows GPU-path probe: no captured or encoded content is persisted.
 // Run only in an interactive desktop session with a working hardware encoder.
 #include <windows.h>
+#include "../windows_media/peerchat_screen_media.h"
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
@@ -35,6 +36,24 @@ static BOOL CALLBACK firstMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM context)
 int wmain() {
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        struct SourceCounts { unsigned monitors = 0, windows = 0; } sources;
+        const auto sourceCallback = [](void* opaque, uint32_t kind, uint64_t,
+            const wchar_t*, uint32_t, uint32_t, uint32_t, uint32_t) {
+            auto& counts = *static_cast<SourceCounts*>(opaque);
+            if (kind == PC_SCREEN_MONITOR) ++counts.monitors;
+            if (kind == PC_SCREEN_WINDOW) ++counts.windows;
+        };
+        const auto totalSources = pc_screen_enumerate_sources(sourceCallback, &sources);
+        pc_screen_capabilities capabilities{};
+        capabilities.structure_size = sizeof(capabilities);
+        if (!pc_screen_query_capabilities(&capabilities)) return 10;
+        std::wcout << L"adapter_sources=" << totalSources << L" monitors=" << sources.monitors
+                   << L" windows=" << sources.windows << L" hardware_codecs="
+                   << capabilities.hardware_encoder_codecs << L" decoder_codecs="
+                   << capabilities.decoder_codecs << L'\n';
+        if (!sources.monitors || totalSources != sources.monitors + sources.windows ||
+            !(capabilities.hardware_encoder_codecs & PC_SCREEN_H264) ||
+            !(capabilities.decoder_codecs & PC_SCREEN_H264)) return 11;
         if (!GraphicsCaptureSession::IsSupported()) {
             std::wcerr << L"Windows Graphics Capture is unsupported.\n";
             return 2;
