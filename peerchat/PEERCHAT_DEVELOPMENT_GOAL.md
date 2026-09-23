@@ -665,7 +665,8 @@ Current feature-first sequence:
    physical two-client voice/settings acceptance remains pending.
 3. Stage 7 — media continuity and voice recovery: implementation and automated verification complete;
    physical two-client network-change/audio acceptance pending.
-4. Stage 8 — one-to-one screen sharing: next, not begun.
+4. Stage 8 — one-to-one screen sharing: local Windows capture/H.264/decode/presentation path
+   proven; product adapter, protocol, UI, settings and two-client acceptance remain in progress.
 5. Stage 9 — webcam video.
 6. Stage 10 — group calls.
 7. Stage 11 — file transfer and richer messaging features.

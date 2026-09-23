@@ -9,10 +9,22 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 7 media continuity and voice recovery implementation and automated gates are complete; Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
-**Next action:** physically test repeated network changes with two packaged clients, confirming the same CallId, recovered two-way audio and preserved controls; stop before Stage 8 screen sharing.
+**Current stage:** Stage 8 screen sharing is in progress. The local Windows GPU capture/codec/presentation pipeline is verified; no PeerChat screen-share protocol, adapter, UI, or package is implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
+**Next action:** implement the narrow MSVC C-ABI Windows media adapter and then integrate it with the existing authenticated signaling, libdatachannel media and Stage 7 generation ownership. Do not treat the local probe as two-client screen-sharing acceptance.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
+
+## Stage 8 local pipeline evidence (not product integration)
+
+- `tests/test-screen-pipeline.ps1 -Run` passed in the interactive Windows user session with a
+  2560×1440 monitor, D3D11-backed Windows.Graphics.Capture, GPU BGRA→NV12 conversion, AMD hardware
+  H.264 Media Foundation encoding, Microsoft H.264 decoding to a D3D11 NV12 texture, GPU
+  NV12→BGRA conversion, and DXGI swap-chain presentation.
+- The captured/decoded raw frames remained on GPU surfaces with no raw-pixel CPU readback. The
+  H.264 compressed bytes crossed GPU/CPU boundaries for the prospective libdatachannel API.
+- This is a local manual hardware smoke test only. Monitor/window selection, C ABI adapter,
+  negotiated media transport, receiver UI, recovery, settings, packaging and physical two-client
+  acceptance remain open. Production MinGW core/dependencies/build scripts are unchanged.
 
 ## Frozen checkpoint and branches
 
