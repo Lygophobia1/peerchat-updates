@@ -9,8 +9,8 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 8 screen sharing is in progress. The local Windows GPU capture/codec/presentation pipeline and an initial MSVC C-ABI source/capability adapter are verified; no continuous PeerChat screen-share media, protocol, UI, or package is implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
-**Next action:** extend the narrow MSVC adapter with bounded continuous capture/encode/decode/presentation mechanics, then integrate it with authenticated signaling, libdatachannel media and Stage 7 generation ownership. Do not treat the local probe as two-client screen-sharing acceptance.
+**Current stage:** Stage 8 screen sharing is in progress. The MSVC adapter now performs continuous monitor/window H.264 capture/encode and GPU decode/presentation, and a one-PC direct ICE/DTLS-SRTP video loopback passed. Authenticated PeerChat share signaling, logical ownership/recovery, UI, settings, packaging and physical two-client acceptance are not implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
+**Next action:** attach the verified media path to authenticated PeerChat control with capability gating and a separate logical share owner, then add Stage 7-style media-generation recovery and client UI/settings. Do not treat the one-PC media test as two-client acceptance.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no publication, final tag, key change or package rebuild in this documentation pass.
 
@@ -31,6 +31,13 @@ separate; no publication, final tag, key change or package rebuild in this docum
   H.264/HEVC hardware encode plus H.264/HEVC decode; AV1 was unavailable. The DLL is not yet
   packaged or invoked by the desktop client. Its MSVC runtime is statically linked; import audit
   showed Windows-inbox dependencies only. The adapter owns no session/call/trust/route state.
+- The adapter now has event-driven continuous monitor/window capture and a bounded in-memory
+  Annex-B H.264 encoder queue, plus a bounded decoder queue with D3D11 presentation. The same
+  local hardware test passed three continuous monitor frames, a specific-window frame, and
+  adapter decoder rendering. `tests/screen_media_transport_test.cpp` passed a one-PC two-endpoint
+  ICE/DTLS-SRTP test: 20 H.264 access units submitted, 345 RTP packets received, 20 units
+  reassembled, and two frames decoded/presented. This verifies only the media mechanics, not
+  PeerChat trust, authenticated control, recovery or remote hardware compatibility.
 
 ## Frozen checkpoint and branches
 

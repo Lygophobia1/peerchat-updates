@@ -9,12 +9,15 @@
 
 ## Components and ownership
 
-Stage 8 has an initial separate `windows_media/PeerChat.ScreenMedia.dll` built with MSVC. Its
-C-compatible ABI currently enumerates live Windows monitors/windows and reports WGC/D3D11/Media
-Foundation codec availability; the local hardware smoke test uses it. This DLL is not yet part of
-the shipped client and owns no screen-share session, signaling, route or trust policy. The
-production MinGW core, dependencies and runtime packaging remain unchanged. Continuous screen
-capture/media delivery and the planned screen-share manager are not implemented yet.
+Stage 8 has a separate `windows_media/PeerChat.ScreenMedia.dll` built with MSVC and a narrow C
+ABI. It enumerates monitors/windows and hardware codec capabilities, captures the selected source
+through WGC/D3D11, emits complete H.264 Annex-B access units from a bounded hardware-encoder
+queue, and decodes/presents received units through a bounded Media Foundation/D3D11 path. The
+standalone `ScreenShareMedia` media-generation component connects those units to a pinned
+libdatachannel H.264 RTP track over ICE/DTLS-SRTP; a local two-endpoint media test passed. Neither
+component owns PeerSession, trust, share lifetime, signaling authorization or recovery policy.
+They are not yet attached to the shipped client. The MinGW core build/dependencies and runtime
+packaging remain unchanged; authenticated share control and the ScreenShareManager are pending.
 
 `desktop/App.cs` owns the WPF presentation. `desktop/CoreAdapter.cs` calls the C-compatible
 exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native core owns

@@ -515,8 +515,108 @@ int wmain() {
             Sleep(700);
             DestroyWindow(hwnd);
         }
+        auto receiverWindow = CreateWindowExW(0, L"STATIC", L"PeerChat Stage 8 decoder adapter probe",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 960, 560,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!receiverWindow) return 17;
+        ShowWindow(receiverWindow, SW_SHOW);
+        pc_screen_decoder_options decoderOptions{};
+        decoderOptions.structure_size = sizeof(decoderOptions);
+        decoderOptions.presentation_window = reinterpret_cast<uint64_t>(receiverWindow);
+        decoderOptions.width = desc.Width;
+        decoderOptions.height = desc.Height;
+        decoderOptions.frames_per_second = 60;
+        auto* adapterDecoder = pc_screen_decoder_open(&decoderOptions);
+        if (!adapterDecoder) { DestroyWindow(receiverWindow); return 18; }
+        bool acceptedAll = true;
+        for (size_t frame = 0; frame < encodedFrames.size(); ++frame) {
+            const auto enqueueDeadline = GetTickCount64() + 2000;
+            int accepted = 0;
+            while (accepted == 0 && GetTickCount64() < enqueueDeadline) {
+                accepted = pc_screen_decoder_push(adapterDecoder, encodedFrames[frame].data(),
+                    static_cast<uint32_t>(encodedFrames[frame].size()), frame * 166666);
+                if (accepted == 0) Sleep(5);
+            }
+            if (accepted != 1) { acceptedAll = false; break; }
+        }
+        pc_screen_decoder_status decoderStats{};
+        decoderStats.structure_size = sizeof(decoderStats);
+        const auto renderDeadline = GetTickCount64() + 5000;
+        while (GetTickCount64() < renderDeadline) {
+            pc_screen_decoder_status_get(adapterDecoder, &decoderStats);
+            if (decoderStats.presented_frames || decoderStats.failed) break;
+            Sleep(10);
+        }
+        pc_screen_decoder_close(adapterDecoder);
+        DestroyWindow(receiverWindow);
+        std::wcout << L"adapter_decoder_accepted=" << decoderStats.accepted_frames
+                   << L" decoded=" << decoderStats.decoded_frames
+                   << L" presented=" << decoderStats.presented_frames
+                   << L" failed=" << decoderStats.failed << L'\n';
+        if (!acceptedAll || !decoderStats.presented_frames || decoderStats.failed) return 19;
         encoder.Reset();
         MFShutdown();
+        pc_screen_encoder_options continuousOptions{};
+        continuousOptions.structure_size = sizeof(continuousOptions);
+        continuousOptions.source_kind = PC_SCREEN_MONITOR;
+        continuousOptions.source_handle = reinterpret_cast<uint64_t>(monitor.handle);
+        continuousOptions.frames_per_second = 60;
+        continuousOptions.bitrate_bits_per_second = 20000000;
+        continuousOptions.capture_cursor = 1;
+        auto* continuous = pc_screen_encoder_open(&continuousOptions);
+        if (!continuous) {
+            std::wcerr << L"Continuous adapter capture/encoder failed to start.\n";
+            return 12;
+        }
+        std::vector<uint8_t> frameBuffer(4 * 1024 * 1024);
+        unsigned continuousFrames = 0;
+        const auto continuousDeadline = GetTickCount64() + 5000;
+        while (continuousFrames < 3 && GetTickCount64() < continuousDeadline) {
+            pc_screen_encoded_frame frameInfo{};
+            frameInfo.structure_size = sizeof(frameInfo);
+            const int popped = pc_screen_encoder_pop(continuous, frameBuffer.data(),
+                static_cast<uint32_t>(frameBuffer.size()), &frameInfo);
+            if (popped == -1 && frameInfo.length <= 8 * 1024 * 1024) {
+                frameBuffer.resize(frameInfo.length);
+                continue;
+            }
+            if (popped < 0) break;
+            if (popped == 1 && frameInfo.length > 0) ++continuousFrames;
+            else Sleep(10);
+        }
+        pc_screen_encoder_close(continuous);
+        std::wcout << L"continuous_adapter_h264_frames=" << continuousFrames << L'\n';
+        if (continuousFrames < 3) return 13;
+        auto captureWindow = CreateWindowExW(0, L"STATIC", L"Stage 8 window capture probe",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!captureWindow) return 14;
+        ShowWindow(captureWindow, SW_SHOW);
+        UpdateWindow(captureWindow);
+        auto windowOptions = continuousOptions;
+        windowOptions.source_kind = PC_SCREEN_WINDOW;
+        windowOptions.source_handle = reinterpret_cast<uint64_t>(captureWindow);
+        auto* windowEncoder = pc_screen_encoder_open(&windowOptions);
+        if (!windowEncoder) { DestroyWindow(captureWindow); return 15; }
+        unsigned windowFrames = 0;
+        const auto windowDeadline = GetTickCount64() + 5000;
+        while (!windowFrames && GetTickCount64() < windowDeadline) {
+            pc_screen_encoded_frame frameInfo{};
+            frameInfo.structure_size = sizeof(frameInfo);
+            const int popped = pc_screen_encoder_pop(windowEncoder, frameBuffer.data(),
+                static_cast<uint32_t>(frameBuffer.size()), &frameInfo);
+            if (popped == -1 && frameInfo.length <= 8 * 1024 * 1024) {
+                frameBuffer.resize(frameInfo.length);
+                continue;
+            }
+            if (popped < 0) break;
+            if (popped == 1 && frameInfo.length > 0) ++windowFrames;
+            else Sleep(10);
+        }
+        pc_screen_encoder_close(windowEncoder);
+        DestroyWindow(captureWindow);
+        std::wcout << L"window_adapter_h264_frames=" << windowFrames << L'\n';
+        if (!windowFrames) return 16;
         return 0;
     } catch (winrt::hresult_error const& error) {
         std::wcerr << L"capture_hresult=0x" << std::hex << static_cast<unsigned>(error.code())

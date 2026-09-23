@@ -34,6 +34,65 @@ PC_SCREEN_API uint32_t __cdecl pc_screen_enumerate_sources(
     pc_screen_source_callback callback, void* context);
 PC_SCREEN_API int __cdecl pc_screen_query_capabilities(pc_screen_capabilities* capabilities);
 
+// Media mechanics only. The caller owns the share lifetime, peer, negotiation,
+// transport and recovery policy. Frames are complete Annex-B H.264 access units.
+typedef struct pc_screen_encoder pc_screen_encoder;
+
+typedef struct pc_screen_encoder_options {
+    uint32_t structure_size;
+    uint32_t source_kind;
+    uint64_t source_handle;
+    uint32_t frames_per_second;
+    uint32_t bitrate_bits_per_second;
+    uint32_t capture_cursor;
+} pc_screen_encoder_options;
+
+typedef struct pc_screen_encoded_frame {
+    uint32_t structure_size;
+    uint32_t length;
+    uint32_t width;
+    uint32_t height;
+    uint64_t timestamp_100ns;
+    uint32_t keyframe;
+} pc_screen_encoded_frame;
+
+// Returns null on unsupported source/encoder or failed capture initialization.
+// Pop returns 1 for a frame, 0 for no frame, -1 if output_capacity is too small,
+// and -2 after a terminal media error. A bounded queue drops stale encoded frames.
+PC_SCREEN_API pc_screen_encoder* __cdecl pc_screen_encoder_open(
+    const pc_screen_encoder_options* options);
+PC_SCREEN_API int __cdecl pc_screen_encoder_pop(pc_screen_encoder* encoder,
+    uint8_t* output, uint32_t output_capacity, pc_screen_encoded_frame* frame);
+PC_SCREEN_API void __cdecl pc_screen_encoder_close(pc_screen_encoder* encoder);
+
+typedef struct pc_screen_decoder pc_screen_decoder;
+
+typedef struct pc_screen_decoder_options {
+    uint32_t structure_size;
+    uint64_t presentation_window;
+    uint32_t width;
+    uint32_t height;
+    uint32_t frames_per_second;
+} pc_screen_decoder_options;
+
+typedef struct pc_screen_decoder_status {
+    uint32_t structure_size;
+    uint64_t accepted_frames;
+    uint64_t decoded_frames;
+    uint64_t presented_frames;
+    uint32_t failed;
+} pc_screen_decoder_status;
+
+// Copies one complete Annex-B access unit into a bounded decoder queue. A full
+// queue returns 0; the caller owns the resulting keyframe/recovery decision.
+PC_SCREEN_API pc_screen_decoder* __cdecl pc_screen_decoder_open(
+    const pc_screen_decoder_options* options);
+PC_SCREEN_API int __cdecl pc_screen_decoder_push(pc_screen_decoder* decoder,
+    const uint8_t* encoded, uint32_t length, uint64_t timestamp_100ns);
+PC_SCREEN_API int __cdecl pc_screen_decoder_status_get(pc_screen_decoder* decoder,
+    pc_screen_decoder_status* status);
+PC_SCREEN_API void __cdecl pc_screen_decoder_close(pc_screen_decoder* decoder);
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,11 +11,13 @@ if (-not $sdk) { throw 'Windows SDK headers are unavailable.' }
 $vsDevCmd = Join-Path $install 'Common7\Tools\VsDevCmd.bat'
 $winrt = Join-Path $sdk.FullName 'cppwinrt'
 $source = Join-Path $projectRoot 'windows_media\peerchat_screen_media.cpp'
+$encoderSource = Join-Path $projectRoot 'windows_media\screen_encoder.cpp'
+$decoderSource = Join-Path $projectRoot 'windows_media\screen_decoder.cpp'
 $output = Join-Path $projectRoot $OutputDirectory
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 Push-Location $output
 try {
-    $build = '"{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /EHsc /MT /W4 /LD /I"{1}" /Fo:peerchat_screen_media.obj /Fe:PeerChat.ScreenMedia.dll "{2}" /link windowsapp.lib d3d11.lib dxgi.lib dwmapi.lib mfplat.lib mfuuid.lib user32.lib gdi32.lib' -f $vsDevCmd, $winrt, $source
+    $build = '"{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++20 /EHsc /MT /W4 /LD /I"{1}" /Fe:PeerChat.ScreenMedia.dll "{2}" "{3}" "{4}" /link windowsapp.lib d3d11.lib dxgi.lib dwmapi.lib mfplat.lib mfuuid.lib user32.lib gdi32.lib' -f $vsDevCmd, $winrt, $source, $encoderSource, $decoderSource
     & cmd.exe /d /c $build
     if ($LASTEXITCODE -ne 0) { throw "Windows screen-media adapter build failed ($LASTEXITCODE)." }
 } finally { Pop-Location }
