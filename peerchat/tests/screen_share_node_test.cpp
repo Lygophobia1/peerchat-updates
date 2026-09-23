@@ -62,8 +62,11 @@ int main(){
         throw std::runtime_error(failure);
     };
     try{
+        const bool heavy=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_HEAVY",nullptr,0)>0;
+        const int sourceWidth=heavy?1920:640,sourceHeight=heavy?1080:480;
+        const std::uint32_t fps=heavy?60:30,bitrate=heavy?25000000:8000000;
         source=CreateWindowExW(0,L"STATIC",L"PeerChat authenticated screen sender",
-            WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,640,480,
+            WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,sourceWidth,sourceHeight,
             nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
         viewer=CreateWindowExW(0,L"STATIC",L"PeerChat authenticated screen receiver",
             WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,800,600,
@@ -82,7 +85,7 @@ int main(){
         nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
         auto id=nodes[0].startScreenShare(peers[1],PC_SCREEN_WINDOW,
-            reinterpret_cast<std::uint64_t>(source),30,8000000,true);
+            reinterpret_cast<std::uint64_t>(source),fps,bitrate,true);
         require(!id.empty(),"Screen share start command was rejected");
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==id;},
             "Authenticated screen offer did not reach the verified peer");
@@ -126,6 +129,30 @@ int main(){
         require(nodes[0].endScreenShare(id),"Sender could not stop the screen share");
         wait([&]{return shareState[0]==0&&shareState[1]==0;},
             "Both peers did not return to idle after screen share");
+        auto repeated=nodes[0].startScreenShare(peers[1],PC_SCREEN_WINDOW,
+            reinterpret_cast<std::uint64_t>(source),fps,bitrate,true);
+        require(!repeated.empty(),"A second active screen share could not start after teardown");
+        wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==repeated;},
+            "Second active share did not reach the verified peer");
+        require(nodes[1].answerScreenShare(repeated,reinterpret_cast<std::uint64_t>(viewer)),
+            "Second active share answer was rejected");
+        wait([&]{return shareState[0]==static_cast<unsigned>(screen::State::Connected)&&
+            shareState[1]==static_cast<unsigned>(screen::State::Connected)&&
+            counter(nodes[1].screenShareDiagnostics(),L"presented_frames")>=1;},
+            "Second active share did not render after repeated start",35);
+        ShowWindow(source,SW_HIDE);
+        const auto stalledUntil=Clock::now()+std::chrono::milliseconds(350);
+        while(Clock::now()<stalledUntil){collect();std::this_thread::sleep_for(std::chrono::milliseconds(20));}
+        const auto stopStarted=Clock::now();
+        require(nodes[0].endScreenShare(repeated),"Stop was rejected after capture source was hidden");
+        wait([&]{return shareState[0]==0&&shareState[1]==0;},
+            "Stalled-capture stop did not return both peers to idle",5);
+        require(Clock::now()-stopStarted<std::chrono::seconds(5),
+            "Stalled-capture teardown exceeded the bounded stop window");
+        require(!nodes[0].send(peers[1],L"Text after screen-share teardown").empty(),
+            "Messaging was unavailable after screen-share teardown");
+        wait([&]{return deliveredText>1;},"Messaging did not recover after screen-share teardown",5);
+        ShowWindow(source,SW_SHOW);
         auto declined=nodes[0].startScreenShare(peers[1],PC_SCREEN_WINDOW,
             reinterpret_cast<std::uint64_t>(source),30,8000000,true);
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==declined;},

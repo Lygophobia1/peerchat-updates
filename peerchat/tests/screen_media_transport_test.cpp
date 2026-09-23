@@ -138,6 +138,11 @@ int main() {
                           << " presented=" << receive.presented << '\n';
                 sender.stop();
                 receiver.stop();
+                sender.stop();
+                receiver.stop();
+                require(!sender.statistics().connected && !receiver.statistics().connected &&
+                    sender.poll().empty() && receiver.poll().empty(),
+                    "Retired screen media revived after idempotent stop");
                 peerchat::ScreenShareMedia cancelled(senderOptions);
                 require(cancelled.startOffer(error), "Could not begin repeated share lifecycle");
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));

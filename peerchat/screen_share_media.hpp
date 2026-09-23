@@ -278,6 +278,7 @@ public:
     void stop() {
         stopping_ = true;
         trackOpen_ = false;
+        connected_ = false;
         if (pc_ >= 0) {
             rtcSetStateChangeCallback(pc_, nullptr);
             rtcSetTrackCallback(pc_, nullptr);
@@ -285,15 +286,23 @@ public:
             rtcSetLocalCandidateCallback(pc_, nullptr);
             rtcSetUserPointer(pc_, nullptr);
         }
-        for (int track : {track_, receiveTrack_}) if (track >= 0) {
-            rtcSetMessageCallback(track, nullptr);
-            rtcSetOpenCallback(track, nullptr);
-            rtcSetClosedCallback(track, nullptr);
-            rtcSetUserPointer(track, nullptr);
+        int retiredReceiveTrack = -1;
+        {
+            std::lock_guard callbacks(callbackRegistrationMutex_);
+            retiredReceiveTrack = receiveTrack_;
+            for (int track : {track_, retiredReceiveTrack}) if (track >= 0) {
+                rtcSetMessageCallback(track, nullptr);
+                rtcSetOpenCallback(track, nullptr);
+                rtcSetClosedCallback(track, nullptr);
+                rtcSetUserPointer(track, nullptr);
+            }
         }
+        // An RTP callback that entered before detachment must finish before its
+        // decoder and callback-owned buffers can be destroyed.
+        { std::lock_guard callbackDrain(mutex_); }
         if (encoder_) { api_.encoderClose(encoder_); encoder_ = nullptr; }
         if (decoder_) { api_.decoderClose(decoder_); decoder_ = nullptr; }
-        if (receiveTrack_ >= 0 && receiveTrack_ != track_) rtcDeleteTrack(receiveTrack_);
+        if (retiredReceiveTrack >= 0 && retiredReceiveTrack != track_) rtcDeleteTrack(retiredReceiveTrack);
         if (track_ >= 0) rtcDeleteTrack(track_);
         if (pc_ >= 0) { rtcClosePeerConnection(pc_); rtcDeletePeerConnection(pc_); }
         pc_ = track_ = receiveTrack_ = -1;
@@ -376,6 +385,7 @@ private:
     static void state(int, rtcState value, void* context) {
         if (!context) return;
         auto& self = *static_cast<ScreenShareMedia*>(context);
+        if (self.stopping_) return;
         if (value == RTC_CONNECTED) {
             self.connected_ = true;
             self.push(EventKind::Connected);
@@ -388,7 +398,7 @@ private:
         }
     }
     static void opened(int, void* context) {
-        if (context) static_cast<ScreenShareMedia*>(context)->trackOpen_ = true;
+        if (context) {auto& self=*static_cast<ScreenShareMedia*>(context);if(!self.stopping_)self.trackOpen_=true;}
     }
     static void closed(int, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->trackOpen_ = false;
@@ -396,6 +406,8 @@ private:
     static void remoteTrack(int, int track, void* context) {
         if (!context || track < 0) return;
         auto& self = *static_cast<ScreenShareMedia*>(context);
+        std::lock_guard callbacks(self.callbackRegistrationMutex_);
+        if(self.stopping_ || (self.receiveTrack_>=0 && self.receiveTrack_!=track))return;
         self.receiveTrack_ = track;
         if (track == self.track_) return;
         rtcSetUserPointer(track, context);
@@ -451,6 +463,7 @@ private:
         ++rtpReceived_;
         mediaBytesReceived_ += static_cast<std::uint64_t>(size);
         std::lock_guard lock(mutex_);
+        if (stopping_ || !decoder_) return;
         if (rtpActive_ && (timestamp != rtpTimestamp_ || sequence !=
                 static_cast<std::uint16_t>(lastSequence_ + 1))) {
             ++lostPackets_;
@@ -509,6 +522,7 @@ private:
     void push(EventKind kind, std::string value = {}, std::string detail = {}) {
         if (stopping_) return;
         std::lock_guard lock(mutex_);
+        if (stopping_) return;
         if (events_.size() == 128) events_.pop_front();
         events_.push_back({kind, std::move(value), std::move(detail)});
     }
@@ -597,6 +611,7 @@ private:
     pc_screen_decoder* decoder_ = nullptr;
     int pc_ = -1, track_ = -1, receiveTrack_ = -1;
     mutable std::mutex mutex_;
+    std::mutex callbackRegistrationMutex_;
     std::deque<Event> events_;
     std::vector<std::uint8_t> rtpFrame_;
     std::vector<std::uint8_t> encodedScratch_;

@@ -9,14 +9,21 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 8 screen sharing is implemented as a Development candidate, not physically accepted. Authenticated/capability-gated one-to-one signaling, logical share ownership, H.264 ICE/DTLS-SRTP media, bounded generation recovery, WPF source/viewer/settings, observational telemetry and isolated packaging passed local automated tests. Physical two-PC capture, viewing, voice coexistence and network-change acceptance remain required. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
-**Next action:** physically test the isolated Stage 8 candidate on two Windows clients. Do not treat two local profiles on one PC as cross-machine acceptance.
-**Latest Git checkpoint:** Stage 8 Development candidate implementation (the commit containing this status update); physical acceptance is still pending.
+**Current stage:** Stage 8 screen sharing remains a Development candidate, not physically accepted. A physical heavy-share stop/unusable-client report is under investigation. Callback-lifetime teardown hardening passes local repeated start/stop, stalled-source, messaging-after-stop, and 1920×1080/60 FPS tests, but the physical hang has not reproduced locally and remains open. Oversized-message crash, simultaneous-share overload and VirtualBox capability are separate pending investigations.
+**Next action:** obtain physical teardown acceptance before treating the Stage 8 candidate as stable; investigate the other reported blockers separately before packaging another candidate.
+**Latest Git checkpoint:** Stage 8 teardown callback-lifetime hardening (the commit containing this status update); physical acceptance is still pending.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
 ## Stage 8 implementation and remaining acceptance
 
+- The screen-media stop path previously allowed late remote-track registration and an in-flight
+  RTP callback to overlap decoder destruction. Stop now rejects callback work for the retired
+  generation, synchronizes remote-track registration, and drains RTP callback access before
+  closing media. Targeted local transport and two-profile tests passed, including repeated
+  start/stop, a hidden capture source, post-stop messaging, and a 1920×1080/60 FPS run. This
+  addresses a concrete lifetime race but does not establish the cause of the physical heavy-load
+  hang or prove a hard deadline against a blocked Windows GPU/codec call; physical retest is required.
 - Authenticated two-profile integration passed: verified peer TLS carried share offer/answer/candidates,
   separate ICE/DTLS-SRTP carried H.264 to GPU presentation, text remained usable, a media-generation
   restart after a simulated network change resumed rendering, and stop/decline returned both peers

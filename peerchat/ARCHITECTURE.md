@@ -17,6 +17,8 @@ standalone `ScreenShareMedia` media-generation component connects those units to
 libdatachannel H.264 RTP track over ICE/DTLS-SRTP. Neither component owns PeerSession, trust,
 share lifetime, signaling authorization or recovery policy. Profile-scoped `ScreenShareManager`
 owns ShareId/lifetime/generation, one active share, stale-event rejection and bounded recovery;
+media teardown marks the generation stopped before detaching libdatachannel callbacks, synchronizes
+late remote-track registration, and drains an in-flight RTP callback before closing its decoder.
 `Node` sends share-control messages only through the verified winning peer-TLS binding, independently
 of whether that reliable binding is direct or server-relayed. Media generation uses separate ICE;
 the server does not see screen content. WPF uses the C ABI for source selection, viewer presentation,
