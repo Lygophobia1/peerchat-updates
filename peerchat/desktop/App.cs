@@ -21,6 +21,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -54,6 +55,10 @@ public class DesktopApplication {
     [DllImport("user32.dll")] static extern bool MessageBeep(uint type);
     const uint FlashTaskbar=2;
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr window,int attribute,ref int value,int size);
+    [StructLayout(LayoutKind.Sequential)] struct NativeRect {public int left,top,right,bottom;}
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CreateWindowEx(uint exStyle,string className,string title,uint style,int x,int y,int width,int height,IntPtr parent,IntPtr menu,IntPtr instance,IntPtr param);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window,out NativeRect bounds);
+    [DllImport("user32.dll")] static extern bool MoveWindow(IntPtr window,int x,int y,int width,int height,bool repaint);
     readonly Window window;
     readonly CoreAdapter core;
     readonly LocalProfileManager profileManager;
@@ -64,6 +69,8 @@ public class DesktopApplication {
     readonly ProfileAccountStore accountStore;
     readonly VoicePreferenceStore voicePreferenceStore;
     readonly VoicePreferenceData voicePreferences;
+    readonly ScreenSharePreferenceStore screenPreferenceStore;
+    readonly ScreenSharePreferenceData screenPreferences;
     readonly DesktopUpdateClient updateClient;
     readonly string updateHealthToken;
     readonly DispatcherTimer timer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(60)};
@@ -90,6 +97,11 @@ public class DesktopApplication {
     DateTime lastPresenceUtc=DateTime.MinValue;
     readonly TextBlock profileName=new TextBlock(), profileHandle=new TextBlock();
     Window incomingVoiceWindow;ContextMenu headerFlyout;DateTime voiceConnectedUtc=DateTime.MinValue,voiceLastConnectedUtc=DateTime.MinValue,voiceStartedUtc=DateTime.MinValue,voiceEndedUtc=DateTime.MinValue;string voiceAudioError="",latestVoiceAudioError="None",recentVoiceCallId="",recentVoicePeerId="",recentVoiceState="Idle";bool recentVoiceMuted,recentVoiceDeafened;
+    Button screenStartButton,screenEndButton,screenDiagnosticsButton;Border screenStrip;TextBlock screenStatus,screenSummaryText;
+    StackPanel screenConnectionPanel;TextBlock screenMethodText,screenQualityText,screenControlText,screenDetailsText;
+    Window incomingScreenWindow,screenViewerWindow;IntPtr screenViewerChild=IntPtr.Zero;
+    string activeScreenId="",activeScreenPeer="";long activeScreenLifetime,activeScreenGeneration;int activeScreenState;
+    bool closingScreenViewer;
     // Older pages are prepended to the bound collection. Keep the same visual message
     // under the reader's eye when WPF remeasures that prepend.
     string historyScrollKey="";
@@ -113,7 +125,7 @@ public class DesktopApplication {
     }
     public DesktopApplication(string dataDirectory,ushort port,string capturePath=null,bool compact=false,LocalProfileManager manager=null,LocalProfileInfo selectedProfile=null,string healthToken=null){
         directory=dataDirectory;
-        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
+        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();screenPreferenceStore=new ScreenSharePreferenceStore(directory);screenPreferences=screenPreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
@@ -148,6 +160,7 @@ public class DesktopApplication {
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
         Click("EmptyAction",()=>{if(model.Groups)CreateGroup();else AddFriend();});
         Click("Send",Send);Click("VoiceCall",StartVoiceCall);Click("VoiceHangUp",EndVoiceCall);Click("VoiceMute",ToggleVoiceMute);Click("VoiceDeafen",ToggleVoiceDeafen);Click("VoiceDetails",ShowVoiceDiagnostics);Click("VoiceRefreshDevices",RefreshVoiceDevices);Click("CopyVoiceDiagnostics",CopyVoiceDiagnostics);Click("Reconnect",Reconnect);Click("CopyConnectionDetails",CopyConnectionDetails);Click("ViewConnectionLog",ViewConnectionLog);Click("Older",Older);
+        BuildScreenShareControls();
         Find<ScrollViewer>("MessageScroll").ScrollChanged+=(s,e)=>{if(e.VerticalChange<0&&e.VerticalOffset<=48)Older();};
         Click("PeerInfo",ShowConversationFlyout);Click("GroupMembers",()=>ShowGroupFlyout("GroupMembers","members"));Click("GroupInvite",()=>ShowGroupFlyout("GroupInvite","invite"));Click("GroupOverflow",()=>ShowGroupFlyout("GroupOverflow","settings"));
         Click("Details",()=>{var fields=Dialog("My connection",new[]{"Host/IP to put in Copy My ID"},new[]{shareHost},"Save endpoint",ConnectionDiagnosticsText()+"\n\nChoose a hostname, LAN/VPN IPv4, or forwarded endpoint your friend can reach. This does not configure your router.");if(fields!=null){string host=fields[0].Trim();if(host.Length==0||host.Length>253||host.Any(Char.IsWhiteSpace)||host.Any(Char.IsControl)){Notify("Enter a valid hostname or IPv4 address.");return;}shareHost=host;shareHostManuallyConfigured=true;}});
@@ -256,6 +269,7 @@ public class DesktopApplication {
                 model.Apply(e);
                 if(e.kind==9){if(InviteCandidatesChanged!=null)InviteCandidatesChanged();if(model.SelectedGroup!=null)RequestGroupHistory(model.SelectedGroup);}
                 if(e.kind==13)HandleVoiceEvent(e);
+                if(e.kind==19)HandleScreenShareEvent(e);
                 if(incoming||incomingGroup)incomingNotification=true;
                 if(e.kind==0){if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id);ConfigureFirewallForListener(e.port);RestoreDiscoverySession();}
                 if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online&&attempting.SessionRevision==0){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
@@ -775,6 +789,7 @@ public class DesktopApplication {
 		bool flag6 = model.VoiceStateCode != 0;
 		Find<Button>("VoiceCall").Visibility = ((!flag || flag6) ? Visibility.Collapsed : Visibility.Visible);
 		Find<Button>("VoiceCall").IsEnabled = flag && model.Selected.Online && model.Selected.Contact.verified && !flag6 && !busy;
+		if(screenStartButton!=null){screenStartButton.Visibility=flag&&activeScreenState==0?Visibility.Visible:Visibility.Collapsed;screenStartButton.IsEnabled=flag&&model.Selected.Online&&model.Selected.Contact!=null&&model.Selected.Contact.verified&&!busy;}
 		Find<Button>("PeerInfo").Visibility = ((!flag && !flag2) ? Visibility.Collapsed : Visibility.Visible);
 		string[] array2 = new string[10] { "CopyId", "QuickCopy", "CopyCompact", "AddFriend", "QuickAdd", "Manual", "QuickManual", "Details", "CopyConnectionDetails", "ViewConnectionLog" };
 		foreach (string name2 in array2)
@@ -2429,7 +2444,24 @@ public class DesktopApplication {
 		voiceSettings.Children.Add(SettingsCard("Audio processing", "The current WinMM/Opus path does not provide reliable acoustic echo cancellation, noise suppression, automatic gain control, or push-to-talk. PeerChat does not show non-functional toggles.", new TextBlock { Text = "Use headphones where possible. Processing controls remain deferred until a supported audio backend is adopted.", Foreground = Brush("#AAB7C4"), TextWrapping = TextWrapping.Wrap }));
 		settingsPages.Add("Voice", voiceSettings);
 		settingsPages.Add("Video", createInfoPage("Video", "Video is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
-		settingsPages.Add("Screen Sharing", createInfoPage("Screen Sharing", "Screen sharing is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
+		StackPanel screenSettings=createInfoPage("Screen Sharing", "Profile-specific preferences for secure one-to-one screen sharing. Source selection remains per share; no source/window handle is saved.");
+		var screenControls=new StackPanel();
+		screenControls.Children.Add(new TextBlock{Text="Frame rate",Foreground=Brush("#AAB7C4")});
+		var screenFps=new ComboBox{ItemsSource=new int[]{15,30,60},SelectedItem=screenPreferences.FramesPerSecond,Margin=new Thickness(0,5,0,12)};
+		AutomationProperties.SetName(screenFps,"Screen share frame rate");
+		screenControls.Children.Add(screenFps);
+		screenControls.Children.Add(new TextBlock{Text="Video bitrate",Foreground=Brush("#AAB7C4")});
+		var screenRates=new[]{new KeyValuePair<int,string>(2000000,"2 Mbps"),new KeyValuePair<int,string>(4000000,"4 Mbps"),new KeyValuePair<int,string>(8000000,"8 Mbps"),new KeyValuePair<int,string>(16000000,"16 Mbps"),new KeyValuePair<int,string>(25000000,"25 Mbps")};
+		var screenBitrate=new ComboBox{ItemsSource=screenRates,DisplayMemberPath="Value",SelectedValuePath="Key",SelectedValue=screenPreferences.BitrateBitsPerSecond,Margin=new Thickness(0,5,0,12)};
+		AutomationProperties.SetName(screenBitrate,"Screen share bitrate");
+		screenControls.Children.Add(screenBitrate);
+		var screenCursor=new CheckBox{Content="Include cursor",IsChecked=screenPreferences.CaptureCursor,Margin=new Thickness(0,2,0,4)};
+		AutomationProperties.SetName(screenCursor,"Screen share cursor");
+		screenControls.Children.Add(screenCursor);
+		Action saveScreenSettings=delegate{if(screenFps.SelectedItem==null||screenBitrate.SelectedValue==null)return;screenPreferences.FramesPerSecond=(int)screenFps.SelectedItem;screenPreferences.BitrateBitsPerSecond=(int)screenBitrate.SelectedValue;screenPreferences.CaptureCursor=screenCursor.IsChecked==true;screenPreferenceStore.Save(screenPreferences);};
+		screenFps.SelectionChanged+=delegate{saveScreenSettings();};screenBitrate.SelectionChanged+=delegate{saveScreenSettings();};screenCursor.Checked+=delegate{saveScreenSettings();};screenCursor.Unchecked+=delegate{saveScreenSettings();};
+		screenSettings.Children.Add(SettingsCard("Capture quality", "H.264 hardware encoding; effective resolution follows the selected source and available device capability. Settings take effect on the next share.",screenControls));
+		settingsPages.Add("Screen Sharing",screenSettings);
 		settingsPages.Add("Network", createInfoPage("Network", "PeerChat automatically selects verified routes. Direct P2P tools and service endpoint configuration remain under Advanced."));
 		showSettingsPage = delegate(string page)
 		{
@@ -3255,6 +3287,115 @@ public class DesktopApplication {
 
 
     void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before calling.");return;}if(!model.Selected.Online){Notify("This friend is currently unavailable for call control. Messaging history remains available.");return;}if(model.VoiceStateCode!=0){Notify("Only one voice call can be active in this profile.");return;}string call=core.StartVoiceCall(model.Selected.Contact.peer);if(String.IsNullOrEmpty(call))Notify("Call control is unavailable for this peer. Messaging may still remain connected.");}
+    void BuildScreenShareControls(){
+        var actions=Find<Button>("VoiceCall").Parent as StackPanel;
+        screenStartButton=new Button{Content="Share Screen",Padding=new Thickness(11,8,11,8),Margin=new Thickness(6,0,0,0),ToolTip="Share a monitor or window with this verified friend"};
+        screenStartButton.Click+=(sender,args)=>StartScreenShare();
+        if(actions!=null)actions.Children.Insert(1,screenStartButton);
+        screenStatus=new TextBlock{Text="Starting screen share",VerticalAlignment=VerticalAlignment.Center,FontWeight=FontWeights.SemiBold};
+        screenEndButton=new Button{Content="Stop Sharing",Padding=new Thickness(10,6,10,6),Margin=new Thickness(12,0,0,0),Background=Brush("#7A2631")};
+        screenEndButton.Click+=(sender,args)=>{if(!String.IsNullOrEmpty(activeScreenId))core.EndScreenShare(activeScreenId);};
+        screenDiagnosticsButton=new Button{Content="Copy Diagnostics",Padding=new Thickness(10,6,10,6),Margin=new Thickness(12,0,0,0)};
+        screenDiagnosticsButton.Click+=(sender,args)=>CopyScreenDiagnostics();
+        screenSummaryText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=11,MaxWidth=440,TextTrimming=TextTrimming.CharacterEllipsis};
+        var statusColumn=new StackPanel{VerticalAlignment=VerticalAlignment.Center};statusColumn.Children.Add(screenStatus);statusColumn.Children.Add(screenSummaryText);
+        var row=new StackPanel{Orientation=Orientation.Horizontal};row.Children.Add(statusColumn);row.Children.Add(screenDiagnosticsButton);row.Children.Add(screenEndButton);
+        screenStrip=new Border{BorderBrush=Brush("#2B3D4C"),BorderThickness=new Thickness(0,1,0,0),Margin=new Thickness(0,10,0,0),Padding=new Thickness(0,9,0,0),Child=row,Visibility=Visibility.Collapsed};
+        var header=Find<Border>("VoiceCard").Parent as StackPanel;if(header!=null)header.Children.Add(screenStrip);
+        screenConnectionPanel=new StackPanel{Visibility=Visibility.Collapsed};
+        screenConnectionPanel.Children.Add(new Border{Height=1,Background=Brush("#28343F"),Margin=new Thickness(0,14,0,12)});
+        screenConnectionPanel.Children.Add(new TextBlock{Text="Screen Media",FontSize=12,FontWeight=FontWeights.SemiBold});
+        screenMethodText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,0)};
+        screenQualityText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,3,0,0)};
+        screenControlText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,3,0,0)};
+        screenConnectionPanel.Children.Add(screenMethodText);screenConnectionPanel.Children.Add(new TextBlock{Text="Security: DTLS-SRTP",Foreground=Brush("#A1AEBB"),FontSize=12});screenConnectionPanel.Children.Add(screenQualityText);screenConnectionPanel.Children.Add(screenControlText);
+        screenDetailsText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=11,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Consolas")};
+        var detailsScroll=new ScrollViewer{Content=screenDetailsText,MaxHeight=260,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Margin=new Thickness(0,6,0,0)};
+        screenConnectionPanel.Children.Add(new Expander{Header="Advanced screen statistics",Foreground=Brush("#EDF1F5"),Background=Brush("#101820"),Content=detailsScroll,Margin=new Thickness(0,8,0,0)});
+        var context=Find<StackPanel>("ContextConnection");context.Children.Insert(context.Children.IndexOf(Find<TextBlock>("MediaConnectionState"))+1,screenConnectionPanel);
+    }
+    async void StartScreenShare(){
+        if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified||!model.Selected.Online){Notify("Choose a connected, verified direct-message friend before sharing.");return;}
+        if(activeScreenState!=0){Notify("Only one screen share can be active in this profile.");return;}
+        string peer=model.Selected.Contact.peer;
+        ScreenSource[] sources;
+        try{
+            bool available=await Task.Run(()=>core.ScreenH264Available());
+            if(!available){Notify("This PC does not have the required Windows capture and H.264 path.");return;}
+            sources=await Task.Run(()=>core.ScreenSources());
+        }catch(Exception error){Notify("Screen sharing is unavailable: "+error.Message);return;}
+        if(sources.Length==0){Notify("No available monitor or window was found.");return;}
+        var dialog=new Window{Title="Share your screen",Owner=window,Width=480,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources,ShowInTaskbar=false};
+        var panel=new StackPanel{Margin=new Thickness(24)};dialog.Content=panel;
+        panel.Children.Add(new TextBlock{Text="Choose what to share",FontSize=22,FontWeight=FontWeights.SemiBold});
+        var sourceList=new ComboBox{ItemsSource=sources,SelectedIndex=0,Margin=new Thickness(0,16,0,10)};panel.Children.Add(sourceList);
+        var cursor=new CheckBox{Content="Show cursor",IsChecked=screenPreferences.CaptureCursor,Margin=new Thickness(0,0,0,12)};panel.Children.Add(cursor);
+        panel.Children.Add(new TextBlock{Text="Video travels over a separate encrypted direct media connection. Your friend must accept before viewing.",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,0,0,18)});
+        var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
+        var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=(sender,args)=>{dialog.DialogResult=false;dialog.Close();};
+        var share=new Button{Content="Share Screen",Background=Brush("#275AA7")};share.Click+=(sender,args)=>{dialog.DialogResult=true;dialog.Close();};
+        buttons.Children.Add(cancel);buttons.Children.Add(share);panel.Children.Add(buttons);
+        if(dialog.ShowDialog()!=true)return;
+        var chosen=sourceList.SelectedItem as ScreenSource;if(chosen==null)return;
+        if(activeScreenState!=0||model.Groups||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||!model.Selected.Online){Notify("That conversation is no longer ready for sharing.");return;}
+        string id=core.StartScreenShare(peer,chosen.kind,chosen.handle,(uint)screenPreferences.FramesPerSecond,(uint)screenPreferences.BitrateBitsPerSecond,cursor.IsChecked==true);
+        if(String.IsNullOrEmpty(id))Notify("Could not queue screen sharing for this peer.");
+    }
+    void ShowIncomingScreenShare(){
+        if(incomingScreenWindow!=null||activeScreenState!=2)return;
+        string name=model.FindByPeer(activeScreenPeer)==null?"Verified friend":model.FindByPeer(activeScreenPeer).Name;
+        var dialog=new Window{Title="Incoming screen share",Owner=window,Width=430,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources,ShowInTaskbar=false};
+        var panel=new StackPanel{Margin=new Thickness(24)};dialog.Content=panel;
+        panel.Children.Add(new TextBlock{Text="Incoming screen share",FontSize=22,FontWeight=FontWeights.SemiBold});
+        panel.Children.Add(new TextBlock{Text=name+" · verified PeerChat identity",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,8,0,18)});
+        var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
+        var decline=new Button{Content="Decline",Margin=new Thickness(0,0,8,0)};decline.Click+=(sender,args)=>{core.DeclineScreenShare(activeScreenId);dialog.Close();};
+        var accept=new Button{Content="View Screen",Background=Brush("#275AA7")};accept.Click+=(sender,args)=>{dialog.Close();OpenScreenViewer();};
+        buttons.Children.Add(decline);buttons.Children.Add(accept);panel.Children.Add(buttons);
+        dialog.Closed+=(sender,args)=>{if(incomingScreenWindow==dialog)incomingScreenWindow=null;};
+        incomingScreenWindow=dialog;dialog.Show();dialog.Activate();
+    }
+    void OpenScreenViewer(){
+        if(screenViewerWindow!=null||activeScreenState!=2)return;
+        var viewer=new Window{Title="PeerChat Screen Share",Owner=window,Width=1060,Height=700,MinWidth=480,MinHeight=320,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#050709"),Foreground=Brush("#EDF1F5"),ShowInTaskbar=true};
+        viewer.Content=new Grid{Background=Brush("#050709")};
+        viewer.SourceInitialized+=(sender,args)=>{
+            var handle=new WindowInteropHelper(viewer).Handle;NativeRect bounds;
+            if(GetClientRect(handle,out bounds))screenViewerChild=CreateWindowEx(0,"STATIC","",0x50000000,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,handle,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+        };
+        viewer.SizeChanged+=(sender,args)=>{NativeRect bounds;var handle=new WindowInteropHelper(viewer).Handle;if(screenViewerChild!=IntPtr.Zero&&GetClientRect(handle,out bounds))MoveWindow(screenViewerChild,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,true);};
+        viewer.Closing+=(sender,args)=>{if(!closing&&!closingScreenViewer&&activeScreenState!=0&&!String.IsNullOrEmpty(activeScreenId)&&core.EndScreenShare(activeScreenId))args.Cancel=true;};
+        viewer.Closed+=(sender,args)=>{if(screenViewerWindow==viewer)screenViewerWindow=null;screenViewerChild=IntPtr.Zero;};
+        screenViewerWindow=viewer;viewer.Show();
+        if(screenViewerChild==IntPtr.Zero||!core.AnswerScreenShare(activeScreenId,(ulong)screenViewerChild.ToInt64())){Notify("Could not open the secure screen viewer.");core.DeclineScreenShare(activeScreenId);closingScreenViewer=true;viewer.Close();closingScreenViewer=false;}
+    }
+    void HandleScreenShareEvent(CoreEvent e){
+        if(e.shareLifetime<activeScreenLifetime||(e.shareLifetime==activeScreenLifetime&&e.shareGeneration<activeScreenGeneration))return;
+        activeScreenLifetime=e.shareLifetime;activeScreenGeneration=e.shareGeneration;activeScreenState=e.shareState;
+        activeScreenId=e.detail??"";activeScreenPeer=e.peer??"";
+        if(screenStrip!=null){screenStrip.Visibility=activeScreenState==0?Visibility.Collapsed:Visibility.Visible;screenStatus.Text=e.text??"Screen sharing";screenSummaryText.Text=e.screenSummary??"";}
+        if(screenConnectionPanel!=null){
+            screenConnectionPanel.Visibility=activeScreenState==0?Visibility.Collapsed:Visibility.Visible;
+            screenMethodText.Text="Connection: "+(activeScreenState==5?"Recovering":e.screenRoute==3?"TURN media relay":e.screenRoute==2?"Direct NAT-traversed ICE":e.screenRoute==1?"Direct host ICE":"Connecting / Unavailable");
+            screenQualityText.Text="Video: H.264 · "+(e.screenWidth>0&&e.screenHeight>0?e.screenWidth+" × "+e.screenHeight:"waiting for frames")+" · generation "+e.shareGeneration;
+            screenControlText.Text="Verified control path: "+(e.callControlAvailable?"Available":"Unavailable");
+            screenDetailsText.Text=e.screenDetails??"Waiting for media statistics.";
+        }
+        if(activeScreenState==2)ShowIncomingScreenShare();
+        if(activeScreenState==0){
+            if(incomingScreenWindow!=null){incomingScreenWindow.Close();incomingScreenWindow=null;}
+            if(screenViewerWindow!=null){closingScreenViewer=true;screenViewerWindow.Close();closingScreenViewer=false;}
+            activeScreenId="";activeScreenPeer="";
+        }
+        Refresh();
+    }
+    async void CopyScreenDiagnostics(){
+        string native=await Task.Run(()=>core.ScreenShareDiagnostics());
+        string value="PeerChat screen-share diagnostics\nsnapshot_utc="+DateTime.UtcNow.ToString("O")+"\n"+(native??"screen_media_state=unavailable");
+        if(value.Length>8192)value=value.Substring(0,8192);
+        try{Clipboard.SetText(value);model.Status="Screen-share diagnostics copied.";Refresh();}
+        catch(COMException){Notify("Clipboard is busy. Try again.");}
+    }
     bool loadingVoiceDevices,voiceDeviceHandlersBound;
     void LoadVoiceDevices(){LoadVoiceDevices(false);}
     void LoadVoiceDevices(bool preserveSelection){var input=Find<ComboBox>("VoiceInput");var output=Find<ComboBox>("VoiceOutput");var oldInput=preserveSelection?input.SelectedItem as VoiceDevice:null;var oldOutput=preserveSelection?output.SelectedItem as VoiceDevice:null;loadingVoiceDevices=true;var devices=core.VoiceDevices();VoicePreferenceStore.ResolveDevices(voicePreferences,devices);input.ItemsSource=devices.inputs;output.ItemsSource=devices.outputs;input.SelectedItem=oldInput==null?devices.inputs.FirstOrDefault(device=>device.id==voicePreferences.InputDeviceId&&device.name==voicePreferences.InputDeviceName):(devices.inputs.FirstOrDefault(device=>device.id==oldInput.id&&device.name==oldInput.name)??devices.inputs.FirstOrDefault(device=>device.name==oldInput.name));output.SelectedItem=oldOutput==null?devices.outputs.FirstOrDefault(device=>device.id==voicePreferences.OutputDeviceId&&device.name==voicePreferences.OutputDeviceName):(devices.outputs.FirstOrDefault(device=>device.id==oldOutput.id&&device.name==oldOutput.name)??devices.outputs.FirstOrDefault(device=>device.name==oldOutput.name));if(input.SelectedItem==null&&input.Items.Count>0)input.SelectedIndex=0;if(output.SelectedItem==null&&output.Items.Count>0)output.SelectedIndex=0;if(!voiceDeviceHandlersBound){input.SelectionChanged+=(s,e)=>SelectVoiceDevices();output.SelectionChanged+=(s,e)=>SelectVoiceDevices();voiceDeviceHandlersBound=true;}loadingVoiceDevices=false;SelectVoiceDevices();}

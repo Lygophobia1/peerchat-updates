@@ -593,7 +593,8 @@ features. Later directions still include:
 - webcam video
 - file transfer
 
-Do not begin group voice, screen sharing, webcam video, or file transfer during the current phase.
+Stage 8 one-to-one screen sharing is now authorized and in Development validation. Group voice,
+webcam video, and file transfer remain later stages.
 
 Avoid architectural assumptions that permanently restrict conversations to exactly two participants.
 
@@ -1125,8 +1126,9 @@ Stages 3–5 and the focused Stage 5.5 reliable connection work are implemented 
 accepted: one native manager owns direct/relay attempts, retry/fallback, winners, stale callbacks,
 handoff and draining, while durable delivery/trust remain transport-independent above it. Stage 6
 voice-control ownership and working profile audio settings are implemented with physical acceptance
-pending. Stage 7 media continuity is implemented and awaiting physical acceptance. Do not begin
-Stage 8 screen sharing without a separate stage authorization. Broad Node retirement and source-tree reorganization remain deferred to
+pending. Stage 7 media continuity is implemented and awaiting physical acceptance.
+Stage 8 one-to-one screen sharing has been separately authorized and is in Development validation.
+Broad Node retirement and source-tree reorganization remain deferred to
 Stage 13; new features still require narrow ownership outside Node wherever practical.
 Preserve the accepted baseline and the open CLR/WPF and false-route-teardown backlog.
 

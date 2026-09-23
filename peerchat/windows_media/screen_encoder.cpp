@@ -105,6 +105,14 @@ public:
         return 1;
     }
 
+    int status(pc_screen_encoder_status* value) {
+        if (!value || value->structure_size != sizeof(*value)) return 0;
+        std::lock_guard lock(mutex_);
+        *value = {sizeof(*value), capturedFrames_, submittedFrames_, encodedFrames_,
+            droppedBeforeEncode_, droppedEncodedQueue_};
+        return 1;
+    }
+
     void onEvent(IMFAsyncResult* async) {
         ComPtr<IMFMediaEventGenerator> source;
         {
@@ -275,6 +283,8 @@ private:
             {
                 std::lock_guard lock(mutex_);
                 if (!running_) return;
+                ++capturedFrames_;
+                if (pending_.texture) ++droppedBeforeEncode_;
                 pending_ = {std::move(copy), now};
             }
             condition_.notify_one();
@@ -320,7 +330,9 @@ private:
             options_.frames_per_second;
         if (FAILED(sample->SetSampleTime(time)) ||
             FAILED(sample->SetSampleDuration(10000000ll / options_.frames_per_second))) return false;
-        return SUCCEEDED(encoder_->ProcessInput(0, sample.Get(), 0));
+        const bool accepted = SUCCEEDED(encoder_->ProcessInput(0, sample.Get(), 0));
+        if (accepted) { std::lock_guard lock(mutex_); ++submittedFrames_; }
+        return accepted;
     }
 
     bool collect() {
@@ -367,7 +379,8 @@ private:
         }
         {
             std::lock_guard lock(mutex_);
-            if (output_.size() == 3) output_.pop_front();
+            ++encodedFrames_;
+            if (output_.size() == 3) { output_.pop_front(); ++droppedEncodedQueue_; }
             output_.push_back(std::move(frame));
         }
         return true;
@@ -437,6 +450,8 @@ private:
     std::deque<MediaEventType> mediaEvents_;
     std::deque<EncodedFrame> output_;
     uint64_t frameIndex_ = 0;
+    uint64_t capturedFrames_ = 0, submittedFrames_ = 0, encodedFrames_ = 0;
+    uint64_t droppedBeforeEncode_ = 0, droppedEncodedQueue_ = 0;
     UINT width_ = 0, height_ = 0;
     GraphicsCaptureItem item_{nullptr};
     Direct3D11CaptureFramePool pool_{nullptr};
@@ -480,6 +495,12 @@ extern "C" int __cdecl pc_screen_encoder_pop(pc_screen_encoder* encoder,
     uint8_t* output, uint32_t output_capacity, pc_screen_encoded_frame* frame) {
     try { return encoder && encoder->state ? encoder->state->pop(output, output_capacity, frame) : -2; }
     catch (...) { return -2; }
+}
+
+extern "C" int __cdecl pc_screen_encoder_status_get(pc_screen_encoder* encoder,
+    pc_screen_encoder_status* status) {
+    try { return encoder && encoder->state ? encoder->state->status(status) : 0; }
+    catch (...) { return 0; }
 }
 
 extern "C" void __cdecl pc_screen_encoder_close(pc_screen_encoder* encoder) {

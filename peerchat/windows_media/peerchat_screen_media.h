@@ -65,6 +65,17 @@ PC_SCREEN_API int __cdecl pc_screen_encoder_pop(pc_screen_encoder* encoder,
     uint8_t* output, uint32_t output_capacity, pc_screen_encoded_frame* frame);
 PC_SCREEN_API void __cdecl pc_screen_encoder_close(pc_screen_encoder* encoder);
 
+typedef struct pc_screen_encoder_status {
+    uint32_t structure_size;
+    uint64_t captured_frames;
+    uint64_t submitted_to_encoder;
+    uint64_t encoded_frames;
+    uint64_t dropped_before_encode;
+    uint64_t dropped_encoded_queue;
+} pc_screen_encoder_status;
+PC_SCREEN_API int __cdecl pc_screen_encoder_status_get(pc_screen_encoder* encoder,
+    pc_screen_encoder_status* status);
+
 typedef struct pc_screen_decoder pc_screen_decoder;
 
 typedef struct pc_screen_decoder_options {
@@ -81,6 +92,11 @@ typedef struct pc_screen_decoder_status {
     uint64_t decoded_frames;
     uint64_t presented_frames;
     uint32_t failed;
+    uint32_t decoded_width;
+    uint32_t decoded_height;
+    uint64_t dropped_decode_queue;
+    uint64_t decode_latency_microseconds_total;
+    uint64_t decode_operations;
 } pc_screen_decoder_status;
 
 // Copies one complete Annex-B access unit into a bounded decoder queue. A full

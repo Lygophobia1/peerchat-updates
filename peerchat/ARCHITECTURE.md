@@ -14,10 +14,16 @@ ABI. It enumerates monitors/windows and hardware codec capabilities, captures th
 through WGC/D3D11, emits complete H.264 Annex-B access units from a bounded hardware-encoder
 queue, and decodes/presents received units through a bounded Media Foundation/D3D11 path. The
 standalone `ScreenShareMedia` media-generation component connects those units to a pinned
-libdatachannel H.264 RTP track over ICE/DTLS-SRTP; a local two-endpoint media test passed. Neither
-component owns PeerSession, trust, share lifetime, signaling authorization or recovery policy.
-They are not yet attached to the shipped client. The MinGW core build/dependencies and runtime
-packaging remain unchanged; authenticated share control and the ScreenShareManager are pending.
+libdatachannel H.264 RTP track over ICE/DTLS-SRTP. Neither component owns PeerSession, trust,
+share lifetime, signaling authorization or recovery policy. Profile-scoped `ScreenShareManager`
+owns ShareId/lifetime/generation, one active share, stale-event rejection and bounded recovery;
+`Node` sends share-control messages only through the verified winning peer-TLS binding, independently
+of whether that reliable binding is direct or server-relayed. Media generation uses separate ICE;
+the server does not see screen content. WPF uses the C ABI for source selection, viewer presentation,
+profile-scoped quality preferences and a compact status strip. Detailed once-per-second observational
+telemetry is kept in Security/Diagnostics, with unsupported ICE statistics marked unavailable.
+The isolated Development package includes the MSVC adapter; the proven MinGW core build and
+dependencies are unchanged. Physical two-PC acceptance is pending.
 
 `desktop/App.cs` owns the WPF presentation. `desktop/CoreAdapter.cs` calls the C-compatible
 exports in `ui_bridge.cpp`; the bridge owns the C++ `peerchat::Node`. The native core owns

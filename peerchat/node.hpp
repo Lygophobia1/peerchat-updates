@@ -6,7 +6,7 @@
 
 namespace peerchat {
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -22,6 +22,11 @@ struct NodeEvent {
     std::uint64_t networkGeneration=0;
     bool sessionConnected=false;
     std::uint64_t callLifetime=0;
+    std::uint64_t shareLifetime=0;
+    std::uint64_t shareGeneration=0;
+    std::uint32_t shareState=0;
+    std::uint32_t screenRoute=0,screenWidth=0,screenHeight=0;
+    std::wstring screenSummary,screenDetails;
     std::uint32_t callState=0;
     std::uint32_t callType=0;
     std::uint32_t mediaState=0;
@@ -79,6 +84,11 @@ public:
     bool setVoiceDevices(int inputDevice, int outputDevice);
     bool setVoiceVolumes(int inputPercent, int outputPercent);
     std::wstring voiceDiagnostics();
+    std::string startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor);
+    bool answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow);
+    bool declineScreenShare(const std::string& shareId);
+    bool endScreenShare(const std::string& shareId);
+    std::wstring screenShareDiagnostics();
     MediaTelemetry voiceTelemetry() const;
     std::vector<NodeEvent> poll();
 private:

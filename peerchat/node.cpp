@@ -14,6 +14,8 @@
 #include "protocol.hpp"
 #include "voice_media.hpp"
 #include "call_manager.hpp"
+#include "screen_share_manager.hpp"
+#include "screen_share_media.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -53,7 +55,7 @@ constexpr std::uint64_t MediaRecoveryWindowMilliseconds=30000,MediaRecoveryRetry
 struct RelayPipe {std::mutex mutex;std::condition_variable changed;std::deque<Blob> output;size_t queued=0;bool closed=false;};
 struct Connection {
     SOCKET socket=INVALID_SOCKET;
-    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false,mediaRecovery=false,identityMismatch=false;
+    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false,mediaRecovery=false,screenShare=false,identityMismatch=false;
     std::wstring host,name,source,route,closeReason;std::uint16_t port=0;std::uint64_t attemptId=0;
     std::string expected,peerId;
     bool directHandoff=false,relay=false;
@@ -76,8 +78,8 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0;Contact contact;Blob bytes;std::shared_ptr<std::promise<std::wstring>> response;};
+    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,SaveContact,RemoveContact,Approve,Send,History,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
@@ -94,6 +96,16 @@ struct Node::Impl {
     session::SessionEpoch sessionEpoch{};
     std::unique_ptr<session::SessionTransportManager> sessionTransports;
     calls::CallManager calls;
+    screen::ScreenShareManager screenShares;
+    std::unique_ptr<ScreenShareMedia> screenMedia;
+    bool screenAvailable=false;
+    ScreenShareMedia::Options screenOptions{};
+    std::uint64_t screenMediaLifetime=0,screenMediaGeneration=0,screenNetworkGeneration=0;
+    std::uint64_t screenRetryAt=0;
+    std::uint64_t screenLastRestartAt=0;
+    std::uint64_t screenTelemetryAt=0;
+    std::uint64_t screenPriorSentBytes=0,screenPriorReceivedBytes=0;
+    std::uint32_t screenReportedRoute=0,screenReportedWidth=0,screenReportedHeight=0;
     std::uint64_t networkGeneration=0,voiceNetworkGeneration=0,voiceConnectionAtStart=0,voiceRequestSentOn=0,voiceRequestReceivedOn=0,voiceOfferSentOn=0,voiceOfferReceivedOn=0,voiceAnswerSentOn=0,voiceAnswerReceivedOn=0,voiceLastSignalConnection=0,voiceCandidatesSent=0,voiceCandidatesReceived=0;
     std::wstring networkFingerprint,voiceNetworkFingerprint;
     std::unique_ptr<VoiceMedia> voiceMedia;std::uint64_t voiceMediaLifetime=0,voiceMediaGeneration=0;std::wstring lastVoiceDiagnostics=L"media_state=idle\nice_dtls_srtp_state=idle\ntrack_open=false\ncodec=Opus not active\ntransport=not active\ncapture_frames=0\nencoded_frames=0\nopus_submitted=0\nsend_api_accepted=0\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\nremote_track_callback_packets=0\npayload_delivered=0\nreceived_packets=0\ndecoded_frames=0\nplayback_frames=0\nlatest_audio_error=none\nlatest_media_error=none";
@@ -202,6 +214,84 @@ struct Node::Impl {
         if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
         for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
         return nullptr;
+    }
+    Connection* screenConnection(const std::string& peer){
+        std::uint64_t winner=0;
+        if(sessionTransports){auto snapshot=sessionTransports->snapshot(peer);if(snapshot&&snapshot->connected)winner=snapshot->activeTransport.value;}
+        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare)return connection.get();
+        if(sessionTransports)return nullptr;
+        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare)return connection.get();
+        return nullptr;
+    }
+    void screenEvent(const std::wstring& reason={}){
+        auto active=screenShares.active();NodeEvent event;event.kind=NodeEvent::Kind::ScreenShare;
+        if(active){event.peerId=active->peer;event.detail=widenUtf8(active->id);event.shareLifetime=active->lifetime;event.shareGeneration=active->generation;event.shareState=static_cast<std::uint32_t>(active->state);event.callControlAvailable=active->controlAvailable;if(screenMedia){auto stats=screenMedia->statistics();auto route=screenMedia->route();event.screenRoute=static_cast<std::uint32_t>(route);event.screenWidth=stats.width;event.screenHeight=stats.height;
+            std::wostringstream summary;
+            summary<< (stats.width&&stats.height?std::to_wstring(stats.width)+L"×"+std::to_wstring(stats.height):L"resolution —") << L" · ";
+            if(stats.ratesAvailable)summary<<static_cast<unsigned>(stats.trackOpen?(active->sender?stats.transmittedFps:stats.renderedFps):0)<<L" FPS";
+            else summary<<L"FPS —";
+            summary<<L" · H.264 · ";
+            if(stats.ratesAvailable){summary.setf(std::ios::fixed);summary.precision(1);summary<<(active->sender?stats.outgoingMbps:stats.incomingMbps)<<L" Mbps "<<(active->sender?L"submitted":L"received");}
+            else summary<<L"bitrate —";
+            summary<<L" · RTT — · "<<(route==ScreenShareMedia::Route::DirectHostIce?L"Direct host ICE":route==ScreenShareMedia::Route::NatTraversedIce?L"NAT-traversed Direct ICE":route==ScreenShareMedia::Route::TurnRelay?L"TURN media relay":L"route —");
+            event.screenSummary=summary.str();event.screenDetails=screenMedia->diagnostics()+
+                L"\nlogical_share_encoded_bytes_submitted="+std::to_wstring(screenPriorSentBytes+stats.encodedBytesSubmitted)+
+                L"\nlogical_share_rtp_bytes_received="+std::to_wstring(screenPriorReceivedBytes+stats.mediaBytesReceived);
+        }}
+        event.text=reason;emit(std::move(event));
+    }
+    void stopScreenMedia(){if(screenMedia){auto stats=screenMedia->statistics();screenPriorSentBytes+=stats.encodedBytesSubmitted;screenPriorReceivedBytes+=stats.mediaBytesReceived;screenMedia->stop();}screenMedia.reset();screenMediaLifetime=screenMediaGeneration=0;}
+    void clearScreen(const std::wstring& reason){
+        auto active=screenShares.active();if(!active&&!screenMedia)return;
+        auto id=active?active->id:std::string{},peer=active?active->peer:std::string{};
+        auto lifetime=active?active->lifetime:0,generation=active?active->generation:0;
+        stopScreenMedia();screenShares.clear();screenRetryAt=screenLastRestartAt=screenTelemetryAt=0;screenReportedRoute=screenReportedWidth=screenReportedHeight=0;screenPriorSentBytes=screenPriorReceivedBytes=0;
+        NodeEvent event;event.kind=NodeEvent::Kind::ScreenShare;event.peerId=peer;event.detail=widenUtf8(id);event.shareLifetime=lifetime;event.shareGeneration=generation;event.shareState=static_cast<std::uint32_t>(screen::State::Idle);event.text=reason;emit(std::move(event));
+    }
+    bool configureScreenMedia(){
+        auto active=screenShares.active();if(!active)return false;
+        stopScreenMedia();screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
+        screenMediaLifetime=active->lifetime;screenMediaGeneration=active->generation;
+        screenNetworkGeneration=networkGeneration;screenTelemetryAt=0;screenReportedRoute=screenReportedWidth=screenReportedHeight=0;return true;
+    }
+    void interruptScreen(const std::wstring& reason){
+        auto active=screenShares.active();if(!active)return;
+        stopScreenMedia();screenShares.transition(screen::State::Recovering,nowMilliseconds()+MediaRecoveryWindowMilliseconds);
+        screenRetryAt=nowMilliseconds()+MediaRecoveryRetryMilliseconds;screenEvent(reason);
+    }
+    void serviceScreenRecovery(){
+        auto active=screenShares.active();if(!active||active->state!=screen::State::Recovering||screenRetryAt>nowMilliseconds())return;
+        auto connection=screenConnection(active->peer);
+        if(!connection){active->controlAvailable=false;screenRetryAt=nowMilliseconds()+500;return;}
+        active->controlAvailable=true;
+        if(active->sender){screenLastRestartAt=nowMilliseconds();screenShares.restart(nowMilliseconds()+MediaRecoveryWindowMilliseconds);configureScreenMedia();std::string error;
+            if(!screenMedia->startOffer(error)){stopScreenMedia();screenRetryAt=nowMilliseconds()+1000;return;}
+            screenRetryAt=nowMilliseconds()+MediaRecoveryRetryMilliseconds;
+        }else{protocol::Writer request(protocol::ScreenRecoveryRequest);request.string(active->id);request.number(active->generation);packet(*connection,request);screenRetryAt=nowMilliseconds()+2000;}
+    }
+    void screenMediaEvents(){
+        auto active=screenShares.active();if(!active||!screenMedia)return;
+        const auto id=active->id,peer=active->peer;
+        const auto lifetime=active->lifetime,generation=active->generation;
+        if(screenMediaLifetime!=lifetime||!screenShares.matchesMedia(lifetime,id,peer,screenMediaGeneration)){stopScreenMedia();return;}
+        auto connection=screenConnection(peer);
+        for(auto& event:screenMedia->poll()){
+            if(!screenShares.matchesMedia(lifetime,id,peer,generation))return;
+            if(event.kind==ScreenShareMedia::EventKind::Description){
+                if(!connection){interruptScreen(L"Share control unavailable");return;}
+                protocol::Writer signal(event.detail=="offer"?protocol::ScreenOffer:protocol::ScreenAnswer);
+                signal.string(id);signal.number(generation);signal.string(event.value);packet(*connection,signal);
+            }else if(event.kind==ScreenShareMedia::EventKind::Candidate){
+                if(connection){protocol::Writer signal(protocol::ScreenCandidate);signal.string(id);signal.number(generation);signal.string(event.value);signal.string(event.detail);packet(*connection,signal);}
+            }else if(event.kind==ScreenShareMedia::EventKind::Connected){screenShares.transition(screen::State::Connected);screenEvent(L"Connected · H.264 · DTLS-SRTP");
+            }else{interruptScreen(event.kind==ScreenShareMedia::EventKind::Failed?L"Secure screen media failed":L"Screen media disconnected");return;}
+        }
+        if(active->state==screen::State::Connected&&nowMilliseconds()>=screenTelemetryAt){
+            screenTelemetryAt=nowMilliseconds()+1000;
+            auto stats=screenMedia->statistics();auto route=static_cast<std::uint32_t>(screenMedia->route());
+            screenReportedWidth=stats.width;screenReportedHeight=stats.height;screenReportedRoute=route;
+            screenEvent(L"Connected · H.264 · DTLS-SRTP");
+        }
     }
     void resetVoiceSignaling(Connection* connection=nullptr){voiceNetworkGeneration=networkGeneration;voiceNetworkFingerprint=networkFingerprint;voiceConnectionAtStart=connection?connection->attemptId:0;voiceRequestSentOn=voiceRequestReceivedOn=voiceOfferSentOn=voiceOfferReceivedOn=voiceAnswerSentOn=voiceAnswerReceivedOn=voiceLastSignalConnection=voiceCandidatesSent=voiceCandidatesReceived=0;}
     std::wstring voiceSignalingDiagnostics()const{std::wostringstream out;auto active=calls.active();out<<L"call_media_generation="<<(active?active->mediaGeneration:0)<<L"\ncall_media_state="<<(active?static_cast<unsigned>(active->mediaState):0)<<L"\ncall_control_available="<<(active&&active->controlAvailable?L"true":L"false")<<L"\nwinning_peerchat_connection_id_at_call_start="<<voiceConnectionAtStart<<L"\nvoice_network_generation="<<voiceNetworkGeneration<<L"\ncurrent_network_generation="<<networkGeneration<<L"\npeer_connection_matches_current_network="<<(voiceNetworkGeneration==networkGeneration?L"true":L"false")<<L"\nvoice_network_fingerprint="<<voiceNetworkFingerprint<<L"\ncall_request_sent_connection_id="<<voiceRequestSentOn<<L"\ncall_request_received_connection_id="<<voiceRequestReceivedOn<<L"\ncall_answer_sent_connection_id="<<voiceAnswerSentOn<<L"\ncall_answer_received_connection_id="<<voiceAnswerReceivedOn<<L"\nsdp_offer_created="<<(voiceOfferSentOn?L"true":L"false")<<L"\nsdp_offer_sent_connection_id="<<voiceOfferSentOn<<L"\nsdp_offer_received_connection_id="<<voiceOfferReceivedOn<<L"\nsdp_answer_created="<<(voiceAnswerSentOn?L"true":L"false")<<L"\nsdp_answer_sent_connection_id="<<voiceAnswerSentOn<<L"\nsdp_answer_received_connection_id="<<voiceAnswerReceivedOn<<L"\nlast_voice_signaling_connection_id="<<voiceLastSignalConnection<<L"\nlocal_ice_candidates_sent="<<voiceCandidatesSent<<L"\nremote_ice_candidates_received="<<voiceCandidatesReceived;return out.str();}
@@ -353,7 +443,7 @@ struct Node::Impl {
         protocol::Reader r(frame);
         if(!c.hello){
             protocol::check(r.type()==protocol::Hello);auto capabilities=r.number();auto port=r.number();c.name=r.text();r.end();
-            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.hello=true;
+            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.screenShare=(capabilities&protocol::CapabilityScreenShare)!=0;c.hello=true;
             c.directHandoff=(capabilities&protocol::CapabilityDirectHandoff)!=0;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty()&&!c.relay)c.host=observedAddress(c.socket);
@@ -382,6 +472,59 @@ struct Node::Impl {
         }
         if(r.type()==protocol::Accepted){r.end();protocol::check(!c.remoteApproved);c.remoteApproved=true;if(sessionTransports)sessionTransports->markRemoteAccepted(sessionEpoch,{c.attemptId});online(c);return;}
         protocol::check(c.online);
+        if(r.type()==protocol::ScreenOffer){
+            auto id=r.string();auto generation=r.number();auto sdp=r.string();r.end();
+            protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&!sdp.empty()&&sdp.size()<=32768);
+            auto active=screenShares.active();
+            if(active&&screenShares.matches(id,c.peerId)){
+                if(generation==active->generation)return;
+                if(!active->sender&&active->state!=screen::State::Incoming&&screenShares.acceptGeneration(generation,nowMilliseconds()+MediaRecoveryWindowMilliseconds)){
+                    stopScreenMedia();configureScreenMedia();std::string error;
+                    if(!screenMedia->startAnswer(sdp,error))interruptScreen(L"Could not restart secure screen media");
+                    else screenEvent(L"Screen media reconnecting");
+                }
+                return;
+            }
+            if(active){protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);return;}
+            if(generation!=1)return;
+            if(!screenShares.start(id,c.peerId,false,screen::State::Incoming,nowMilliseconds()+30000))return;
+            screenPriorSentBytes=screenPriorReceivedBytes=0;
+            screenShares.active()->remoteOffer=std::move(sdp);screenEvent(L"Incoming screen share");return;
+        }
+        if(r.type()==protocol::ScreenAnswer){
+            auto id=r.string();auto generation=r.number();auto sdp=r.string();r.end();
+            protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&!sdp.empty()&&sdp.size()<=32768);
+            auto active=screenShares.active();
+            if(active&&active->sender&&screenShares.matches(id,c.peerId)&&active->generation==generation&&screenMedia){
+                if(!screenMedia->setAnswer(sdp))interruptScreen(L"Could not accept secure screen answer");
+                else{screenShares.transition(screen::State::Connecting,nowMilliseconds()+20000);screenEvent(L"Connecting screen media");}
+            }return;
+        }
+        if(r.type()==protocol::ScreenCandidate){
+            auto id=r.string();auto generation=r.number();auto candidate=r.string();auto mid=r.string();r.end();
+            protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&candidate.size()<=4096&&mid.size()<=64);
+            auto active=screenShares.active();
+            if(active&&screenShares.matches(id,c.peerId)&&active->generation==generation){
+                if(screenMedia)screenMedia->addCandidate(candidate,mid);
+                else screenShares.queueCandidate(std::move(candidate),std::move(mid));
+            }return;
+        }
+        if(r.type()==protocol::ScreenRecoveryRequest){
+            auto id=r.string();auto generation=r.number();r.end();
+            protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000);
+            auto active=screenShares.active();
+            if(active&&active->sender&&screenShares.matches(id,c.peerId)&&
+                generation>=active->generation&&nowMilliseconds()>=screenLastRestartAt+1000){
+                if(active->state==screen::State::Connected){interruptScreen(L"Peer requested screen-media recovery");screenRetryAt=nowMilliseconds();}
+                else if(active->state==screen::State::Recovering&&!screenMedia)screenRetryAt=nowMilliseconds();
+            }
+            return;
+        }
+        if(r.type()==protocol::ScreenEnd||r.type()==protocol::ScreenDecline){
+            auto type=r.type();auto id=r.string();r.end();protocol::check(c.screenShare&&protocol::id(id,32));
+            if(screenShares.matches(id,c.peerId))clearScreen(type==protocol::ScreenDecline?L"Screen share declined":L"Screen share ended");
+            return;
+        }
         if(r.type()==protocol::Handoff){
             protocol::check(c.directHandoff&&c.approved&&c.remoteApproved);
             if(c.identityMismatch)return; // explicit device re-verification is not route continuity
@@ -445,6 +588,7 @@ struct Node::Impl {
             // Voice capability describes authenticated call control. The media
             // path remains independent ICE/DTLS-SRTP and is never put on relay.
             capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
+            if(screenAvailable)capabilities|=protocol::CapabilityScreenShare;
             if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
             protocol::Writer hello(protocol::Hello);hello.number(capabilities);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
@@ -508,7 +652,7 @@ struct Node::Impl {
                 for(auto it=connections.begin();it!=connections.end();){auto& c=**it;if(hasId(c.attemptId)){c.source=command.accepted?L"Runtime network change":L"Authoritative candidate refresh";c.route=command.accepted?L"old-network route invalidated":L"exact stale endpoint invalidated";emit(connectionEvent(NodeEvent::Kind::Disconnected,command.accepted?L"local network generation superseded":L"local stale-route invalidation",c,command.peer));sessionTransports->closeTransport(sessionEpoch,{c.attemptId},"route invalidated",false);if(deliveries)deliveries->retireTransport({c.attemptId});it=connections.erase(it);}else{if(decision.retainedActiveWinner&&(c.expected==command.peer||c.peerId==command.peer)&&c.online)emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"authoritative endpoint changed; live verified session retained",c,command.peer));++it;}}
                 auto contact=contacts.find(command.peer);if(contact!=contacts.end()&&!command.text.empty()&&command.port){auto& endpoints=contact->second.endpoints;endpoints.erase(std::remove_if(endpoints.begin(),endpoints.end(),[&](const Endpoint& endpoint){return endpoint.host==command.text&&endpoint.port==command.port;}),endpoints.end());store->saveContact(contact->second);}auto activeCall=calls.active();if(decision.activeWinnerCancelled&&activeCall&&calls.peer()==command.peer){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}emitSessionSnapshot(command.peer);
             }
-            else if(command.action==Action::NetworkContext){bool changed=networkGeneration&&command.accountId>networkGeneration;networkGeneration=command.accountId;networkFingerprint=command.text;if(sessionTransports)sessionTransports->observeNetwork(sessionEpoch,networkGeneration);if(changed&&calls.active()&&calls.active()->state==calls::State::Connected)interruptVoiceMedia(L"Network changed");}
+            else if(command.action==Action::NetworkContext){bool changed=networkGeneration&&command.accountId>networkGeneration;bool screenNetworkChanged=changed&&networkFingerprint!=command.text;networkGeneration=command.accountId;networkFingerprint=command.text;if(sessionTransports)sessionTransports->observeNetwork(sessionEpoch,networkGeneration);if(changed&&calls.active()&&calls.active()->state==calls::State::Connected)interruptVoiceMedia(L"Network changed");if(screenNetworkChanged&&screenShares.active())interruptScreen(L"Network changed · reconnecting screen media");}
             else if(command.action==Action::SaveContact){
                 auto& c=command.contact;protocol::check(protocol::id(c.peerId)&&!c.name.empty()&&c.name.size()<=64&&!c.endpoints.empty());
                 for(const auto& e:c.endpoints)protocol::check(!e.host.empty()&&e.host.size()<=253&&e.port);
@@ -525,6 +669,33 @@ struct Node::Impl {
                 store->append(command.peer,m);NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
+            else if(command.action==Action::ScreenStart){
+                if(screenShares.active())throw std::runtime_error("A screen share is already active");
+                auto contact=contacts.find(command.peer);
+                if(contact==contacts.end()||!contact->second.verified||!screenConnection(command.peer))throw std::runtime_error("A verified screen-share capable peer is required");
+                if(command.sourceKind!=PC_SCREEN_MONITOR&&command.sourceKind!=PC_SCREEN_WINDOW)throw std::runtime_error("Invalid screen source");
+                if(!screenShares.start(command.id,command.peer,true,screen::State::Offering,nowMilliseconds()+30000))throw std::runtime_error("Could not start screen share");
+                screenPriorSentBytes=screenPriorReceivedBytes=0;
+                screenOptions={};screenOptions.sender=true;screenOptions.sourceKind=command.sourceKind;screenOptions.sourceHandle=command.sourceHandle;
+                screenOptions.fps=command.fps;screenOptions.bitrate=command.bitrate;screenOptions.captureCursor=command.accepted;
+                configureScreenMedia();std::string error;
+                if(!screenMedia->startOffer(error)){clearScreen(widenUtf8(error));continue;}screenEvent(L"Starting screen share");
+            }else if(command.action==Action::ScreenAnswer){
+                auto active=screenShares.active();if(!active||active->id!=command.id||active->state!=screen::State::Incoming)continue;
+                if(!screenConnection(active->peer)){clearScreen(L"Peer unavailable for screen-share control");continue;}
+                screenOptions={};screenOptions.sender=false;screenOptions.presentationWindow=command.sourceHandle;
+                screenOptions.width=1280;screenOptions.height=720;screenOptions.fps=60;
+                configureScreenMedia();std::string error;
+                if(!screenMedia->startAnswer(active->remoteOffer,error)){clearScreen(widenUtf8(error));continue;}
+                for(const auto& candidate:active->candidates)screenMedia->addCandidate(candidate.first,candidate.second);
+                active->candidates.clear();screenShares.transition(screen::State::Connecting,nowMilliseconds()+20000);screenEvent(L"Connecting screen media");
+            }else if(command.action==Action::ScreenDecline||command.action==Action::ScreenEnd){
+                auto active=screenShares.active();if(!active||active->id!=command.id)continue;
+                if(auto connection=screenConnection(active->peer)){protocol::Writer end(command.action==Action::ScreenDecline?protocol::ScreenDecline:protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}
+                clearScreen(command.action==Action::ScreenDecline?L"Screen share declined":L"Screen share ended");
+            }else if(command.action==Action::ScreenDiagnostics){
+                if(command.response){std::wostringstream out;auto active=screenShares.active();out<<L"share_id="<<(active?widenUtf8(active->id):L"none")<<L"\nexpected_peer_id="<<(active?widenUtf8(active->peer):L"none")<<L"\nshare_lifetime="<<(active?active->lifetime:0)<<L"\nmedia_generation="<<(active?active->generation:0)<<L"\nshare_state="<<(active?static_cast<unsigned>(active->state):0)<<L"\ncontrol_available="<<(active&&active->controlAvailable?L"true":L"false")<<L"\nnetwork_generation="<<screenNetworkGeneration;auto sent=screenPriorSentBytes,received=screenPriorReceivedBytes;if(screenMedia){auto stats=screenMedia->statistics();sent+=stats.encodedBytesSubmitted;received+=stats.mediaBytesReceived;out<<L"\n"<<screenMedia->diagnostics();}out<<L"\nlogical_share_encoded_bytes_submitted="<<sent<<L"\nlogical_share_rtp_bytes_received="<<received;command.response->set_value(out.str());}
+            }
             else if(command.action==Action::VoiceStart){
                 if(!calls.idle())throw std::runtime_error("A voice call is already active");
                 auto contact=contacts.find(command.peer);
@@ -591,6 +762,7 @@ struct Node::Impl {
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
             groupAccount=store->groupAccount();groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
+            screenAvailable=ScreenShareMedia::available();
             auto createListener=[&]{listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(listener==INVALID_SOCKET)throw std::runtime_error("Cannot create listener");nonblocking(listener);BOOL exclusive=TRUE;setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<char*>(&exclusive),sizeof(exclusive));};
             createListener();sockaddr_in bindAddress{};bindAddress.sin_family=AF_INET;bindAddress.sin_port=htons(profile.listenPort);bindAddress.sin_addr.s_addr=htonl(INADDR_ANY);
             if(bind(listener,reinterpret_cast<sockaddr*>(&bindAddress),sizeof(bindAddress))){int error=WSAGetLastError();if(listeningPortOverride||(error!=WSAEADDRINUSE&&error!=WSAEACCES))throw std::runtime_error("Cannot listen on configured port; choose a free port in your profile");closesocket(listener);listener=INVALID_SOCKET;createListener();bindAddress.sin_port=0;if(bind(listener,reinterpret_cast<sockaddr*>(&bindAddress),sizeof(bindAddress)))throw std::runtime_error("Cannot allocate a free listener port for this profile");sockaddr_in assigned{};int assignedSize=sizeof(assigned);if(getsockname(listener,reinterpret_cast<sockaddr*>(&assigned),&assignedSize))throw std::runtime_error("Cannot read the allocated listener port");profile.listenPort=ntohs(assigned.sin_port);store->saveProfile(profile);}
@@ -601,7 +773,8 @@ struct Node::Impl {
             // saved fingerprint reference into a verified contact.
             for(const auto& c:contacts)if(!c.second.endpoints.empty()){const auto& endpoint=c.second.endpoints.front();sessionTransports->seedRetry(c.first,routeObservation(endpoint.host,endpoint.port,L"Saved contact",L"automatic reconnect",false,{nextRouteRevision++}),nowMilliseconds());emitSessionSnapshot(c.first);}
             while(running){
-                drain();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();
+                drain();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
+                if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}
                 if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 if(calls.mediaTimedOut(nowMilliseconds())||calls.controlAndMediaTimedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Voice connection could not be restored",true);}
                 for(const auto& retry:sessionTransports->takeDueRetries(nowMilliseconds())){auto split=retry.route.endpointUtf8.rfind(':');if(split==std::string::npos)continue;auto host=widenUtf8(retry.route.endpointUtf8.substr(0,split));std::uint16_t port=static_cast<std::uint16_t>(std::stoul(retry.route.endpointUtf8.substr(split+1)));auto source=widenUtf8(retry.route.sourceUtf8),route=widenUtf8(retry.route.routeUtf8);try{resolve(host,port,retry.remoteDeviceId,source,route.empty()?L"automatic reconnect":route);}catch(...){scheduleReconnect(retry.remoteDeviceId,host,port,source,route);}}
@@ -640,6 +813,7 @@ struct Node::Impl {
                     {std::lock_guard<std::mutex> lock(relayMutex);relayPipes.erase(connection.attemptId);}it=connections.erase(it);
                     if(!id.empty()&&!close.hasActiveWinner&&!close.hasPendingAttempt){
                         auto activeCall=calls.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeCall&&calls.peer()==id){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}
+                        auto activeShare=screenShares.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeShare&&activeShare->peer==id){activeShare->controlAvailable=false;screenEvent(L"Share control unavailable · waiting to reconnect");}
                         emit(std::move(disconnected));
                         if(wasRelay){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
                         else scheduleReconnect(id,host,port,source,route,mismatch);
@@ -647,7 +821,7 @@ struct Node::Impl {
                 }else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");calls.reset();running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -679,6 +853,15 @@ bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!pr
 void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
 void Node::loadGroupHistory(const std::string& group,std::int64_t before){if(!protocol::id(group,32))return;Impl::Command c{};c.action=Impl::Action::GroupHistoryPage;c.group=group;c.before=before;impl_->command(std::move(c));}
 std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(peerId))return {};Impl::Command command{};command.action=Impl::Action::VoiceStart;command.peer=peerId;command.id=Storage::newMessageId();auto id=command.id;return impl_->command(std::move(command))?id:std::string{};}
+std::string Node::startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor){
+    if(!protocol::id(peerId)||!sourceHandle||(sourceKind!=PC_SCREEN_MONITOR&&sourceKind!=PC_SCREEN_WINDOW)||fps<5||fps>60||bitrate<250000||bitrate>50000000)return {};
+    Impl::Command command{};command.action=Impl::Action::ScreenStart;command.peer=peerId;command.id=Storage::newMessageId();command.sourceKind=sourceKind;command.sourceHandle=sourceHandle;command.fps=fps;command.bitrate=bitrate;command.accepted=captureCursor;
+    auto id=command.id;return impl_->command(std::move(command))?id:std::string{};
+}
+bool Node::answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow){if(!protocol::id(shareId,32)||!presentationWindow)return false;Impl::Command command{};command.action=Impl::Action::ScreenAnswer;command.id=shareId;command.sourceHandle=presentationWindow;return impl_->command(std::move(command));}
+bool Node::declineScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenDecline;command.id=shareId;return impl_->command(std::move(command));}
+bool Node::endScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenEnd;command.id=shareId;return impl_->command(std::move(command));}
+std::wstring Node::screenShareDiagnostics(){auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command command{};command.action=Impl::Action::ScreenDiagnostics;command.response=response;if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return L"screen_media_state=unavailable";return result.get();}
 bool Node::answerVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceAnswer;command.id=callId;return impl_->command(std::move(command));}
 bool Node::declineVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceDecline;command.id=callId;return impl_->command(std::move(command));}
 bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceEnd;command.id=callId;return impl_->command(std::move(command));}

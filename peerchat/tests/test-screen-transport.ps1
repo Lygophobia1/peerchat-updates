@@ -1,4 +1,4 @@
-param([switch]$Run)
+param([switch]$Run,[switch]$Node)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -14,8 +14,21 @@ try {
         -ldatachannel -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto `
         -leverest -lp256m -lssp -o $output -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -liphlpapi -luser32
     if ($LASTEXITCODE -ne 0) { throw 'H.264 media transport test build failed.' }
+    if ($Node) {
+        $nodeOutput = 'build\stage8-transport\screen-share-node-test.exe'
+        & g++ -I. -Ibuild\native\install\include -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror `
+            tests\screen_share_node_test.cpp node.cpp tls.cpp storage.cpp group.cpp voice_media.cpp audio.cpp `
+            -Lbuild\native\install\lib -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp `
+            -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m -lssp `
+            -o $nodeOutput -lwinmm -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -liphlpapi -luser32
+        if ($LASTEXITCODE -ne 0) { throw 'Authenticated screen share integration test build failed.' }
+    }
     if ($Run) {
         & (Resolve-Path $output).Path
         if ($LASTEXITCODE -ne 0) { throw 'H.264 media transport test failed.' }
+        if ($Node) {
+            & (Resolve-Path $nodeOutput).Path
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticated screen share integration test failed.' }
+        }
     }
 } finally { Pop-Location }

@@ -9,12 +9,27 @@
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
 **Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 8 screen sharing is in progress. The MSVC adapter now performs continuous monitor/window H.264 capture/encode and GPU decode/presentation, and a one-PC direct ICE/DTLS-SRTP video loopback passed. Authenticated PeerChat share signaling, logical ownership/recovery, UI, settings, packaging and physical two-client acceptance are not implemented yet. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
-**Next action:** attach the verified media path to authenticated PeerChat control with capability gating and a separate logical share owner, then add Stage 7-style media-generation recovery and client UI/settings. Do not treat the one-PC media test as two-client acceptance.
+**Current stage:** Stage 8 screen sharing is implemented as a Development candidate, not physically accepted. Authenticated/capability-gated one-to-one signaling, logical share ownership, H.264 ICE/DTLS-SRTP media, bounded generation recovery, WPF source/viewer/settings, observational telemetry and isolated packaging passed local automated tests. Physical two-PC capture, viewing, voice coexistence and network-change acceptance remain required. Stage 6/7 physical two-client voice/settings/network-switch acceptance remains pending.
+**Next action:** physically test the isolated Stage 8 candidate on two Windows clients. Do not treat two local profiles on one PC as cross-machine acceptance.
+**Latest Git checkpoint:** Stage 8 Development candidate implementation (the commit containing this status update); physical acceptance is still pending.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
-separate; no publication, final tag, key change or package rebuild in this documentation pass.
+separate; no release publication, final tag, or key change occurred in this stage.
 
-## Stage 8 local pipeline evidence (not product integration)
+## Stage 8 implementation and remaining acceptance
+
+- Authenticated two-profile integration passed: verified peer TLS carried share offer/answer/candidates,
+  separate ICE/DTLS-SRTP carried H.264 to GPU presentation, text remained usable, a media-generation
+  restart after a simulated network change resumed rendering, and stop/decline returned both peers
+  to idle. The local WPF smoke, package dependency/import verification, and isolated candidate build
+  passed. These do not prove real two-PC or cross-network behavior.
+- The Development candidate is `build/stage8-screen-share-physical-candidate-20260923`;
+  `PeerChat.ScreenMedia.dll` is staged alongside `PeerChat.Desktop.exe`. The existing release/update
+  feed was not changed. Physical acceptance still needs sender/receiver UI, monitor/window selection,
+  active voice plus share, repeated start/stop, and recovery across a real network transition.
+- Once-per-second telemetry reports observed capture/encode/send-API/receive/render rates and bounded
+  queue drops. Selected ICE route and effective encoded/decoded dimensions are authoritative. The
+  pinned libdatachannel C API does not expose media RTT, wire throughput, jitter or reliable loss
+  percentage, so those fields are explicitly unavailable rather than inferred.
 
 - `tests/test-screen-pipeline.ps1 -Run` passed in the interactive Windows user session with a
   2560×1440 monitor, D3D11-backed Windows.Graphics.Capture, GPU BGRA→NV12 conversion, AMD hardware
@@ -22,22 +37,23 @@ separate; no publication, final tag, key change or package rebuild in this docum
   NV12→BGRA conversion, and DXGI swap-chain presentation.
 - The captured/decoded raw frames remained on GPU surfaces with no raw-pixel CPU readback. The
   H.264 compressed bytes crossed GPU/CPU boundaries for the prospective libdatachannel API.
-- This is a local manual hardware smoke test only. User-facing monitor/window selection,
-  negotiated media transport, receiver UI, recovery, settings, packaging and physical two-client
-  acceptance remain open. Production MinGW core/dependencies/build scripts are unchanged.
+- This local hardware smoke test was followed by authenticated client integration; only physical
+  two-client acceptance remains open. Production MinGW build/dependencies remain unchanged.
 - `windows_media/peerchat_screen_media.h` now defines the narrow Windows DLL ABI, and its first
   implementation enumerates current monitors/windows and reports Media Foundation hardware
   encode/decode availability. The test enumerated two monitors and nine windows and reported
-  H.264/HEVC hardware encode plus H.264/HEVC decode; AV1 was unavailable. The DLL is not yet
-  packaged or invoked by the desktop client. Its MSVC runtime is statically linked; import audit
+  H.264/HEVC hardware encode plus H.264/HEVC decode; AV1 was unavailable. The DLL is now
+  packaged in the isolated Development candidate and invoked by the desktop client. Its MSVC
+  runtime is statically linked; import audit
   showed Windows-inbox dependencies only. The adapter owns no session/call/trust/route state.
 - The adapter now has event-driven continuous monitor/window capture and a bounded in-memory
   Annex-B H.264 encoder queue, plus a bounded decoder queue with D3D11 presentation. The same
   local hardware test passed three continuous monitor frames, a specific-window frame, and
   adapter decoder rendering. `tests/screen_media_transport_test.cpp` passed a one-PC two-endpoint
   ICE/DTLS-SRTP test: 20 H.264 access units submitted, 345 RTP packets received, 20 units
-  reassembled, and two frames decoded/presented. This verifies only the media mechanics, not
-  PeerChat trust, authenticated control, recovery or remote hardware compatibility.
+  reassembled, and two frames decoded/presented. That earlier test verified media mechanics;
+  the later authenticated two-profile test above covers local trust/control/recovery, but remote
+  hardware compatibility still requires physical acceptance.
 
 ## Frozen checkpoint and branches
 
@@ -313,7 +329,7 @@ Interfaces/factories need concrete value.
 | 5 | Capability-gated direct handoff; two-peer arbitration/loss/replay/fallback and legacy compatibility, then physical text handoff. |
 | 6 | One-to-one voice ownership and profile voice settings; implementation complete at `c9943b5`, physical acceptance pending. |
 | 7 | Implementation/automated gates complete: bounded replaceable media generations, stale-generation rejection and voice recovery; physical network-change/audio continuity pending. |
-| 8 | Next, not begun: one-to-one screen sharing using the proven call/media lifecycle. |
+| 8 | One-to-one Development candidate implemented; physical two-client screen-share acceptance pending. |
 | 9 | Webcam video. |
 | 10 | Group calls without replacing the participant-oriented call owner. |
 | 11 | File transfer and richer messaging features. |
@@ -566,6 +582,6 @@ Broader or uncertain changes remain open with the missing evidence.
 
 ## Deferred scope
 
-Stage 8 screen sharing, client modularization, video, files, group voice, configured TURN/media relay,
+Stage 8 physical acceptance, client modularization, video, files, group voice, configured TURN/media relay,
 onion, disappearing messages, external bridge and multi-device synchronization remain deferred.
 Preserve the accepted stack and begin the next stage only with separate authorization.

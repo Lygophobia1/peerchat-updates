@@ -59,7 +59,7 @@ public:
         if (!data || !length || length > 8 * 1024 * 1024 || failed_) return -1;
         std::lock_guard lock(mutex_);
         if (!running_ || failed_) return -1;
-        if (queue_.size() >= 8) return 0;
+        if (queue_.size() >= 8) { ++droppedDecodeQueue_; return 0; }
         queue_.push_back({std::vector<uint8_t>(data, data + length), timestamp});
         ++accepted_;
         condition_.notify_one();
@@ -69,7 +69,9 @@ public:
     int status(pc_screen_decoder_status* value) {
         if (!value || value->structure_size != sizeof(*value)) return 0;
         std::lock_guard lock(mutex_);
-        *value = {sizeof(*value), accepted_, decoded_, presented_, failed_ ? 1u : 0u};
+        *value = {sizeof(*value), accepted_, decoded_, presented_, failed_ ? 1u : 0u,
+            decodedWidth_, decodedHeight_, droppedDecodeQueue_,
+            decodeLatencyMicrosecondsTotal_, decodeOperations_};
         return 1;
     }
 
@@ -222,9 +224,11 @@ private:
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = input.Get();
-        return SUCCEEDED(videoContext_->VideoProcessorBlt(
+        const bool displayed=SUCCEEDED(videoContext_->VideoProcessorBlt(
                    processor.Get(), output.Get(), 0, 1, &stream)) &&
                SUCCEEDED(swap_->Present(1, 0));
+        if(displayed){std::lock_guard lock(mutex_);decodedWidth_=desc.Width;decodedHeight_=desc.Height;}
+        return displayed;
     }
 
     bool drain() {
@@ -300,7 +304,16 @@ private:
                         frame = std::move(queue_.front());
                         queue_.pop_front();
                     }
-                    if (!decode(std::move(frame))) fail();
+                    const auto started = std::chrono::steady_clock::now();
+                    const bool decoded = decode(std::move(frame));
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - started).count();
+                    {
+                        std::lock_guard lock(mutex_);
+                        ++decodeOperations_;
+                        decodeLatencyMicrosecondsTotal_ += static_cast<uint64_t>(std::max<int64_t>(0, elapsed));
+                    }
+                    if (!decoded) fail();
                 }
             }
         } catch (...) { fail(); }
@@ -320,6 +333,8 @@ private:
     bool initialized_ = false, failed_ = false, mediaFoundationStarted_ = false;
     std::deque<QueuedFrame> queue_;
     uint64_t accepted_ = 0, decoded_ = 0, presented_ = 0;
+    uint64_t droppedDecodeQueue_ = 0, decodeLatencyMicrosecondsTotal_ = 0, decodeOperations_ = 0;
+    uint32_t decodedWidth_ = 0, decodedHeight_ = 0;
     UINT presentationWidth_ = 0, presentationHeight_ = 0;
     ComPtr<ID3D11Device> d3d_;
     ComPtr<ID3D11DeviceContext> context_;

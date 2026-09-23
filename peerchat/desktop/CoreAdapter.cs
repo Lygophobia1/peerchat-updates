@@ -1,6 +1,8 @@
 using System;
 using System.ComponentModel;
 using System.IO;
+using System.Collections.Generic;
+using System.Text;
 using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 
@@ -12,6 +14,8 @@ public sealed class CoreAdapter : IDisposable {
     const uint LoadLibrarySearchDllLoadDir=0x00000100;
     const uint LoadLibrarySearchSystem32=0x00000800;
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string fileName,IntPtr file,uint flags);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetModuleFileName(IntPtr module,StringBuilder fileName,uint size);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool FreeLibrary(IntPtr module);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_create();
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_destroy(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_start(IntPtr handle,string directory,ushort port,string name);
@@ -41,6 +45,15 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_groups(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_history(IntPtr handle,string group,long before);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_voice_call(IntPtr handle,string peer);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_screen_start(IntPtr handle,string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,int cursor);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_answer(IntPtr handle,string id,ulong viewer);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_decline(IntPtr handle,string id);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_end(IntPtr handle,string id);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_screen_diagnostics(IntPtr handle);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void ScreenSourceCallback(IntPtr context,uint kind,ulong source,IntPtr name,uint width,uint height,uint refreshNumerator,uint refreshDenominator);
+    [DllImport("PeerChat.ScreenMedia.dll",CallingConvention=CallingConvention.Cdecl)] static extern uint pc_screen_enumerate_sources(ScreenSourceCallback callback,IntPtr context);
+    [StructLayout(LayoutKind.Sequential)] struct ScreenCapabilities {public uint size,capture,encoders,decoders,d3d11;}
+    [DllImport("PeerChat.ScreenMedia.dll",CallingConvention=CallingConvention.Cdecl)] static extern int pc_screen_query_capabilities(ref ScreenCapabilities capabilities);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_answer(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_decline(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_end(IntPtr handle,string call);
@@ -55,6 +68,8 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_add(IntPtr handle,string invite,string ownPeer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr handle);
     readonly IntPtr nativeModule;
+    static readonly object screenModuleGate=new object();
+    static IntPtr screenModule;
     IntPtr handle;
     readonly JavaScriptSerializer serializer=new JavaScriptSerializer { MaxJsonLength=32*1024*1024 };
     public CoreAdapter(){
@@ -91,6 +106,27 @@ public sealed class CoreAdapter : IDisposable {
     public void LoadGroups(){ui_groups(handle);}
     public void GroupHistory(string group,long before){ui_group_history(handle,group,before);}
     public string StartVoiceCall(string peer){return Marshal.PtrToStringUni(ui_voice_call(handle,peer));}
+    public string StartScreenShare(string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,bool cursor){return Marshal.PtrToStringUni(ui_screen_start(handle,peer,sourceKind,sourceHandle,fps,bitrate,cursor?1:0));}
+    public bool AnswerScreenShare(string id,ulong viewer){return ui_screen_answer(handle,id,viewer)!=0;}
+    public bool DeclineScreenShare(string id){return ui_screen_decline(handle,id)!=0;}
+    public bool EndScreenShare(string id){return ui_screen_end(handle,id)!=0;}
+    public string ScreenShareDiagnostics(){return Marshal.PtrToStringUni(ui_screen_diagnostics(handle));}
+    static void EnsureScreenMediaLoaded(){lock(screenModuleGate){
+        if(screenModule!=IntPtr.Zero)return;
+        string path=Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"PeerChat.ScreenMedia.dll"));
+        if(!File.Exists(path))throw new FileNotFoundException("The packaged screen-media adapter is missing.",path);
+        screenModule=LoadLibraryEx(path,IntPtr.Zero,LoadLibrarySearchDllLoadDir|LoadLibrarySearchSystem32);
+        if(screenModule==IntPtr.Zero){int code=Marshal.GetLastWin32Error();throw new DllNotFoundException("Could not load the packaged screen-media adapter: Windows loader error "+code+" ("+new Win32Exception(code).Message+").");}
+        var loadedPath=new StringBuilder(32768);uint length=GetModuleFileName(screenModule,loadedPath,(uint)loadedPath.Capacity);
+        if(length==0||length>=(uint)loadedPath.Capacity||!String.Equals(Path.GetFullPath(loadedPath.ToString()),path,StringComparison.OrdinalIgnoreCase)){FreeLibrary(screenModule);screenModule=IntPtr.Zero;throw new DllNotFoundException("The screen-media adapter did not load from the PeerChat package directory.");}
+    }}
+    public ScreenSource[] ScreenSources(){
+        EnsureScreenMediaLoaded();
+        var sources=new List<ScreenSource>();
+        ScreenSourceCallback callback=(context,kind,source,name,width,height,numerator,denominator)=>sources.Add(new ScreenSource{kind=kind,handle=source,name=Marshal.PtrToStringUni(name)??"Screen",width=width,height=height});
+        pc_screen_enumerate_sources(callback,IntPtr.Zero);GC.KeepAlive(callback);return sources.ToArray();
+    }
+    public bool ScreenH264Available(){EnsureScreenMediaLoaded();var capabilities=new ScreenCapabilities{size=(uint)Marshal.SizeOf(typeof(ScreenCapabilities))};return pc_screen_query_capabilities(ref capabilities)!=0&&capabilities.capture!=0&&(capabilities.encoders&1)!=0&&(capabilities.decoders&1)!=0&&capabilities.d3d11!=0;}
     public bool AnswerVoiceCall(string call){return ui_voice_answer(handle,call)!=0;}
     public bool DeclineVoiceCall(string call){return ui_voice_decline(handle,call)!=0;}
     public bool EndVoiceCall(string call){return ui_voice_end(handle,call)!=0;}
@@ -106,13 +142,14 @@ public sealed class CoreAdapter : IDisposable {
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
     public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
-public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration; public int retryMs,callState,callType,mediaState,reliableRoute,mediaRoute; public bool connected,callMuted,callDeafened,callControlAvailable; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
+public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration; public int retryMs,callState,callType,mediaState,reliableRoute,mediaRoute,shareState,screenRoute,screenWidth,screenHeight; public bool connected,callMuted,callDeafened,callControlAvailable; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
 public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }
 public class GroupMemberData { public long account; public string peer,name; public int role; }
 public class GroupEventData { public string id,group,sender,text; public long account,time,logical; }
 public class VoiceDevices { public VoiceDevice[] inputs,outputs; }
+public class ScreenSource { public uint kind,width,height; public ulong handle; public string name; public override string ToString(){return (kind==1?"Monitor: ":"Window: ")+name+" ("+width+"×"+height+")";} }
 public class VoiceDevice { public int id; public string name; public override string ToString(){return name;} }
 public class VoiceTelemetry { public float input,output; public bool active,inputAvailable,outputAvailable; }
 }

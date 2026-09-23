@@ -25,4 +25,32 @@ public sealed class VoicePreferenceStore {
     public static void ResolveDevices(VoicePreferenceData value,VoiceDevices devices){if(value==null||devices==null)return;var inputs=devices.inputs??new VoiceDevice[0];var outputs=devices.outputs??new VoiceDevice[0];if(!inputs.Any(item=>item.id==value.InputDeviceId&&item.name==value.InputDeviceName)){value.InputDeviceId=-1;value.InputDeviceName="Windows default microphone";}if(!outputs.Any(item=>item.id==value.OutputDeviceId&&item.name==value.OutputDeviceName)){value.OutputDeviceId=-1;value.OutputDeviceName="Windows default output";}}
     static bool Valid(VoicePreferenceData value){return value!=null&&value.Version==1&&value.InputDeviceId>=-1&&value.OutputDeviceId>=-1&&value.InputVolume>=0&&value.InputVolume<=200&&value.OutputVolume>=0&&value.OutputVolume<=200&&(value.InputDeviceName??"").Length<=256&&(value.OutputDeviceName??"").Length<=256;}
 }
+
+// Screen preferences are profile-scoped. Handles, share IDs, peers and live
+// negotiation state are deliberately never persisted.
+public sealed class ScreenSharePreferenceData {
+    public int Version=1;
+    public int FramesPerSecond=30;
+    public int BitrateBitsPerSecond=8000000;
+    public bool CaptureCursor=true;
+}
+public sealed class ScreenSharePreferenceStore {
+    readonly string path;
+    readonly JavaScriptSerializer json=new JavaScriptSerializer();
+    public ScreenSharePreferenceStore(string profileDirectory){path=Path.Combine(profileDirectory,"screen-share-preferences.json");}
+    public ScreenSharePreferenceData Load(){
+        try{if(!File.Exists(path))return new ScreenSharePreferenceData();var value=json.Deserialize<ScreenSharePreferenceData>(File.ReadAllText(path,Encoding.UTF8));return Valid(value)?value:new ScreenSharePreferenceData();}
+        catch{return new ScreenSharePreferenceData();}
+    }
+    public void Save(ScreenSharePreferenceData value){
+        if(!Valid(value))throw new InvalidOperationException("Screen-share preferences are invalid.");
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
+        string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+        File.WriteAllText(temporary,json.Serialize(value),new UTF8Encoding(false));
+        if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
+    }
+    static bool Valid(ScreenSharePreferenceData value){return value!=null&&value.Version==1&&
+        (value.FramesPerSecond==15||value.FramesPerSecond==30||value.FramesPerSecond==60)&&
+        new[]{2000000,4000000,8000000,16000000,25000000}.Contains(value.BitrateBitsPerSecond);}
+}
 }
