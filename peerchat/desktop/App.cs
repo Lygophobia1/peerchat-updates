@@ -200,21 +200,6 @@ public class DesktopApplication {
         }catch(Exception error){model.Status=error.Message;}
         busy=false;if(!closing)timer.Start();Refresh();
     }
-    async void ConfigureFirewallForListener(ushort port){
-        if(port==0||closing||firewallConfigurationInFlight||firewallConfiguredPort==port)return;
-        // In-process WPF harnesses are not the installed PeerChat executable and must never
-        // provision or rewrite installation-level firewall state for their test-host path.
-        if(profileManager==null){firewallConfiguredPort=port;return;}
-        firewallConfigurationInFlight=true;
-        try{
-            var firewall=await Task.Run(()=>FirewallRules.EnsurePrivateRule(port,profileManager==null?null:profileManager.InstallRoot));
-            if(firewall.Ok){
-                firewallConfiguredPort=port;
-                if(profileManager!=null)TraceStartup(profileManager.InstallRoot,firewall.Changed?"firewall-rule-updated":"firewall-rule-reused");
-            }
-            else if(!closing){model.Status=firewall.PermissionDenied?"Listening on TCP "+port+"; approve Windows Firewall to receive P2P connections.":"Listening on TCP "+port+"; inbound P2P may be blocked. "+firewall.Detail;Refresh();}
-        }finally{firewallConfigurationInFlight=false;}
-    }
     void UpdateUnreadIndicator(){
         int unread=model.Conversations.Values.Sum(item=>item.Unread)+model.GroupChats.Values.Sum(item=>item.Unread);
         window.Title=unread==0?"PeerChat":"PeerChat • "+unread+" unread";
@@ -246,7 +231,7 @@ public class DesktopApplication {
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Direct P2P":"Local profile ready · Sign in, create an account, or continue Offline / Direct P2P"):"@"+accountLink.Username+" signed out · Local history and Direct P2P remain available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");RefreshAutomaticShareHost();var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,shareHost,model.Port));discovery=saved;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
         }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Direct P2P · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
@@ -275,7 +260,7 @@ public class DesktopApplication {
                 if(e.kind==13)HandleVoiceEvent(e);
                 if(e.kind==19)HandleScreenShareEvent(e);
                 if(incoming||incomingGroup)incomingNotification=true;
-                if(e.kind==0){if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id);ConfigureFirewallForListener(e.port);RestoreDiscoverySession();}
+                if(e.kind==0){if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id+" relay-only="+(e.port==0));RestoreDiscoverySession();}
                 if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online&&attempting.SessionRevision==0){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);}
                 if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online&&scheduled.SessionRevision==0){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
                 if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);}
@@ -1140,7 +1125,7 @@ public class DesktopApplication {
 			accountLink = accountStore.SaveSession(candidate.AccountId, candidate.Username, candidate.Host, candidate.Port, candidate.CertificateSha256, candidate.SessionToken);
 			SaveDiscoveryService(candidate.Host, candidate.Port, candidate.CertificateSha256);
 			RefreshAutomaticShareHost();
-			PresenceResult presence = await Task.Run(() => candidate.ReportPresence(model.OwnId, shareHost, model.Port));
+			PresenceResult presence = await Task.Run(() => candidate.ReportPresence(model.OwnId, "", 0, "", 0, false));
 			discovery = candidate;
 			ApplyPresenceDiagnostics(presence);
 			core.SetGroupAccount(discovery.AccountId, discovery.Username);
@@ -1284,7 +1269,7 @@ public class DesktopApplication {
 			int num3 = 0;
 			try
 			{
-				PresenceResult result = await Task.Run(() => source.ReportPresence(model.OwnId, host, port));
+				PresenceResult result = await Task.Run(() => source.ReportPresence(model.OwnId, "", 0, "", 0, false));
 				if (discovery != source || closing || closed)
 				{
 					return false;
@@ -3282,7 +3267,7 @@ public class DesktopApplication {
 				RefreshAutomaticShareHost();
 				try
 				{
-					await Task.Run(() => source.ReportPresence(model.OwnId, shareHost, model.Port));
+					await Task.Run(() => source.ReportPresence(model.OwnId, "", 0, "", 0, false));
 				}
 				catch
 				{

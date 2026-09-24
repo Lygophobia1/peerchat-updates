@@ -54,7 +54,9 @@ class Node {
 public:
     Node();~Node();
     Node(const Node&)=delete;Node& operator=(const Node&)=delete;
-    void start(const std::wstring& dataDirectory,std::uint16_t listeningPortOverride=0,const std::wstring& displayNameOverride={});
+    // Production profiles start relay-only. Test fixtures and the retained
+    // explicit Direct Only path may opt into a listener.
+    void start(const std::wstring& dataDirectory,std::uint16_t listeningPortOverride=0,const std::wstring& displayNameOverride={},bool startDirectListener=true);
     void stop();
     void connect(const std::wstring& hostname,std::uint16_t port,const std::string& expectedIdentity={},const std::wstring& candidateSource=L"Direct",const std::wstring& route=L"manual",bool forceImmediate=false);
     void invalidateRoute(const std::string& expectedIdentity,const std::wstring& staleHost={},std::uint16_t stalePort=0,bool allRoutes=false,std::uint64_t expectedNetworkGeneration=0);

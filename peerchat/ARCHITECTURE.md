@@ -569,15 +569,19 @@ or certificates.
 
 ## Firewall
 
-After the native Ready event reveals the actual P2P listener port, the client ensures one inbound
-TCP rule named `PeerChat P2P (Private)`, scoped to the packaged executable and Private networks.
-The rule belongs to the installation, not a profile. A hidden, non-elevated query first validates
-its enabled state, inbound direction, Private-only scope, TCP protocol, Allow action, exact current
-executable path, and listener port. An exact match is reused without running an elevated modify
-command; elevation occurs only when the rule is missing or stale. Successful verification is
-recorded in install-wide `firewall-state.dat`, but the live Windows rule remains authoritative.
-It never enables Public-network access or disables Windows Firewall. Firewall/TCP diagnostics
-remain separate from TLS and identity failures.
+Relay-only startup creates no reliable direct TCP listener, publishes no reliable direct candidate,
+and does not touch Windows Firewall. Explicit Direct Only or authorized scoped reliable P2P acquires
+a temporary `0.0.0.0` listener on an OS-selected port; its port is runtime-only and is released when
+the scope is cancelled or discarded. The future consent UI obtains firewall permission before it
+begins that lifecycle.
+
+The installation rule remains `PeerChat P2P (Private)`, but is now application-scoped rather than
+fixed-port: exact packaged executable, inbound TCP, Allow, Private profile only, and any local TCP
+port. A hidden non-elevated query validates those properties. The first explicit P2P operation may
+elevate to add or migrate the retained rule; a matching rule is reused without UAC. Reusing the
+rule name migrates an old exact-port rule in place. It never opens a listener, publishes an endpoint,
+permits UDP or Public networks, or disables Windows Firewall. `firewall-state.dat` remains
+installation status metadata while the live rule is authoritative.
 In-process UI test hosts have no profile manager/install boundary and therefore never provision or
 rewrite the machine-wide rule for their harness executable path.
 

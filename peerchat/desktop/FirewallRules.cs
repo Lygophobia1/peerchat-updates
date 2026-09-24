@@ -30,54 +30,65 @@ internal static class FirewallRules {
     // Treat a rule as present only after seeing its actual verbose rule header.
     internal static bool RuleExists(string output){return !String.IsNullOrEmpty(output)&&Regex.IsMatch(output,"^\\s*Rule Name\\s*:",RegexOptions.IgnoreCase|RegexOptions.Multiline);}
 
-    internal static bool RuleMatches(string output,ushort port,string program){
-        if(!RuleExists(output)||port==0||String.IsNullOrEmpty(program))return false;
+    // A temporary listener uses a different OS-selected port each time. The
+    // installation rule is deliberately application-scoped rather than
+    // port-scoped: exact executable, inbound TCP and Private only.
+    internal static bool RuleMatchesProgramPrivateTcp(string output,string program){
+        if(!RuleExists(output)||String.IsNullOrEmpty(program))return false;
         string normalized=output.Replace("\r","");
         return Regex.IsMatch(normalized,"^\\s*Enabled:\\s*Yes\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
             Regex.IsMatch(normalized,"^\\s*Direction:\\s*In\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
             Regex.IsMatch(normalized,"^\\s*Profiles:\\s*Private\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
             Regex.IsMatch(normalized,"^\\s*Protocol:\\s*TCP\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
             Regex.IsMatch(normalized,"^\\s*Action:\\s*Allow\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
-            Regex.IsMatch(normalized,"LocalPort:\\s*"+port+"(?:\\s|$)",RegexOptions.IgnoreCase)&&
+            Regex.IsMatch(normalized,"^\\s*LocalPort:\\s*(Any|\\*)\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline)&&
             Regex.IsMatch(normalized,"Program:\\s*"+Regex.Escape(program)+"\\s*$",RegexOptions.IgnoreCase|RegexOptions.Multiline);
     }
 
+    // Retained only for compatibility with the focused parser test and to
+    // demonstrate that a historical exact-port rule is no longer acceptable.
+    internal static bool RuleMatches(string output,ushort port,string program){return port>0&&RuleMatchesProgramPrivateTcp(output,program);}
+
     // This file is installation metadata only. The live Windows Firewall rule remains
     // authoritative and is queried silently on every process start before elevation.
-    static void SaveInstallState(string installRoot,ushort port,string program){
+    static void SaveInstallState(string installRoot,string program){
         if(String.IsNullOrEmpty(installRoot))return;
         try{
             Directory.CreateDirectory(installRoot);
             string path=Path.Combine(installRoot,"firewall-state.dat"),temporary=path+".new";
-            string content="version=1\r\nport="+port+"\r\nprogram="+program+"\r\nverifiedUtc="+DateTime.UtcNow.ToString("o")+"\r\n";
+            string content="version=2\r\nscope=program-private-tcp\r\nprogram="+program+"\r\nverifiedUtc="+DateTime.UtcNow.ToString("o")+"\r\n";
             File.WriteAllText(temporary,content,new UTF8Encoding(false));
             if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
         }catch{} // Provisioning must not fail merely because status metadata is unavailable.
     }
 
-    internal static FirewallResult EnsurePrivateRule(ushort port,string installRoot=null){
+    internal static FirewallResult EnsurePrivateProgramRule(string installRoot=null){
         var result=new FirewallResult();
-        if(port==0){result.Detail="The listener did not report a usable TCP port.";return result;}
         string program=ProgramPath();
         if(String.IsNullOrEmpty(program)){result.PermissionDenied=true;result.Detail="Could not determine the packaged PeerChat application path.";return result;}
         string existing=Query();
-        if(RuleMatches(existing,port,program)){
+        if(RuleMatchesProgramPrivateTcp(existing,program)){
             result.Ok=true;result.Detail="Existing installation firewall rule reused.";
-            SaveInstallState(installRoot,port,program);return result;
+            SaveInstallState(installRoot,program);return result;
         }
         string quotedProgram="\""+program.Replace("\"","\\\"")+"\"";
-        string command="advfirewall firewall "+(RuleExists(existing)?"set rule name=\""+RuleName+"\" new dir=in action=allow enable=yes profile=private protocol=TCP localport="+port+" program="+quotedProgram:"add rule name=\""+RuleName+"\" dir=in action=allow enable=yes profile=private protocol=TCP localport="+port+" program="+quotedProgram);
+        // Reusing the historical rule name means an old exact-port rule is
+        // migrated in place instead of leaving two confusing allowances.
+        string command="advfirewall firewall "+(RuleExists(existing)?"set rule name=\""+RuleName+"\" new dir=in action=allow enable=yes profile=private protocol=TCP localport=any program="+quotedProgram:"add rule name=\""+RuleName+"\" dir=in action=allow enable=yes profile=private protocol=TCP localport=any program="+quotedProgram);
         try{
             var info=new ProcessStartInfo("netsh.exe",command){UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden};
             using(var process=Process.Start(info)){
                 if(!process.WaitForExit(10000)){try{process.Kill();}catch{}result.PermissionDenied=true;result.Detail="Windows Firewall did not respond to the elevation request.";return result;}
-                result.Ok=process.ExitCode==0&&RuleMatches(Query(),port,program);
-                if(result.Ok){result.Changed=true;result.Detail="Installation firewall rule updated.";SaveInstallState(installRoot,port,program);}
+                result.Ok=process.ExitCode==0&&RuleMatchesProgramPrivateTcp(Query(),program);
+                if(result.Ok){result.Changed=true;result.Detail="Installation firewall rule migrated or updated for temporary Private TCP P2P.";SaveInstallState(installRoot,program);}
                 else result.Detail="Windows Firewall did not accept a valid Private TCP PeerChat rule.";
             }
         }catch(Win32Exception error){result.PermissionDenied=error.NativeErrorCode==1223||error.NativeErrorCode==740;result.Detail=result.PermissionDenied?"Approve the Windows security prompt to allow inbound PeerChat connections on Private networks.":"Windows Firewall could not be started: "+error.Message;}
         catch(Exception error){result.Detail="Windows Firewall setup failed: "+error.Message;}
         return result;
     }
+
+    [Obsolete("Temporary reliable listeners require the program-scoped Private TCP rule.")]
+    internal static FirewallResult EnsurePrivateRule(ushort port,string installRoot=null){return EnsurePrivateProgramRule(installRoot);}
 }
 }

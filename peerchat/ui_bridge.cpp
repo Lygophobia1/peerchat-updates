@@ -17,7 +17,7 @@ static std::wstring quote(const std::wstring& value){
 }
 UI_API void* ui_create(){try{return new UiBridge;}catch(...){return nullptr;}}
 UI_API void ui_destroy(void* handle){delete static_cast<UiBridge*>(handle);}
-UI_API int ui_start(void* handle,const wchar_t* directory,unsigned short port,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.start(directory,port,name?name:L"");return 1;}catch(...){return 0;}}
+UI_API int ui_start(void* handle,const wchar_t* directory,unsigned short port,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.start(directory,port,name?name:L"",false);return 1;}catch(...){return 0;}}
 UI_API int ui_connect(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer));return 1;}catch(...){return 0;}}
 UI_API int ui_connect_ex(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer,const wchar_t* source,const wchar_t* route,int force){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer),source?source:L"Direct",route?route:L"manual",force!=0);return 1;}catch(...){return 0;}}
 UI_API int ui_invalidate_route(void* handle,const wchar_t* peer,const wchar_t* staleHost,unsigned short stalePort,int allRoutes){try{static_cast<UiBridge*>(handle)->node.invalidateRoute(identity(peer),staleHost?staleHost:L"",stalePort,allRoutes!=0);return 1;}catch(...){return 0;}}

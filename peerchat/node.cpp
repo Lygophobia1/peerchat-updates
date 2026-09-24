@@ -119,8 +119,34 @@ struct Node::Impl {
     std::atomic<float> voiceInputLevel{0.0f},voiceOutputLevel{0.0f};
     std::atomic<unsigned> voiceTelemetryFlags{0};
     SOCKET listener=INVALID_SOCKET;
+    // Runtime-only scope leases. A bound port is never persisted or emitted in
+    // ordinary presence; only an authorized direct lifecycle may hold it.
+    std::set<std::string> directListenerLeases;
+    bool startupDirectListener=false;
     ~Impl(){stop();}
     void emit(NodeEvent e){std::lock_guard<std::mutex> lock(eventMutex);if(events.size()>=4096)events.pop_front();events.push_back(std::move(e));}
+    void closeDirectListener(){
+        if(listener==INVALID_SOCKET)return;
+        closesocket(listener);listener=INVALID_SOCKET;
+        NodeEvent event;event.kind=NodeEvent::Kind::ConnectionLifecycle;event.text=L"Temporary reliable direct listener closed";emit(std::move(event));
+    }
+    void ensureDirectListener(const std::string& lease,std::uint16_t requestedPort=0){
+        if(!lease.empty())directListenerLeases.insert(lease);
+        if(listener!=INVALID_SOCKET)return;
+        listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+        if(listener==INVALID_SOCKET)throw std::runtime_error("Cannot create temporary direct listener");
+        try{
+            nonblocking(listener);BOOL exclusive=TRUE;setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<char*>(&exclusive),sizeof(exclusive));
+            sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(requestedPort);address.sin_addr.s_addr=htonl(INADDR_ANY);
+            if(bind(listener,reinterpret_cast<sockaddr*>(&address),sizeof(address)))throw std::runtime_error("Cannot bind temporary direct listener");
+            sockaddr_in assigned{};int size=sizeof(assigned);
+            if(getsockname(listener,reinterpret_cast<sockaddr*>(&assigned),&size))throw std::runtime_error("Cannot read temporary listener port");
+            profile.listenPort=ntohs(assigned.sin_port);
+            if(!profile.listenPort||listen(listener,16))throw std::runtime_error("Cannot start temporary direct listener");
+            NodeEvent event;event.kind=NodeEvent::Kind::ConnectionLifecycle;event.port=profile.listenPort;event.text=L"Temporary reliable direct listener opened";emit(std::move(event));
+        }catch(...){closesocket(listener);listener=INVALID_SOCKET;if(!lease.empty())directListenerLeases.erase(lease);throw;}
+    }
+    void releaseDirectListener(const std::string& lease){if(!lease.empty())directListenerLeases.erase(lease);if(!startupDirectListener&&directListenerLeases.empty())closeDirectListener();}
     void emitGroupHistoryPage(const std::string& groupId,std::int64_t before){
         auto found=groups.find(groupId);if(found==groups.end())throw std::runtime_error("Unknown Group ID");
         const auto& state=found->second.state();
@@ -629,6 +655,8 @@ struct Node::Impl {
         std::deque<Command> batch;{std::lock_guard<std::mutex> lock(commandMutex);batch.swap(commands);}
         for(auto& command:batch)try{
             if(command.action==Action::Connect){
+                // Explicit manual/Direct Only uses the same temporary listener.
+                ensureDirectListener(command.peer.empty()?"manual-direct":command.peer);
                 if(command.forceImmediate&&!command.peer.empty()){
                     const bool manual=command.route.rfind(L"manual retry",0)==0;
                     auto replacement=routeObservation(command.text,command.port,command.source,command.route,false,{nextRouteRevision++});
@@ -649,6 +677,7 @@ struct Node::Impl {
                 sessionTransports->replaceCandidates(sessionEpoch,command.peer,std::move(routes),command.accepted,command.accountId,nowMilliseconds(),command.forceImmediate);emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::ScopedP2pProbe){
+                ensureDirectListener(command.peer);
                 auto route=routeObservation(command.text,command.port,L"Scoped mutual P2P consent",L"manual reliable P2P probe",false,{nextRouteRevision++});route.networkRevision=command.generation;
                 if(!sessionTransports->beginScopedP2pProbe(sessionEpoch,command.peer,command.id,command.sourceHandle,route,nowMilliseconds()))throw std::runtime_error("Scoped P2P authorization is stale, unavailable, or not bound to the current relay session");
                 emitSessionSnapshot(command.peer);
@@ -659,6 +688,7 @@ struct Node::Impl {
                 auto ids=sessionTransports->cancelScopedP2p(sessionEpoch,command.peer);auto selected=[&](std::uint64_t id){return std::any_of(ids.begin(),ids.end(),[&](auto value){return value.value==id;});};
                 for(auto it=resolvers.begin();it!=resolvers.end();){if(selected((*it)->attemptId)){sessionTransports->closeTransport(sessionEpoch,{(*it)->attemptId},"scoped P2P cancelled",false);it=resolvers.erase(it);}else ++it;}
                 for(auto it=connections.begin();it!=connections.end();){if(selected((*it)->attemptId)){(*it)->closeReason=L"scoped P2P cancelled";sessionTransports->closeTransport(sessionEpoch,{(*it)->attemptId},"scoped P2P cancelled",false);if(deliveries)deliveries->retireTransport({(*it)->attemptId});it=connections.erase(it);}else ++it;}
+                releaseDirectListener(command.peer);
                 emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::RelayReady){
@@ -824,7 +854,7 @@ struct Node::Impl {
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
     }
-    void run(const std::wstring& directory,std::uint16_t listeningPortOverride,const std::wstring& displayNameOverride){
+    void run(const std::wstring& directory,std::uint16_t listeningPortOverride,const std::wstring& displayNameOverride,bool startDirectListener){
         WSADATA data{};bool winsock=false;
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
@@ -841,11 +871,9 @@ struct Node::Impl {
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
             groupAccount=store->groupAccount();groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
-            auto createListener=[&]{listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(listener==INVALID_SOCKET)throw std::runtime_error("Cannot create listener");nonblocking(listener);BOOL exclusive=TRUE;setsockopt(listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<char*>(&exclusive),sizeof(exclusive));};
-            createListener();sockaddr_in bindAddress{};bindAddress.sin_family=AF_INET;bindAddress.sin_port=htons(profile.listenPort);bindAddress.sin_addr.s_addr=htonl(INADDR_ANY);
-            if(bind(listener,reinterpret_cast<sockaddr*>(&bindAddress),sizeof(bindAddress))){int error=WSAGetLastError();if(listeningPortOverride||(error!=WSAEADDRINUSE&&error!=WSAEACCES))throw std::runtime_error("Cannot listen on configured port; choose a free port in your profile");closesocket(listener);listener=INVALID_SOCKET;createListener();bindAddress.sin_port=0;if(bind(listener,reinterpret_cast<sockaddr*>(&bindAddress),sizeof(bindAddress)))throw std::runtime_error("Cannot allocate a free listener port for this profile");sockaddr_in assigned{};int assignedSize=sizeof(assigned);if(getsockname(listener,reinterpret_cast<sockaddr*>(&assigned),&assignedSize))throw std::runtime_error("Cannot read the allocated listener port");profile.listenPort=ntohs(assigned.sin_port);store->saveProfile(profile);}
-            if(listen(listener,16))throw std::runtime_error("Cannot start the profile listener");
-            NodeEvent ready;ready.kind=NodeEvent::Kind::Ready;ready.peerId=profile.peerId;ready.text=profile.name;ready.port=profile.listenPort;emit(std::move(ready));publishContacts();publishGroups();
+            startupDirectListener=startDirectListener;
+            if(startupDirectListener)ensureDirectListener("explicit-direct-only",listeningPortOverride);
+            NodeEvent ready;ready.kind=NodeEvent::Kind::Ready;ready.peerId=profile.peerId;ready.text=profile.name;ready.port=listener==INVALID_SOCKET?0:profile.listenPort;emit(std::move(ready));publishContacts();publishGroups();
             // Pending friend IDs are intentionally reconnectable too. The first
             // successful TLS handshake supplies the public key that turns the
             // saved fingerprint reference into a verified contact.
@@ -864,10 +892,17 @@ struct Node::Impl {
                     auto pipe=std::make_shared<RelayPipe>();{std::lock_guard<std::mutex> lock(relayMutex);relayPipes[attempt]=pipe;}
                     NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=relay.remoteDeviceId;request.attemptId=attempt;request.networkGeneration=relay.networkRevision;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated discovery service";request.route=L"manager-owned bounded direct fallback";request.text=L"Relay transport requested";emit(std::move(request));emitSessionSnapshot(relay.remoteDeviceId);
                 }
-                fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);FD_SET(listener,&reads);
+                // Winsock rejects select() with no sockets. Relay-only idle
+                // profiles intentionally have neither a direct listener nor a
+                // direct connection, so yield briefly and return to the
+                // manager-owned relay/control work above.
+                bool hasDirectSocket=listener!=INVALID_SOCKET;
+                for(const auto& connection:connections)if(!connection->dead&&!connection->relay){hasDirectSocket=true;break;}
+                if(!hasDirectSocket){Sleep(20);continue;}
+                fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);if(listener!=INVALID_SOCKET)FD_SET(listener,&reads);
                 for(auto& c:connections)if(!c->dead&&!c->relay){if(!c->connecting)FD_SET(c->socket,&reads);if(c->connecting||c->sent<c->output.size())FD_SET(c->socket,&writes);FD_SET(c->socket,&errors);}
                 timeval timeout{0,20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
-                if(FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";attachDirectTransport(*c);nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
+                if(listener!=INVALID_SOCKET&&FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";attachDirectTransport(*c);nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
                 for(auto& c:connections)if(!c->dead&&!c->relay)try{
                     if(FD_ISSET(c->socket,&errors)){int error=0,length=sizeof(error);getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length);error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"socket error "+std::to_wstring(error);c->dead=true;}
                     if(c->connecting&&FD_ISSET(c->socket,&writes)){int error=0,length=sizeof(error);if(getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length)||error){error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"connect completion error "+std::to_wstring(error);c->dead=true;}c->connecting=false;}
@@ -899,11 +934,11 @@ struct Node::Impl {
                 }else ++it;
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();if(listener!=INVALID_SOCKET){closesocket(listener);listener=INVALID_SOCKET;}credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
-void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name]{impl_->run(directory,port,name);});}
+void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name,bool startDirectListener){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name,startDirectListener]{impl_->run(directory,port,name,startDirectListener);});}
 void Node::stop(){impl_->stop();}
 void Node::connect(const std::wstring& host,std::uint16_t port,const std::string& expected,const std::wstring& source,const std::wstring& route,bool forceImmediate){Impl::Command c{};c.action=Impl::Action::Connect;c.text=host;c.port=port;c.peer=expected;c.source=source;c.route=route;c.forceImmediate=forceImmediate;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::invalidateRoute(const std::string& expected,const std::wstring& staleHost,std::uint16_t stalePort,bool allRoutes,std::uint64_t expectedNetworkGeneration){if(expected.empty())return;Impl::Command c{};c.action=Impl::Action::InvalidateRoute;c.peer=expected;c.text=staleHost;c.port=stalePort;c.accepted=allRoutes;c.accountId=expectedNetworkGeneration;impl_->command(std::move(c));}

@@ -41,6 +41,15 @@ native reconnect test passed in the interactive DPAPI context. WPF consent/setti
 full two-party promotion, and physical validation remain next work. Voice/screen-share ICE are
 unchanged.
 
+**Reliable-control privacy checkpoint 4:** packaged desktop startup now opens no reliable direct
+listener, publishes relay-only presence, and does not provision firewall state. Explicit Direct
+Only/scoped native P2P acquires an OS-selected temporary listener and cancellation releases it;
+the direct listener port is no longer profile-persisted route state. The firewall boundary now
+validates/migrates one Private/TCP/program-scoped rule in place, ready for the first explicit
+consent-driven attempt rather than ordinary startup. Targeted reconnect/lifecycle and firewall
+parser tests pass; WPF consent/settings and one-time first-attempt elevation wiring remain next.
+Voice and screen-share ICE are unchanged.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256
