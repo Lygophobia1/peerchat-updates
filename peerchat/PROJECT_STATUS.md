@@ -15,6 +15,17 @@
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
+**Local profile maintenance:** backup, reset, and restore now use a restart-assisted, profile-ID
+bootstrap request rather than modifying an active profile. The active desktop stops profile-owned
+timers, scoped P2P, relay/discovery and the native core; bootstrap proves the lease is free before
+maintenance. Backup verifies copied files and excludes lock/WAL/SHM/runtime files. Reset keeps a
+timestamped recovery directory, preserves the native device Peer ID and a readable account binding
+while clearing its session, and rebuilds a current-schema profile without history, trust, routes,
+P2P/session caches or old settings. Restore validates metadata/profile ID, stages/verifies the
+backup and keeps the pre-restore directory for rollback. Targeted profile-manager regression and
+fresh desktop/native build passed; the existing adapter integration remains blocked only by the
+documented sandbox-token DPAPI environment limitation and needs normal interactive-user validation.
+
 **Reliable-control privacy checkpoint 1:** the server now advertises `relayOnlyPresence` and accepts
 valid relay-only `presence` records with no LAN/public endpoint. Direct candidate fields are optional
 and remain empty in ordinary friend snapshots/events for those records; legacy version-1 requests

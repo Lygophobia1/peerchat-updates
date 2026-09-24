@@ -569,10 +569,22 @@ completion marker and stable directory are activated. Catalog replacement is ato
 marker repairs interrupted catalog activation. Source state is not deleted, ciphertext is copied
 without decrypt/re-encrypt, logs contain no secret values, and no server is contacted.
 
-Backup copies exactly the selected protected profile to `PeerChatProfile`. Reset backs up and
-replaces only that stable directory, so only it gets a new Peer ID. Restore stages/verifies the
-backup, moves current state to a safety backup, and swaps only the selected directory. Other
-profiles are untouched. Full-install reset requires explicit selection.
+Backup, reset, and restore are restart-assisted profile-maintenance operations. The running client
+writes a versioned, profile-ID-only request above `Profiles`, stops timers, scoped P2P, relays,
+discovery, and the native owner, then exits. The replacement bootstrap verifies it can acquire and
+release the selected profile lock before doing filesystem work; a genuinely separate holder fails
+clearly without deleting the lock. Backups copy a quiescent selected profile to `PeerChatProfile`,
+verify file hashes, exclude `.peerchat-profile.lock` and SQLite WAL/SHM/runtime temporary files,
+and write safe identity/account/schema metadata.
+
+Reset first renames the closed profile to a timestamped recovery directory. It then creates a
+brand-new current-schema encrypted SQLite store and copies only the durable native device profile
+(private/public key and Peer ID) into it. A readable protected account link is retained only after
+its session credential is cleared; histories, trust, settings, caches, routes, P2P state, UI state,
+outboxes, runtime data and stale schema artifacts are not copied. Restore validates the backup's
+profile ID/metadata, stages and verifies it, preserves the current directory as a recovery copy,
+and atomically activates the staged profile with rollback on failure. Neither operation modifies
+server accounts, friendships, server data, or certificate material.
 
 Server runtime data remains under the configured ProgramData directory; certificate private keys
 remain in `CurrentUser\My`. Client reset never modifies server accounts, friendships, databases,

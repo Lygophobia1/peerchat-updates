@@ -17,6 +17,19 @@ static std::wstring quote(const std::wstring& value){
 }
 UI_API void* ui_create(){try{return new UiBridge;}catch(...){return nullptr;}}
 UI_API void ui_destroy(void* handle){delete static_cast<UiBridge*>(handle);}
+// Profile maintenance deliberately has no Node/session ownership.  It opens two closed
+// SQLite stores only while the managed bootstrap has verified the profile lock is free,
+// and copies just the durable device identity into a brand-new current-schema store.
+UI_API int ui_rebuild_profile_identity(const wchar_t* previous,const wchar_t* fresh){try{
+    if(!previous||!*previous||!fresh||!*fresh)return 0;
+    peerchat::Storage oldStore(previous),freshStore(fresh);
+    freshStore.saveProfile(oldStore.profile());
+    return 1;
+}catch(...){return 0;}}
+UI_API const wchar_t* ui_profile_peer_id(const wchar_t* directory){static thread_local std::wstring output;try{
+    if(!directory||!*directory){output.clear();return output.c_str();}
+    peerchat::Storage store(directory);output=widen(store.profile().peerId);return output.c_str();
+}catch(...){output.clear();return output.c_str();}}
 UI_API int ui_start(void* handle,const wchar_t* directory,unsigned short port,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.start(directory,port,name?name:L"",false);return 1;}catch(...){return 0;}}
 UI_API int ui_connect(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer));return 1;}catch(...){return 0;}}
 UI_API int ui_connect_ex(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer,const wchar_t* source,const wchar_t* route,int force){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer),source?source:L"Direct",route?route:L"manual",force!=0);return 1;}catch(...){return 0;}}

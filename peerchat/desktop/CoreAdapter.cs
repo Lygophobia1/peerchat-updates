@@ -19,6 +19,8 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool FreeLibrary(IntPtr module);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_create();
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_destroy(IntPtr handle);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_rebuild_profile_identity(string previous,string fresh);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_profile_peer_id(string directory);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_start(IntPtr handle,string directory,ushort port,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_connect(IntPtr handle,string host,ushort port,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_connect_ex(IntPtr handle,string host,ushort port,string peer,string source,string route,int force);
@@ -90,6 +92,8 @@ public sealed class CoreAdapter : IDisposable {
         handle=ui_create();if(handle==IntPtr.Zero)throw new InvalidOperationException("Could not create the peer core.");
     }
     public void Start(string directory,ushort port,string name){if(ui_start(handle,directory,port,name)==0)throw new InvalidOperationException("Could not start the peer core.");}
+    public void RebuildProfileIdentity(string previous,string fresh){if(String.IsNullOrWhiteSpace(previous)||String.IsNullOrWhiteSpace(fresh)||ui_rebuild_profile_identity(previous,fresh)==0)throw new InvalidOperationException("Could not preserve the local cryptographic device identity while rebuilding this profile.");}
+    public string ProfilePeerId(string directory){return Marshal.PtrToStringUni(ui_profile_peer_id(directory))??"";}
     public void Connect(string host,ushort port,string peer,string source="Direct",string route="manual",bool force=false){if(ui_connect_ex(handle,host,port,peer,source,route,force?1:0)==0)throw new InvalidOperationException("Invalid connection details.");}
     public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false,ulong expectedNetworkGeneration=0){if(!String.IsNullOrEmpty(peer))ui_invalidate_route_v2(handle,peer,staleHost??"",stalePort,allRoutes?1:0,expectedNetworkGeneration);}
     public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}

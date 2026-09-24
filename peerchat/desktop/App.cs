@@ -1941,28 +1941,7 @@ public class DesktopApplication {
 
 	private void BackupClientState()
 	{
-		try
-		{
-			if (!Directory.Exists(directory))
-			{
-				Notify("The local profile directory does not exist yet.");
-				return;
-			}
-			string text = ClientBackupDirectory();
-			if (profileManager != null)
-			{
-				profileManager.BackupSelected(text);
-			}
-			else
-			{
-				CopyDirectory(directory, System.IO.Path.Combine(text, "PeerChat"));
-			}
-			Notify("Selected local profile backed up to:\n" + text);
-		}
-		catch (Exception ex)
-		{
-			Notify("Client backup failed: " + ex.Message);
-		}
+		BeginProfileMaintenance(ProfileMaintenanceAction.Backup, null, "Back up selected local profile?", "PeerChat will safely close this profile, make a verified backup without runtime lock/WAL files, and reopen it.");
 	}
 
 	private static void CopyDirectory(string source, string target)
@@ -1991,8 +1970,13 @@ public class DesktopApplication {
 
 		private void StopProfileServices()
 		{
+			// The maintenance/bootstrap process performs filesystem work only after this
+			// profile owner, its relays, timers and native SQLite owner have stopped.
 			timer.Stop();
+			voiceTimer.Stop();
+			networkChangeTimer.Stop();
 			ClearScopedP2p(true);
+			StopRelays();
 			if (discovery != null)
 		{
 			discovery.StopEventChannel();
@@ -2001,14 +1985,14 @@ public class DesktopApplication {
 		core.Dispose();
 	}
 
-	private void RestartManaged()
+	private void RestartManaged(string extraArguments="")
 	{
 		string fullPath = System.IO.Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName);
 		if (!File.Exists(fullPath))
 		{
 			throw new FileNotFoundException("PeerChat executable was not found for restart.", fullPath);
 		}
-		string text = "--install-root \"" + profileManager.InstallRoot.Replace("\"", "\\\"") + "\"";
+		string text = "--install-root \"" + profileManager.InstallRoot.Replace("\"", "\\\"") + "\""+(String.IsNullOrWhiteSpace(extraArguments)?"":" "+extraArguments);
 		TraceStartup(profileManager.InstallRoot, "restart-launch executable=" + fullPath + " arguments=" + text);
 		ProcessStartInfo processStartInfo = new ProcessStartInfo(fullPath, text);
 		processStartInfo.UseShellExecute = false;
@@ -2054,30 +2038,7 @@ public class DesktopApplication {
 
 	private void ResetFreshClient()
 	{
-		if (!Confirm("Reset selected local profile?", "This creates a new Peer ID for this profile by replacing only its local identity, contacts, trust, settings, session, and encrypted history. Other local profiles and server accounts are not changed. A complete backup is created first.", "Reset Selected Profile"))
-		{
-			return;
-		}
-		try
-		{
-			string text = ClientBackupDirectory();
-			StopProfileServices();
-			if (profileManager != null)
-			{
-				profileManager.ResetSelected(text);
-				RestartManaged();
-			}
-			else
-			{
-				Directory.CreateDirectory(text);
-				Directory.Move(directory, System.IO.Path.Combine(text, "PeerChat"));
-				RestartWithProfile(directory);
-			}
-		}
-		catch (Exception ex)
-		{
-			Notify("Fresh-profile reset failed: " + ex.Message);
-		}
+		BeginProfileMaintenance(ProfileMaintenanceAction.Reset, null, "Reset selected local profile?", "Rebuilds this computer's local PeerChat profile using the latest defaults and storage format.\n\nThis erases local history, settings, trust decisions, cached routes, P2P state, and local session credentials. Your PeerChat account association and cryptographic device identity are retained.\n\nA timestamped local recovery copy is kept. Other profiles and server account records are not changed.");
 	}
 
 	private void RestoreClientState()
@@ -2099,9 +2060,9 @@ public class DesktopApplication {
 		}
 		string path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), array3[0].Trim());
 		string text = System.IO.Path.Combine(path, (profileManager == null) ? "PeerChat" : "PeerChatProfile");
-		if (!Directory.Exists(text))
+		if (!Directory.Exists(text)||profileManager!=null&&!File.Exists(System.IO.Path.Combine(path,"profile-metadata.json")))
 		{
-			Notify("That backup folder was not found.");
+			Notify("That backup folder is missing the selected-profile data or metadata.");
 		}
 		else
 		{
@@ -2109,29 +2070,21 @@ public class DesktopApplication {
 			{
 				return;
 			}
-			try
-			{
-				string text2 = ClientBackupDirectory();
-				StopProfileServices();
-				if (profileManager != null)
-				{
-					profileManager.RestoreSelected(text, text2);
-					RestartManaged();
-					return;
-				}
-				Directory.CreateDirectory(text2);
-				if (Directory.Exists(directory))
-				{
-					Directory.Move(directory, System.IO.Path.Combine(text2, "PeerChat"));
-				}
-				CopyDirectory(text, directory);
-				RestartWithProfile(directory);
-			}
-			catch (Exception ex)
-			{
-				Notify("Client restore failed: " + ex.Message);
-			}
+			BeginProfileMaintenance(ProfileMaintenanceAction.Restore, path, "Replace selected local profile?", "The current selected profile will be preserved as a timestamped recovery copy, then the verified backup will be restored. Other profiles are untouched.");
 		}
+	}
+
+	private async void BeginProfileMaintenance(ProfileMaintenanceAction action,string restoreRoot,string title,string detail)
+	{
+		if(profileManager==null||localProfile==null){Notify("Local profile maintenance is available from the normal installed client launch.");return;}
+		if(!Confirm(title,detail,title))return;
+		try{
+			string recovery=ClientBackupDirectory();
+			var request=profileManager.CreateMaintenanceRequest(action,localProfile.Id,recovery,restoreRoot);
+			window.IsEnabled=false;
+			await Task.Run(delegate{StopProfileServices();});
+			RestartManaged("--profile-maintenance "+request.RequestId);
+		}catch(Exception error){window.IsEnabled=true;Notify("Profile maintenance could not start: "+error.Message);}
 	}
 
 	private void SettingsPage()
@@ -3573,16 +3526,31 @@ public class DesktopApplication {
         Func<LocalProfileInfo> selectedProfile=()=>{var item=list.SelectedItem as ListBoxItem;return item==null?null:item.Tag as LocalProfileInfo;};var overflowButtons=new Dictionary<ListBoxItem,Button>();Action rebuild=null;Action<LocalProfileInfo> removeProfile=profile=>{if(MessageBox.Show(dialog,"Delete local profile '"+profile.Name+"'?\n\nIts Peer ID, trust, encrypted history, contacts, account session, endpoints, and settings will be removed from PeerChat. A recoverable copy is retained locally.","Delete Local Profile",MessageBoxButton.YesNo,MessageBoxImage.Warning)!=MessageBoxResult.Yes)return;try{manager.Remove(profile.Id);rebuild();}catch(Exception error){MessageBox.Show(dialog,error.Message,"PeerChat",MessageBoxButton.OK,MessageBoxImage.Information);}};string editMode="";LocalProfileInfo editProfile=null;Action<string,LocalProfileInfo> showEditor=(mode,profile)=>{editMode=mode;editProfile=profile;name.Text=profile==null?"":profile.Name;commit.Content=mode=="rename"?"Save Name":"Create Profile";editor.Visibility=Visibility.Visible;open.IsDefault=false;commit.IsDefault=true;name.Focus();name.SelectAll();};rebuild=()=>{var current=manager.Load();list.Items.Clear();overflowButtons.Clear();ListBoxItem selectedItem=null;foreach(var profile in current.Profiles){string initials=String.Join("",profile.Name.Split(new[]{' '},StringSplitOptions.RemoveEmptyEntries).Take(2).Select(part=>Char.ToUpperInvariant(part[0]).ToString()));if(initials.Length==0)initials="P";DateTime used;string last=DateTime.TryParse(profile.LastUsedUtc,out used)?"Last used "+used.ToLocalTime().ToString("g"):"Not opened yet";bool wasSelected=profile.Id==current.SelectedProfileId;ProfileAccountLink linked=null;try{linked=new ProfileAccountStore(manager.ProfilePath(profile.Id)).Load();}catch{}string account=linked==null?"No linked account":"@"+linked.Username;var text=new StackPanel{Margin=new Thickness(12,2,6,2)};text.Children.Add(new TextBlock{Text=profile.Name,FontSize=17,FontWeight=FontWeights.SemiBold,Foreground=primary});text.Children.Add(new TextBlock{Text=account,FontSize=12,Foreground=secondary,Margin=new Thickness(0,3,0,0)});text.Children.Add(new TextBlock{Text=last,FontSize=11,Foreground=disabled,Margin=new Thickness(0,3,0,0)});var card=new Grid{Margin=new Thickness(10,9,8,9)};card.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(46)});card.ColumnDefinitions.Add(new ColumnDefinition());card.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(38)});card.Children.Add(new Border{Width=40,Height=40,CornerRadius=new CornerRadius(20),Background=Brush(wasSelected?"#315F9E":"#29455F"),Child=new TextBlock{Text=initials,FontSize=15,FontWeight=FontWeights.SemiBold,Foreground=primary,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});Grid.SetColumn(text,1);card.Children.Add(text);var overflow=new Button{Content="…",Padding=new Thickness(8,4,8,7),HorizontalContentAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center,Visibility=Visibility.Collapsed,Background=Brush("#16212A"),BorderBrush=Brush("#2B3A46")};var menu=new ContextMenu{Background=Brush("#111920"),Foreground=primary,BorderBrush=Brush("#344351"),BorderThickness=new Thickness(1)};var rename=new MenuItem{Header="Rename",Foreground=primary};var delete=new MenuItem{Header="Delete",Foreground=Brush("#FF9B9B")};rename.Click+=(s,e)=>showEditor("rename",profile);delete.Click+=(s,e)=>removeProfile(profile);menu.Items.Add(rename);menu.Items.Add(new Separator());menu.Items.Add(delete);overflow.Click+=(s,e)=>{menu.PlacementTarget=overflow;menu.IsOpen=true;};Grid.SetColumn(overflow,2);card.Children.Add(overflow);var item=new ListBoxItem{Content=card,Tag=profile,Foreground=primary,Padding=new Thickness(0),Margin=new Thickness(3,2,3,2),HorizontalContentAlignment=HorizontalAlignment.Stretch,Background=Brush(wasSelected?"#152536":"Transparent"),BorderBrush=Brush(wasSelected?"#31506B":"Transparent"),BorderThickness=new Thickness(1)};overflowButtons[item]=overflow;list.Items.Add(item);if(wasSelected)selectedItem=item;}list.SelectedItem=selectedItem??list.Items.Cast<object>().FirstOrDefault();};
         Action updateSelection=()=>{foreach(var pair in overflowButtons){bool selected=Object.ReferenceEquals(pair.Key,list.SelectedItem);pair.Value.Visibility=selected?Visibility.Visible:Visibility.Collapsed;pair.Key.Background=Brush(selected?"#152536":"Transparent");pair.Key.BorderBrush=Brush(selected?"#31506B":"Transparent");}};list.SelectionChanged+=(s,e)=>updateSelection();Action openSelected=()=>{var selected=selectedProfile();if(selected==null)return;manager.Select(selected.Id);result=manager.Load().Profiles.First(p=>p.Id==selected.Id);dialog.DialogResult=true;};open.Click+=(s,e)=>openSelected();list.MouseDoubleClick+=(s,e)=>openSelected();newProfile.Click+=(s,e)=>showEditor("new",null);cancelEdit.Click+=(s,e)=>{editor.Visibility=Visibility.Collapsed;commit.IsDefault=false;open.IsDefault=true;};commit.Click+=(s,e)=>{if(String.IsNullOrWhiteSpace(name.Text))return;if(editMode=="rename"&&editProfile!=null)manager.Rename(editProfile.Id,name.Text);else manager.Create(name.Text);editor.Visibility=Visibility.Collapsed;commit.IsDefault=false;open.IsDefault=true;rebuild();updateSelection();};rebuild();updateSelection();dialog.ShowDialog();return result;
     }
+    static void ExecuteProfileMaintenance(LocalProfileManager manager,ProfileMaintenanceRequest request){
+        Exception last=null;
+        // The replacement process normally races only the prior process' final lock release.
+        // Wait briefly for that known graceful shutdown, but never bypass a real other-process lock.
+        for(int attempt=0;attempt<12;attempt++){
+            try{
+                manager.ExecuteMaintenance(request,(previous,fresh)=>{using(var maintenanceCore=new CoreAdapter()){if(String.IsNullOrEmpty(fresh))return maintenanceCore.ProfilePeerId(previous);maintenanceCore.RebuildProfileIdentity(previous,fresh);return maintenanceCore.ProfilePeerId(fresh);}});
+                return;
+            }catch(InvalidOperationException error){
+                if(error.Message==null||error.Message.IndexOf("currently open in another PeerChat process",StringComparison.OrdinalIgnoreCase)<0)throw;
+                last=error;if(attempt==11)break;System.Threading.Thread.Sleep(Math.Min(1000,100*(attempt+1)));
+            }
+        }
+        throw last??new InvalidOperationException("This profile is currently open in another PeerChat process. Close it before continuing.");
+    }
     [STAThread] public static int Main(string[] args){
         string startupRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PeerChat");
         try{
-            string installRoot=startupRoot,directory=null,profileId=null,healthToken=null;ushort port=0;string capture=null;bool compact=args.Contains("--compact");
-            for(int index=0;index+1<args.Length;index++){if(args[index]=="--data-dir")directory=args[++index];else if(args[index]=="--install-root"){installRoot=Path.GetFullPath(args[++index]);startupRoot=installRoot;}else if(args[index]=="--profile-id")profileId=args[++index];else if(args[index]=="--port")port=UInt16.Parse(args[++index]);else if(args[index]=="--capture")capture=args[++index];else if(args[index]=="--peerchat-update-health-token")healthToken=args[++index];}
+            string installRoot=startupRoot,directory=null,profileId=null,healthToken=null,maintenanceRequestId=null;ushort port=0;string capture=null;bool compact=args.Contains("--compact");
+            for(int index=0;index+1<args.Length;index++){if(args[index]=="--data-dir")directory=args[++index];else if(args[index]=="--install-root"){installRoot=Path.GetFullPath(args[++index]);startupRoot=installRoot;}else if(args[index]=="--profile-id")profileId=args[++index];else if(args[index]=="--port")port=UInt16.Parse(args[++index]);else if(args[index]=="--capture")capture=args[++index];else if(args[index]=="--peerchat-update-health-token")healthToken=args[++index];else if(args[index]=="--profile-maintenance")maintenanceRequestId=args[++index];}
             // The chooser is intentionally shown before Application.Run and before CoreAdapter
             // construction. Keep WPF alive when that temporary last window closes; otherwise WPF
             // permanently begins shutdown and silently refuses to run the main window.
             var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};LocalProfileManager manager=null;LocalProfileInfo selected=null;TraceStartup(installRoot,"bootstrap-start");
-            if(directory==null){manager=new LocalProfileManager(installRoot);TraceStartup(installRoot,"chooser-open");selected=ChooseLocalProfile(manager,profileId);if(selected==null){TraceStartup(installRoot,"chooser-cancelled");app.Shutdown();return 0;}directory=manager.ProfilePath(selected.Id);TraceStartup(installRoot,"profile-selected id="+selected.Id+" path="+directory);}
+            if(directory==null){manager=new LocalProfileManager(installRoot);if(!String.IsNullOrEmpty(maintenanceRequestId)){var request=manager.ReadMaintenanceRequest(maintenanceRequestId);TraceStartup(installRoot,"profile-maintenance-start action="+request.Action+" profile="+request.ProfileId);ExecuteProfileMaintenance(manager,request);manager.CompleteMaintenanceRequest(request);profileId=request.ProfileId;TraceStartup(installRoot,"profile-maintenance-complete action="+request.Action+" profile="+request.ProfileId);}TraceStartup(installRoot,"chooser-open");selected=ChooseLocalProfile(manager,profileId);if(selected==null){TraceStartup(installRoot,"chooser-cancelled");app.Shutdown();return 0;}directory=manager.ProfilePath(selected.Id);TraceStartup(installRoot,"profile-selected id="+selected.Id+" path="+directory);}
             var profileLease=LocalProfileLease.TryAcquire(directory);if(profileLease==null){TraceStartup(installRoot,"profile-already-open path="+directory);MessageBox.Show("This local profile is already open in another PeerChat window. Choose a different profile or close the existing window first.","PeerChat profile already open",MessageBoxButton.OK,MessageBoxImage.Information);app.Shutdown(2);return 2;}
             var desktop=new DesktopApplication(directory,port,capture,compact,manager,selected,healthToken);app.ShutdownMode=ShutdownMode.OnMainWindowClose;TraceStartup(installRoot,"main-run-enter");desktop.Run(app);TraceStartup(installRoot,"main-run-exit");app.Shutdown(0);profileLease.Dispose();
             // The window close path has already joined/released the native core. Terminate the
