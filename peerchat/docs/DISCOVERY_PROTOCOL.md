@@ -36,6 +36,10 @@ another profile authenticates. The server never receives the local profile ID.
 - `login`: `username`, `password`; returns the same session fields.
 - `session_info`: authenticated account ID and username for restoring older saved sessions.
 - `logout`: revokes only the presented session token; other profile/device sessions remain valid.
+- `media_turn_credentials`: returns one ephemeral TURN/UDP credential only to an authenticated
+  account session for its registered `publicIdentity`. The response contains public TURN host/UDP
+  port, `transport: "udp"`, REST username/password, and absolute `expiresUtc`; it never contains
+  the TURN REST shared secret or is persisted into profile, presence, or friend state.
 - `search`: exact case-insensitive public username lookup excluding the signed-in/blocked user.
 - `suggest`: case-insensitive prefix lookup, limited to 15 public profiles.
 
@@ -166,7 +170,11 @@ implementation are described in ARCHITECTURE.md; they are not discovery protocol
 Future ICE/TURN signaling may use coordination infrastructure, but it must remain authenticated to
 the same account/device trust relationship and must not make the server a call authority or content
 archive.
-STUN/TURN coordination is separate from social discovery. TURN remains unimplemented. Future peer
+STUN/TURN coordination is separate from social discovery. The server can now issue standard
+short-lived coturn REST credentials for TURN/UDP, but current voice and screen media do not yet
+request or consume them. Issuance is authenticated, account/device-bound, rate-limited, and
+memory-only; it neither makes discovery a media relay nor changes the current direct ICE behavior.
+Future peer
 handoff proposals, arbitration, promotion and channel authority must remain authenticated peer/client
 operations, not discovery authority. No handoff wire messages or new server operations are added here.
 

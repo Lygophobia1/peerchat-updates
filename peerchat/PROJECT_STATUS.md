@@ -11,7 +11,8 @@
 **Actual source/runtime metadata:** `4.0.1-dev.1`; Development prerelease published. This is not a stable Release.
 **Current stage:** Stage 8 one-to-one screen sharing passed current physical two-profile acceptance in the isolated `stage8-single-gpu-worker-20260923` build: 2560×1440 sharing, an active voice call, text, Stop Share, and a second Start Share all remained usable. The accepted fix gives one encoder worker ownership of PeerChat D3D11 copy/conversion work and leaves the WGC callback as a bounded newest-frame handoff. Cross-network acceptance remains unproven. Oversized-message crash, simultaneous-share overload and VirtualBox capability remain separate investigations.
 **Next action:** verify an installed Development client receives `4.0.1-dev.1`, then perform sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance.
-**Latest Git checkpoint:** current `refactor/session-transport` tip (`Add server-first scoped P2P standby policy`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
+**Latest Git checkpoint:** current `refactor/session-transport` checkpoint (`Add TURN credential
+issuer boundary`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
@@ -74,6 +75,17 @@ disabling the preference, logout, and profile shutdown cancel scoped state witho
 relay winner. Desktop build, discovery privacy integration, and targeted reconnect/lifecycle tests
 pass. Physical two-client consent/probe/promotion validation remains required. Voice/screen-share
 ICE remain unchanged.
+
+**TURN/media checkpoint 1:** discovery now has an optional server-side TURN/UDP credential issuer.
+It stores the coturn REST shared secret only as CurrentUser-DPAPI-protected server configuration,
+then issues unique, short-lived standard REST HMAC credentials to authenticated account/device
+sessions with bounded per-device rate limiting. The credentials are memory-only and are absent from
+ordinary presence/friend snapshots, persistent profiles, and diagnostics. The Server Admin UI shows
+enabled/disabled TURN issuer status without displaying the secret. Discovery integration now covers
+disabled/malformed configuration, anonymous/revoked/unowned-device denial, expiry/HMAC format,
+unique issuance/rate limiting, no plaintext-secret output, and existing discovery/relay/P2P
+regressions. Voice and screen sharing still use their accepted direct ICE configuration; no media
+route, capture, codec, call, or reliable-transport behavior changed here.
 
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its

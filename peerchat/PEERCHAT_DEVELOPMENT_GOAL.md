@@ -112,8 +112,9 @@ Voice diagnostics remain local and privacy-safe: current/recent call state, sele
 media counters, and errors may be copied for troubleshooting, but audio content and secret key or
 session material must never be recorded or included.
 Direct voice may use standard STUN coordination while retaining host candidates for LAN/offline
-operation. TURN/privacy relay remains a future fallback; neither service owns call identity,
-signaling authority, or media content.
+operation. The server-side TURN credential boundary is implemented, but clients have not yet
+integrated it into media ICE policy; TURN/privacy relay remains the next media-connectivity step.
+Neither service owns call identity, signaling authority, or media content.
 Device errors must not invalidate the logical friend/session. Invite eligibility belongs to stable
 friend accounts, independent of reachability. Reliability candidates are kept separate from the
 existing release until automated checks and physical acceptance establish their status.

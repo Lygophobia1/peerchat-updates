@@ -93,6 +93,15 @@ server-held account/session/device/presence, friend/request/block, and relay rec
 affected friends to refresh, and releases the username. It never reaches into a desktop profile,
 device key, trust store, or encrypted local history.
 
+The discovery server also owns a narrow TURN credential issuer, not media routing. When enabled in
+local server configuration, it protects the coturn REST shared secret with CurrentUser DPAPI and
+issues short-lived, rate-limited HMAC-SHA1 REST credentials only to an authenticated account for one
+of that account's registered device identities. The client receives public host/UDP port, temporary
+username/password and absolute expiry in memory; no TURN secret or credential becomes profile,
+presence, friend, or diagnostic state. The current `VoiceMedia` and `ScreenShareMedia` ICE
+configurations remain unchanged in this checkpoint; a later shared media-ICE configuration will
+consume this boundary and explicitly choose TURN-only versus direct-media policy.
+
 The WPF conversation shell keeps normal actions in the selected conversation header. DMs expose a
 compact Call action; an active call expands that header into a slim state/duration/mute/deafen/end
 strip. Engineering call details remain in that call area and load only when the user opens Details

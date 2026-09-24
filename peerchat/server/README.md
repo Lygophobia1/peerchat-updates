@@ -43,6 +43,35 @@ operations will add new request types; they are not part of this milestone.
 Run `..\tests\test-discovery.ps1` for the isolated two-client TLS test. It generates a temporary
 CurrentUser development certificate and tests persistence by restarting the service.
 
+## Optional TURN/UDP credential issuer
+
+The discovery server can issue short-lived standard coturn REST credentials for later voice and
+screen-share ICE use. This does not route media through the discovery server, and current clients do
+not consume the credentials yet. In Server Admin → Settings, enable the TURN media credential issuer
+and enter the public TURN host, UDP port, realm, credential TTL, and a private REST shared secret.
+The secret is protected for the Windows user running the server, is never displayed after saving, and
+must not be committed or copied into client configuration.
+
+Configure coturn separately on the public TURN host with the same private secret and realm, for
+example:
+
+```ini
+listening-port=3478
+realm=peerchat
+use-auth-secret
+static-auth-secret=<the same private secret configured in PeerChat Server Admin>
+no-tcp-relay
+fingerprint
+min-port=49160
+max-port=49200
+```
+
+Allow inbound UDP 3478 and the selected relay UDP range at the host/firewall. The deployed public
+host and UDP port must match the PeerChat Server Admin configuration. Run the discovery server under
+the same Windows user that saved the protected secret; moving the configuration to a different user
+requires entering the secret again. Never place the secret in this repository, logs, manifests, or a
+desktop profile.
+
 ## Local administration UI
 
 Run `..\scripts\build-server-admin.ps1` and open `..\build\v0.3-beta\Server\PeerChat.Server.Admin.exe` for the

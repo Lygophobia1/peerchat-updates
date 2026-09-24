@@ -21,11 +21,40 @@ try {
     $fingerprint=($cert.GetCertHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)|ForEach-Object {$_.ToString('X2')}) -join ''
     $database=Join-Path $PWD ($outputDirectory+'\test-server-'+[Guid]::NewGuid().ToString('N')+'.sqlite')
     $serverLog=Join-Path $PWD ($outputDirectory+'\test-server.log');$serverError=Join-Path $PWD ($outputDirectory+'\test-server-error.log')
+    $turnSecret='PeerChat-integration-test-TURN-secret-2026'
+    $turnConfig=Join-Path $PWD ($outputDirectory+'\test-server-turn-config.json')
+    $invalidTurnConfig=Join-Path $PWD ($outputDirectory+'\test-server-invalid-turn-config.json')
+    $protectedTurnSecret=[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($turnSecret),$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser))
+    function Write-TestTurnConfig([bool]$enabled,[string]$path,[string]$turnHost='turn.test.invalid') {
+        [ordered]@{
+            DataDirectory=(Join-Path $PWD ($outputDirectory+'\test-server-data'))
+            DatabasePath=$database
+            LogDirectory=(Join-Path $PWD ($outputDirectory+'\test-server-logs'))
+            CertificateThumbprint=$cert.Thumbprint
+            TurnEnabled=$enabled
+            TurnPublicHost=$turnHost
+            TurnUdpPort=3478
+            TurnCredentialTtlSeconds=600
+            TurnRealm='peerchat-test'
+            TurnRestSharedSecretProtected=$protectedTurnSecret
+        } | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
+    }
     # Start-Process flattens an argument array. Quote the database path because this workspace has spaces.
     $managementPipe='PeerChatDiscoveryTest-'+[Guid]::NewGuid().ToString('N')
-    $serverArguments="--port 17443 --database `"$database`" --certificate-thumbprint $($cert.Thumbprint) --management-pipe $managementPipe"
     $serverExecutable=Join-Path $PWD ($outputDirectory+'\PeerChat.Server.exe')
     $testExecutable=Join-Path $PWD ($outputDirectory+'\DiscoveryIntegrationTest.exe')
+    $previousTurnTestSecret=$env:PEERCHAT_TEST_TURN_SECRET;$env:PEERCHAT_TEST_TURN_SECRET=$turnSecret
+    Write-TestTurnConfig $false $turnConfig
+    $disabledArguments="--config `"$turnConfig`" --port 17443 --database `"$database`" --certificate-thumbprint $($cert.Thumbprint) --management-pipe $managementPipe"
+    $startDisabledServer={Start-Process -FilePath $serverExecutable -ArgumentList $disabledArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog -RedirectStandardError $serverError}
+    $server=& $startDisabledServer;Start-Sleep -Milliseconds 700
+    if($server.HasExited){throw "Disabled TURN discovery server exited during startup: $(Get-Content -Raw $serverError)"}
+    try { & $testExecutable localhost $fingerprint 17443 --turn-disabled;if($LASTEXITCODE -ne 0){throw 'Disabled TURN integration test failed'} } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+    Write-TestTurnConfig $true $turnConfig
+    Write-TestTurnConfig $true $invalidTurnConfig 'bad host'
+    & $serverExecutable --config $invalidTurnConfig
+    if($LASTEXITCODE -eq 0){throw 'Malformed TURN configuration unexpectedly started the discovery server'}
+    $serverArguments="--config `"$turnConfig`" --port 17443 --database `"$database`" --certificate-thumbprint $($cert.Thumbprint) --management-pipe $managementPipe"
     $startServer={Start-Process -FilePath $serverExecutable -ArgumentList $serverArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog -RedirectStandardError $serverError}
     $server=& $startServer;Start-Sleep -Milliseconds 700
     if($server.HasExited){throw "Discovery server exited during startup: $(Get-Content -Raw $serverError)"}
@@ -35,4 +64,6 @@ try {
     try {
         & $testExecutable localhost $fingerprint 17443 --after-restart;if($LASTEXITCODE -ne 0){throw 'Discovery restart integration test failed'}
     } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
-} finally { Pop-Location }
+    if((Get-Content -Raw -LiteralPath $turnConfig).Contains($turnSecret)){throw 'TURN shared secret was persisted in plaintext in the server test configuration'}
+    if(Select-String -LiteralPath $serverLog,$serverError -SimpleMatch -Pattern $turnSecret -Quiet){throw 'TURN shared secret appeared in discovery server test output'}
+} finally { if($null -eq $previousTurnTestSecret){Remove-Item Env:PEERCHAT_TEST_TURN_SECRET -ErrorAction SilentlyContinue}else{$env:PEERCHAT_TEST_TURN_SECRET=$previousTurnTestSecret}; Pop-Location }
