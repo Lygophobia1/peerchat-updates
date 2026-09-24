@@ -185,6 +185,14 @@ friendship removal, blocking, logout, cancellation, and replay fail closed. Thes
 enter presence, `friend_state`, ordinary events, or persistent server storage. Consent is route
 permission only; subsequent native direct TLS must still pass Peer-ID and trust checks.
 
+`p2p_request`, `p2p_accepted`, `p2p_declined`, `p2p_candidates_ready`, and `p2p_cancelled` are
+authenticated discovery-event notifications. The first four consent/authorization notifications
+carry no endpoint; `p2p_candidates_ready` carries only the recipient-specific temporary peer
+endpoint, request ID, peer identity, and expiry. A client must treat the expiry as a wall-clock
+authorization boundary; the native transport converts it to its own monotonic deadline before
+admitting the probe. The candidate submitter must consume its authenticated response as well as the
+other participant's event, so both peers receive their opposite route exactly once.
+
 ## Security and privacy
 
 The service never receives private device keys, plaintext chat messages, encrypted history,

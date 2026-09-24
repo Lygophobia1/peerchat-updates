@@ -50,6 +50,20 @@ consent-driven attempt rather than ordinary startup. Targeted reconnect/lifecycl
 parser tests pass; WPF consent/settings and one-time first-attempt elevation wiring remain next.
 Voice and screen-share ICE are unchanged.
 
+**Reliable-control privacy checkpoint 5:** WPF now persists the profile-scoped `Allow direct P2P
+connections` preference off by default, presents Server Relay as the reliable-control default, and
+explains that voice/screen media may still use their separate ICE routes. An online established
+friend can start a scoped consent request from conversation details; the recipient receives an
+IP-disclosure warning before acceptance. Firewall provisioning remains deferred until that explicit
+request. Listener allocation and temporary candidate submission occur only after consent. The
+desktop converts server expiry into the native monotonic deadline and consumes both the submit
+response and discovery event so either peer can begin the verified standby probe. Native snapshots
+project `Use P2P` only after a verified standby and `Return to Server Relay` after promotion;
+disabling the preference, logout, and profile shutdown cancel scoped state without disturbing the
+relay winner. Desktop build, discovery privacy integration, and targeted reconnect/lifecycle tests
+pass. Physical two-client consent/probe/promotion validation remains required. Voice/screen-share
+ICE remain unchanged.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256

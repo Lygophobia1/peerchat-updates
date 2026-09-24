@@ -79,7 +79,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -143,7 +143,7 @@ struct Node::Impl {
             if(getsockname(listener,reinterpret_cast<sockaddr*>(&assigned),&size))throw std::runtime_error("Cannot read temporary listener port");
             profile.listenPort=ntohs(assigned.sin_port);
             if(!profile.listenPort||listen(listener,16))throw std::runtime_error("Cannot start temporary direct listener");
-            NodeEvent event;event.kind=NodeEvent::Kind::ConnectionLifecycle;event.port=profile.listenPort;event.text=L"Temporary reliable direct listener opened";emit(std::move(event));
+            NodeEvent event;event.kind=NodeEvent::Kind::ConnectionLifecycle;event.peerId=lease;event.port=profile.listenPort;event.text=L"Temporary reliable direct listener opened";emit(std::move(event));
         }catch(...){closesocket(listener);listener=INVALID_SOCKET;if(!lease.empty())directListenerLeases.erase(lease);throw;}
     }
     void releaseDirectListener(const std::string& lease){if(!lease.empty())directListenerLeases.erase(lease);if(!startupDirectListener&&directListenerLeases.empty())closeDirectListener();}
@@ -222,7 +222,7 @@ struct Node::Impl {
     void emitSessionSnapshot(const std::string& peer){
         if(!sessionTransports||peer.empty())return;
         auto snapshot=sessionTransports->snapshot(peer);if(!snapshot)return;
-        NodeEvent event;event.kind=NodeEvent::Kind::SessionSnapshot;event.peerId=event.expectedPeerId=peer;event.sessionEpoch=snapshot->epoch.value;event.sessionRevision=snapshot->revision;event.networkGeneration=snapshot->networkRevision;event.sessionConnected=snapshot->connected;event.attemptId=snapshot->activeTransport.value;event.retryDelayMilliseconds=snapshot->retryDelayMilliseconds;event.reliableRoute=static_cast<std::uint32_t>(snapshot->activeRoute.routeClass);
+        NodeEvent event;event.kind=NodeEvent::Kind::SessionSnapshot;event.peerId=event.expectedPeerId=peer;event.sessionEpoch=snapshot->epoch.value;event.sessionRevision=snapshot->revision;event.networkGeneration=snapshot->networkRevision;event.sessionConnected=snapshot->connected;event.attemptId=snapshot->activeTransport.value;event.retryDelayMilliseconds=snapshot->retryDelayMilliseconds;event.reliableRoute=static_cast<std::uint32_t>(snapshot->activeRoute.routeClass);event.p2pAvailability=static_cast<std::uint32_t>(snapshot->p2pAvailability);
         if(snapshot->connected){event.text=L"Ready";event.candidate=widenUtf8(snapshot->activeRoute.endpointUtf8);event.candidateSource=widenUtf8(snapshot->activeRoute.sourceUtf8);event.route=widenUtf8(snapshot->activeRoute.routeUtf8);event.detail=snapshot->activeRoute.incoming?L"inbound":L"outbound";}
         else if(snapshot->retrySuspended)event.text=L"Identity verification required";
         else if(snapshot->retryScheduled)event.text=L"Retrying with backoff";
@@ -676,10 +676,14 @@ struct Node::Impl {
                 if(!command.name.empty()&&publicPort){auto value=routeObservation(command.name,publicPort,L"Discovery public candidate",L"public direct candidate",false,{nextRouteRevision++});value.networkRevision=command.accountId;routes.push_back(std::move(value));}
                 sessionTransports->replaceCandidates(sessionEpoch,command.peer,std::move(routes),command.accepted,command.accountId,nowMilliseconds(),command.forceImmediate);emitSessionSnapshot(command.peer);
             }
+            else if(command.action==Action::PrepareScopedP2p){ensureDirectListener(command.peer);}
             else if(command.action==Action::ScopedP2pProbe){
                 ensureDirectListener(command.peer);
                 auto route=routeObservation(command.text,command.port,L"Scoped mutual P2P consent",L"manual reliable P2P probe",false,{nextRouteRevision++});route.networkRevision=command.generation;
-                if(!sessionTransports->beginScopedP2pProbe(sessionEpoch,command.peer,command.id,command.sourceHandle,route,nowMilliseconds()))throw std::runtime_error("Scoped P2P authorization is stale, unavailable, or not bound to the current relay session");
+                auto wallNow=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                if(command.sourceHandle<=wallNow)throw std::runtime_error("Scoped P2P authorization has expired");
+                auto expiry=nowMilliseconds()+(command.sourceHandle-wallNow)*1000;
+                if(!sessionTransports->beginScopedP2pProbe(sessionEpoch,command.peer,command.id,expiry,route,nowMilliseconds()))throw std::runtime_error("Scoped P2P authorization is stale, unavailable, or not bound to the current relay session");
                 emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::PromoteScopedP2p){handoffEffects(sessionTransports->promoteVerifiedP2P(sessionEpoch,command.peer,command.id,nowMilliseconds()));emitSessionSnapshot(command.peer);
@@ -949,6 +953,7 @@ bool Node::beginScopedP2pProbe(const std::string& peer,const std::string& author
     if(!protocol::id(peer)||!token(authorization)||host.empty()||!port||!expiry||!generation)return false;
     Impl::Command c{};c.action=Impl::Action::ScopedP2pProbe;c.peer=peer;c.id=authorization;c.text=host;c.port=port;c.sourceHandle=expiry;c.generation=generation;return impl_->command(std::move(c));
 }
+bool Node::prepareScopedP2pListener(const std::string& peer){if(!protocol::id(peer))return false;Impl::Command c{};c.action=Impl::Action::PrepareScopedP2p;c.peer=peer;return impl_->command(std::move(c));}
 bool Node::promoteVerifiedP2P(const std::string& peer,const std::string& authorization){if(!protocol::id(peer)||authorization.size()!=43)return false;Impl::Command c{};c.action=Impl::Action::PromoteScopedP2p;c.peer=peer;c.id=authorization;return impl_->command(std::move(c));}
 void Node::cancelScopedP2p(const std::string& peer){if(!protocol::id(peer))return;Impl::Command c{};c.action=Impl::Action::CancelScopedP2p;c.peer=peer;impl_->command(std::move(c));}
 void Node::replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,std::vector<AuthenticatedFriend> friends){Impl::Command c{};c.action=Impl::Action::AuthenticatedFriends;c.accountId=localAccountId;c.sourceHandle=snapshotGeneration;c.friends=std::move(friends);impl_->command(std::move(c));}

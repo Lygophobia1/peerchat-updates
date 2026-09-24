@@ -93,6 +93,9 @@ public class DesktopApplication {
     string shareHost=DefaultReachableHost(),networkFingerprint="";ulong networkGeneration=1;bool shareHostManuallyConfigured;
     DiscoveryClient discovery;
     ProfileAccountLink accountLink;
+    readonly ConnectionPreferenceStore connectionPreferenceStore; ConnectionPreferenceData connectionPreferences;
+    sealed class ScopedP2pRequest { public string Id,Peer; public long AccountId,ExpiresUtc; public bool Initiated; }
+    readonly Dictionary<string,ScopedP2pRequest> scopedP2p=new Dictionary<string,ScopedP2pRequest>();
     readonly Dictionary<long,string> friendRequestStates=new Dictionary<long,string>();
     readonly Dictionary<long,DiscoverySearchResult> friendDirectory=new Dictionary<long,DiscoverySearchResult>();
     readonly Dictionary<long,bool> friendPresence=new Dictionary<long,bool>();
@@ -129,7 +132,7 @@ public class DesktopApplication {
     }
     public DesktopApplication(string dataDirectory,ushort port,string capturePath=null,bool compact=false,LocalProfileManager manager=null,LocalProfileInfo selectedProfile=null,string healthToken=null){
         directory=dataDirectory;
-        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();screenPreferenceStore=new ScreenSharePreferenceStore(directory);screenPreferences=screenPreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
+        conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);connectionPreferenceStore=new ConnectionPreferenceStore(directory);connectionPreferences=connectionPreferenceStore.Load();voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();screenPreferenceStore=new ScreenSharePreferenceStore(directory);screenPreferences=screenPreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
@@ -290,7 +293,7 @@ public class DesktopApplication {
                  else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);}
                 if(e.kind==3&&!model.Groups){var connected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??model.Get(e.peer);connectionAttempts.Update(e,connected,"Ready","Verified","None");RecordConnection("connected",connected,"TCP and TLS authenticated; identity verified",e);model.Selected=connected;RequestConversationHistory(model.Selected);ShowConversation();}
                 if(e.kind==4){var disconnected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,disconnected,e.text??"Disconnected",null,null);RecordConnection("disconnected",disconnected,e.text??"Disconnected",e);}
-                if(e.kind==16){var lifecycle=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,lifecycle,null,null,null);RecordConnection("connection-lifecycle",lifecycle,e.text??"connection lifecycle transition",e);}
+                if(e.kind==16){var lifecycle=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,lifecycle,null,null,null);RecordConnection("connection-lifecycle",lifecycle,e.text??"connection lifecycle transition",e);if((e.text??"")=="Temporary reliable direct listener opened"&&e.port>0&&!String.IsNullOrEmpty(e.peer)){var request=scopedP2p.Values.FirstOrDefault(value=>value.Peer==e.peer);if(request!=null)SubmitScopedP2pCandidate(request,e.port);}}
                 if((e.kind==5&&model.Selected!=null&&e.peer==model.Selected.Contact.peer)||(e.kind==10&&model.SelectedGroup!=null&&e.peer==model.SelectedGroup.Id)||initialDmHistory||initialGroupHistory)scroll=true;
                 string historyKey=e.kind==6&&model.Selected!=null&&model.FindByPeer(e.peer)==model.Selected?model.Selected.ConversationId:e.kind==11?"group:"+e.peer:"";
                 if(!String.IsNullOrEmpty(historyKey)&&historyKey==historyScrollKey){string restoreKey=historyScrollKey;double offset=historyScrollOffset,extent=historyScrollExtent;historyScrollKey="";window.Dispatcher.BeginInvoke((Action)delegate {if(CurrentHistoryKey()==restoreKey){var viewer=Find<ScrollViewer>("MessageScroll");viewer.ScrollToVerticalOffset(offset+Math.Max(0,viewer.ExtentHeight-extent));}});}
@@ -327,7 +330,13 @@ public class DesktopApplication {
     void ShowConversationFlyout(){
         var selected=model.Selected;if(selected==null)return;var panel=new StackPanel();panel.Children.Add(FlyoutText(selected.Name,18));panel.Children.Add(new TextBlock{Text=selected.AccountId>0?"Account "+selected.AccountId:"Direct P2P contact",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
         string trust=selected.Contact!=null&&selected.Contact.verified?"Verified device":"Verification required";panel.Children.Add(FlyoutText(selected.ConnectionState+" · "+trust));panel.Children.Add(new TextBlock{Text="Peer ID\n"+(selected.Contact==null||String.IsNullOrEmpty(selected.Contact.peer)?"Not available":selected.Contact.peer),Foreground=Brush("#A1AEBB"),FontSize=11,Margin=new Thickness(0,8,0,12),TextWrapping=TextWrapping.Wrap});
-        panel.Children.Add(FlyoutAction("Try Reconnect",()=>{CloseHeaderFlyout();Reconnect();}));panel.Children.Add(FlyoutAction("Copy Connection Details",()=>CopyConnectionDetails()));OpenHeaderFlyout("PeerInfo",panel);
+        panel.Children.Add(FlyoutAction("Try Reconnect",()=>{CloseHeaderFlyout();Reconnect();}));
+        if(selected.IsFriend&&selected.AccountId>0&&selected.Online){
+            if(selected.P2pAvailability==2)panel.Children.Add(FlyoutAction("Use P2P",()=>{CloseHeaderFlyout();PromoteScopedP2p(selected);}));
+            else if(selected.P2pAvailability==3)panel.Children.Add(FlyoutAction("Return to Server Relay",()=>{CloseHeaderFlyout();ReturnToRelay(selected);}));
+            else panel.Children.Add(FlyoutAction("Try P2P Connection",()=>{CloseHeaderFlyout();TryScopedP2p(selected);}));
+        }
+        panel.Children.Add(FlyoutAction("Copy Connection Details",()=>CopyConnectionDetails()));OpenHeaderFlyout("PeerInfo",panel);
     }
     void ShowGroupFlyout(string anchorName,string focus){
         var group=model.SelectedGroup;if(group==null){Notify("Select a group first.");return;}var panel=new StackPanel();panel.Children.Add(FlyoutText(group.Name,18));panel.Children.Add(new TextBlock{Text=group.MemberCount+" members · client-owned",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
@@ -1150,11 +1159,12 @@ public class DesktopApplication {
 	{
 		DiscoveryClient signedOut = discovery;
 		var knownFriends=friendDirectory.Values.ToArray();
-		if (signedOut != null)
-		{
-			signedOut.StopEventChannel();
-		}
-		discovery = null;
+			if (signedOut != null)
+			{
+				signedOut.StopEventChannel();
+			}
+			ClearScopedP2p(true);
+			discovery = null;
 		authenticatedFriendSnapshotGeneration++;
 		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
 		automaticInitialPinAttempts.Clear();
@@ -1204,6 +1214,8 @@ public class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
+				if(notification!=null&&(notification.Event=="p2p_accepted"||notification.Event=="p2p_candidates_ready"||notification.Event=="p2p_declined"||notification.Event=="p2p_cancelled")){HandleP2pEvent(notification);return;}
 				if (notification != null && notification.Event == "channel_connected")
 				{
 					model.Status = "Discovery reconnected · refreshing network presence…";
@@ -1977,10 +1989,11 @@ public class DesktopApplication {
 		Environment.Exit(0);
 	}
 
-	private void StopProfileServices()
-	{
-		timer.Stop();
-		if (discovery != null)
+		private void StopProfileServices()
+		{
+			timer.Stop();
+			ClearScopedP2p(true);
+			if (discovery != null)
 		{
 			discovery.StopEventChannel();
 		}
@@ -2507,7 +2520,7 @@ public class DesktopApplication {
 		screenFps.SelectionChanged+=delegate{saveScreenSettings();};screenBitrate.SelectionChanged+=delegate{saveScreenSettings();};screenCursor.Checked+=delegate{saveScreenSettings();};screenCursor.Unchecked+=delegate{saveScreenSettings();};
 		screenSettings.Children.Add(SettingsCard("Capture quality", "H.264 hardware encoding; effective resolution follows the selected source and available device capability. Settings take effect on the next share.",screenControls));
 		settingsPages.Add("Screen Sharing",screenSettings);
-		settingsPages.Add("Network", createInfoPage("Network", "PeerChat automatically selects verified routes. Direct P2P tools and service endpoint configuration remain under Advanced."));
+		var networkSettings=new StackPanel();networkSettings.Children.Add(new TextBlock{Text="Reliable connection",FontSize=24,FontWeight=FontWeights.SemiBold});networkSettings.Children.Add(new TextBlock{Text="Server Relay — default\nPeerChat uses the server relay for reliable messaging and control. Voice and screen sharing may still use their existing ICE media paths.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,18)});var allowP2p=new CheckBox{Content="Allow direct P2P connections",IsChecked=connectionPreferences.AllowDirectP2p,Foreground=Brush("#EDF1F5")};allowP2p.Checked+=(s,e)=>{connectionPreferences.AllowDirectP2p=true;connectionPreferenceStore.Save(connectionPreferences);};allowP2p.Unchecked+=(s,e)=>{connectionPreferences.AllowDirectP2p=false;connectionPreferenceStore.Save(connectionPreferences);ClearScopedP2p(true);};networkSettings.Children.Add(allowP2p);networkSettings.Children.Add(new TextBlock{Text="Direct P2P can reduce server usage and latency, but it may reveal your IP address to the other person. It is off by default and requires mutual consent for each friend.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,0)});settingsPages.Add("Network",networkSettings);
 		showSettingsPage = delegate(string page)
 		{
 			StackPanel panel;
@@ -2778,7 +2791,9 @@ public class DesktopApplication {
 		string[] array = LoadDiscoveryService();
 		ConversationModel selected = model.Selected;
 		ConnectionAttemptDetails connectionAttemptDetails = connectionAttempts.For(selected);
-		return "PeerChat connection details\nTimestamp: " + DateTime.UtcNow.ToString("O") + "\nProfile: " + ((localProfile == null) ? "Local" : localProfile.Name) + "\nAccount ID: " + ((selected == null || selected.AccountId <= 0) ? "Unavailable" : selected.AccountId.ToString()) + "\nConversation ID: " + ((selected == null) ? "None" : selected.ConversationId) + "\nDiscovery endpoint: " + array[0] + ":" + array[1] + "\nLocal P2P listener: 0.0.0.0:" + model.Port + "\nLAN candidate: " + shareHost + ":" + model.Port + "\nFriend presence: " + connectionAttemptDetails.Presence + "\nCandidate seen UTC (server): " + connectionAttemptDetails.CandidateSeenUtc + "\nRefresh result: " + connectionAttemptDetails.RefreshResult + "\nPublic candidate: " + ((selected == null || selected.Contact == null) ? "Unavailable" : (selected.Contact.publicHost + ":" + selected.Contact.publicPort)) + "\nLive winning session: " + (connectionAttemptDetails.HasLiveSession ? "Connected" : "None") + "\nWinning connection ID: " + (connectionAttemptDetails.HasLiveSession ? connectionAttemptDetails.LiveConnectionId.ToString() : "None") + "\nWinning direction: " + connectionAttemptDetails.LiveDirection + "\nWinning endpoint: " + connectionAttemptDetails.LiveCandidate + "\nWinning source: " + connectionAttemptDetails.LiveSource + "\nWinning route: " + connectionAttemptDetails.LiveRoute + "\nCandidate source: " + connectionAttemptDetails.Source + "\nSelected candidate: " + connectionAttemptDetails.Candidate + "\nSelection reason: " + connectionAttemptDetails.Route + "\nExpected Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.ExpectedPeer) ? "Unspecified" : connectionAttemptDetails.ExpectedPeer) + "\nPresented/current Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.PresentedPeer) ? "Not presented" : connectionAttemptDetails.PresentedPeer) + "\nTCP/TLS state: " + connectionAttemptDetails.TransportState + "\nTrust state: " + connectionAttemptDetails.TrustState + "\nLatest failed attempt ID: " + ((connectionAttemptDetails.LatestFailedAttemptId > 0) ? connectionAttemptDetails.LatestFailedAttemptId.ToString() : "None") + "\nLatest failed endpoint: " + connectionAttemptDetails.LatestFailedCandidate + "\nLatest failed source: " + connectionAttemptDetails.LatestFailedSource + "\nLatest failed route: " + connectionAttemptDetails.LatestFailedRoute + "\nLatest failed reason: " + connectionAttemptDetails.LatestFailure + "\n\nLocal subnet classification:\n" + connectionAttemptDetails.LocalSubnetDiagnostics;
+			string listener=model.Port==0?"None (relay-only)":"0.0.0.0:"+model.Port;
+			string localCandidate=model.Port==0?"None (not published)":shareHost+":"+model.Port;
+			return "PeerChat connection details\nTimestamp: " + DateTime.UtcNow.ToString("O") + "\nProfile: " + ((localProfile == null) ? "Local" : localProfile.Name) + "\nAccount ID: " + ((selected == null || selected.AccountId <= 0) ? "Unavailable" : selected.AccountId.ToString()) + "\nConversation ID: " + ((selected == null) ? "None" : selected.ConversationId) + "\nDiscovery endpoint: " + array[0] + ":" + array[1] + "\nLocal P2P listener: " + listener + "\nLAN candidate: " + localCandidate + "\nFriend presence: " + connectionAttemptDetails.Presence + "\nCandidate seen UTC (server): " + connectionAttemptDetails.CandidateSeenUtc + "\nRefresh result: " + connectionAttemptDetails.RefreshResult + "\nPublic candidate: " + ((selected == null || selected.Contact == null) ? "Unavailable" : (selected.Contact.publicHost + ":" + selected.Contact.publicPort)) + "\nLive winning session: " + (connectionAttemptDetails.HasLiveSession ? "Connected" : "None") + "\nWinning connection ID: " + (connectionAttemptDetails.HasLiveSession ? connectionAttemptDetails.LiveConnectionId.ToString() : "None") + "\nWinning direction: " + connectionAttemptDetails.LiveDirection + "\nWinning endpoint: " + connectionAttemptDetails.LiveCandidate + "\nWinning source: " + connectionAttemptDetails.LiveSource + "\nWinning route: " + connectionAttemptDetails.LiveRoute + "\nCandidate source: " + connectionAttemptDetails.Source + "\nSelected candidate: " + connectionAttemptDetails.Candidate + "\nSelection reason: " + connectionAttemptDetails.Route + "\nExpected Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.ExpectedPeer) ? "Unspecified" : connectionAttemptDetails.ExpectedPeer) + "\nPresented/current Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.PresentedPeer) ? "Not presented" : connectionAttemptDetails.PresentedPeer) + "\nTCP/TLS state: " + connectionAttemptDetails.TransportState + "\nTrust state: " + connectionAttemptDetails.TrustState + "\nLatest failed attempt ID: " + ((connectionAttemptDetails.LatestFailedAttemptId > 0) ? connectionAttemptDetails.LatestFailedAttemptId.ToString() : "None") + "\nLatest failed endpoint: " + connectionAttemptDetails.LatestFailedCandidate + "\nLatest failed source: " + connectionAttemptDetails.LatestFailedSource + "\nLatest failed route: " + connectionAttemptDetails.LatestFailedRoute + "\nLatest failed reason: " + connectionAttemptDetails.LatestFailure + "\n\nLocal subnet classification:\n" + connectionAttemptDetails.LocalSubnetDiagnostics;
 	}
 
 	private void ConnectFriendCandidate(DiscoverySearchResult friend, ConversationModel conversation, bool force, string trigger)
@@ -2791,8 +2806,54 @@ public class DesktopApplication {
 		lastPublicCandidate=validPublic?publicHost+":"+publicPort:"Unavailable";lastPublicCandidateSource=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery friend state":friend.PublicCandidateSource;lastObservedAddressClassification=String.IsNullOrEmpty(friend.ObservedAddressClassification)?"Unavailable":friend.ObservedAddressClassification;
 		TraceUi("Candidate provider update: account="+friend.AccountId+"; generation="+networkGeneration+"; LAN="+(eligibleLan?lan+":"+lanPort:"ineligible")+"; public="+(validPublic?publicHost+":"+publicPort:"none")+"; relay="+relayAvailable+"; trigger="+trigger+"; interfaces="+subnet.Diagnostics.Replace('\n','|'));
 		core.UpdateCandidates(friend.PublicIdentity,eligibleLan?lan:"",eligibleLan?(ushort)lanPort:(ushort)0,validPublic?publicHost:"",validPublic?(ushort)publicPort:(ushort)0,relayAvailable,networkGeneration,force);
-		if(conversation.SessionRevision==0){conversation.ConnectionState="Finding best route";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · direct preferred"+(relayAvailable?", secure relay fallback available":"")+"…";Refresh();
+			if(conversation.SessionRevision==0){conversation.ConnectionState="Finding server relay";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · secure server relay"+(connectionPreferences.AllowDirectP2p?", manual P2P available":"")+"…";Refresh();
 	}
+
+    void ClearScopedP2p(bool notifyServer){
+        foreach(var request in scopedP2p.Values.ToArray()){
+            core.CancelScopedP2p(request.Peer);
+            if(notifyServer&&discovery!=null)try{discovery.CancelP2p(request.Id,model.OwnId);}catch{}
+        }
+        scopedP2p.Clear();
+    }
+    void SubmitScopedP2pCandidate(ScopedP2pRequest request,ushort port){
+        if(request==null||discovery==null||port==0)return;
+        Task.Run(()=>{
+            try{
+                var response=discovery.SubmitP2pCandidate(request.Id,model.OwnId,DefaultReachableHost(),port);
+                string state=response.ContainsKey("state")?response["state"] as string:"";
+                if(state!="candidates_ready")return;
+                var ready=new DiscoveryEvent{Event="p2p_candidates_ready",RequestId=request.Id,PeerHost=response.ContainsKey("peerHost")?response["peerHost"] as string:"",PeerPublicIdentity=response.ContainsKey("peerPublicIdentity")?response["peerPublicIdentity"] as string:"",PeerPort=response.ContainsKey("peerPort")?Convert.ToInt32(response["peerPort"]):0,ExpiresUtc=response.ContainsKey("expiresUtc")?Convert.ToInt64(response["expiresUtc"]):0};
+                window.Dispatcher.BeginInvoke((Action)(()=>HandleP2pEvent(ready)));
+            }catch(Exception error){window.Dispatcher.BeginInvoke((Action)(()=>{var conversation=model.FindByPeer(request.Peer);if(conversation!=null){conversation.ConnectionState="P2P unavailable · relay remains connected";conversation.Refresh();}RecordConnection("p2p",conversation,"candidate submission failed: "+error.GetType().Name);}));}
+        });
+    }
+    void TryScopedP2p(ConversationModel conversation){
+        if(conversation==null||discovery==null||!conversation.IsFriend||conversation.AccountId<=0||conversation.Contact==null||String.IsNullOrEmpty(conversation.Contact.peer)){Notify("P2P is available only for an online established friend with a healthy relay connection.");return;}
+        if(!connectionPreferences.AllowDirectP2p){if(!Confirm("Allow direct P2P?","Direct P2P can reduce latency, but it may reveal your IP address to this friend. You can turn it off later in Settings → Network.","Allow P2P"))return;connectionPreferences.AllowDirectP2p=true;connectionPreferenceStore.Save(connectionPreferences);}
+        FirewallResult firewall=FirewallRules.EnsurePrivateProgramRule(profileManager==null?AppDomain.CurrentDomain.BaseDirectory:profileManager.InstallRoot);
+        if(!firewall.Ok){Notify(firewall.PermissionDenied?"P2P was not started because Windows Firewall permission was not approved. Relay messaging remains connected.":"P2P was not started. "+firewall.Detail);return;}
+        try{var response=discovery.RequestP2p(conversation.AccountId,model.OwnId,conversation.Contact.peer);string id=response.ContainsKey("requestId")?response["requestId"] as string:"";long expiry=response.ContainsKey("expiresUtc")?Convert.ToInt64(response["expiresUtc"]):0;if(id.Length!=43)throw new InvalidOperationException("The server did not authorize this P2P request.");scopedP2p[id]=new ScopedP2pRequest{Id=id,Peer=conversation.Contact.peer,AccountId=conversation.AccountId,ExpiresUtc=expiry,Initiated=true};conversation.ConnectionState="Waiting for P2P consent · relay remains connected";conversation.Refresh();RecordConnection("p2p",conversation,"consent requested");}catch(Exception error){Notify("P2P request was not started. Relay messaging remains connected. "+error.Message);}
+    }
+    void HandleIncomingP2p(DiscoveryEvent e){
+        var conversation=model.FindByPeer(e.PublicIdentity);if(conversation==null||!conversation.IsFriend||String.IsNullOrEmpty(e.RequestId)||e.RequestId.Length!=43)return;
+        bool allow=Confirm("Try direct P2P connection?",conversation.Name+" wants to try a direct P2P connection. If you allow this, your IP address may be visible to them. Relay messaging stays connected while it is tested.","Allow");
+        try{discovery.ConsentP2p(e.RequestId,model.OwnId,allow);if(!allow){conversation.ConnectionState="P2P declined · relay remains connected";conversation.Refresh();return;}scopedP2p[e.RequestId]=new ScopedP2pRequest{Id=e.RequestId,Peer=e.PublicIdentity,AccountId=conversation.AccountId,ExpiresUtc=e.ExpiresUtc};core.PrepareScopedP2pListener(e.PublicIdentity);conversation.ConnectionState="Preparing direct P2P · relay remains connected";conversation.Refresh();}catch(Exception error){Notify("Could not respond to the P2P request. "+error.Message);}
+    }
+    void HandleP2pEvent(DiscoveryEvent e){
+        if(e.Event=="p2p_accepted"){ScopedP2pRequest state;if(scopedP2p.TryGetValue(e.RequestId,out state)){state.ExpiresUtc=e.ExpiresUtc;core.PrepareScopedP2pListener(state.Peer);}return;}
+        ScopedP2pRequest request;if(!scopedP2p.TryGetValue(e.RequestId,out request))return;var conversation=model.FindByPeer(request.Peer);
+        if(e.Event=="p2p_candidates_ready"){if(e.PeerPublicIdentity!=request.Peer||String.IsNullOrEmpty(e.PeerHost)||e.PeerPort<=0||e.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()){core.CancelScopedP2p(request.Peer);if(conversation!=null){conversation.ConnectionState="P2P unavailable · relay remains connected";conversation.Refresh();}return;}if(!core.BeginScopedP2p(request.Peer,e.RequestId,e.PeerHost,(ushort)e.PeerPort,(ulong)e.ExpiresUtc,networkGeneration)){if(conversation!=null){conversation.ConnectionState="P2P unavailable · relay remains connected";conversation.Refresh();}}else if(conversation!=null){conversation.ConnectionState="Testing P2P · relay remains connected";conversation.Refresh();}return;}
+        core.CancelScopedP2p(request.Peer);scopedP2p.Remove(e.RequestId);if(conversation!=null){conversation.ConnectionState=e.Event=="p2p_declined"?"P2P declined · relay remains connected":"P2P cancelled · relay remains connected";conversation.Refresh();}
+    }
+    void PromoteScopedP2p(ConversationModel conversation){
+        var request=scopedP2p.Values.FirstOrDefault(value=>value.Peer==conversation.Contact.peer);
+        if(request==null||!core.PromoteScopedP2p(request.Peer,request.Id)){Notify("The verified P2P route is no longer available. Relay messaging remains connected.");return;}
+        conversation.ConnectionState="Switching to verified P2P · relay remains connected";conversation.Refresh();
+    }
+    void ReturnToRelay(ConversationModel conversation){
+        ClearScopedP2p(true);conversation.ConnectionState="Server Relay";conversation.Refresh();
+    }
 
 	private static string ReliableConnectionMethod(ConversationModel conversation)
 	{

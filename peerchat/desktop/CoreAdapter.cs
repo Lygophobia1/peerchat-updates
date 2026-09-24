@@ -26,6 +26,10 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route_v2(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes,ulong expectedNetworkGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr handle,ulong generation,string fingerprint);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_candidates(IntPtr handle,string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,int relay,ulong generation,int force);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_prepare_scoped_p2p_listener(IntPtr handle,string peer);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_begin_scoped_p2p(IntPtr handle,string peer,string id,string host,ushort port,ulong expiry,ulong generation);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_promote_scoped_p2p(IntPtr handle,string peer,string id);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern void ui_cancel_scoped_p2p(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_friends(IntPtr handle,ulong localAccount,ulong generation,string encoded);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_pin_initial_authenticated_friend_identity(IntPtr handle,string peer,ulong attempt,ulong generation);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr handle,ulong attempt,int incoming);
@@ -90,6 +94,10 @@ public sealed class CoreAdapter : IDisposable {
     public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false,ulong expectedNetworkGeneration=0){if(!String.IsNullOrEmpty(peer))ui_invalidate_route_v2(handle,peer,staleHost??"",stalePort,allRoutes?1:0,expectedNetworkGeneration);}
     public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}
     public void UpdateCandidates(string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,bool relay,ulong generation,bool force=false){ui_candidates(handle,peer,lanHost??"",lanPort,publicHost??"",publicPort,relay?1:0,generation,force?1:0);}
+    public bool PrepareScopedP2pListener(string peer){return !String.IsNullOrEmpty(peer)&&ui_prepare_scoped_p2p_listener(handle,peer)!=0;}
+    public bool BeginScopedP2p(string peer,string id,string host,ushort port,ulong expiry,ulong generation){return ui_begin_scoped_p2p(handle,peer,id,host,port,expiry,generation)!=0;}
+    public bool PromoteScopedP2p(string peer,string id){return ui_promote_scoped_p2p(handle,peer,id)!=0;}
+    public void CancelScopedP2p(string peer){if(!String.IsNullOrEmpty(peer))ui_cancel_scoped_p2p(handle,peer);}
     // This is a profile-local projection of the authenticated account friendship snapshot. The
     // native core checks it again before allowing the restricted initial identity pin operation.
     public bool SetAuthenticatedFriends(long localAccount,ulong generation,IEnumerable<FriendConversationBinding> friends){
@@ -153,7 +161,7 @@ public sealed class CoreAdapter : IDisposable {
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
     public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
-public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration; public int retryMs,callState,callType,mediaState,reliableRoute,mediaRoute,shareState,screenRoute,screenWidth,screenHeight; public bool connected,callMuted,callDeafened,callControlAvailable; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
+public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight; public bool connected,callMuted,callDeafened,callControlAvailable; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
 public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }

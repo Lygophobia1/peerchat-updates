@@ -6,6 +6,13 @@ using System.Text;
 using System.Web.Script.Serialization;
 
 namespace PeerChatDesktop {
+public sealed class ConnectionPreferenceData { public int Version=1; public bool AllowDirectP2p=false; }
+public sealed class ConnectionPreferenceStore {
+    readonly string path;readonly JavaScriptSerializer json=new JavaScriptSerializer();
+    public ConnectionPreferenceStore(string profileDirectory){path=Path.Combine(profileDirectory,"connection-preferences.dat");}
+    public ConnectionPreferenceData Load(){try{if(!File.Exists(path))return new ConnectionPreferenceData();var value=json.Deserialize<ConnectionPreferenceData>(Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(path),null,DataProtectionScope.CurrentUser)));return value!=null&&value.Version==1?value:new ConnectionPreferenceData();}catch{return new ConnectionPreferenceData();}}
+    public void Save(ConnectionPreferenceData value){if(value==null||value.Version!=1)throw new InvalidOperationException("Connection preferences are invalid.");Directory.CreateDirectory(Path.GetDirectoryName(path));string temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temp,ProtectedData.Protect(Encoding.UTF8.GetBytes(json.Serialize(value)),null,DataProtectionScope.CurrentUser));if(File.Exists(path))File.Replace(temp,path,null);else File.Move(temp,path);}
+}
 public sealed class VoicePreferenceData {
     public int Version=1;
     public int InputDeviceId=-1,OutputDeviceId=-1;

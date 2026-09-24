@@ -137,13 +137,13 @@ available under Security & Connection. This never overwrites a manually verified
 
 ## Reliable-control direct-route privacy
 
-The discovery server now supports a relay-only presence capability. It represents an authenticated
+The discovery server supports a relay-only presence capability. It represents an authenticated
 profile as online without requiring, deriving, storing in ordinary friend state, or broadcasting a
 direct reliable-control endpoint. The capability is explicitly advertised so a privacy-first client
-can fail closed against an older server instead of silently publishing a route. This currently
-changes only discovery presence representation; scoped mutual-consent candidate exchange, native
-standby direct probing/promotion, and the WPF preference are subsequent checkpoints. Voice and
-screen-share ICE candidate exchange remain separate media systems and are unchanged.
+can fail closed against an older server instead of silently publishing a route. Desktop profiles
+default to this mode and persist `AllowDirectP2p=false` in profile-scoped DPAPI-protected
+preferences. Voice and screen-share ICE candidate exchange remain separate media systems and are
+unchanged.
 
 The discovery-only consent checkpoint now feeds a narrow native, profile-scoped reliable-P2P
 probe boundary. `SessionTransportManager` is Server Relay first by default: ordinary discovery,
@@ -153,8 +153,19 @@ candidate, and an authenticated relay winner can start one bounded direct probe.
 direct TLS/trust check becomes an authoritative `Available` standby, never a second delivery
 winner; relay continues carrying messages/control. The manager exposes an explicit promotion
 operation that begins the existing authenticated make-before-break handoff, plus cancellation that
-closes scoped direct state without disturbing relay. The WPF preference/consent UI and discovery
-event wiring are intentionally subsequent work. Voice and screen-share ICE remain unchanged.
+closes scoped direct state without disturbing relay.
+
+The WPF Network page describes Server Relay as the reliable-control default and warns that direct
+P2P can reveal an IP address. An online established friend may request one scoped P2P attempt from
+the conversation details action. The first explicit request silently checks the retained
+Private/TCP/program firewall rule and requests elevation only if it is missing or stale; it then
+asks the server for consent without opening a listener or disclosing an endpoint. The recipient's
+modal similarly warns before accepting. Only after consent does either desktop allocate its
+temporary OS-selected listener and submit that scoped endpoint. The native session snapshot is the
+authority for `Testing`, verified `Available`, and `Promoted`; WPF merely offers `Use P2P` or
+`Return to Server Relay`. Disabling the profile preference, logout, profile shutdown, decline, or
+cancellation clears scoped native and server state while leaving relay usable. Voice and
+screen-share ICE remain unchanged.
 
 ## Profile bootstrap and lifecycle
 

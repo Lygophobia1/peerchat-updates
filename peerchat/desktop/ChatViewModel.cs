@@ -27,6 +27,7 @@ public class ConversationModel : ObservableModel {
     public string LoadingHistoryPeer="";
     public long WinningConnectionId;
     public int ReliableRoute;
+    public int P2pAvailability;
     public string ReliableEndpoint="";
     public long SessionEpoch,SessionRevision;
     // Presentation state mirrors the core's connection lifecycle. It is deliberately
@@ -144,7 +145,7 @@ public class ChatViewModel {
             if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=!outgoing&&member!=null?member.name+"\n"+value.text:value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,delivery=2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
         }
         if(e.kind==13){if(e.callLifetime<VoiceCallLifetime||(e.callLifetime==VoiceCallLifetime&&e.mediaGeneration<VoiceMediaGeneration))return;VoiceCallLifetime=e.callLifetime;VoiceStateCode=e.callState;VoiceCallType=e.callType;VoiceMediaState=e.mediaState;VoiceMediaGeneration=e.mediaGeneration;VoiceMediaRoute=e.mediaRoute;VoiceControlAvailable=e.callControlAvailable;VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";VoiceMuted=e.callMuted;VoiceDeafened=e.callDeafened;}
-        if(e.kind==17){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);bool newer=e.sessionEpoch>item.SessionEpoch||(e.sessionEpoch==item.SessionEpoch&&e.sessionRevision>item.SessionRevision);if(newer){item.SessionEpoch=e.sessionEpoch;item.SessionRevision=e.sessionRevision;item.Online=e.connected;item.WinningConnectionId=e.connected?e.attempt:0;item.ReliableRoute=e.connected?e.reliableRoute:0;item.ReliableEndpoint=e.connected?(e.candidate??""):"";item.ConnectionState=String.IsNullOrEmpty(e.text)?(e.connected?"Ready":"Offline"):e.text;item.Refresh();}}
+        if(e.kind==17){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);bool newer=e.sessionEpoch>item.SessionEpoch||(e.sessionEpoch==item.SessionEpoch&&e.sessionRevision>item.SessionRevision);if(newer){item.SessionEpoch=e.sessionEpoch;item.SessionRevision=e.sessionRevision;item.Online=e.connected;item.WinningConnectionId=e.connected?e.attempt:0;item.ReliableRoute=e.connected?e.reliableRoute:0;item.P2pAvailability=e.p2pAvailability;item.ReliableEndpoint=e.connected?(e.candidate??""):"";item.ConnectionState=String.IsNullOrEmpty(e.text)?(e.connected?"Ready":"Offline"):e.text;item.Refresh();}}
     }
     static string ClassifyConnectionError(string text){
         string value=(text??"").ToLowerInvariant();

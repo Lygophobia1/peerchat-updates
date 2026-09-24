@@ -43,6 +43,9 @@ struct NodeEvent {
     bool callDeafened=false;
     bool callControlAvailable=true;
     std::uint32_t reliableRoute=0;
+    // The manager owns this value; WPF uses it only to present the optional
+    // verified-direct standby/promotion controls.
+    std::uint32_t p2pAvailability=0;
     std::uint32_t mediaRoute=0;
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
@@ -68,7 +71,8 @@ public:
     // It is intentionally not a generic direct-connect API.
     bool beginScopedP2pProbe(const std::string& peerId,const std::string& authorizationId,
                              const std::wstring& host,std::uint16_t port,
-                             std::uint64_t authorizationExpiryMilliseconds,std::uint64_t networkGeneration);
+                             std::uint64_t authorizationExpiryUtcSeconds,std::uint64_t networkGeneration);
+    bool prepareScopedP2pListener(const std::string& peerId);
     bool promoteVerifiedP2P(const std::string& peerId,const std::string& authorizationId);
     void cancelScopedP2p(const std::string& peerId);
     void replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,
