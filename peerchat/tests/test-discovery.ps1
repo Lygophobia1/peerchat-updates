@@ -22,13 +22,14 @@ try {
     $database=Join-Path $PWD ($outputDirectory+'\test-server-'+[Guid]::NewGuid().ToString('N')+'.sqlite')
     $serverLog=Join-Path $PWD ($outputDirectory+'\test-server.log');$serverError=Join-Path $PWD ($outputDirectory+'\test-server-error.log')
     # Start-Process flattens an argument array. Quote the database path because this workspace has spaces.
-    $serverArguments="--port 17443 --database `"$database`" --certificate-thumbprint $($cert.Thumbprint)"
+    $managementPipe='PeerChatDiscoveryTest-'+[Guid]::NewGuid().ToString('N')
+    $serverArguments="--port 17443 --database `"$database`" --certificate-thumbprint $($cert.Thumbprint) --management-pipe $managementPipe"
     $serverExecutable=Join-Path $PWD ($outputDirectory+'\PeerChat.Server.exe')
     $testExecutable=Join-Path $PWD ($outputDirectory+'\DiscoveryIntegrationTest.exe')
     $startServer={Start-Process -FilePath $serverExecutable -ArgumentList $serverArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog -RedirectStandardError $serverError}
     $server=& $startServer;Start-Sleep -Milliseconds 700
     if($server.HasExited){throw "Discovery server exited during startup: $(Get-Content -Raw $serverError)"}
-    try { & $testExecutable localhost $fingerprint 17443;if($LASTEXITCODE -ne 0){throw 'Discovery integration test failed'} } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+    try { & $testExecutable localhost $fingerprint 17443 $managementPipe;if($LASTEXITCODE -ne 0){throw 'Discovery integration test failed'} } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     $server=& $startServer;Start-Sleep -Milliseconds 700
     if($server.HasExited){throw "Discovery server restart failed: $(Get-Content -Raw $serverError)"}
     try {

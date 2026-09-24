@@ -267,6 +267,13 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
     }
     std::reverse(result.begin(),result.end());return result;
 }
+void Storage::eraseHistory(const std::string& conversation) {
+    require(identifier(conversation),"Invalid conversation identity");
+    Transaction transaction(impl_->sql,impl_->db);
+    Statement removeOutbox(impl_->sql,impl_->db,"DELETE FROM outbox WHERE peer=?");removeOutbox.text(1,conversation);removeOutbox.row();
+    Statement removeMessages(impl_->sql,impl_->db,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();
+    transaction.commit();
+}
 std::vector<StoredMessage> Storage::pending(const std::string& conversation,int limit) {
     require(identifier(conversation)&&limit>0&&limit<=1000,"Invalid outbox page request");
     Statement s(impl_->sql,impl_->db,"SELECT m.id,m.b FROM outbox o JOIN messages m ON o.id=m.id WHERE o.peer=? ORDER BY m.rowid LIMIT ?");s.text(1,conversation);s.number(2,limit);

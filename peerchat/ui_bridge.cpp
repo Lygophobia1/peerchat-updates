@@ -32,6 +32,7 @@ UI_API int ui_approve(void* handle,const wchar_t* peer,int accepted){try{static_
 UI_API int ui_send(void* handle,const wchar_t* peer,const wchar_t* text){try{return !static_cast<UiBridge*>(handle)->node.send(identity(peer),text).empty();}catch(...){return 0;}}
 UI_API int ui_remove(void* handle,const wchar_t* peer){try{auto& bridge=*static_cast<UiBridge*>(handle);std::string id=identity(peer);bridge.node.removeContact(id);bridge.contacts.erase(id);return 1;}catch(...){return 0;}}
 UI_API int ui_history(void* handle,const wchar_t* peer,long long before){try{static_cast<UiBridge*>(handle)->node.loadHistory(identity(peer),before);return 1;}catch(...){return 0;}}
+UI_API int ui_erase_history(void* handle,const wchar_t* peer){try{return static_cast<UiBridge*>(handle)->node.eraseHistory(identity(peer))?1:0;}catch(...){return 0;}}
 UI_API int ui_group_account(void* handle,unsigned long long account,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.setGroupAccount(account,name?name:L"");return account&&name&&*name;}catch(...){return 0;}}
 UI_API const wchar_t* ui_group_create(void* handle,const wchar_t* name){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=widen(bridge.node.createGroup(name?name:L""));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API int ui_group_rename(void* handle,const wchar_t* group,const wchar_t* name){try{return static_cast<UiBridge*>(handle)->node.renameGroup(identity(group),name?name:L"");}catch(...){return 0;}}

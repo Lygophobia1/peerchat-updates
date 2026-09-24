@@ -60,6 +60,10 @@ int main() {
             restarted.retireTransport({303});
             require(restarted.authorizeTransport({304},b.peerId)&&restarted.submittedMessage(b.peerId,sent[1].id,{304}),"Retired transport prevented resend on its replacement");
             require(restarted.acknowledgeMessage(b.peerId,{304},sent[1].id),"Replacement transport could not complete durable delivery");
+            reopened.eraseHistory(b.peerId);
+            require(reopened.history(b.peerId).empty(),"Conversation-history deletion retained encrypted messages");
+            require(reopened.pending(b.peerId).empty(),"Conversation-history deletion retained outbox messages");
+            require(reopened.contacts().size()==1&&reopened.contacts()[0].peerId==b.peerId,"Conversation-history deletion removed contact trust");
         }
         // Older peers may have stored the former 16K-character maximum. Keep
         // encrypted history readable, but reject that size at the new wire edge.

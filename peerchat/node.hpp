@@ -63,6 +63,7 @@ public:
     void approve(const std::string& peerId,bool accepted);
     std::string send(const std::string& peerId,const std::wstring& text);
     void loadHistory(const std::string& peerId,std::int64_t before=INT64_MAX);
+    bool eraseHistory(const std::string& peerId);
     void setName(const std::wstring& name);
     void setGroupAccount(std::uint64_t accountId,const std::wstring& accountName);
     std::string createGroup(const std::wstring& name);

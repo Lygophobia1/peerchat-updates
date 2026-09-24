@@ -22,6 +22,21 @@ runtime-only ZIP is `3,147,619` bytes with SHA-256
 `development/manifest.json` references those exact values. Packaging required and audited
 `PeerChat.ScreenMedia.dll` alongside `PeerChat.Desktop.exe` and the updater runtime.
 
+**Current local administration/history work:** Server Admin now has a typed, double-confirmed
+account deletion flow for resetting a damaged server account without touching any client profile
+or local encrypted history. It deletes only server-side account state and frees the username for
+re-registration. The DM contact menu now has a separately typed, double-confirmed local-history
+deletion action; it removes only that profile's encrypted DM/outbox records and preserves contact,
+trust, friendship, account, and device identity. Group history is intentionally not included:
+its signed event ledger also owns membership/state, so clearing it would need a distinct, safe
+group-state design rather than a presentation shortcut.
+
+**Validation:** the extended discovery integration test passed account lookup/deletion, session
+revocation, relationship cleanup, username reuse, and restart persistence. The focused storage
+test reached and passed the new local-history/contact-preservation assertions, then failed at the
+pre-existing altered-ciphertext detection assertion (`Altered ciphertext was accepted`). That
+encryption-regression evidence remains open; no DPAPI/encryption behavior was weakened here.
+
 ## Stage 8 implementation and remaining acceptance
 
 - Receiver diagnostics now distinguish complete access units accepted by the bounded decoder

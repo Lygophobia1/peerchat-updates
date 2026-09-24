@@ -171,7 +171,7 @@ public class DesktopApplication {
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
         Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
         Find<Expander>("VoiceAdvancedExpander").Expanded+=(s,e)=>RefreshVoiceDiagnosticsText();
-        var removeMenu=new ContextMenu();var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(removeItem);removeItem.Click+=(s,e)=>RemoveSelectedContact();
+        var removeMenu=new ContextMenu();var clearHistoryItem=new MenuItem{Header="Delete Conversation History"};var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(clearHistoryItem);removeMenu.Items.Add(new Separator());removeMenu.Items.Add(removeItem);clearHistoryItem.Click+=(s,e)=>DeleteSelectedConversationHistory();removeItem.Click+=(s,e)=>RemoveSelectedContact();
         var list=Find<ListBox>("ContactList");list.ContextMenu=removeMenu;list.PreviewMouseRightButtonDown+=(s,e)=>{var element=e.OriginalSource as DependencyObject;var item=ItemsControl.ContainerFromElement(list,element) as ListBoxItem;if(item!=null){item.IsSelected=true;item.Focus();}};
     }
     // Centralized lightweight geometry set. The same line weight and blue/white palette is used
@@ -641,6 +641,37 @@ public class DesktopApplication {
 		};
 		rebuild();
 		picker.ShowDialog();
+	}
+
+	private void DeleteSelectedConversationHistory()
+	{
+		if (model.Groups || model.Selected == null || model.Selected.Contact == null)
+		{
+			return;
+		}
+		ConversationModel selected = model.Selected;
+		string phrase = "DELETE " + selected.Name;
+		string[] values = Dialog("Delete conversation history", new string[1] { "Type exactly: " + phrase }, new string[1] { "" }, "Delete History", "This permanently removes only this profile's encrypted direct-message history with " + selected.Name + ". It does not remove the contact, server account, friendship, device identity, or trust. New messages will begin a fresh local history.", true);
+		if (values == null)
+		{
+			return;
+		}
+		if (!String.Equals(values[0].Trim(), phrase, StringComparison.Ordinal))
+		{
+			Notify("Conversation history was not deleted because the confirmation text did not match.");
+			return;
+		}
+		if (!Confirm("Final history deletion", "Permanently delete local conversation history with " + selected.Name + "? This cannot be undone.", "Delete History"))
+		{
+			return;
+		}
+		if (!core.EraseHistory(selected.Contact.peer))
+		{
+			Notify("Could not queue local conversation-history deletion.");
+			return;
+		}
+		model.Status = "Deleting local conversation history…";
+		Refresh();
 	}
 
 	private void RemoveSelectedContact()

@@ -55,6 +55,9 @@ public:
     void observeLogicalOrder(std::uint64_t remoteOrder);
     std::vector<StoredMessage> history(const std::string& conversation,
         int limit=100, std::int64_t beforeSequence=INT64_MAX);
+    // Removes only this local DM's encrypted message/outbox records. Contact, trust and account
+    // identity remain intact so a later message starts a fresh conversation safely.
+    void eraseHistory(const std::string& conversation);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
     bool appendGroupEvent(const GroupEvent& event);
     std::vector<GroupEvent> groupEvents(const std::string& groupId);

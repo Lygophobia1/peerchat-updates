@@ -33,6 +33,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_send(IntPtr handle,string peer,string text);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_remove(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_history(IntPtr handle,string peer,long before);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_erase_history(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_account(IntPtr handle,ulong account,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_rename(IntPtr handle,string group,string name);
@@ -94,6 +95,7 @@ public sealed class CoreAdapter : IDisposable {
     public bool Send(string peer,string text){return ui_send(handle,peer,text)!=0;}
     public bool Remove(string peer){return ui_remove(handle,peer)!=0;}
     public void History(string peer,long before){ui_history(handle,peer,before);}
+    public bool EraseHistory(string peer){return ui_erase_history(handle,peer)!=0;}
     public bool SetGroupAccount(long account,string name){return account>0&&ui_group_account(handle,(ulong)account,name)!=0;}
     public string CreateGroup(string name){return Marshal.PtrToStringUni(ui_group_create(handle,name));}
     public bool RenameGroup(string group,string name){return ui_group_rename(handle,group,name)!=0;}

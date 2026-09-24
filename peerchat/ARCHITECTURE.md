@@ -82,6 +82,13 @@ Windows DNS/text APIs and WinMM remain concrete adapters/dependencies, not a por
 forwards bounded logs, and uses a local named pipe for status and graceful stop. The server does
 not require the Admin application.
 
+The local Server Admin UI also supports an explicit destructive account reset: it looks up an
+exact username, requires the operator to type `DELETE @username` and confirm again, then requests
+the headless server to transactionally remove only server-held account/session/device/presence,
+friend/request/block, and relay records. It revokes active server sessions and relay attachments,
+notifies affected friends to refresh, and releases the username. It never reaches into a desktop
+profile, device key, trust store, or encrypted local history.
+
 The WPF conversation shell keeps normal actions in the selected conversation header. DMs expose a
 compact Call action; an active call expands that header into a slim state/duration/mute/deafen/end
 strip. Engineering call details remain in that call area and load only when the user opens Details
