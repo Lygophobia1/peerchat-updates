@@ -135,6 +135,16 @@ mismatched, or quarantined pin. Pending friendships, stale generations, changed 
 ambiguous state fail closed into the existing explicit verification flow. The fingerprint remains
 available under Security & Connection. This never overwrites a manually verified legacy contact.
 
+## Reliable-control direct-route privacy
+
+The discovery server now supports a relay-only presence capability. It represents an authenticated
+profile as online without requiring, deriving, storing in ordinary friend state, or broadcasting a
+direct reliable-control endpoint. The capability is explicitly advertised so a privacy-first client
+can fail closed against an older server instead of silently publishing a route. This currently
+changes only discovery presence representation; scoped mutual-consent candidate exchange, native
+standby direct probing/promotion, and the WPF preference are subsequent checkpoints. Voice and
+screen-share ICE candidate exchange remain separate media systems and are unchanged.
+
 ## Profile bootstrap and lifecycle
 
 Normal startup reads `%LOCALAPPDATA%\PeerChat\profiles.json`, shows profile cards, and resolves the

@@ -54,8 +54,16 @@ and blocked collections. Only the `friends` collection includes endpoint candida
 `presence` contains:
 
 - `publicIdentity`: current public device/Peer identity
-- `endpointHost`, `endpointPort`: LAN/private P2P candidate
-- `publicEndpointHost`, `publicEndpointPort`: optional explicit authenticated public candidate
+- `directCandidates`: optional Boolean capability request. Omitted means legacy direct-candidate
+  presence; `false` creates valid relay-only presence with no direct endpoint.
+- `endpointHost`, `endpointPort`: optional LAN/private P2P candidate when `directCandidates` is true
+- `publicEndpointHost`, `publicEndpointPort`: optional explicit authenticated public candidate when
+  `directCandidates` is true
+
+The server advertises `relayOnlyPresence: true` in login/register/session-info responses. A client
+that needs relay-only presence must require that capability rather than sending a privacy-sensitive
+endpoint to an older server. Legacy version-1 clients omit `directCandidates` and retain their
+existing direct-presence behavior.
 
 The endpoint ports are client P2P listener ports. The server discovery port is never substituted.
 If a public endpoint is omitted, a valid server-observed public IPv4 is combined with the advertised
@@ -72,7 +80,10 @@ candidates, `publicCandidateSource`, and `observedAddressClassification`. Friend
 records include those fields plus `candidateSeenUtc`. Presence is considered fresh for 90 seconds;
 the current client's heartbeat scheduling is documented in ARCHITECTURE.md.
 
-Candidates are route hints, never identities. They are released only to authenticated friends and
+Candidates are route hints, never identities. Relay-only presence remains online and relay-reachable
+with `endpointHost`, `publicEndpointHost`, and both ports empty/zero; ordinary friend snapshots and
+presence events therefore disclose no direct route for that account. A future mutually-consented,
+peer-scoped P2P authorization may exchange short-lived direct candidates separately. Candidates
 must still complete the native mutual-TLS Peer ID verification.
 
 Presence is advisory reachability information, not authenticated P2P liveness. An `online=false`

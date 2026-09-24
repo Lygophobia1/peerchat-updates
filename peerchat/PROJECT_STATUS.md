@@ -15,6 +15,13 @@
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
+**Reliable-control privacy checkpoint 1:** the server now advertises `relayOnlyPresence` and accepts
+valid relay-only `presence` records with no LAN/public endpoint. Direct candidate fields are optional
+and remain empty in ordinary friend snapshots/events for those records; legacy version-1 requests
+that omit the capability flag retain direct-presence compatibility. The focused discovery integration
+test passed. Scoped mutual consent, temporary endpoint exchange, standby direct transport, settings
+and UI are not implemented in this checkpoint. Voice/screen-share ICE remains unchanged.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256

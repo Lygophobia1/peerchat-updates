@@ -333,6 +333,12 @@ and fallback. Direct is preferred in Automatic mode; strict privacy may require 
 and must fail closed rather than silently disclose a direct address. No new transport is authorized
 by this roadmap.
 
+For reliable messaging/control, the planned default is Server Relay with direct probing off. A
+direct route must require peer-scoped mutual consent before either endpoint is disclosed, and its
+temporary candidate state must not become ordinary friend/presence data. Voice and screen-share
+media currently remain separate ICE systems; this control-route setting must not claim to hide media
+addresses until TURN/relayed media is implemented.
+
 Ordinary users must NOT need manual port forwarding.
 
 Use mature networking standards/libraries where appropriate.
