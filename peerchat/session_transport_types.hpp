@@ -88,6 +88,8 @@ struct RouteObservation {
     RouteClass routeClass = RouteClass::Unknown;
 };
 
+enum class P2pAvailability : std::uint8_t { Unavailable, Testing, Available, Promoted };
+
 struct RetryTarget {
     std::string remoteDeviceId;
     RouteObservation route;
@@ -106,6 +108,7 @@ enum class WinnerDisposition : std::uint8_t {
     Activated,
     ReplacedExisting,
     AwaitingHandoff,
+    VerifiedStandby,
     RejectedDuplicate,
     RejectedStaleToken,
     RejectedNotReady
@@ -160,6 +163,8 @@ struct SessionSnapshot {
     RouteObservation latestFailedRoute;
     std::string latestFailureUtf8;
     std::uint32_t retryDelayMilliseconds = 0;
+    P2pAvailability p2pAvailability = P2pAvailability::Unavailable;
+    TransportInstanceId p2pStandbyTransport;
 };
 
 enum class TransportEventKind : std::uint8_t {

@@ -7,6 +7,8 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +31,10 @@ public:
           localDeviceId_(std::move(localDeviceId)), epoch_(epoch),
           retryBaseMilliseconds_(retryBaseMilliseconds),
           retryCapMilliseconds_(retryCapMilliseconds), handoff_(localDeviceId_) {}
+
+    // Server relay is the privacy-preserving default for reliable control.
+    // DirectOnly is deliberately opt-in for the retained diagnostic path.
+    void setDirectOnly(bool value) { directOnly_ = value; }
 
     bool registerAttempt(SessionEpoch epoch, TransportInstanceId instance,
                          std::string expectedRemoteDeviceId,
@@ -137,6 +143,32 @@ public:
             return decision;
         }
         auto& continuity = continuityFor(peer);
+        // A consent-scoped direct route is deliberately not a delivery winner.
+        // It may authenticate beside relay, but only an explicit later command
+        // can start the existing make-before-break handoff.
+        if (candidate.route.kind == TransportKind::Direct) {
+            auto authorization = p2p_.find(peer);
+            if (authorization != p2p_.end() && authorization->second.availability == P2pAvailability::Testing &&
+                authorization->second.route.endpointUtf8 == candidate.route.endpointUtf8 &&
+                authorization->second.networkRevision == candidate.route.networkRevision &&
+                authorization->second.expiryMilliseconds > nowMilliseconds && continuity.activeTransport.value) {
+                auto active = transports_.find(continuity.activeTransport.value);
+                if (active != transports_.end() && !active->second.closed &&
+                    active->second.route.kind == TransportKind::Relay) {
+                    candidate.standby = true;
+                    candidate.state = TransportState::LocallyTrusted;
+                    authorization->second.standby = instance;
+                    authorization->second.availability = P2pAvailability::Available;
+                    // Arm both peers for the proven handoff protocol, but do
+                    // not emit Hello until PromoteVerifiedP2P is requested.
+                    handoff_.attach(instance, peer, handoffNonce(instance), nowMilliseconds);
+                    touch(peer);
+                    decision.disposition = WinnerDisposition::VerifiedStandby;
+                    decision.reasonUtf8 = "verified direct P2P standby available; relay remains active";
+                    return decision;
+                }
+            }
+        }
         if(candidate.handoffCandidate&&!continuity.activeTransport.value){
             decision.disposition=WinnerDisposition::RejectedNotReady;
             decision.reasonUtf8="handoff has no retained original binding";return decision;
@@ -219,6 +251,25 @@ public:
         record.closed = true;
         record.state = failed ? TransportState::Failed : TransportState::Closed;
         const auto peer = decision.remoteDeviceId;
+        auto continuity = !peer.empty() ? continuities_.find(peer) : continuities_.end();
+        if (continuity != continuities_.end() && continuity->second.activeTransport.value == instance.value) {
+            auto scoped=p2p_.find(peer);
+            if(scoped!=p2p_.end()&&scoped->second.availability==P2pAvailability::Promoted&&scoped->second.standby.value==instance.value&&scoped->second.relay.value){
+                auto relay=transports_.find(scoped->second.relay.value);
+                if(relay!=transports_.end()&&!relay->second.closed&&trusted(relay->second)){
+                    continuity->second.activeTransport=relay->second.instance;continuity->second.session.observeLegacyActive(relay->second.instance);
+                    relay->second.state=TransportState::Active;scoped->second.standby={};scoped->second.availability=P2pAvailability::Unavailable;
+                    pendingHandoffEffects_.push_back({HandoffEffect::Kind::Restore,relay->second.instance,instance,{},"direct P2P failed; restored retained relay"});
+                }
+            }
+        }
+        if (!peer.empty()) {
+            auto scoped=p2p_.find(peer);
+            if(scoped!=p2p_.end()&&scoped->second.standby.value==instance.value) {
+                scoped->second.standby={};
+                if(scoped->second.availability!=P2pAvailability::Promoted) scoped->second.availability=P2pAvailability::Unavailable;
+            }
+        }
         auto recovery = applyHandoff(handoff_.closed(instance));
         pendingHandoffEffects_.insert(pendingHandoffEffects_.end(),recovery.begin(),recovery.end());
         if (!peer.empty()) {
@@ -396,6 +447,11 @@ public:
         for(auto& item:plans_){
             const auto activeKind=activeTransportKind(item.first);
             if(item.second.suspended||item.second.networkRevision<networkRevision_)continue;
+            if(!directOnly_) {
+                auto authorization=p2p_.find(item.first);
+                if(authorization==p2p_.end()||authorization->second.availability!=P2pAvailability::Testing) continue;
+                if(authorization->second.expiryMilliseconds<=nowMilliseconds){authorization->second.availability=P2pAvailability::Unavailable;item.second.direct.clear();touch(item.first);continue;}
+            }
             if(activeKind&&*activeKind==TransportKind::Direct)continue;
             if(hasPendingAttempt(item.first,{}))continue;
             CandidateRoute* selected=nullptr;
@@ -404,6 +460,41 @@ public:
             if(selected){selected->dueMilliseconds=never();due.push_back({item.first,selected->route});touch(item.first);}
         }
         return due;
+    }
+
+    // The only normal-profile direct entry point. Ordinary discovery/saved
+    // endpoints lack the scoped token and cannot construct this operation.
+    bool beginScopedP2pProbe(SessionEpoch epoch,const std::string& peer,const std::string& authorizationId,
+                             std::uint64_t authorizationExpiryMilliseconds,RouteObservation route,std::uint64_t nowMilliseconds) {
+        if(epoch!=epoch_||peer.empty()||route.kind!=TransportKind::Direct||route.endpointUtf8.empty()||
+           authorizationId.size()!=43||authorizationExpiryMilliseconds<=nowMilliseconds||
+           route.networkRevision!=networkRevision_||!hasActiveRelay(peer)) return false;
+        if(auto existing=p2p_.find(peer);existing!=p2p_.end()&&existing->second.availability!=P2pAvailability::Unavailable)return false;
+        p2p_[peer]={authorizationId,authorizationExpiryMilliseconds,route.networkRevision,P2pAvailability::Testing,{}, {},route};
+        auto& plan=plans_[peer];plan.direct.clear();plan.direct.push_back({std::move(route),0,0,0,nowMilliseconds});plan.networkRevision=networkRevision_;
+        touch(peer);return true;
+    }
+
+    std::vector<HandoffEffect> promoteVerifiedP2P(SessionEpoch epoch,const std::string& peer,
+                                                   const std::string& authorizationId,std::uint64_t nowMilliseconds) {
+        if(epoch!=epoch_)return {};
+        auto state=p2p_.find(peer);
+        if(state==p2p_.end()||state->second.availability!=P2pAvailability::Available||state->second.id!=authorizationId||
+           state->second.expiryMilliseconds<=nowMilliseconds||state->second.networkRevision!=networkRevision_||
+           !state->second.standby.value||!hasActiveRelay(peer))return {};
+        auto standby=transports_.find(state->second.standby.value);
+        if(standby==transports_.end()||!trusted(standby->second)||!standby->second.standby)return {};
+        state->second.availability=P2pAvailability::Promoted;state->second.relay=continuityFor(peer).activeTransport;
+        standby->second.handoffAttached=true;standby->second.handoffBegan=nowMilliseconds;touch(peer);
+        return handoff_.hello(standby->second.instance);
+    }
+
+    std::vector<TransportInstanceId> cancelScopedP2p(SessionEpoch epoch,const std::string& peer) {
+        if(epoch!=epoch_)return {};
+        std::vector<TransportInstanceId> result;auto state=p2p_.find(peer);
+        if(state==p2p_.end())return result;
+        for(auto& item:transports_)if(item.second.matches(peer)&&!item.second.closed&&item.second.route.endpointUtf8==state->second.route.endpointUtf8){item.second.cancelled=true;item.second.state=TransportState::Closing;result.push_back(item.second.instance);}
+        p2p_.erase(state);auto plan=plans_.find(peer);if(plan!=plans_.end())plan->second.direct.clear();touch(peer);return result;
     }
 
     // Candidate providers replace observations; they never choose a winner or
@@ -433,8 +524,10 @@ public:
         plan.beganMilliseconds=nowMilliseconds;
         const auto activeKind=activeTransportKind(peer);
         if(!activeKind||*activeKind==TransportKind::Relay){
-            if(!plan.suspended&&!plan.direct.empty()&&(!hadDirect||changed))plan.direct.front().dueMilliseconds=nowMilliseconds;
-            plan.relayDueMilliseconds=!plan.suspended&&relayAvailable?(previousRelayAvailable&&!changed?previousRelayDue:nowMilliseconds+DirectFallbackWindowMilliseconds):never();
+            if(directOnly_&&!plan.suspended&&!plan.direct.empty()&&(!hadDirect||changed))plan.direct.front().dueMilliseconds=nowMilliseconds;
+            // Normal profiles are server-first: a discovery endpoint can never
+            // start direct TCP; relay is requested immediately.
+            plan.relayDueMilliseconds=!plan.suspended&&relayAvailable?(directOnly_?(previousRelayAvailable&&!changed?previousRelayDue:nowMilliseconds+DirectFallbackWindowMilliseconds):nowMilliseconds):never();
         }else plan.relayDueMilliseconds=never();
         touch(peer);return true;
     }
@@ -487,6 +580,7 @@ public:
     void removePeer(const std::string& peer) {
         retries_.erase(peer);
         plans_.erase(peer);
+        p2p_.erase(peer);
         for(auto& item:transports_)if(item.second.matches(peer))item.second.locallyTrusted=false;
         auto continuity = continuities_.find(peer);
         if (continuity != continuities_.end() && !continuity->second.activeTransport.value)
@@ -525,6 +619,8 @@ public:
                 for(const auto& candidate:plan->second.direct)if(candidate.dueMilliseconds!=never()){result.retryScheduled=true;result.retryDelayMilliseconds=std::max(result.retryDelayMilliseconds,candidate.delayMilliseconds);}
             }
         }
+        auto p2p=p2p_.find(peer);
+        if(p2p!=p2p_.end()) { result.p2pAvailability=p2p->second.availability;result.p2pStandbyTransport=p2p->second.standby; }
         return result;
     }
 
@@ -560,11 +656,14 @@ public:
     }
     std::vector<HandoffEffect> receiveHandoff(SessionEpoch epoch,TransportInstanceId id,
                                              const HandoffEnvelope& envelope,std::uint64_t now) {
-        auto found=current(epoch,id);if(!found||!trusted(**found)||!(*found)->handoffAttached)return {};
+        auto found=current(epoch,id);if(!found||!trusted(**found)||(!(*found)->handoffAttached&&!(*found)->standby))return {};
+        const bool standbyHello=(*found)->standby&&!(*found)->handoffAttached&&envelope.message==HandoffMessage::Hello;
         if(!isActive(id)&&!handoff_.draining(id)&&(*found)->route.networkRevision<networkRevision_)
             return applyHandoff({{HandoffEffect::Kind::Retire,id,{},{},"candidate network generation superseded"}});
         auto state=snapshot((*found)->remoteDeviceId());if(!state)return {};
-        return applyHandoff(handoff_.receive(id,state->activeTransport,envelope,now));
+        auto effects=applyHandoff(handoff_.receive(id,state->activeTransport,envelope,now));
+        if(standbyHello){(*found)->handoffAttached=true;auto hello=handoff_.hello(id);effects.insert(effects.begin(),hello.begin(),hello.end());}
+        return effects;
     }
     std::vector<HandoffEffect> handoffTick(SessionEpoch epoch,std::uint64_t now) {
         if(epoch!=epoch_)return {};
@@ -572,6 +671,8 @@ public:
         auto timed=applyHandoff(handoff_.tick(now));result.insert(result.end(),timed.begin(),timed.end());
         for(auto& item:transports_) {
             auto& record=item.second;if(record.closed||record.cancelled||!record.handoffAttached||!trusted(record)||handoff_.draining(record.instance))continue;
+            bool retainedRelay=false;for(const auto& scoped:p2p_)if(scoped.second.availability==P2pAvailability::Promoted&&scoped.second.relay.value==record.instance.value){retainedRelay=true;break;}
+            if(retainedRelay)continue;
             if(!isActive(record.instance)&&record.route.networkRevision<networkRevision_){
                 auto expired=applyHandoff({{HandoffEffect::Kind::Retire,record.instance,{},{},"candidate network generation superseded"}});
                 result.insert(result.end(),expired.begin(),expired.end());continue;
@@ -588,6 +689,9 @@ public:
 
 private:
     static constexpr std::uint64_t never() { return std::numeric_limits<std::uint64_t>::max(); }
+    static std::string handoffNonce(TransportInstanceId id) {
+        std::ostringstream value;value<<std::hex<<std::setfill('0')<<std::setw(16)<<id.value<<std::setw(16)<<(id.value^0x9e3779b97f4a7c15ULL);return value.str();
+    }
 #ifdef PEERCHAT_TEST_SHORT_RECONNECT_BACKOFF
     static constexpr std::uint64_t DirectFallbackWindowMilliseconds=300;
 #else
@@ -615,6 +719,7 @@ private:
         bool closed = false;
         bool handoffAttached = false;
         bool handoffCandidate = false;
+        bool standby = false;
         std::uint64_t handoffBegan = 0;
         std::string remoteDeviceId() const { return presentedRemoteDeviceId.empty() ? expectedRemoteDeviceId : presentedRemoteDeviceId; }
         std::string continuityKey() const { return !locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId(); }
@@ -650,6 +755,13 @@ private:
         }
     };
 
+    struct ScopedP2pState {
+        std::string id;std::uint64_t expiryMilliseconds=0,networkRevision=0;
+        P2pAvailability availability=P2pAvailability::Unavailable;
+        TransportInstanceId standby,relay;
+        RouteObservation route;
+    };
+
     std::optional<TransportRecord*> current(SessionEpoch epoch, TransportInstanceId instance) {
         if (epoch != epoch_) return {};
         auto found = transports_.find(instance.value);
@@ -680,11 +792,17 @@ private:
         return transport==transports_.end()?std::optional<TransportKind>{}:transport->second.route.kind;
     }
 
+    bool hasActiveRelay(const std::string& peer) const {
+        auto continuity=continuities_.find(peer);if(continuity==continuities_.end()||!continuity->second.activeTransport.value)return false;
+        auto transport=transports_.find(continuity->second.activeTransport.value);
+        return transport!=transports_.end()&&!transport->second.closed&&transport->second.route.kind==TransportKind::Relay;
+    }
+
     bool hasPendingAttempt(const std::string& peer, TransportInstanceId except) const {
         for (const auto& item : transports_) {
             const auto& record = item.second;
             if (record.instance.value == except.value || record.closed || record.cancelled) continue;
-            if (record.matches(peer) && !isActive(record.instance)&&!handoff_.draining(record.instance)) return true;
+            if (record.matches(peer) && !record.standby&&!isActive(record.instance)&&!handoff_.draining(record.instance)) return true;
         }
         return false;
     }
@@ -707,7 +825,9 @@ private:
     std::map<std::string, ContinuityState> continuities_;
     std::map<std::string, RetryState> retries_;
     std::map<std::string, CandidatePlan> plans_;
+    std::map<std::string, ScopedP2pState> p2p_;
     DirectHandoff handoff_;
+    bool directOnly_ = false;
     std::vector<HandoffEffect> pendingHandoffEffects_;
 
     static bool trusted(const TransportRecord& r) {
@@ -720,13 +840,18 @@ private:
             auto found=current(epoch_,effect.instance);
             if(!found)continue;
             auto& record=**found;
-            if(effect.kind==HandoffEffect::Kind::Retire){record.cancelled=true;record.state=TransportState::Closing;}
+            if(effect.kind==HandoffEffect::Kind::Retire){
+                bool retainRelay=false;for(const auto& scoped:p2p_)if(scoped.second.availability==P2pAvailability::Promoted&&scoped.second.relay.value==effect.instance.value){retainRelay=true;break;}
+                if(retainRelay)continue;
+                record.cancelled=true;record.state=TransportState::Closing;
+            }
             else if(!trusted(record))continue;
             if(effect.kind==HandoffEffect::Kind::Promote||effect.kind==HandoffEffect::Kind::Restore) {
                 if(!trusted(record))continue;
                 auto& continuity=continuityFor(record.remoteDeviceId());
                 if(continuity.activeTransport.value!=effect.previous.value)continue;
                 continuity.activeTransport=effect.instance;continuity.session.observeLegacyActive(effect.instance);
+                if(effect.kind==HandoffEffect::Kind::Promote){auto scoped=p2p_.find(record.remoteDeviceId());if(scoped!=p2p_.end()&&scoped->second.standby.value==effect.instance.value){scoped->second.availability=P2pAvailability::Promoted;scoped->second.relay=effect.previous;}}
                 record.state=TransportState::Active;retries_.erase(record.remoteDeviceId());touch(record.remoteDeviceId());
             }
             applied.push_back(std::move(effect));

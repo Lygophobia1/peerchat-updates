@@ -145,11 +145,16 @@ changes only discovery presence representation; scoped mutual-consent candidate 
 standby direct probing/promotion, and the WPF preference are subsequent checkpoints. Voice and
 screen-share ICE candidate exchange remain separate media systems and are unchanged.
 
-The discovery-only consent checkpoint now creates short-lived, memory-only reliable-P2P probe
-authorizations. It exchanges no endpoint until both exact authenticated friend devices consent and
-then submit a scoped candidate. It has no native transport consumer yet: relay remains the winner,
-and cancellation/expiry/logout/friendship invalidation simply deletes the authorization. Native
-standby probing and promotion remain a following checkpoint.
+The discovery-only consent checkpoint now feeds a narrow native, profile-scoped reliable-P2P
+probe boundary. `SessionTransportManager` is Server Relay first by default: ordinary discovery,
+saved, stale, LAN, public, and refreshed candidates never schedule reliable direct TCP. Only a
+current 43-character scoped authorization, its expiry, current network generation, a temporary
+candidate, and an authenticated relay winner can start one bounded direct probe. A successful
+direct TLS/trust check becomes an authoritative `Available` standby, never a second delivery
+winner; relay continues carrying messages/control. The manager exposes an explicit promotion
+operation that begins the existing authenticated make-before-break handoff, plus cancellation that
+closes scoped direct state without disturbing relay. The WPF preference/consent UI and discovery
+event wiring are intentionally subsequent work. Voice and screen-share ICE remain unchanged.
 
 ## Profile bootstrap and lifecycle
 

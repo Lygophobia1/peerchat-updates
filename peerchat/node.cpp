@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <deque>
 #include <future>
@@ -78,7 +79,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    enum class Action { Connect,Candidates,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -433,6 +434,13 @@ struct Node::Impl {
             handoffEffects(sessionTransports->attachHandoff(sessionEpoch,{c.attemptId},Storage::newMessageId(),nowMilliseconds()));
             emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,widenUtf8(decision.reasonUtf8),c,c.peerId));return;
         }
+        if(decision.disposition==session::WinnerDisposition::VerifiedStandby){
+            // TLS is fully authenticated, but durable delivery remains bound
+            // exclusively to the relay winner until explicit promotion.
+            c.online=true;
+            emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,widenUtf8(decision.reasonUtf8),c,c.peerId));
+            emitSessionSnapshot(c.peerId);return;
+        }
         if(!decision.activated()){
             c.closeReason=widenUtf8(decision.reasonUtf8);c.dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,c.closeReason,c,c.peerId));emitSessionSnapshot(c.peerId);return;
         }
@@ -639,6 +647,19 @@ struct Node::Impl {
                 auto publicPort=static_cast<std::uint16_t>(command.before);
                 if(!command.name.empty()&&publicPort){auto value=routeObservation(command.name,publicPort,L"Discovery public candidate",L"public direct candidate",false,{nextRouteRevision++});value.networkRevision=command.accountId;routes.push_back(std::move(value));}
                 sessionTransports->replaceCandidates(sessionEpoch,command.peer,std::move(routes),command.accepted,command.accountId,nowMilliseconds(),command.forceImmediate);emitSessionSnapshot(command.peer);
+            }
+            else if(command.action==Action::ScopedP2pProbe){
+                auto route=routeObservation(command.text,command.port,L"Scoped mutual P2P consent",L"manual reliable P2P probe",false,{nextRouteRevision++});route.networkRevision=command.generation;
+                if(!sessionTransports->beginScopedP2pProbe(sessionEpoch,command.peer,command.id,command.sourceHandle,route,nowMilliseconds()))throw std::runtime_error("Scoped P2P authorization is stale, unavailable, or not bound to the current relay session");
+                emitSessionSnapshot(command.peer);
+            }
+            else if(command.action==Action::PromoteScopedP2p){handoffEffects(sessionTransports->promoteVerifiedP2P(sessionEpoch,command.peer,command.id,nowMilliseconds()));emitSessionSnapshot(command.peer);
+            }
+            else if(command.action==Action::CancelScopedP2p){
+                auto ids=sessionTransports->cancelScopedP2p(sessionEpoch,command.peer);auto selected=[&](std::uint64_t id){return std::any_of(ids.begin(),ids.end(),[&](auto value){return value.value==id;});};
+                for(auto it=resolvers.begin();it!=resolvers.end();){if(selected((*it)->attemptId)){sessionTransports->closeTransport(sessionEpoch,{(*it)->attemptId},"scoped P2P cancelled",false);it=resolvers.erase(it);}else ++it;}
+                for(auto it=connections.begin();it!=connections.end();){if(selected((*it)->attemptId)){(*it)->closeReason=L"scoped P2P cancelled";sessionTransports->closeTransport(sessionEpoch,{(*it)->attemptId},"scoped P2P cancelled",false);if(deliveries)deliveries->retireTransport({(*it)->attemptId});it=connections.erase(it);}else ++it;}
+                emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::RelayReady){
                 std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto found=relayPipes.find(command.accountId);if(found!=relayPipes.end())pipe=found->second;}
@@ -888,6 +909,13 @@ void Node::connect(const std::wstring& host,std::uint16_t port,const std::string
 void Node::invalidateRoute(const std::string& expected,const std::wstring& staleHost,std::uint16_t stalePort,bool allRoutes,std::uint64_t expectedNetworkGeneration){if(expected.empty())return;Impl::Command c{};c.action=Impl::Action::InvalidateRoute;c.peer=expected;c.text=staleHost;c.port=stalePort;c.accepted=allRoutes;c.accountId=expectedNetworkGeneration;impl_->command(std::move(c));}
 void Node::setNetworkContext(std::uint64_t generation,const std::wstring& fingerprint){Impl::Command c{};c.action=Impl::Action::NetworkContext;c.accountId=generation;c.text=fingerprint;impl_->command(std::move(c));}
 void Node::updateCandidates(const std::string& peer,const std::wstring& lanHost,std::uint16_t lanPort,const std::wstring& publicHost,std::uint16_t publicPort,bool relayAvailable,std::uint64_t generation,bool forceImmediate){if(peer.empty())return;Impl::Command c{};c.action=Impl::Action::Candidates;c.peer=peer;c.text=lanHost;c.port=lanPort;c.name=publicHost;c.before=publicPort;c.accepted=relayAvailable;c.accountId=generation;c.forceImmediate=forceImmediate;impl_->command(std::move(c));}
+bool Node::beginScopedP2pProbe(const std::string& peer,const std::string& authorization,const std::wstring& host,std::uint16_t port,std::uint64_t expiry,std::uint64_t generation){
+    auto token=[](const std::string& value){if(value.size()!=43)return false;for(char c:value)if(!std::isalnum(static_cast<unsigned char>(c))&&c!='-'&&c!='_')return false;return true;};
+    if(!protocol::id(peer)||!token(authorization)||host.empty()||!port||!expiry||!generation)return false;
+    Impl::Command c{};c.action=Impl::Action::ScopedP2pProbe;c.peer=peer;c.id=authorization;c.text=host;c.port=port;c.sourceHandle=expiry;c.generation=generation;return impl_->command(std::move(c));
+}
+bool Node::promoteVerifiedP2P(const std::string& peer,const std::string& authorization){if(!protocol::id(peer)||authorization.size()!=43)return false;Impl::Command c{};c.action=Impl::Action::PromoteScopedP2p;c.peer=peer;c.id=authorization;return impl_->command(std::move(c));}
+void Node::cancelScopedP2p(const std::string& peer){if(!protocol::id(peer))return;Impl::Command c{};c.action=Impl::Action::CancelScopedP2p;c.peer=peer;impl_->command(std::move(c));}
 void Node::replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,std::vector<AuthenticatedFriend> friends){Impl::Command c{};c.action=Impl::Action::AuthenticatedFriends;c.accountId=localAccountId;c.sourceHandle=snapshotGeneration;c.friends=std::move(friends);impl_->command(std::move(c));}
 bool Node::pinInitialAuthenticatedFriendIdentity(const std::string& peer,std::uint64_t attemptId,std::uint64_t friendSnapshotGeneration){if(!protocol::id(peer)||!attemptId||!friendSnapshotGeneration)return false;Impl::Command c{};c.action=Impl::Action::PinInitialAuthenticatedFriendIdentity;c.peer=peer;c.sourceHandle=attemptId;c.generation=friendSnapshotGeneration;return impl_->command(std::move(c));}
 bool Node::relayReady(std::uint64_t attempt,bool incoming){Impl::Command c{};c.action=Impl::Action::RelayReady;c.accountId=attempt;c.accepted=incoming;return impl_->command(std::move(c));}

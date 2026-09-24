@@ -62,6 +62,13 @@ public:
     void updateCandidates(const std::string& peerId,const std::wstring& lanHost,std::uint16_t lanPort,
                           const std::wstring& publicHost,std::uint16_t publicPort,bool relayAvailable,
                           std::uint64_t networkGeneration,bool forceImmediate=false);
+    // Narrow privacy-safe boundary for a discovery-authorized temporary route.
+    // It is intentionally not a generic direct-connect API.
+    bool beginScopedP2pProbe(const std::string& peerId,const std::string& authorizationId,
+                             const std::wstring& host,std::uint16_t port,
+                             std::uint64_t authorizationExpiryMilliseconds,std::uint64_t networkGeneration);
+    bool promoteVerifiedP2P(const std::string& peerId,const std::string& authorizationId);
+    void cancelScopedP2p(const std::string& peerId);
     void replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,
                                      std::vector<AuthenticatedFriend> friends);
     bool pinInitialAuthenticatedFriendIdentity(const std::string& peerId,std::uint64_t attemptId,

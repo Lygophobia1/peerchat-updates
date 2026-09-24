@@ -11,7 +11,7 @@
 **Actual source/runtime metadata:** `4.0.1-dev.1`; Development prerelease published. This is not a stable Release.
 **Current stage:** Stage 8 one-to-one screen sharing passed current physical two-profile acceptance in the isolated `stage8-single-gpu-worker-20260923` build: 2560×1440 sharing, an active voice call, text, Stop Share, and a second Start Share all remained usable. The accepted fix gives one encoder worker ownership of PeerChat D3D11 copy/conversion work and leaves the WGC callback as a bounded newest-frame handoff. Cross-network acceptance remains unproven. Oversized-message crash, simultaneous-share overload and VirtualBox capability remain separate investigations.
 **Next action:** verify an installed Development client receives `4.0.1-dev.1`, then perform sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance.
-**Latest Git checkpoint:** `f728784` (`Publish Development screen sharing candidate`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
+**Latest Git checkpoint:** current `refactor/session-transport` tip (`Add server-first scoped P2P standby policy`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
@@ -29,6 +29,17 @@ endpoint. Logout, block, friendship removal, cancellation, expiry and invalid/re
 closed or remove the authorization. The focused discovery test covers consent, withheld candidates,
 third-party denial and cancelled replay. Native standby probing/promotion and WPF controls remain
 unimplemented; the relay winner is unaffected.
+
+**Reliable-control privacy checkpoint 3:** the native `SessionTransportManager` now defaults to
+Server Relay for normal reliable messaging/control. Ordinary discovery, cached, LAN, public, stale,
+and refreshed endpoints cannot start a direct probe. A direct attempt requires a current scoped
+authorization ID, expiry, matching network generation, temporary endpoint, and a healthy relay
+winner. It stays bounded and, after full peer TLS/trust verification, projects `Available` as a
+non-delivery direct standby; relay remains the sole winner until explicit promotion begins the
+existing authenticated handoff. Cancelling scoped P2P closes only that direct state. The targeted
+native reconnect test passed in the interactive DPAPI context. WPF consent/settings/event wiring,
+full two-party promotion, and physical validation remain next work. Voice/screen-share ICE are
+unchanged.
 
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
