@@ -82,11 +82,14 @@ runtime-only ZIP is `3,147,619` bytes with SHA-256
 `development/manifest.json` references those exact values. Packaging required and audited
 `PeerChat.ScreenMedia.dll` alongside `PeerChat.Desktop.exe` and the updater runtime.
 
-**Current local administration/history work:** Server Admin now has a typed, double-confirmed
-account deletion flow for resetting a damaged server account without touching any client profile
-or local encrypted history. It deletes only server-side account state and frees the username for
-re-registration. The DM contact menu now has a separately typed, double-confirmed local-history
-deletion action; it removes only that profile's encrypted DM/outbox records and preserves contact,
+**Current local administration/history work:** Server Admin now has a debounced, paged
+`Recent / Matching Accounts` browser for test-account cleanup. Empty search returns a bounded
+recent/active page; case-insensitive server search ranks exact/prefix/substring matches and exposes
+only username, stable ID, created/last-presence time, online state, and device count. A selected
+stable account ID—not a retyped name—drives the typed, double-confirmed deletion flow; active
+accounts are explicitly disconnected. It deletes only server-side account state and frees the
+username for re-registration. The DM contact menu now has a separately typed, double-confirmed
+local-history deletion action; it removes only that profile's encrypted DM/outbox records and preserves contact,
 trust, friendship, account, and device identity. Group history is intentionally not included:
 its signed event ledger also owns membership/state, so clearing it would need a distinct, safe
 group-state design rather than a presentation shortcut.
