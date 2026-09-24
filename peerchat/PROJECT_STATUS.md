@@ -8,12 +8,19 @@
 > - Discovery wire/API and authority contract: `docs/DISCOVERY_PROTOCOL.md`
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
-**Actual source/runtime metadata:** `4.0.1-dev.1`; Development publication is being prepared, not a formally published stable v4.0.0.
+**Actual source/runtime metadata:** `4.0.1-dev.1`; Development prerelease published. This is not a stable Release.
 **Current stage:** Stage 8 one-to-one screen sharing passed current physical two-profile acceptance in the isolated `stage8-single-gpu-worker-20260923` build: 2560×1440 sharing, an active voice call, text, Stop Share, and a second Start Share all remained usable. The accepted fix gives one encoder worker ownership of PeerChat D3D11 copy/conversion work and leaves the WGC callback as a bounded newest-frame handoff. Cross-network acceptance remains unproven. Oversized-message crash, simultaneous-share overload and VirtualBox capability remain separate investigations.
-**Next action:** publish the packaged `4.0.1-dev.1` Development update, then verify an installed Development client receives it. Keep sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance, not prerequisites for this local Development build.
-**Latest Git checkpoint:** pending `4.0.1-dev.1` Development-source checkpoint after final package/test verification.
+**Next action:** verify an installed Development client receives `4.0.1-dev.1`, then perform sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance.
+**Latest Git checkpoint:** `f728784` (`Publish Development screen sharing candidate`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
+
+**Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
+`https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
+runtime-only ZIP is `3,147,619` bytes with SHA-256
+`1298baaa009e5bad267e9395b1a42dcfb8616b28612b66ba94d1c0865ad97ca6`; the pushed
+`development/manifest.json` references those exact values. Packaging required and audited
+`PeerChat.ScreenMedia.dll` alongside `PeerChat.Desktop.exe` and the updater runtime.
 
 ## Stage 8 implementation and remaining acceptance
 
