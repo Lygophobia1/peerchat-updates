@@ -1,4 +1,5 @@
 #include "node.hpp"
+#include "protocol.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -73,6 +74,13 @@ int main(){
         wait([&]{return historyPages[0].size()>=2;},"Older group history page was not delivered");
         const auto& older=historyPages[0].back();require(!older.empty()&&older.size()<100,"Older group history page did not stop at the history boundary");
         for(const auto& event:older){require(event.logicalOrder<oldest,"Older group history page did not use its before cursor");require(pageIds.insert(event.eventId).second,"Group history pages overlapped by message ID");}
+
+        require(!peers[1].sendGroup(groupId,std::wstring(protocol::MaxChatCharacters+1,L'Z')),
+            "Oversized outgoing group message was queued");
+        require(peers[1].sendGroup(groupId,std::wstring(protocol::MaxChatCharacters,L'Z')),
+            "Near-limit outgoing group message was rejected");
+        wait([&]{for(const auto& received:messages)if(received.size()!=103)return false;return true;},
+            "Near-limit group message did not replicate to every member");
 
         for(auto& peer:peers)peer.stop();
         for(size_t index=0;index<Count;index++){Storage store((directory/std::to_wstring(index)).wstring());require(store.groupAccount().accountId==1000+index,"Group account binding did not persist");require(!store.groupEvents(groupId).empty(),"Encrypted group ledger did not persist");}

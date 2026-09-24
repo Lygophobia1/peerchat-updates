@@ -2,6 +2,7 @@
 // Compile this file alone, not together with storage.cpp.
 #include "storage.cpp"
 #include "../delivery_manager.hpp"
+#include "../protocol.hpp"
 #include <fstream>
 #include <iostream>
 #include <set>
@@ -60,6 +61,24 @@ int main() {
             require(restarted.authorizeTransport({304},b.peerId)&&restarted.submittedMessage(b.peerId,sent[1].id,{304}),"Retired transport prevented resend on its replacement");
             require(restarted.acknowledgeMessage(b.peerId,{304},sent[1].id),"Replacement transport could not complete durable delivery");
         }
+        // Older peers may have stored the former 16K-character maximum. Keep
+        // encrypted history readable, but reject that size at the new wire edge.
+        {
+            const std::wstring legacy(16384,L'X');
+            Storage older((root/L"legacy").wstring());
+            for(int index=0;index<100;++index){
+                StoredMessage message{Storage::newMessageId(),a.peerId,b.peerId,legacy,1700000009999ull+static_cast<std::uint64_t>(index),Delivery::Delivered,0};
+                require(older.append(b.peerId,message),"Legacy-sized encrypted message was not stored");
+            }
+            protocol::Writer nearPacket(protocol::Text);nearPacket.text(std::wstring(protocol::MaxChatCharacters,L'X'));
+            protocol::Reader accepted(nearPacket.data);require(accepted.chatText().has_value(),"Near-limit chat text was rejected");
+            protocol::Writer compatibility(protocol::Text);compatibility.text(legacy);
+            protocol::Reader legacyIncoming(compatibility.data);require(legacyIncoming.chatText().has_value(),"Historical peer message was rejected");
+            protocol::Writer over(protocol::Text);over.number(protocol::MaxAcceptedChatCharacters+1);
+            over.data.insert(over.data.end(),protocol::MaxAcceptedChatCharacters+1,'X');
+            protocol::Reader rejected(over.data);require(!rejected.chatText().has_value(),"Over-limit incoming chat text was accepted");
+        }
+        {Storage older((root/L"legacy").wstring());auto page=older.history(b.peerId,100);require(page.size()==100&&page[0].text.size()==16384&&page.back().text.size()==16384,"Legacy oversized ciphertext page was not readable after reopening");}
         // Independent recipient owns an independent local copy of the same ID.
         {Storage receiver((root/L"1").wstring());delivery::DeliveryManager incoming(receiver,b.peerId);auto received=sent[0];received.delivery=Delivery::Delivered;require(incoming.acceptIncomingMessage(a.peerId,received),"Independent recipient copy failed");require(!incoming.acceptIncomingMessage(a.peerId,received),"Duplicate incoming message escaped durable suppression");}
         // Scan database and surviving sidecars for UTF-8 and UTF-16 message text.

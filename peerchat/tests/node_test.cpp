@@ -1,4 +1,5 @@
 #include "node.hpp"
+#include "protocol.hpp"
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -28,7 +29,8 @@ int main(){
             case NodeEvent::Kind::Disconnected:connected[index].erase(event.peerId);break;
             case NodeEvent::Kind::Message:
                 for(const auto& message:event.messages)if(message.recipient==identities[index]){
-                    require(message.text==L"Synthetic encrypted test message \u2603 https://example.test/","Received payload mismatch");
+                    require(message.text==L"Synthetic encrypted test message \u2603 https://example.test/"||
+                        message.text==std::wstring(protocol::MaxChatCharacters,L'X'),"Received payload mismatch");
                     require(received[index].insert(message.id).second,"Duplicate incoming message event");
                 }break;
             case NodeEvent::Kind::Delivered:for(const auto& message:event.messages)delivered[index].insert(message.id);break;
@@ -49,6 +51,12 @@ int main(){
         wait([&]{for(const auto& active:connected)if(active.size()!=5)return false;return true;},"Six peers did not authenticate all direct links");
         for(size_t from=0;from<peers.size();from++)for(size_t to=0;to<peers.size();to++)if(from!=to)require(!peers[from].send(identities[to],L"Synthetic encrypted test message \u2603 https://example.test/").empty(),"Send rejected");
         wait([&]{for(size_t index=0;index<peers.size();index++)if(received[index].size()!=5||delivered[index].size()!=5)return false;return true;},"Bidirectional full mesh messages/acknowledgements failed");
+        require(peers[0].send(identities[1],std::wstring(protocol::MaxChatCharacters+1,L'X')).empty(),
+            "Oversized outgoing chat message was queued");
+        auto nearLimit=peers[0].send(identities[1],std::wstring(protocol::MaxChatCharacters,L'X'));
+        require(!nearLimit.empty(),"Near-limit outgoing chat message was rejected");
+        wait([&]{return received[1].count(nearLimit)&&delivered[0].count(nearLimit);},
+            "Near-limit chat message did not deliver and acknowledge");
         peers[5].stop();connected[5].clear();ready[5]=false;
         wait([&]{for(size_t index=0;index<5;index++)if(connected[index].count(identities[5]))return false;return true;},"Disconnect was not detected");
         std::string queued=peers[0].send(identities[5],L"Synthetic encrypted test message \u2603 https://example.test/");require(!queued.empty(),"Offline message rejected");

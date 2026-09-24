@@ -36,7 +36,7 @@ public class ConversationModel : ObservableModel {
     public string Name {get{return !String.IsNullOrEmpty(AccountName)?AccountName:Contact.name;}}
     public string Initial {get{return String.IsNullOrEmpty(Name)?"?":System.Globalization.StringInfo.GetNextTextElement(Name).ToUpperInvariant();}}
     public Brush Presence {get{return new SolidColorBrush(Online?Color.FromRgb(54,216,115):Color.FromRgb(107,121,135));}}
-    public string Preview {get{return Messages.Count>0?Messages.Last().Text:(Contact.verified?"Start a conversation":"Awaiting verification");}}
+    public string Preview {get{return Messages.Count>0?Messages.Last().Preview:(Contact.verified?"Start a conversation":"Awaiting verification");}}
     public string When {get{return Messages.Count>0?Messages.Last().ShortTime:"";}}
     public string UnreadLabel {get{return Unread>0?Unread+" unread":"";}}
     public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","UnreadLabel","ConnectionState"})Changed(name);}
@@ -52,7 +52,7 @@ public class GroupModel : ObservableModel {
     public string Name {get{return Data.name;}}
     public string Initial {get{return String.IsNullOrEmpty(Name)?"G":System.Globalization.StringInfo.GetNextTextElement(Name).ToUpperInvariant();}}
     public Brush Presence {get{return new SolidColorBrush(Color.FromRgb(66,151,232));}}
-    public string Preview {get{return Messages.Count>0?Messages.Last().Text:(Invited?"Invitation · Accept or decline":MemberCount+" members"+(PendingInviteCount>0?" · "+PendingInviteCount+" pending":""));}}
+    public string Preview {get{return Messages.Count>0?Messages.Last().Preview:(Invited?"Invitation · Accept or decline":MemberCount+" members"+(PendingInviteCount>0?" · "+PendingInviteCount+" pending":""));}}
     public string When {get{return Messages.Count>0?Messages.Last().ShortTime:"";}}
     public string UnreadLabel {get{return Unread>0?Unread+" unread":"";}}
     public int MemberCount {get{return Data.members==null?0:Data.members.Length;}}
@@ -65,6 +65,7 @@ public class MessageModel : ObservableModel {
     double bubbleWidth=400;
     public double BubbleWidth {get{return bubbleWidth;}set{bubbleWidth=value;Changed("BubbleWidth");}}
     public string Text {get{return Data.text;}}
+    public string Preview {get{string value=Text??"";if(value.Length<=160)return value;int length=160;if(Char.IsHighSurrogate(value[length-1])&&Char.IsLowSurrogate(value[length]))length--;return value.Substring(0,length)+"…";}}
     public HorizontalAlignment Alignment {get{return Outgoing?HorizontalAlignment.Right:HorizontalAlignment.Left;}}
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}

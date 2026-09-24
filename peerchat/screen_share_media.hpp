@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <iomanip>
 #include <mutex>
 #include <random>
@@ -42,6 +43,14 @@ public:
         std::uint64_t decoded = 0, presented = 0;
         std::uint64_t captured = 0, encoderSubmitted = 0, encoded = 0;
         std::uint64_t droppedBeforeEncode = 0, droppedEncodedQueue = 0, droppedDecodeQueue = 0;
+        std::uint64_t captureCallbacks = 0, lastCaptureCallbackAgeMs = 0;
+        std::uint32_t captureCallbackStage = 0, encoderWorkerStage = 0;
+        std::uint64_t captureCallbackStageElapsedMs = 0, encoderWorkerStageElapsedMs = 0;
+        std::uint32_t pendingCaptureFrame = 0, encodedQueueDepth = 0, encoderInputReady = 0;
+        bool encoderFailed = false;
+        std::uint32_t decoderQueueDepth = 0, decoderWorkerStage = 0;
+        std::uint64_t decoderWorkerStageElapsedMs = 0;
+        std::uint32_t largestDecoderAccessUnitBytes = 0;
         std::uint64_t encodedBytesSubmitted = 0, mediaBytesReceived = 0;
         double captureFps = 0, encodeFps = 0, transmittedFps = 0;
         double receivedFps = 0, renderedFps = 0, outgoingMbps = 0, incomingMbps = 0;
@@ -154,6 +163,17 @@ public:
                 value.encoded = status.encoded_frames;
                 value.droppedBeforeEncode = status.dropped_before_encode;
                 value.droppedEncodedQueue = status.dropped_encoded_queue;
+                value.captureCallbacks = status.capture_callback_count;
+                value.lastCaptureCallbackAgeMs = status.last_capture_callback_age_ms;
+                value.captureCallbackStage = status.capture_callback_stage;
+                value.captureCallbackStageElapsedMs = status.capture_callback_stage_elapsed_ms;
+                value.encoderWorkerStage = status.encoder_worker_stage;
+                value.encoderWorkerStageElapsedMs = status.encoder_worker_stage_elapsed_ms;
+                value.pendingCaptureFrame = status.pending_capture_frame;
+                value.encodedQueueDepth = status.encoded_queue_depth;
+                value.encoderInputReady = status.encoder_input_ready;
+                value.encoderFailed = status.failed != 0;
+                value.failed = value.failed || value.encoderFailed;
             }
         }
         if (decoder_) {
@@ -166,6 +186,10 @@ public:
                 value.width = status.decoded_width;
                 value.height = status.decoded_height;
                 value.droppedDecodeQueue = status.dropped_decode_queue;
+                value.decoderQueueDepth = status.queue_depth;
+                value.decoderWorkerStage = status.worker_stage;
+                value.decoderWorkerStageElapsedMs = status.worker_stage_elapsed_ms;
+                value.largestDecoderAccessUnitBytes = status.largest_access_unit_bytes;
                 if (status.decode_operations) {
                     value.decodeLatencyAvailable = true;
                     value.averageDecodeMs = double(status.decode_latency_microseconds_total) /
@@ -235,7 +259,46 @@ public:
             << L"\nencoded_frames=" << data.encoded
             << L"\ndropped_before_encode=" << data.droppedBeforeEncode
             << L"\ndropped_encoded_queue=" << data.droppedEncodedQueue
+            << L"\ncapture_callback_count=" << data.captureCallbacks
+            << L"\nlast_capture_callback_age_ms=" << (data.captureCallbacks ?
+                std::to_wstring(data.lastCaptureCallbackAgeMs) : L"Unavailable (no callback yet)")
+            << L"\ncapture_callback_stage=" << data.captureCallbackStage
+            << L"\ncapture_callback_stage_name=" <<
+                (data.captureCallbackStage == PC_SCREEN_CAPTURE_NEXT ? L"acquiring WGC frame" :
+                 data.captureCallbackStage == PC_SCREEN_CAPTURE_COPY ? L"D3D11 CopyResource" :
+                 data.captureCallbackStage == PC_SCREEN_CAPTURE_QUEUE ? L"queueing capture frame" :
+                 data.captureCallbackStage == PC_SCREEN_CAPTURE_CREATE_TEXTURE ? L"creating D3D11 capture texture" :
+                 data.captureCallbackStage == PC_SCREEN_CAPTURE_GPU_LOCK ? L"waiting for GPU lock before copy" :
+                 L"idle")
+            << L"\ncapture_callback_stage_elapsed_ms=" << data.captureCallbackStageElapsedMs
+            << L"\nencoder_worker_stage=" << data.encoderWorkerStage
+            << L"\nencoder_worker_stage_name=" <<
+                (data.encoderWorkerStage == PC_SCREEN_ENCODER_INITIALIZING ? L"initializing" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_WAITING ? L"waiting for input or MFT event" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_CONVERT ? L"D3D11 video conversion" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_INPUT ? L"Media Foundation ProcessInput" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_OUTPUT ? L"Media Foundation ProcessOutput" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_STOPPING ? L"stopping" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_STOPPED ? L"stopped" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_CREATE_SURFACES ? L"creating D3D11 video surfaces" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_GPU_LOCK ? L"waiting for GPU lock before conversion" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_VIDEO_BLT ? L"D3D11 VideoProcessorBlt" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_CREATE_SAMPLE ? L"creating Media Foundation input sample" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_CREATE_COPY_TEXTURE ? L"creating D3D11 capture copy" :
+                 data.encoderWorkerStage == PC_SCREEN_ENCODER_COPY_CAPTURE ? L"D3D11 CopyResource on encoder worker" :
+                 L"unavailable")
+            << L"\nencoder_worker_stage_elapsed_ms=" << data.encoderWorkerStageElapsedMs
+            << L"\npending_capture_frame=" << data.pendingCaptureFrame
+            << L"\nencoded_queue_depth=" << data.encodedQueueDepth
+            << L"\nencoder_input_ready=" << data.encoderInputReady
+            << L"\nencoder_failed=" << (data.encoderFailed ? L"true" : L"false")
             << L"\ndropped_decode_queue=" << data.droppedDecodeQueue
+            << L"\ndecoder_queue_depth=" << data.decoderQueueDepth
+            << L"\ndecoder_worker_stage=" << data.decoderWorkerStage
+            << L"\ndecoder_worker_stage_elapsed_ms=" << data.decoderWorkerStageElapsedMs
+            << L"\nlargest_decoder_access_unit_bytes=" << data.largestDecoderAccessUnitBytes
+            << L"\ndropped_decode_queue_semantics=complete access units refused by full 8-frame decoder queue"
+            << L"\ncomplete_access_units_delivered_semantics=complete access units accepted into decoder queue"
             << L"\ntransport_dropped_frames=Unavailable (pinned libdatachannel C API)"
             << L"\npresentation_dropped_frames=Unavailable (terminal presentation failure only)"
             << L"\ncapture_fps=" << (data.ratesAvailable && options_.sender ? std::to_wstring(data.captureFps) : L"Unavailable")
@@ -275,10 +338,13 @@ public:
         return Route::Unknown;
     }
 
-    void stop() {
+    void stop(const std::function<void(std::uint32_t)>& progress = {}) {
+        auto stage = [&](std::uint32_t value) { if (progress) progress(value); };
+        stage(1); // Retire media callbacks before any owned object is destroyed.
         stopping_ = true;
         trackOpen_ = false;
         connected_ = false;
+        stage(2); // Detach peer-connection callbacks.
         if (pc_ >= 0) {
             rtcSetStateChangeCallback(pc_, nullptr);
             rtcSetTrackCallback(pc_, nullptr);
@@ -286,6 +352,7 @@ public:
             rtcSetLocalCandidateCallback(pc_, nullptr);
             rtcSetUserPointer(pc_, nullptr);
         }
+        stage(3); // Detach track callbacks.
         int retiredReceiveTrack = -1;
         {
             std::lock_guard callbacks(callbackRegistrationMutex_);
@@ -299,13 +366,19 @@ public:
         }
         // An RTP callback that entered before detachment must finish before its
         // decoder and callback-owned buffers can be destroyed.
+        stage(4); // Drain an already-entered RTP callback.
         { std::lock_guard callbackDrain(mutex_); }
+        stage(5); // Wait for native capture/encoder teardown.
         if (encoder_) { api_.encoderClose(encoder_); encoder_ = nullptr; }
+        stage(6); // Wait for native decoder/presentation teardown.
         if (decoder_) { api_.decoderClose(decoder_); decoder_ = nullptr; }
+        stage(7); // Delete detached tracks.
         if (retiredReceiveTrack >= 0 && retiredReceiveTrack != track_) rtcDeleteTrack(retiredReceiveTrack);
         if (track_ >= 0) rtcDeleteTrack(track_);
+        stage(8); // Close and delete the ICE/DTLS-SRTP peer connection.
         if (pc_ >= 0) { rtcClosePeerConnection(pc_); rtcDeletePeerConnection(pc_); }
         pc_ = track_ = receiveTrack_ = -1;
+        stage(9); // Unload the Windows media adapter after all workers exit.
         api_.close();
         {
             std::lock_guard lock(mutex_);
@@ -314,6 +387,7 @@ public:
             rtpActive_ = false;
         }
         connected_ = false;
+        stage(10);
     }
 
 private:

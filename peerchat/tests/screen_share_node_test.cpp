@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <array>
 #include <chrono>
+#include <cwchar>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -63,8 +64,30 @@ int main(){
     };
     try{
         const bool heavy=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_HEAVY",nullptr,0)>0;
-        const int sourceWidth=heavy?1920:640,sourceHeight=heavy?1080:480;
-        const std::uint32_t fps=heavy?60:30,bitrate=heavy?25000000:8000000;
+        const bool realMonitor=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_REAL_MONITOR",nullptr,0)>0;
+        const HMONITOR monitor=realMonitor?MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY):nullptr;
+        MONITORINFO monitorInfo{};monitorInfo.cbSize=sizeof(monitorInfo);
+        require(!realMonitor||(monitor&&GetMonitorInfoW(monitor,&monitorInfo)),
+            "Primary desktop monitor was unavailable for real-screen capture");
+        wchar_t resolution[16]{};
+        GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_RESOLUTION",resolution,16);
+        wchar_t holdText[16]{};
+        GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_HOLD_SECONDS",holdText,16);
+        const auto requestedHold=std::wcstol(holdText,nullptr,10);
+        const int holdSeconds=requestedHold>=1&&requestedHold<=120?
+            static_cast<int>(requestedHold):12;
+        const int sourceWidth=realMonitor?
+            monitorInfo.rcMonitor.right-monitorInfo.rcMonitor.left:
+            std::wcscmp(resolution,L"720")==0?1280:
+            std::wcscmp(resolution,L"1080")==0?1920:
+            std::wcscmp(resolution,L"1440")==0?2560:heavy?1920:640;
+        const int sourceHeight=realMonitor?
+            monitorInfo.rcMonitor.bottom-monitorInfo.rcMonitor.top:
+            std::wcscmp(resolution,L"720")==0?720:
+            std::wcscmp(resolution,L"1080")==0?1080:
+            std::wcscmp(resolution,L"1440")==0?1440:heavy?1080:480;
+        const std::uint32_t fps=heavy||realMonitor?60:30,
+            bitrate=heavy||realMonitor?25000000:8000000;
         source=CreateWindowExW(0,L"STATIC",L"PeerChat authenticated screen sender",
             WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,sourceWidth,sourceHeight,
             nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
@@ -84,8 +107,11 @@ int main(){
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
         nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
-        auto id=nodes[0].startScreenShare(peers[1],PC_SCREEN_WINDOW,
-            reinterpret_cast<std::uint64_t>(source),fps,bitrate,true);
+        const auto captureKind=realMonitor?PC_SCREEN_MONITOR:PC_SCREEN_WINDOW;
+        const auto captureHandle=reinterpret_cast<std::uint64_t>(realMonitor?
+            static_cast<HANDLE>(monitor):static_cast<HANDLE>(source));
+        auto id=nodes[0].startScreenShare(peers[1],captureKind,
+            captureHandle,fps,bitrate,true);
         require(!id.empty(),"Screen share start command was rejected");
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==id;},
             "Authenticated screen offer did not reach the verified peer");
@@ -104,8 +130,54 @@ int main(){
             "Rolling sender/receiver video telemetry was not surfaced");
         auto senderTelemetry=nodes[0].screenShareDiagnostics();
         auto receiverTelemetry=nodes[1].screenShareDiagnostics();
+        require(receiverTelemetry.find(L"decoder_worker_stage=")!=std::wstring::npos&&
+            receiverTelemetry.find(L"decoder_queue_depth=")!=std::wstring::npos,
+            "Decoder worker and queue diagnostics were not surfaced");
+        if(resolution[0]||realMonitor){
+            auto until=Clock::now()+std::chrono::seconds(holdSeconds);
+            auto nextReport=Clock::now()+std::chrono::seconds(10);
+            auto lastPresent=counter(receiverTelemetry,L"presented_frames");
+            auto lastProgress=Clock::now();
+            while(Clock::now()<until){
+                collect();
+                receiverTelemetry=nodes[1].screenShareDiagnostics();
+                const auto current=counter(receiverTelemetry,L"presented_frames");
+                if(current>lastPresent){lastPresent=current;lastProgress=Clock::now();}
+                if(Clock::now()-lastProgress>std::chrono::seconds(realMonitor?8:4)){
+                    std::wcerr<<L"receiver stalled at "<<sourceWidth<<L'x'<<sourceHeight
+                        <<L":\n"<<receiverTelemetry<<L'\n';
+                    throw std::runtime_error("Receiver presentation stopped progressing");
+                }
+                if(Clock::now()>=nextReport){
+                    const auto senderNow=nodes[0].screenShareDiagnostics();
+                    std::wcout<<L"active_share="<<sourceWidth<<L'x'<<sourceHeight
+                        <<L" captured="<<counter(senderNow,L"captured_frames")
+                        <<L" encoded="<<counter(senderNow,L"encoded_frames")
+                        <<L" submitted="<<counter(senderNow,L"encoded_submit_api_accepted")
+                        <<L" receiver_rtp="<<counter(receiverTelemetry,L"remote_rtp_callback_packets")
+                        <<L" accepted="<<counter(receiverTelemetry,L"complete_access_units_delivered")
+                        <<L" decoded="<<counter(receiverTelemetry,L"decoded_frames")
+                        <<L" presented="<<current
+                        <<L" decode_queue="<<counter(receiverTelemetry,L"decoder_queue_depth")
+                        <<L" queue_dropped="<<counter(receiverTelemetry,L"dropped_decode_queue")
+                        <<L" worker_stage="<<counter(receiverTelemetry,L"decoder_worker_stage")
+                        <<L" stage_ms="<<counter(receiverTelemetry,L"decoder_worker_stage_elapsed_ms")
+                        <<L'\n';
+                    nextReport=Clock::now()+std::chrono::seconds(10);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            std::wcout<<L"resolution="<<sourceWidth<<L'x'<<sourceHeight
+                <<L" presented="<<lastPresent<<L" queue_dropped="
+                <<counter(receiverTelemetry,L"dropped_decode_queue")<<L'\n';
+            std::wcout<<L"sender_final_diagnostics:\n"<<nodes[0].screenShareDiagnostics()
+                <<L"\nreceiver_final_diagnostics:\n"<<receiverTelemetry<<L'\n';
+        }
         require(counter(senderTelemetry,L"captured_frames")>0&&
             counter(senderTelemetry,L"encoded_bytes_submit_api_accepted")>0&&
+            counter(senderTelemetry,L"capture_callback_count")>0&&
+            senderTelemetry.find(L"encoder_worker_stage=")!=std::wstring::npos&&
+            senderTelemetry.find(L"capture_callback_stage=")!=std::wstring::npos&&
             counter(receiverTelemetry,L"media_rtp_bytes_received")>0&&
             receiverTelemetry.find(L"media_rtt_ms=Unavailable")!=std::wstring::npos,
             "Screen telemetry did not distinguish measured counters from unavailable ICE RTT");
@@ -129,8 +201,10 @@ int main(){
         require(nodes[0].endScreenShare(id),"Sender could not stop the screen share");
         wait([&]{return shareState[0]==0&&shareState[1]==0;},
             "Both peers did not return to idle after screen share");
-        auto repeated=nodes[0].startScreenShare(peers[1],PC_SCREEN_WINDOW,
-            reinterpret_cast<std::uint64_t>(source),fps,bitrate,true);
+        require(nodes[0].screenShareDiagnostics().find(L"screen_stop_stage=10")!=std::wstring::npos,
+            "Completed sender teardown did not expose its stop stage");
+        auto repeated=nodes[0].startScreenShare(peers[1],captureKind,
+            captureHandle,fps,bitrate,true);
         require(!repeated.empty(),"A second active screen share could not start after teardown");
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==repeated;},
             "Second active share did not reach the verified peer");

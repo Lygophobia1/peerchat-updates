@@ -8,31 +8,69 @@
 > - Discovery wire/API and authority contract: `docs/DISCOVERY_PROTOCOL.md`
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
-**Actual source/runtime metadata:** `4.0.0-dev.2`; not a formally published stable v4.0.0.
-**Current stage:** Stage 8 screen sharing remains a Development candidate, not physically accepted. A physical heavy-share stop/unusable-client report is under investigation. Callback-lifetime teardown hardening passes local repeated start/stop, stalled-source, messaging-after-stop, and 1920×1080/60 FPS tests, but the physical hang has not reproduced locally and remains open. Oversized-message crash, simultaneous-share overload and VirtualBox capability are separate pending investigations.
-**Next action:** obtain physical teardown acceptance before treating the Stage 8 candidate as stable; investigate the other reported blockers separately before packaging another candidate.
-**Latest Git checkpoint:** Stage 8 teardown callback-lifetime hardening (the commit containing this status update); physical acceptance is still pending.
+**Actual source/runtime metadata:** `4.0.1-dev.1`; Development publication is being prepared, not a formally published stable v4.0.0.
+**Current stage:** Stage 8 one-to-one screen sharing passed current physical two-profile acceptance in the isolated `stage8-single-gpu-worker-20260923` build: 2560×1440 sharing, an active voice call, text, Stop Share, and a second Start Share all remained usable. The accepted fix gives one encoder worker ownership of PeerChat D3D11 copy/conversion work and leaves the WGC callback as a bounded newest-frame handoff. Cross-network acceptance remains unproven. Oversized-message crash, simultaneous-share overload and VirtualBox capability remain separate investigations.
+**Next action:** publish the packaged `4.0.1-dev.1` Development update, then verify an installed Development client receives it. Keep sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance, not prerequisites for this local Development build.
+**Latest Git checkpoint:** pending `4.0.1-dev.1` Development-source checkpoint after final package/test verification.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
 
 ## Stage 8 implementation and remaining acceptance
 
+- Receiver diagnostics now distinguish complete access units accepted by the bounded decoder
+  queue from units refused because its eight slots are full, and expose queue depth plus the
+  current decode/presentation stage and its elapsed time. In the physical snapshot, 43 accepted
+  and 382 refused units do not contradict each other; one decoded and zero presented frames
+  point to a downstream stall, but the precise blocking call needs the new physical snapshot.
+  Local authenticated two-profile fixed 720p, 1080p and 1440p window tests passed; a 90-second
+  2560×1440 real-monitor run at 30 FPS presented 2,381 frames and recovered after 19 bounded
+  queue drops. That 30-FPS local run does not reproduce or clear the physical 60-FPS failure.
+  `build/stage8-single-gpu-worker-20260923` passed physical two-profile acceptance: full-resolution
+  sharing, voice and messaging coexistence, Stop Share, and a subsequent share all worked. The
+  shared publisher now stages `PeerChat.ScreenMedia.dll` into its runtime-only Client ZIP and
+  audits its Windows imports so a Development package cannot silently omit the adapter.
+- Two actual isolated WPF clients from that test package connected over verified peer TLS and
+  direct ICE at requested 2560×1440/60 FPS and 25 Mbps. The receiver presented 253 frames;
+  later diagnostics showed zero decode-queue depth and a worker waiting for input. A subsequent
+  active-motion run reproduced the freeze after 1,571 encoded frames: sender capture callback
+  and encoder worker both remained in broad D3D11 stages for more than 22 seconds; receiver had
+  accepted 1,501 access units, decoded/presented 1,463, then waited on an empty queue with no
+  discontinuity. Stop Share stayed in `closing capture and encoder` for over 10 seconds and
+  blocked native-worker message processing. These facts locate the failure on the sender but
+  do not yet distinguish a GPU mutex wait from a stuck D3D11 call. The finer-trace physical run
+  did: after 5,340 encoder inputs and 5,263 receiver presentations, `VideoProcessorBlt` remained
+  in progress for 35 seconds while the capture callback waited on the GPU mutex; receiver decode
+  queue stayed empty. This identifies the immediate blocking call, though not whether the driver
+  or unprotected shared-context access ultimately causes it. The adapter now enables D3D11
+  multithread protection before passing the shared device to the asynchronous encoder, following
+  the Windows Media Foundation device-sharing guidance. Targeted compile and packaged dependency
+  checks passed. The interactive Windows GPU probe also passed on the actual 2560×1440 monitor:
+  hardware H.264 encode, adapter decode/presentation, three continuous monitor frames, and a
+  captured window frame. Physical retest still stalled in `VideoProcessorBlt` after 1,814
+  encoded frames; Stop remained in encoder close after 20 seconds. The new candidate confines
+  PeerChat's immediate-context copy and conversion to one encoder worker and makes the WGC
+  callback a one-frame, drop-stale handoff. Its targeted compile, short interactive GPU probe,
+  and package dependency checks passed. The subsequent physical two-profile run exercised the
+  working full-resolution share with voice, messaging, Stop Share and a replacement share. That
+  clears the observed local stop/hang path; sustained cross-network stress remains unproven.
 - The screen-media stop path previously allowed late remote-track registration and an in-flight
   RTP callback to overlap decoder destruction. Stop now rejects callback work for the retired
   generation, synchronizes remote-track registration, and drains RTP callback access before
   closing media. Targeted local transport and two-profile tests passed, including repeated
   start/stop, a hidden capture source, post-stop messaging, and a 1920×1080/60 FPS run. This
-  addresses a concrete lifetime race but does not establish the cause of the physical heavy-load
-  hang or prove a hard deadline against a blocked Windows GPU/codec call; physical retest is required.
+  addresses a concrete lifetime race. Together with the one-worker capture/conversion boundary,
+  the current local physical test completed Stop Share and a subsequent share cleanly. A hard
+  deadline against a future blocked Windows GPU/codec call is not claimed.
 - Authenticated two-profile integration passed: verified peer TLS carried share offer/answer/candidates,
   separate ICE/DTLS-SRTP carried H.264 to GPU presentation, text remained usable, a media-generation
   restart after a simulated network change resumed rendering, and stop/decline returned both peers
   to idle. The local WPF smoke, package dependency/import verification, and isolated candidate build
   passed. These do not prove real two-PC or cross-network behavior.
-- The Development candidate is `build/stage8-screen-share-physical-candidate-20260923`;
-  `PeerChat.ScreenMedia.dll` is staged alongside `PeerChat.Desktop.exe`. The existing release/update
-  feed was not changed. Physical acceptance still needs sender/receiver UI, monitor/window selection,
-  active voice plus share, repeated start/stop, and recovery across a real network transition.
+- The current publish candidate is built from the accepted `stage8-single-gpu-worker-20260923`
+  source; `PeerChat.ScreenMedia.dll` is now required in every runtime-only Client package and
+  receives its own Windows import audit. Current local two-profile acceptance covered sender/
+  receiver UI, a full-resolution monitor, active voice plus share, messaging, Stop Share and a
+  repeated start. Recovery across a real network transition remains follow-up work.
 - Once-per-second telemetry reports observed capture/encode/send-API/receive/render rates and bounded
   queue drops. Selected ICE route and effective encoded/decoded dimensions are authoritative. The
   pinned libdatachannel C API does not expose media RTT, wire throughput, jitter or reliable loss
@@ -44,8 +82,8 @@ separate; no release publication, final tag, or key change occurred in this stag
   NV12→BGRA conversion, and DXGI swap-chain presentation.
 - The captured/decoded raw frames remained on GPU surfaces with no raw-pixel CPU readback. The
   H.264 compressed bytes crossed GPU/CPU boundaries for the prospective libdatachannel API.
-- This local hardware smoke test was followed by authenticated client integration; only physical
-  two-client acceptance remains open. Production MinGW build/dependencies remain unchanged.
+- This local hardware smoke test was followed by authenticated client integration and current
+  local two-profile physical acceptance. Production MinGW build/dependencies remain unchanged.
 - `windows_media/peerchat_screen_media.h` now defines the narrow Windows DLL ABI, and its first
   implementation enumerates current monitors/windows and reports Media Foundation hardware
   encode/decode availability. The test enumerated two monitors and nine windows and reported
@@ -60,7 +98,7 @@ separate; no release publication, final tag, or key change occurred in this stag
   ICE/DTLS-SRTP test: 20 H.264 access units submitted, 345 RTP packets received, 20 units
   reassembled, and two frames decoded/presented. That earlier test verified media mechanics;
   the later authenticated two-profile test above covers local trust/control/recovery, but remote
-  hardware compatibility still requires physical acceptance.
+  hardware compatibility beyond the accepted local test machine still requires physical acceptance.
 
 ## Frozen checkpoint and branches
 
@@ -336,7 +374,7 @@ Interfaces/factories need concrete value.
 | 5 | Capability-gated direct handoff; two-peer arbitration/loss/replay/fallback and legacy compatibility, then physical text handoff. |
 | 6 | One-to-one voice ownership and profile voice settings; implementation complete at `c9943b5`, physical acceptance pending. |
 | 7 | Implementation/automated gates complete: bounded replaceable media generations, stale-generation rejection and voice recovery; physical network-change/audio continuity pending. |
-| 8 | One-to-one Development candidate implemented; physical two-client screen-share acceptance pending. |
+| 8 | One-to-one screen sharing passed current local two-profile physical acceptance; Development publication and later cross-network/stress acceptance remain. |
 | 9 | Webcam video. |
 | 10 | Group calls without replacing the participant-oriented call owner. |
 | 11 | File transfer and richer messaging features. |

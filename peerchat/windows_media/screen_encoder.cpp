@@ -1,6 +1,7 @@
 #include "peerchat_screen_media.h"
 
 #include <windows.h>
+#include <d3d10_1.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
@@ -39,7 +40,7 @@ struct EncodedFrame {
 };
 
 struct CapturedFrame {
-    ComPtr<ID3D11Texture2D> texture;
+    Direct3D11CaptureFrame frame{nullptr};
     std::chrono::steady_clock::time_point arrival;
 };
 
@@ -108,8 +109,19 @@ public:
     int status(pc_screen_encoder_status* value) {
         if (!value || value->structure_size != sizeof(*value)) return 0;
         std::lock_guard lock(mutex_);
+        const auto now = GetTickCount64();
+        const auto callbackTick = lastCaptureCallbackTick_.load();
+        const auto captureStageTick = captureStageSince_.load();
+        const auto workerStageTick = workerStageSince_.load();
         *value = {sizeof(*value), capturedFrames_, submittedFrames_, encodedFrames_,
-            droppedBeforeEncode_, droppedEncodedQueue_};
+            droppedBeforeEncode_, droppedEncodedQueue_, captureCallbackCount_.load(),
+            callbackTick && now >= callbackTick ? now - callbackTick : 0,
+            captureStage_.load(), captureStageTick && now >= captureStageTick ?
+                now - captureStageTick : 0,
+            workerStage_.load(), workerStageTick && now >= workerStageTick ?
+                now - workerStageTick : 0,
+            pending_.frame ? 1u : 0u, static_cast<uint32_t>(output_.size()),
+            inputReady_ ? 1u : 0u, failed_ ? 1u : 0u};
         return 1;
     }
 
@@ -136,6 +148,14 @@ public:
     }
 
 private:
+    void setCaptureStage(uint32_t stage) {
+        captureStageSince_ = GetTickCount64();
+        captureStage_ = stage;
+    }
+    void setWorkerStage(uint32_t stage) {
+        workerStageSince_ = GetTickCount64();
+        workerStage_ = stage;
+    }
     void fail() {
         {
             std::lock_guard lock(mutex_);
@@ -152,6 +172,12 @@ private:
         if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 nullptr, 0, D3D11_SDK_VERSION, &d3d_, nullptr, &d3dContext_))) return false;
+        // Only the encoder worker uses our immediate context for copy and conversion.
+        // The asynchronous Media Foundation MFT shares the device through the DXGI
+        // manager, so it still needs the device's context multithread protection.
+        ComPtr<ID3D10Multithread> multithread;
+        if (FAILED(d3d_.As(&multithread))) return false;
+        multithread->SetMultithreadProtected(TRUE);
         ComPtr<IDXGIDevice> dxgi;
         if (FAILED(d3d_.As(&dxgi))) return false;
         winrt::com_ptr<IInspectable> inspectable;
@@ -254,44 +280,52 @@ private:
 
     void onCapture(Direct3D11CaptureFramePool const& sender) {
         if (!running_) return;
+        ++captureCallbackCount_;
+        lastCaptureCallbackTick_ = GetTickCount64();
+        setCaptureStage(PC_SCREEN_CAPTURE_NEXT);
         try {
             auto frame = sender.TryGetNextFrame();
-            auto access = frame.Surface().as<
-                ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-            ComPtr<ID3D11Texture2D> source;
-            if (FAILED(access->GetInterface(IID_PPV_ARGS(&source)))) { fail(); return; }
-            D3D11_TEXTURE2D_DESC desc{};
-            source->GetDesc(&desc);
-            if (desc.Width < width_ || desc.Height < height_) { fail(); return; }
             const auto now = std::chrono::steady_clock::now();
             {
                 std::lock_guard lock(mutex_);
                 if (lastCapture_ != std::chrono::steady_clock::time_point{} &&
                     now - lastCapture_ < std::chrono::nanoseconds(
-                        1000000000ull / options_.frames_per_second)) return;
+                        1000000000ull / options_.frames_per_second)) {
+                    setCaptureStage(PC_SCREEN_CAPTURE_IDLE);
+                    return;
+                }
                 lastCapture_ = now;
             }
-            desc.BindFlags = 0;
-            desc.CPUAccessFlags = 0;
-            desc.MiscFlags = 0;
-            ComPtr<ID3D11Texture2D> copy;
-            if (FAILED(d3d_->CreateTexture2D(&desc, nullptr, &copy))) { fail(); return; }
-            {
-                std::lock_guard gpu(gpuMutex_);
-                d3dContext_->CopyResource(copy.Get(), source.Get());
-            }
+            setCaptureStage(PC_SCREEN_CAPTURE_QUEUE);
             {
                 std::lock_guard lock(mutex_);
                 if (!running_) return;
                 ++capturedFrames_;
-                if (pending_.texture) ++droppedBeforeEncode_;
-                pending_ = {std::move(copy), now};
+                if (pending_.frame) ++droppedBeforeEncode_;
+                pending_ = {std::move(frame), now};
             }
             condition_.notify_one();
+            setCaptureStage(PC_SCREEN_CAPTURE_IDLE);
         } catch (...) { fail(); }
     }
 
     bool submit(CapturedFrame frame) {
+        auto access = frame.frame.Surface().as<
+            ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+        ComPtr<ID3D11Texture2D> source;
+        if (FAILED(access->GetInterface(IID_PPV_ARGS(&source)))) return false;
+        D3D11_TEXTURE2D_DESC copyDesc{};
+        source->GetDesc(&copyDesc);
+        if (copyDesc.Width < width_ || copyDesc.Height < height_) return false;
+        copyDesc.BindFlags = 0;
+        copyDesc.CPUAccessFlags = 0;
+        copyDesc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> copy;
+        setWorkerStage(PC_SCREEN_ENCODER_CREATE_COPY_TEXTURE);
+        if (FAILED(d3d_->CreateTexture2D(&copyDesc, nullptr, &copy))) return false;
+        setWorkerStage(PC_SCREEN_ENCODER_COPY_CAPTURE);
+        d3dContext_->CopyResource(copy.Get(), source.Get());
+        setWorkerStage(PC_SCREEN_ENCODER_CREATE_SURFACES);
         D3D11_TEXTURE2D_DESC nv12Desc{};
         nv12Desc.Width = width_;
         nv12Desc.Height = height_;
@@ -307,7 +341,7 @@ private:
         inputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
         ComPtr<ID3D11VideoProcessorInputView> input;
         if (FAILED(videoDevice_->CreateVideoProcessorInputView(
-                frame.texture.Get(), videoEnumerator_.Get(), &inputDesc, &input))) return false;
+                copy.Get(), videoEnumerator_.Get(), &inputDesc, &input))) return false;
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDesc{};
         outputDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         ComPtr<ID3D11VideoProcessorOutputView> output;
@@ -316,11 +350,10 @@ private:
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = input.Get();
-        {
-            std::lock_guard gpu(gpuMutex_);
-            if (FAILED(videoContext_->VideoProcessorBlt(
-                    videoProcessor_.Get(), output.Get(), 0, 1, &stream))) return false;
-        }
+        setWorkerStage(PC_SCREEN_ENCODER_VIDEO_BLT);
+        if (FAILED(videoContext_->VideoProcessorBlt(
+                videoProcessor_.Get(), output.Get(), 0, 1, &stream))) return false;
+        setWorkerStage(PC_SCREEN_ENCODER_CREATE_SAMPLE);
         ComPtr<IMFMediaBuffer> surface;
         if (FAILED(MFCreateDXGISurfaceBuffer(
                 __uuidof(ID3D11Texture2D), nv12.Get(), 0, FALSE, &surface))) return false;
@@ -330,12 +363,14 @@ private:
             options_.frames_per_second;
         if (FAILED(sample->SetSampleTime(time)) ||
             FAILED(sample->SetSampleDuration(10000000ll / options_.frames_per_second))) return false;
+        setWorkerStage(PC_SCREEN_ENCODER_INPUT);
         const bool accepted = SUCCEEDED(encoder_->ProcessInput(0, sample.Get(), 0));
         if (accepted) { std::lock_guard lock(mutex_); ++submittedFrames_; }
         return accepted;
     }
 
     bool collect() {
+        setWorkerStage(PC_SCREEN_ENCODER_OUTPUT);
         MFT_OUTPUT_STREAM_INFO info{};
         if (FAILED(encoder_->GetOutputStreamInfo(0, &info))) return false;
         MFT_OUTPUT_DATA_BUFFER result{};
@@ -388,6 +423,7 @@ private:
 
     void run() {
         try {
+            setWorkerStage(PC_SCREEN_ENCODER_INITIALIZING);
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             if (!initialize()) fail();
             else {
@@ -397,6 +433,7 @@ private:
                 }
                 condition_.notify_all();
                 while (running_) {
+                    setWorkerStage(PC_SCREEN_ENCODER_WAITING);
                     MediaEventType event{};
                     CapturedFrame frame;
                     bool submitFrame = false, handleEvent = false;
@@ -404,7 +441,7 @@ private:
                         std::unique_lock lock(mutex_);
                         condition_.wait(lock, [this] {
                             return !running_ || !mediaEvents_.empty() ||
-                                (inputReady_ && pending_.texture);
+                                (inputReady_ && pending_.frame);
                         });
                         if (!running_) break;
                         if (!mediaEvents_.empty()) {
@@ -412,7 +449,7 @@ private:
                             mediaEvents_.pop_front();
                             handleEvent = true;
                             if (event == METransformNeedInput) inputReady_ = true;
-                        } else if (inputReady_ && pending_.texture) {
+                        } else if (inputReady_ && pending_.frame) {
                             frame = std::move(pending_);
                             inputReady_ = false;
                             submitFrame = true;
@@ -424,6 +461,7 @@ private:
             }
         } catch (...) { fail(); }
         running_ = false;
+        setWorkerStage(PC_SCREEN_ENCODER_STOPPING);
         if (pool_) pool_.FrameArrived(frameToken_);
         if (session_) session_.Close();
         if (pool_) pool_.Close();
@@ -435,13 +473,14 @@ private:
         eventSink_.Reset();
         encoder_.Reset();
         if (mediaFoundationStarted_) MFShutdown();
+        setWorkerStage(PC_SCREEN_ENCODER_STOPPED);
         condition_.notify_all();
     }
 
     pc_screen_encoder_options options_{};
     std::thread worker_;
     std::atomic<bool> running_{true};
-    std::mutex mutex_, gpuMutex_;
+    std::mutex mutex_;
     std::condition_variable condition_;
     bool initialized_ = false, failed_ = false, inputReady_ = false;
     bool mediaFoundationStarted_ = false;
@@ -452,6 +491,11 @@ private:
     uint64_t frameIndex_ = 0;
     uint64_t capturedFrames_ = 0, submittedFrames_ = 0, encodedFrames_ = 0;
     uint64_t droppedBeforeEncode_ = 0, droppedEncodedQueue_ = 0;
+    std::atomic<uint64_t> captureCallbackCount_{0}, lastCaptureCallbackTick_{0};
+    std::atomic<uint32_t> captureStage_{PC_SCREEN_CAPTURE_IDLE};
+    std::atomic<uint64_t> captureStageSince_{0};
+    std::atomic<uint32_t> workerStage_{PC_SCREEN_ENCODER_INITIALIZING};
+    std::atomic<uint64_t> workerStageSince_{0};
     UINT width_ = 0, height_ = 0;
     GraphicsCaptureItem item_{nullptr};
     Direct3D11CaptureFramePool pool_{nullptr};

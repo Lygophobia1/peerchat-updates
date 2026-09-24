@@ -24,6 +24,12 @@ of whether that reliable binding is direct or server-relayed. Media generation u
 the server does not see screen content. WPF uses the C ABI for source selection, viewer presentation,
 profile-scoped quality preferences and a compact status strip. Detailed once-per-second observational
 telemetry is kept in Security/Diagnostics, with unsupported ICE statistics marked unavailable.
+The decoder adapter exposes its bounded queue depth and current decode/presentation worker stage
+through the same C status boundary; this is observational and does not own recovery policy.
+The sender enables D3D11 immediate-context multithread protection before sharing its device with
+WGC and the asynchronous Media Foundation encoder. The WGC callback hands off only the newest
+captured frame; one encoder worker owns PeerChat's D3D11 copy and video conversion calls in order.
+Capture/encoder stage diagnostics identify the active D3D11 operation.
 The isolated Development package includes the MSVC adapter; the proven MinGW core build and
 dependencies are unchanged. Physical two-PC acceptance is pending.
 

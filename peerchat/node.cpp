@@ -98,6 +98,8 @@ struct Node::Impl {
     calls::CallManager calls;
     screen::ScreenShareManager screenShares;
     std::unique_ptr<ScreenShareMedia> screenMedia;
+    std::atomic<std::uint32_t> screenStopStage{0};
+    std::atomic<std::uint64_t> screenStopStageSince{0};
     bool screenAvailable=false;
     ScreenShareMedia::Options screenOptions{};
     std::uint64_t screenMediaLifetime=0,screenMediaGeneration=0,screenNetworkGeneration=0;
@@ -240,7 +242,7 @@ struct Node::Impl {
         }}
         event.text=reason;emit(std::move(event));
     }
-    void stopScreenMedia(){if(screenMedia){auto stats=screenMedia->statistics();screenPriorSentBytes+=stats.encodedBytesSubmitted;screenPriorReceivedBytes+=stats.mediaBytesReceived;screenMedia->stop();}screenMedia.reset();screenMediaLifetime=screenMediaGeneration=0;}
+    void stopScreenMedia(){if(screenMedia){screenStopStageSince=GetTickCount64();screenStopStage=100;auto stats=screenMedia->statistics();screenPriorSentBytes+=stats.encodedBytesSubmitted;screenPriorReceivedBytes+=stats.mediaBytesReceived;screenMedia->stop([this](std::uint32_t stage){screenStopStageSince=GetTickCount64();screenStopStage=stage;});}screenMedia.reset();screenMediaLifetime=screenMediaGeneration=0;}
     void clearScreen(const std::wstring& reason){
         auto active=screenShares.active();if(!active&&!screenMedia)return;
         auto id=active?active->id:std::string{},peer=active?active->peer:std::string{};
@@ -250,7 +252,7 @@ struct Node::Impl {
     }
     bool configureScreenMedia(){
         auto active=screenShares.active();if(!active)return false;
-        stopScreenMedia();screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
+        stopScreenMedia();screenStopStage=0;screenStopStageSince=0;screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
         screenMediaLifetime=active->lifetime;screenMediaGeneration=active->generation;
         screenNetworkGeneration=networkGeneration;screenTelemetryAt=0;screenReportedRoute=screenReportedWidth=screenReportedHeight=0;return true;
     }
@@ -550,7 +552,7 @@ struct Node::Impl {
         if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));return;}
         if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));auto active=calls.active();if(active&&active->id.value==callId&&active->participants.count(c.peerId))clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");return;}
         if(r.type()==protocol::Text){
-            StoredMessage m;m.id=r.string();if(c.logicalOrdering)m.logicalOrder=r.number();m.utcMilliseconds=r.number();m.text=r.text();r.end();protocol::check(protocol::id(m.id,32));m.sender=c.peerId;m.recipient=profile.peerId;m.delivery=Delivery::Delivered;store->observeLogicalOrder(m.logicalOrder);
+            StoredMessage m;m.id=r.string();if(c.logicalOrdering)m.logicalOrder=r.number();m.utcMilliseconds=r.number();auto chatText=r.chatText();r.end();protocol::check(protocol::id(m.id,32));if(!chatText){notice(NodeEvent::Kind::Error,L"Oversized chat message rejected",c.peerId);return;}m.text=std::move(*chatText);m.sender=c.peerId;m.recipient=profile.peerId;m.delivery=Delivery::Delivered;store->observeLogicalOrder(m.logicalOrder);
             if(!deliveries)throw std::runtime_error("Delivery owner is unavailable");
             if(deliveries->acceptIncomingMessage(c.peerId,m)){NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=c.peerId;e.messages.push_back(m);emit(std::move(e));}
             protocol::Writer ack(protocol::Ack);ack.string(m.id);packet(c,ack);
@@ -559,7 +561,7 @@ struct Node::Impl {
             // A peer can acknowledge only an ID actually sent on this connection.
             if(deliveries&&deliveries->acknowledgeMessage(c.peerId,{c.attemptId},id)){NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=c.peerId;StoredMessage m;m.id=id;m.delivery=Delivery::Delivered;e.messages.push_back(m);emit(std::move(e));outbox(c);}
         }else if(r.type()==protocol::GroupEvent){
-            auto event=decodeGroupEvent(frame);protocol::check(protocol::id(event.groupId,32)&&protocol::id(event.eventId));
+            bool oversizedMessage=false;auto event=decodeGroupEvent(frame,true,&oversizedMessage);protocol::check(protocol::id(event.groupId,32)&&protocol::id(event.eventId));if(oversizedMessage){notice(NodeEvent::Kind::Error,L"Oversized group message rejected",c.peerId);return;}
             auto found=groups.find(event.groupId);
             if(found==groups.end()){
                 // An unknown group enters local state only through its valid signed creation
@@ -838,7 +840,7 @@ int Node::takeRelayOutput(std::uint64_t attempt,unsigned char* bytes,std::size_t
 void Node::saveContact(const Contact& contact){Impl::Command c{};c.action=Impl::Action::SaveContact;c.contact=contact;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::removeContact(const std::string& peer){Impl::Command c{};c.action=Impl::Action::RemoveContact;c.peer=peer;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::approve(const std::string& peer,bool accepted){Impl::Command c{};c.action=Impl::Action::Approve;c.peer=peer;c.accepted=accepted;impl_->command(std::move(c));}
-std::string Node::send(const std::string& peer,const std::wstring& text){if(!protocol::id(peer)||text.empty()||text.size()>16384)return {};Impl::Command c{};c.action=Impl::Action::Send;c.peer=peer;c.text=text;c.id=Storage::newMessageId();auto id=c.id;return impl_->command(std::move(c))?id:std::string{};}
+std::string Node::send(const std::string& peer,const std::wstring& text){if(!protocol::id(peer)||text.empty()||text.size()>protocol::MaxChatCharacters)return {};Impl::Command c{};c.action=Impl::Action::Send;c.peer=peer;c.text=text;c.id=Storage::newMessageId();auto id=c.id;return impl_->command(std::move(c))?id:std::string{};}
 void Node::loadHistory(const std::string& peer,std::int64_t before){Impl::Command c{};c.action=Impl::Action::History;c.peer=peer;c.before=before;impl_->command(std::move(c));}
 void Node::setName(const std::wstring& name){if(name.empty()||name.size()>64)return;Impl::Command c{};c.action=Impl::Action::Name;c.text=name;impl_->command(std::move(c));}
 void Node::setGroupAccount(std::uint64_t accountId,const std::wstring& accountName){if(!accountId||accountName.empty()||accountName.size()>64)return;Impl::Command c{};c.action=Impl::Action::GroupAccount;c.accountId=accountId;c.name=accountName;impl_->command(std::move(c));}
@@ -849,7 +851,7 @@ bool Node::respondToGroupInvite(const std::string& groupId,bool accept){if(!prot
 bool Node::leaveGroup(const std::string& groupId){if(!protocol::id(groupId,32))return false;Impl::Command c{};c.action=Impl::Action::GroupLeave;c.group=groupId;return impl_->command(std::move(c));}
 bool Node::removeGroupMember(const std::string& groupId,std::uint64_t accountId){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRemove;c.group=groupId;c.accountId=accountId;return impl_->command(std::move(c));}
 bool Node::setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRole;c.group=groupId;c.accountId=accountId;c.accepted=admin;return impl_->command(std::move(c));}
-bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!protocol::id(groupId,32)||text.empty()||text.size()>16384)return false;Impl::Command c{};c.action=Impl::Action::GroupSend;c.group=groupId;c.text=text;return impl_->command(std::move(c));}
+bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!protocol::id(groupId,32)||text.empty()||text.size()>protocol::MaxChatCharacters)return false;Impl::Command c{};c.action=Impl::Action::GroupSend;c.group=groupId;c.text=text;return impl_->command(std::move(c));}
 void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
 void Node::loadGroupHistory(const std::string& group,std::int64_t before){if(!protocol::id(group,32))return;Impl::Command c{};c.action=Impl::Action::GroupHistoryPage;c.group=group;c.before=before;impl_->command(std::move(c));}
 std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(peerId))return {};Impl::Command command{};command.action=Impl::Action::VoiceStart;command.peer=peerId;command.id=Storage::newMessageId();auto id=command.id;return impl_->command(std::move(command))?id:std::string{};}
@@ -861,7 +863,39 @@ std::string Node::startScreenShare(const std::string& peerId,std::uint32_t sourc
 bool Node::answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow){if(!protocol::id(shareId,32)||!presentationWindow)return false;Impl::Command command{};command.action=Impl::Action::ScreenAnswer;command.id=shareId;command.sourceHandle=presentationWindow;return impl_->command(std::move(command));}
 bool Node::declineScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenDecline;command.id=shareId;return impl_->command(std::move(command));}
 bool Node::endScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenEnd;command.id=shareId;return impl_->command(std::move(command));}
-std::wstring Node::screenShareDiagnostics(){auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command command{};command.action=Impl::Action::ScreenDiagnostics;command.response=response;if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return L"screen_media_state=unavailable";return result.get();}
+std::wstring Node::screenShareDiagnostics(){
+    auto stage=impl_->screenStopStage.load();
+    auto stageSince=impl_->screenStopStageSince.load();
+    auto stopDetail=[&](bool timedOut){
+        const wchar_t* name=L"not stopping";
+        switch(stage){
+        case 100:name=L"reading media counters before stop";break;
+        case 1:name=L"retiring media callbacks";break;
+        case 2:name=L"detaching peer-connection callbacks";break;
+        case 3:name=L"detaching track callbacks";break;
+        case 4:name=L"draining RTP callback";break;
+        case 5:name=L"closing capture and encoder";break;
+        case 6:name=L"closing decoder and presentation";break;
+        case 7:name=L"deleting tracks";break;
+        case 8:name=L"closing ICE/media connection";break;
+        case 9:name=L"unloading media adapter";break;
+        case 10:name=L"completed";break;
+        }
+        const auto now=GetTickCount64();
+        return std::wstring(L"\nscreen_stop_stage=")+std::to_wstring(stage)+
+            L"\nscreen_stop_stage_name="+name+
+            L"\nscreen_stop_stage_elapsed_ms="+std::to_wstring(stageSince&&now>=stageSince?now-stageSince:0)+
+            L"\nscreen_diagnostics_worker_timeout="+(timedOut?L"true":L"false");
+    };
+    auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();
+    Impl::Command command{};command.action=Impl::Action::ScreenDiagnostics;command.response=response;
+    if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready){
+        stage=impl_->screenStopStage.load();stageSince=impl_->screenStopStageSince.load();
+        return L"screen_media_state=unavailable"+stopDetail(true);
+    }
+    stage=impl_->screenStopStage.load();stageSince=impl_->screenStopStageSince.load();
+    return result.get()+stopDetail(false);
+}
 bool Node::answerVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceAnswer;command.id=callId;return impl_->command(std::move(command));}
 bool Node::declineVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceDecline;command.id=callId;return impl_->command(std::move(command));}
 bool Node::endVoiceCall(const std::string& callId){if(!protocol::id(callId,32))return false;Impl::Command command{};command.action=Impl::Action::VoiceEnd;command.id=callId;return impl_->command(std::move(command));}

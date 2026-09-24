@@ -9,20 +9,21 @@
 
 ## CURRENT VERSION
 
-**Source metadata: 4.0.0-dev.2; user-accepted product baseline: v4.0.0.**
+**Source metadata: 4.0.1-dev.1; user-accepted product baseline: v4.0.0.**
 
 Acceptance does not imply a signed stable artifact or completed Release publication.
 
 ## CURRENT PHASE
 
-**Stage 3 direct-session continuity ownership implemented; Stage 4 not started.**
+**Stages 3–7 are implemented; Stage 8 one-to-one screen sharing has passed current local
+two-profile physical acceptance and is being prepared as a Development build.**
 
-The accepted source is frozen on `release/v4.0.0`; incremental networking work belongs on
-`refactor/session-transport`. Formal Release versioning, signing backup and publication remain
-separate work. Stage 3 now centralizes direct-transport winner selection, retry/backoff, cancellation/lifetime
-tokens, and revisioned session snapshots in the native session/transport boundary. Durable delivery,
-ACK ownership, draining, and resend behavior remain unchanged and belong to a separately authorized
-Stage 4.
+The accepted stable source remains frozen on `release/v4.0.0`; incremental networking and media
+work belongs on `refactor/session-transport`. Stages 3–5.5 centralize session/transport and durable
+delivery ownership, Stage 6 owns calls and voice preferences, and Stage 7 owns media continuity.
+Stage 8 keeps Windows capture/codec mechanics in the narrow MSVC adapter while session, trust,
+signaling, recovery and UI ownership stay outside it. Development acceptance does not claim
+cross-network or Release-channel acceptance.
 
 Milestone 1 — Account + Discovery Foundation is complete and has passed real packaged-client testing.
 

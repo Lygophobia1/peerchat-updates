@@ -9,6 +9,7 @@ try {
     try {
         & (Join-Path $PSScriptRoot 'build-updater.ps1') -OutputDirectory "$buildRoot\Updater"
         & (Join-Path $PSScriptRoot 'build-desktop.ps1') -OutputDirectory "$buildRoot\Client" -UpdaterCorePath "$buildRoot\Updater\PeerChat.Updater.Core.dll"
+        & (Join-Path $PSScriptRoot 'build-screen-media.ps1') -OutputDirectory "$buildRoot\ScreenMedia"
         & (Join-Path $PSScriptRoot 'build-server.ps1') -OutputDirectory "$buildRoot\Server"
         & (Join-Path $PSScriptRoot 'build-server-admin.ps1') -OutputDirectory "$buildRoot\Server"
         New-Item -ItemType Directory -Force -Path "$stage\Client","$stage\Server" | Out-Null
@@ -16,9 +17,10 @@ try {
         # certificates, user data, and prior package contents are deliberately excluded.
         Copy-Item "$buildRoot\Client\PeerChat.Desktop.exe","$buildRoot\Client\PeerChat.Core.dll","$buildRoot\Client\PeerChat.Desktop.exe.config","$buildRoot\Client\peerchat-client.ico","$projectRoot\desktop\service-bootstrap.json" "$stage\Client" -Force
         Copy-Item "$buildRoot\Updater\PeerChat.Updater.exe","$buildRoot\Updater\PeerChat.Updater.Core.dll","$buildRoot\Updater\PeerChat.Updater.exe.config" "$stage\Client" -Force
+        Copy-Item "$buildRoot\ScreenMedia\PeerChat.ScreenMedia.dll" "$stage\Client" -Force
         Copy-Item "$projectRoot\updater\update-feeds.json" "$stage\Client\update-feeds.json" -Force
         Copy-Item "$buildRoot\Server\PeerChat.Server.exe","$buildRoot\Server\PeerChat.Server.Admin.exe","$buildRoot\Server\peerchat-server.ico" "$stage\Server" -Force
-        & (Join-Path $PSScriptRoot 'verify-client-native-dependencies.ps1') -ClientDirectory "$stage\Client"
+        & (Join-Path $PSScriptRoot 'verify-client-native-dependencies.ps1') -ClientDirectory "$stage\Client" -RequireScreenMedia
         $stageFull=[IO.Path]::GetFullPath($stage)
         $hashes=Get-ChildItem $stageFull -File -Recurse | Sort-Object FullName | ForEach-Object { (Get-FileHash -Algorithm SHA256 $_.FullName).Hash+'  '+$_.FullName.Substring($stageFull.Length).TrimStart('\') }
         Set-Content -LiteralPath "$stage\PACKAGE-SHA256.txt" -Value $hashes -Encoding Ascii

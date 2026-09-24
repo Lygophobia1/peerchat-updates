@@ -61,6 +61,7 @@ public:
         if (!running_ || failed_) return -1;
         if (queue_.size() >= 8) { ++droppedDecodeQueue_; return 0; }
         queue_.push_back({std::vector<uint8_t>(data, data + length), timestamp});
+        largestAccessUnitBytes_ = std::max(largestAccessUnitBytes_, length);
         ++accepted_;
         condition_.notify_one();
         return 1;
@@ -69,13 +70,21 @@ public:
     int status(pc_screen_decoder_status* value) {
         if (!value || value->structure_size != sizeof(*value)) return 0;
         std::lock_guard lock(mutex_);
+        const auto now = GetTickCount64();
+        const auto since = workerStageSince_.load();
         *value = {sizeof(*value), accepted_, decoded_, presented_, failed_ ? 1u : 0u,
             decodedWidth_, decodedHeight_, droppedDecodeQueue_,
-            decodeLatencyMicrosecondsTotal_, decodeOperations_};
+            decodeLatencyMicrosecondsTotal_, decodeOperations_,
+            static_cast<uint32_t>(queue_.size()), workerStage_.load(),
+            since && now >= since ? now - since : 0, largestAccessUnitBytes_};
         return 1;
     }
 
 private:
+    void setStage(uint32_t stage) {
+        workerStageSince_ = GetTickCount64();
+        workerStage_ = stage;
+    }
     void fail() {
         {
             std::lock_guard lock(mutex_);
@@ -174,6 +183,7 @@ private:
     }
 
     bool present(IMFSample* sample) {
+        setStage(PC_SCREEN_DECODER_PRESENT_SETUP);
         ComPtr<IMFMediaBuffer> buffer;
         ComPtr<IMFDXGIBuffer> surface;
         ComPtr<ID3D11Texture2D> texture;
@@ -224,15 +234,18 @@ private:
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = input.Get();
-        const bool displayed=SUCCEEDED(videoContext_->VideoProcessorBlt(
-                   processor.Get(), output.Get(), 0, 1, &stream)) &&
-               SUCCEEDED(swap_->Present(1, 0));
+        setStage(PC_SCREEN_DECODER_PRESENT_BLT);
+        if (FAILED(videoContext_->VideoProcessorBlt(
+                processor.Get(), output.Get(), 0, 1, &stream))) return false;
+        setStage(PC_SCREEN_DECODER_PRESENT_SWAP);
+        const bool displayed = SUCCEEDED(swap_->Present(1, 0));
         if(displayed){std::lock_guard lock(mutex_);decodedWidth_=desc.Width;decodedHeight_=desc.Height;}
         return displayed;
     }
 
     bool drain() {
         for (;;) {
+            setStage(PC_SCREEN_DECODER_PROCESS_OUTPUT);
             MFT_OUTPUT_DATA_BUFFER result{};
             DWORD status = 0;
             const HRESULT produced = decoder_->ProcessOutput(0, 1, &result, &status);
@@ -271,6 +284,7 @@ private:
     }
 
     bool decode(QueuedFrame frame) {
+        setStage(PC_SCREEN_DECODER_PROCESS_INPUT);
         ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(frame.bytes.size()), &buffer)))
             return false;
@@ -287,6 +301,7 @@ private:
 
     void run() {
         try {
+            setStage(PC_SCREEN_DECODER_INITIALIZING);
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             if (!initialize()) fail();
             else {
@@ -296,6 +311,7 @@ private:
                 }
                 condition_.notify_all();
                 while (running_) {
+                    setStage(PC_SCREEN_DECODER_WAITING);
                     QueuedFrame frame;
                     {
                         std::unique_lock lock(mutex_);
@@ -318,10 +334,12 @@ private:
             }
         } catch (...) { fail(); }
         running_ = false;
+        setStage(PC_SCREEN_DECODER_STOPPING);
         if (decoder_) decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
         decoder_.Reset();
         swap_.Reset();
         if (mediaFoundationStarted_) MFShutdown();
+        setStage(PC_SCREEN_DECODER_STOPPED);
         condition_.notify_all();
     }
 
@@ -335,6 +353,9 @@ private:
     uint64_t accepted_ = 0, decoded_ = 0, presented_ = 0;
     uint64_t droppedDecodeQueue_ = 0, decodeLatencyMicrosecondsTotal_ = 0, decodeOperations_ = 0;
     uint32_t decodedWidth_ = 0, decodedHeight_ = 0;
+    uint32_t largestAccessUnitBytes_ = 0;
+    std::atomic<uint32_t> workerStage_{PC_SCREEN_DECODER_INITIALIZING};
+    std::atomic<uint64_t> workerStageSince_{0};
     UINT presentationWidth_ = 0, presentationHeight_ = 0;
     ComPtr<ID3D11Device> d3d_;
     ComPtr<ID3D11DeviceContext> context_;

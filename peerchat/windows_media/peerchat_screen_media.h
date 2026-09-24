@@ -72,7 +72,33 @@ typedef struct pc_screen_encoder_status {
     uint64_t encoded_frames;
     uint64_t dropped_before_encode;
     uint64_t dropped_encoded_queue;
+    uint64_t capture_callback_count;
+    uint64_t last_capture_callback_age_ms;
+    uint32_t capture_callback_stage;
+    uint64_t capture_callback_stage_elapsed_ms;
+    uint32_t encoder_worker_stage;
+    uint64_t encoder_worker_stage_elapsed_ms;
+    uint32_t pending_capture_frame;
+    uint32_t encoded_queue_depth;
+    uint32_t encoder_input_ready;
+    uint32_t failed;
 } pc_screen_encoder_status;
+// Stages identify the current native operation; no per-frame content is logged.
+enum {
+    PC_SCREEN_CAPTURE_IDLE = 0, PC_SCREEN_CAPTURE_NEXT = 1,
+    PC_SCREEN_CAPTURE_COPY = 2, PC_SCREEN_CAPTURE_QUEUE = 3,
+    PC_SCREEN_CAPTURE_CREATE_TEXTURE = 4, PC_SCREEN_CAPTURE_GPU_LOCK = 5,
+    PC_SCREEN_ENCODER_INITIALIZING = 1, PC_SCREEN_ENCODER_WAITING = 2,
+    PC_SCREEN_ENCODER_CONVERT = 3, PC_SCREEN_ENCODER_INPUT = 4,
+    PC_SCREEN_ENCODER_OUTPUT = 5, PC_SCREEN_ENCODER_STOPPING = 6,
+    PC_SCREEN_ENCODER_STOPPED = 7,
+    PC_SCREEN_ENCODER_CREATE_SURFACES = 8,
+    PC_SCREEN_ENCODER_GPU_LOCK = 9,
+    PC_SCREEN_ENCODER_VIDEO_BLT = 10,
+    PC_SCREEN_ENCODER_CREATE_SAMPLE = 11,
+    PC_SCREEN_ENCODER_CREATE_COPY_TEXTURE = 12,
+    PC_SCREEN_ENCODER_COPY_CAPTURE = 13
+};
 PC_SCREEN_API int __cdecl pc_screen_encoder_status_get(pc_screen_encoder* encoder,
     pc_screen_encoder_status* status);
 
@@ -97,7 +123,24 @@ typedef struct pc_screen_decoder_status {
     uint64_t dropped_decode_queue;
     uint64_t decode_latency_microseconds_total;
     uint64_t decode_operations;
+    uint32_t queue_depth;
+    uint32_t worker_stage;
+    uint64_t worker_stage_elapsed_ms;
+    uint32_t largest_access_unit_bytes;
 } pc_screen_decoder_status;
+
+// A snapshot of the decoder worker, not a separate recovery or lifecycle owner.
+enum {
+    PC_SCREEN_DECODER_INITIALIZING = 1,
+    PC_SCREEN_DECODER_WAITING = 2,
+    PC_SCREEN_DECODER_PROCESS_INPUT = 3,
+    PC_SCREEN_DECODER_PROCESS_OUTPUT = 4,
+    PC_SCREEN_DECODER_PRESENT_SETUP = 5,
+    PC_SCREEN_DECODER_PRESENT_BLT = 6,
+    PC_SCREEN_DECODER_PRESENT_SWAP = 7,
+    PC_SCREEN_DECODER_STOPPING = 8,
+    PC_SCREEN_DECODER_STOPPED = 9
+};
 
 // Copies one complete Annex-B access unit into a bounded decoder queue. A full
 // queue returns 0; the caller owns the resulting keyframe/recovery decision.

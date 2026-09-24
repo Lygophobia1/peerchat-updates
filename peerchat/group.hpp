@@ -53,5 +53,5 @@ std::string newGroupId();
 void signGroupEvent(GroupEvent& event,const Profile& device);
 bool verifyGroupEventSignature(const GroupEvent& event,const Blob& publicKey);
 Blob encodeGroupEvent(const GroupEvent& event);
-GroupEvent decodeGroupEvent(const Blob& packet);
+GroupEvent decodeGroupEvent(const Blob& packet,bool enforceChatLimit=false,bool* oversizedMessage=nullptr);
 }
