@@ -125,6 +125,16 @@ If TLS presents a different identity, the client shows one explicit verification
 expected identity, presented identity, and connection generation. Acceptance persists the new
 local trust; rejection suppresses repeats for that attempt only.
 
+For an authenticated, established account friendship, the first device identity may be pinned
+without a fingerprint dialog only through the native restricted
+`PinInitialAuthenticatedFriendIdentity` operation. The desktop may request it but is not its
+security authority: the core requires a current authenticated profile/friend snapshot, the
+snapshot's exact expected Peer ID, the current connection attempt and snapshot generation, a
+matching presented TLS Peer ID, a public-key-to-Peer-ID match, and no existing, historical,
+mismatched, or quarantined pin. Pending friendships, stale generations, changed identities, and
+ambiguous state fail closed into the existing explicit verification flow. The fingerprint remains
+available under Security & Connection. This never overwrites a manually verified legacy contact.
+
 ## Profile bootstrap and lifecycle
 
 Normal startup reads `%LOCALAPPDATA%\PeerChat\profiles.json`, shows profile cards, and resolves the

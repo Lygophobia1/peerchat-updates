@@ -86,6 +86,8 @@ public class DesktopApplication {
     readonly HashSet<string> trustPrompted=new HashSet<string>(StringComparer.Ordinal);
     readonly HashSet<string> trustSuppressed=new HashSet<string>(StringComparer.Ordinal);
     readonly ConnectionAttemptTracker connectionAttempts=new ConnectionAttemptTracker();
+    ulong authenticatedFriendSnapshotGeneration;
+    readonly HashSet<long> automaticInitialPinAttempts=new HashSet<long>();
     readonly object relayGate=new object();readonly Dictionary<ulong,RelayTransport> relayTransports=new Dictionary<ulong,RelayTransport>();
     string lastPublicCandidate="Unavailable",lastPublicCandidateSource="Unavailable",lastObservedAddressClassification="Unavailable";
     string shareHost=DefaultReachableHost(),networkFingerprint="";ulong networkGeneration=1;bool shareHostManuallyConfigured;
@@ -278,7 +280,27 @@ public class DesktopApplication {
                 if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online&&scheduled.SessionRevision==0){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);}
                 if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);}
                 if(e.kind==18)StartRelay(e);
-                if(e.kind==2){var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId))e.text="Peer identity changed for "+identityConversation.Name+". Previously verified "+identityConversation.PreviousVerifiedPeerId+"; current device "+e.peer+". Explicit verification is required.";string failure=identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId)?"Peer identity changed":"Identity verification required";connectionAttempts.Update(e,identityConversation,"TLS identity mismatch","Verification required",failure);RecordConnection("trust",identityConversation,failure,e);string key=(e.expected??"")+"|"+(e.peer??"")+"|"+e.attempt;if(!trustPrompted.Contains(key)&&!trustSuppressed.Contains(key)){trustPrompted.Add(key);trustRequests.Enqueue(Tuple.Create(e,key));}TraceUi("Identity diagnostics: expected Peer ID="+(String.IsNullOrEmpty(e.expected)?"unspecified":e.expected)+"; presented Peer ID="+(e.peer??"unknown")+"; attempt="+e.attempt);}
+                if(e.kind==2){
+                    var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);
+                    bool previouslyPinned=identityConversation!=null&&!String.IsNullOrEmpty(identityConversation.PreviousVerifiedPeerId);
+                    bool presentedMismatch=!String.IsNullOrEmpty(e.expected)&&!String.IsNullOrEmpty(e.peer)&&!String.Equals(e.expected,e.peer,StringComparison.Ordinal);
+                    bool initialPinRejected=(e.text??"").StartsWith("Initial automatic device pinning was rejected",StringComparison.Ordinal);
+                    // This is deliberately only a request. The core independently validates the
+                    // authenticated friendship snapshot, session attempt, key hash and pin state.
+                    if(!previouslyPinned&&!presentedMismatch&&!initialPinRejected&&e.attempt>0&&automaticInitialPinAttempts.Add(e.attempt)&&
+                       core.PinInitialAuthenticatedFriendIdentity(e.peer,(ulong)e.attempt,authenticatedFriendSnapshotGeneration)){
+                        connectionAttempts.Update(e,identityConversation,"Authenticating initial friend device","Initial pin requested",null);
+                        RecordConnection("initial-identity-pin",identityConversation,"native core initial authenticated-friend pin requested",e);
+                        TraceUi("Initial authenticated friend identity pin requested for current attempt="+e.attempt);
+                        continue;
+                    }
+                    if(previouslyPinned)e.text="Peer identity changed for "+identityConversation.Name+". Previously verified "+identityConversation.PreviousVerifiedPeerId+"; current device "+e.peer+". Explicit verification is required.";
+                    string failure=previouslyPinned?"Peer identity changed":"Identity verification required";
+                    connectionAttempts.Update(e,identityConversation,"TLS identity mismatch","Verification required",failure);RecordConnection("trust",identityConversation,failure,e);
+                    string key=(e.expected??"")+"|"+(e.peer??"")+"|"+e.attempt;
+                    if(!trustPrompted.Contains(key)&&!trustSuppressed.Contains(key)){trustPrompted.Add(key);trustRequests.Enqueue(Tuple.Create(e,key));}
+                    TraceUi("Identity diagnostics: expected Peer ID="+(String.IsNullOrEmpty(e.expected)?"unspecified":e.expected)+"; presented Peer ID="+(e.peer??"unknown")+"; attempt="+e.attempt);
+                }
                 if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){voiceAudioError=(e.text??"").Substring("Voice audio device error:".Length).Trim();latestVoiceAudioError=voiceAudioError;var voiceConversation=model.FindByPeer(e.peer);RecordConnection("voice-audio",voiceConversation,voiceAudioError,e);model.Status="Voice audio unavailable · "+voiceAudioError;RefreshVoiceUi();}
                  else if(e.kind==8){string failure=ConnectionFailureSummary(e.text);var failed=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??(String.IsNullOrEmpty(e.expected)&&String.IsNullOrEmpty(e.peer)?model.Selected:null);connectionAttempts.Update(e,failed,e.text??"Failed",null,failure);RecordConnection("failure",failed,failure,e);}
                 if(e.kind==3&&!model.Groups){var connected=model.FindByPeer(e.expected)??model.FindByPeer(e.peer)??model.Get(e.peer);connectionAttempts.Update(e,connected,"Ready","Verified","None");RecordConnection("connected",connected,"TCP and TLS authenticated; identity verified",e);model.Selected=connected;RequestConversationHistory(model.Selected);ShowConversation();}
@@ -1148,6 +1170,9 @@ public class DesktopApplication {
 			signedOut.StopEventChannel();
 		}
 		discovery = null;
+		authenticatedFriendSnapshotGeneration++;
+		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
+		automaticInitialPinAttempts.Clear();
 		StopRelays();
 		foreach(var friend in knownFriends){var conversation=model.FindByPeer(friend.PublicIdentity);if(conversation!=null)ConnectFriendCandidate(friend,conversation,false,"account signed out");}
 		discoveryRestored = true;
@@ -1512,6 +1537,8 @@ public class DesktopApplication {
 			friendRequestStates[item3.AccountId] = "Request Sent";
 		}
 		conversationIndex.Reconcile(state.Friends);
+		authenticatedFriendSnapshotGeneration++;
+		core.SetAuthenticatedFriends(discovery == null ? 0 : discovery.AccountId, authenticatedFriendSnapshotGeneration, conversationIndex.Records.Where(binding => binding.ActiveFriend));
 		HashSet<long> hashSet = new HashSet<long>();
 		foreach (DiscoverySearchResult item in state.Friends)
 		{

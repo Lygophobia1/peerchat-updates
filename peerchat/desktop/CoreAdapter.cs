@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
@@ -25,6 +26,8 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route_v2(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes,ulong expectedNetworkGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr handle,ulong generation,string fingerprint);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_candidates(IntPtr handle,string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,int relay,ulong generation,int force);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_friends(IntPtr handle,ulong localAccount,ulong generation,string encoded);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_pin_initial_authenticated_friend_identity(IntPtr handle,string peer,ulong attempt,ulong generation);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr handle,ulong attempt,int incoming);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_receive(IntPtr handle,ulong attempt,byte[] bytes,uint length);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern void ui_relay_closed(IntPtr handle,ulong attempt,string reason);
@@ -87,6 +90,12 @@ public sealed class CoreAdapter : IDisposable {
     public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false,ulong expectedNetworkGeneration=0){if(!String.IsNullOrEmpty(peer))ui_invalidate_route_v2(handle,peer,staleHost??"",stalePort,allRoutes?1:0,expectedNetworkGeneration);}
     public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}
     public void UpdateCandidates(string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,bool relay,ulong generation,bool force=false){ui_candidates(handle,peer,lanHost??"",lanPort,publicHost??"",publicPort,relay?1:0,generation,force?1:0);}
+    // This is a profile-local projection of the authenticated account friendship snapshot. The
+    // native core checks it again before allowing the restricted initial identity pin operation.
+    public bool SetAuthenticatedFriends(long localAccount,ulong generation,IEnumerable<FriendConversationBinding> friends){
+        if(localAccount<0)return false;var rows=new List<string>();foreach(var item in friends??Enumerable.Empty<FriendConversationBinding>()){if(item==null||item.AccountId<=0||String.IsNullOrEmpty(item.CurrentPeerId))continue;var peers=(item.KnownPeerIds??new List<string>()).Where(value=>!String.IsNullOrEmpty(value)&&value.IndexOfAny(new[]{'|',',','\r','\n'})<0).Distinct(StringComparer.Ordinal);rows.Add(item.AccountId+"|"+item.CurrentPeerId+"|"+String.Join(",",peers));}return ui_authenticated_friends(handle,(ulong)localAccount,generation,String.Join("\n",rows))!=0;
+    }
+    public bool PinInitialAuthenticatedFriendIdentity(string peer,ulong attempt,ulong generation){return !String.IsNullOrEmpty(peer)&&attempt>0&&generation>0&&ui_pin_initial_authenticated_friend_identity(handle,peer,attempt,generation)!=0;}
     public bool RelayReady(ulong attempt,bool incoming){return ui_relay_ready(handle,attempt,incoming?1:0)!=0;}
     public bool RelayReceive(ulong attempt,byte[] bytes,int length){return bytes!=null&&length>0&&ui_relay_receive(handle,attempt,bytes,(uint)length)!=0;}
     public void RelayClosed(ulong attempt,string reason){ui_relay_closed(handle,attempt,reason??"Relay closed");}

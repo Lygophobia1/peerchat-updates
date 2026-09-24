@@ -5,6 +5,14 @@
 #include <memory>
 
 namespace peerchat {
+// A profile-scoped projection of the authenticated account/friend snapshot.
+// It authorizes only the narrow initial-device TOFU transition below; it is
+// never a substitute for the peer TLS certificate or Peer ID check.
+struct AuthenticatedFriend {
+    std::uint64_t accountId = 0;
+    std::string expectedPeerId;
+    std::vector<std::string> knownPeerIds;
+};
 struct NodeEvent {
     enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare };
     Kind kind=Kind::Error;
@@ -54,6 +62,10 @@ public:
     void updateCandidates(const std::string& peerId,const std::wstring& lanHost,std::uint16_t lanPort,
                           const std::wstring& publicHost,std::uint16_t publicPort,bool relayAvailable,
                           std::uint64_t networkGeneration,bool forceImmediate=false);
+    void replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,
+                                     std::vector<AuthenticatedFriend> friends);
+    bool pinInitialAuthenticatedFriendIdentity(const std::string& peerId,std::uint64_t attemptId,
+                                              std::uint64_t friendSnapshotGeneration);
     bool relayReady(std::uint64_t attemptId,bool incoming);
     bool relayReceive(std::uint64_t attemptId,const unsigned char* bytes,std::size_t length);
     void relayClosed(std::uint64_t attemptId,const std::wstring& reason);

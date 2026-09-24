@@ -185,6 +185,12 @@ encryption-regression evidence remains open; no DPAPI/encryption behavior was we
   Explicit port overrides remain strict. Migration/backup/reset/restore retain isolation and ciphertext.
 - Stable social DM conversations reconcile current/historical verified device histories in place.
   Device changes still require explicit trust; account association never silently grants device trust.
+- First connection for a current authenticated, established friend can now request a narrowly
+  core-authorized initial device pin without the ordinary fingerprint dialog. The core verifies the
+  exact expected/presented Peer ID, TLS public-key hash, current attempt/snapshot generation and
+  absence of any historical/mismatched/quarantined pin; pending, stale and changed identities remain
+  on explicit review. The native node regression covers initial pinning, accepted reconnects and
+  pending/stale-account rejection. Physical desktop validation remains pending.
 - Account/discovery/friend persistence and authorized candidate exchange. Direct mutual-TLS P2P,
   logical message ordering, delivery ACKs, encrypted offline outbox and duplicate suppression.
 - DM/group history presentation pages 100 newest messages, starts at the newest end, loads older pages

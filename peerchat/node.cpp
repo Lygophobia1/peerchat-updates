@@ -78,13 +78,16 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::shared_ptr<std::promise<std::wstring>> response;};
+    enum class Action { Connect,Candidates,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
     std::unique_ptr<delivery::DeliveryManager> deliveries;
     std::map<std::string,Contact> contacts;
+    struct AuthenticatedFriendState { std::uint64_t accountId=0; std::set<std::string> knownPeerIds; };
+    std::uint64_t authenticatedAccountId=0,authenticatedFriendSnapshotGeneration=0;
+    std::map<std::string,AuthenticatedFriendState> authenticatedFriends;
     std::map<std::string,GroupLedger> groups;
     GroupAccount groupAccount;
     std::vector<std::unique_ptr<Connection>> connections;
@@ -655,6 +658,57 @@ struct Node::Impl {
                 auto contact=contacts.find(command.peer);if(contact!=contacts.end()&&!command.text.empty()&&command.port){auto& endpoints=contact->second.endpoints;endpoints.erase(std::remove_if(endpoints.begin(),endpoints.end(),[&](const Endpoint& endpoint){return endpoint.host==command.text&&endpoint.port==command.port;}),endpoints.end());store->saveContact(contact->second);}auto activeCall=calls.active();if(decision.activeWinnerCancelled&&activeCall&&calls.peer()==command.peer){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::NetworkContext){bool changed=networkGeneration&&command.accountId>networkGeneration;bool screenNetworkChanged=changed&&networkFingerprint!=command.text;networkGeneration=command.accountId;networkFingerprint=command.text;if(sessionTransports)sessionTransports->observeNetwork(sessionEpoch,networkGeneration);if(changed&&calls.active()&&calls.active()->state==calls::State::Connected)interruptVoiceMedia(L"Network changed");if(screenNetworkChanged&&screenShares.active())interruptScreen(L"Network changed · reconnecting screen media");}
+            else if(command.action==Action::AuthenticatedFriends){
+                authenticatedAccountId=command.accountId;
+                authenticatedFriendSnapshotGeneration=command.sourceHandle;
+                authenticatedFriends.clear();
+                if(!authenticatedAccountId) continue;
+                for(const auto& value:command.friends){
+                    if(!value.accountId||!protocol::id(value.expectedPeerId)) continue;
+                    AuthenticatedFriendState state;state.accountId=value.accountId;
+                    state.knownPeerIds.insert(value.expectedPeerId);
+                    for(const auto& peer:value.knownPeerIds)if(protocol::id(peer))state.knownPeerIds.insert(peer);
+                    authenticatedFriends.emplace(value.expectedPeerId,std::move(state));
+                }
+            }
+            else if(command.action==Action::PinInitialAuthenticatedFriendIdentity){
+                Connection* connection=nullptr;
+                for(auto& value:connections)if(!value->dead&&value->attemptId==command.sourceHandle){connection=value.get();break;}
+                auto reject=[&](const std::wstring& reason){
+                    if(!connection)return;
+                    NodeEvent event=connectionEvent(NodeEvent::Kind::TrustRequired,reason,*connection,connection->peerId);
+                    event.contacts.push_back({connection->peerId,connection->name,connection->tls?connection->tls->remotePublicKey():Blob{},connection->relay?std::vector<Endpoint>{}:std::vector<Endpoint>{{connection->host,connection->port}},false});
+                    emit(std::move(event));
+                };
+                if(!connection||!connection->hello||connection->approved||connection->identityMismatch||
+                   command.peer.empty()||connection->peerId!=command.peer||
+                   (!connection->expected.empty()&&connection->expected!=connection->peerId)||
+                   command.generation!=authenticatedFriendSnapshotGeneration||
+                   !connection->tls||Storage::publicKeyId(connection->tls->remotePublicKey())!=connection->peerId){
+                    reject(L"Initial automatic device pinning was rejected because the connection identity is stale or mismatched. Verify this device explicitly.");
+                    continue;
+                }
+                auto friendState=authenticatedFriends.find(connection->peerId);
+                if(!authenticatedAccountId||friendState==authenticatedFriends.end()||friendState->second.accountId==0){
+                    reject(L"Initial automatic device pinning requires a current authenticated friendship. Verify this device explicitly.");
+                    continue;
+                }
+                bool historicalPin=false,storedKeyMismatch=false;
+                for(const auto& contact:contacts){
+                    if(friendState->second.knownPeerIds.count(contact.first)&&contact.second.verified){historicalPin=true;break;}
+                }
+                auto known=contacts.find(connection->peerId);
+                if(known!=contacts.end()&&!known->second.publicKey.empty()&&known->second.publicKey!=connection->tls->remotePublicKey())storedKeyMismatch=true;
+                if(historicalPin||storedKeyMismatch){
+                    reject(historicalPin?L"A prior device identity is already pinned for this friend. Verify the changed device explicitly.":L"The stored device key does not match the presented Peer ID. Verify this device explicitly.");
+                    continue;
+                }
+                Contact contact=known==contacts.end()?Contact{connection->peerId,connection->name,connection->tls->remotePublicKey(),{},true}:known->second;
+                contact.name=connection->name;contact.publicKey=connection->tls->remotePublicKey();contact.verified=true;
+                if(!connection->relay){auto endpoint=std::find_if(contact.endpoints.begin(),contact.endpoints.end(),[&](const Endpoint& value){return value.host==connection->host&&value.port==connection->port;});if(endpoint==contact.endpoints.end()&&contact.endpoints.size()<128)contact.endpoints.push_back({connection->host,connection->port});}
+                store->saveContact(contact);contacts[connection->peerId]=contact;publishContacts();approve(*connection);
+                emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Initial authenticated friend device identity pinned automatically",*connection,connection->peerId));
+            }
             else if(command.action==Action::SaveContact){
                 auto& c=command.contact;protocol::check(protocol::id(c.peerId)&&!c.name.empty()&&c.name.size()<=64&&!c.endpoints.empty());
                 for(const auto& e:c.endpoints)protocol::check(!e.host.empty()&&e.host.size()<=253&&e.port);
@@ -834,6 +888,8 @@ void Node::connect(const std::wstring& host,std::uint16_t port,const std::string
 void Node::invalidateRoute(const std::string& expected,const std::wstring& staleHost,std::uint16_t stalePort,bool allRoutes,std::uint64_t expectedNetworkGeneration){if(expected.empty())return;Impl::Command c{};c.action=Impl::Action::InvalidateRoute;c.peer=expected;c.text=staleHost;c.port=stalePort;c.accepted=allRoutes;c.accountId=expectedNetworkGeneration;impl_->command(std::move(c));}
 void Node::setNetworkContext(std::uint64_t generation,const std::wstring& fingerprint){Impl::Command c{};c.action=Impl::Action::NetworkContext;c.accountId=generation;c.text=fingerprint;impl_->command(std::move(c));}
 void Node::updateCandidates(const std::string& peer,const std::wstring& lanHost,std::uint16_t lanPort,const std::wstring& publicHost,std::uint16_t publicPort,bool relayAvailable,std::uint64_t generation,bool forceImmediate){if(peer.empty())return;Impl::Command c{};c.action=Impl::Action::Candidates;c.peer=peer;c.text=lanHost;c.port=lanPort;c.name=publicHost;c.before=publicPort;c.accepted=relayAvailable;c.accountId=generation;c.forceImmediate=forceImmediate;impl_->command(std::move(c));}
+void Node::replaceAuthenticatedFriends(std::uint64_t localAccountId,std::uint64_t snapshotGeneration,std::vector<AuthenticatedFriend> friends){Impl::Command c{};c.action=Impl::Action::AuthenticatedFriends;c.accountId=localAccountId;c.sourceHandle=snapshotGeneration;c.friends=std::move(friends);impl_->command(std::move(c));}
+bool Node::pinInitialAuthenticatedFriendIdentity(const std::string& peer,std::uint64_t attemptId,std::uint64_t friendSnapshotGeneration){if(!protocol::id(peer)||!attemptId||!friendSnapshotGeneration)return false;Impl::Command c{};c.action=Impl::Action::PinInitialAuthenticatedFriendIdentity;c.peer=peer;c.sourceHandle=attemptId;c.generation=friendSnapshotGeneration;return impl_->command(std::move(c));}
 bool Node::relayReady(std::uint64_t attempt,bool incoming){Impl::Command c{};c.action=Impl::Action::RelayReady;c.accountId=attempt;c.accepted=incoming;return impl_->command(std::move(c));}
 bool Node::relayReceive(std::uint64_t attempt,const unsigned char* bytes,std::size_t length){if(!bytes||!length||length>64*1024)return false;Impl::Command c{};c.action=Impl::Action::RelayReceive;c.accountId=attempt;c.bytes.assign(bytes,bytes+length);return impl_->command(std::move(c));}
 void Node::relayClosed(std::uint64_t attempt,const std::wstring& reason){Impl::Command c{};c.action=Impl::Action::RelayClosed;c.accountId=attempt;c.text=reason;impl_->command(std::move(c));}
