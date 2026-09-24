@@ -145,6 +145,12 @@ changes only discovery presence representation; scoped mutual-consent candidate 
 standby direct probing/promotion, and the WPF preference are subsequent checkpoints. Voice and
 screen-share ICE candidate exchange remain separate media systems and are unchanged.
 
+The discovery-only consent checkpoint now creates short-lived, memory-only reliable-P2P probe
+authorizations. It exchanges no endpoint until both exact authenticated friend devices consent and
+then submit a scoped candidate. It has no native transport consumer yet: relay remains the winner,
+and cancellation/expiry/logout/friendship invalidation simply deletes the authorization. Native
+standby probing and promotion remain a following checkpoint.
+
 ## Profile bootstrap and lifecycle
 
 Normal startup reads `%LOCALAPPDATA%\PeerChat\profiles.json`, shows profile cards, and resolves the

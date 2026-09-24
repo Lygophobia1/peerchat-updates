@@ -22,6 +22,14 @@ that omit the capability flag retain direct-presence compatibility. The focused 
 test passed. Scoped mutual consent, temporary endpoint exchange, standby direct transport, settings
 and UI are not implemented in this checkpoint. Voice/screen-share ICE remains unchanged.
 
+**Reliable-control privacy checkpoint 2:** authenticated discovery now owns memory-only, 60-second
+P2P probe requests bound to exact friend accounts/devices. Request/accept/decline events contain no
+endpoint; only mutual consent plus two exact candidate submissions releases the temporary opposite
+endpoint. Logout, block, friendship removal, cancellation, expiry and invalid/replayed IDs fail
+closed or remove the authorization. The focused discovery test covers consent, withheld candidates,
+third-party denial and cancelled replay. Native standby probing/promotion and WPF controls remain
+unimplemented; the relay winner is unaffected.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256

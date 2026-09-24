@@ -170,6 +170,21 @@ STUN/TURN coordination is separate from social discovery. TURN remains unimpleme
 handoff proposals, arbitration, promotion and channel authority must remain authenticated peer/client
 operations, not discovery authority. No handoff wire messages or new server operations are added here.
 
+## Scoped reliable P2P authorization
+
+`p2p_request` and `p2p_consent` use the authenticated discovery event channel, not the opaque inner
+peer-TLS relay stream. A request ID is a random 256-bit base64url token, memory-only, bound to the
+initiator/recipient account and exact registered device identities, purpose `reliable P2P probe`,
+and a 60-second expiry. The server requires an established friendship and replaces a duplicate
+request for the same exact pair.
+
+The recipient receives the request without any endpoint. Only after explicit acceptance may either
+exact participant submit one temporary `p2p_candidates` endpoint. The server releases the opposite
+endpoint only after both submissions. Wrong account/device/token, pre-consent submission, expiry,
+friendship removal, blocking, logout, cancellation, and replay fail closed. These endpoints never
+enter presence, `friend_state`, ordinary events, or persistent server storage. Consent is route
+permission only; subsequent native direct TLS must still pass Peer-ID and trust checks.
+
 ## Security and privacy
 
 The service never receives private device keys, plaintext chat messages, encrypted history,
