@@ -1,7 +1,12 @@
 #include "voice_media.hpp"
+#define RTC_STATIC
+#include <rtc/rtc.h>
 #include <chrono>
+#include <atomic>
+#include <cstdlib>
 #include <cwchar>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -11,10 +16,52 @@ namespace {
 using namespace std::chrono_literals;
 void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 bool countAtLeast(const std::wstring& diagnostics,const wchar_t* key,std::uint64_t minimum){auto start=diagnostics.find(key);if(start==std::wstring::npos)return false;start+=std::wcslen(key);auto end=diagnostics.find(L'\n',start);return std::stoull(diagnostics.substr(start,end-start))>=minimum;}
+
+struct TurnPeer {
+    int pc=-1,dc=-1,track=-1,remoteTrack=-1;
+    TurnPeer* remote=nullptr;
+    std::atomic<bool> connected{false},dataOpen{false};
+    std::atomic<unsigned> dataMessages{0},mediaPackets{0};
+    std::mutex gate;
+};
+void turnOpen(int id,void* value){auto* peer=static_cast<TurnPeer*>(value);if(peer&&id==peer->dc)peer->dataOpen=true;}
+void turnData(int,const char*,int,void* value){if(value)++static_cast<TurnPeer*>(value)->dataMessages;}
+void turnMedia(int,const char*,int,void* value){if(value)++static_cast<TurnPeer*>(value)->mediaPackets;}
+void configureTurnData(TurnPeer& peer,int dc){peer.dc=dc;rtcSetUserPointer(dc,&peer);rtcSetOpenCallback(dc,turnOpen);rtcSetMessageCallback(dc,turnData);}
+void turnDataChannel(int,int dc,void* value){if(value)configureTurnData(*static_cast<TurnPeer*>(value),dc);}
+void turnTrack(int,int track,void* value){if(!value)return;auto& peer=*static_cast<TurnPeer*>(value);peer.remoteTrack=track;rtcSetUserPointer(track,&peer);rtcSetMessageCallback(track,turnMedia);}
+void turnState(int,rtcState state,void* value){if(value&&state==RTC_CONNECTED)static_cast<TurnPeer*>(value)->connected=true;}
+void turnDescription(int,const char* sdp,const char* type,void* value){auto* peer=static_cast<TurnPeer*>(value);if(!peer||!peer->remote||!sdp||!type)return;if(std::string(type)=="offer"){rtcSetRemoteDescription(peer->remote->pc,sdp,"offer");rtcSetLocalDescription(peer->remote->pc,"answer");}else if(std::string(type)=="answer")rtcSetRemoteDescription(peer->remote->pc,sdp,"answer");}
+void turnCandidate(int,const char* candidate,const char* mid,void* value){auto* peer=static_cast<TurnPeer*>(value);if(peer&&peer->remote&&candidate)rtcAddRemoteCandidate(peer->remote->pc,candidate,mid?mid:"0");}
+void destroyTurnPeer(TurnPeer& peer){if(peer.pc>=0){rtcSetLocalDescriptionCallback(peer.pc,nullptr);rtcSetLocalCandidateCallback(peer.pc,nullptr);rtcSetStateChangeCallback(peer.pc,nullptr);rtcSetDataChannelCallback(peer.pc,nullptr);rtcSetTrackCallback(peer.pc,nullptr);}for(int id:{peer.dc,peer.track,peer.remoteTrack})if(id>=0){rtcSetOpenCallback(id,nullptr);rtcSetMessageCallback(id,nullptr);rtcSetUserPointer(id,nullptr);}if(peer.dc>=0)rtcDeleteDataChannel(peer.dc);if(peer.remoteTrack>=0&&peer.remoteTrack!=peer.track)rtcDeleteTrack(peer.remoteTrack);if(peer.track>=0)rtcDeleteTrack(peer.track);if(peer.pc>=0){rtcClosePeerConnection(peer.pc);rtcDeletePeerConnection(peer.pc);}peer.pc=peer.dc=peer.track=peer.remoteTrack=-1;peer.remote=nullptr;}
+bool selectedRelayPair(int pc){char local[512]{},remote[512]{};return rtcGetSelectedCandidatePair(pc,local,sizeof(local),remote,sizeof(remote))>=0&&std::string(local).find(" typ relay")!=std::string::npos&&std::string(remote).find(" typ relay")!=std::string::npos;}
+bool validTurnUdpUri(const char* uri){if(!uri)return false;std::string value(uri);if(value.rfind("turn:",0)!=0||value.find_first_of(" \t\r\n")!=std::string::npos)return false;auto at=value.rfind('@'),query=value.find('?');if(at==std::string::npos||at<=5||query==std::string::npos||query<=at+1||value.substr(query)!="?transport=udp")return false;auto authority=value.substr(at+1,query-at-1);auto colon=authority.rfind(':');if(colon==std::string::npos||colon==0||colon+1>=authority.size())return false;for(char digit:authority.substr(colon+1))if(digit<'0'||digit>'9')return false;int port=0;try{port=std::stoi(authority.substr(colon+1));}catch(...){return false;}return port>0&&port<=65535;}
+void runConfiguredTurnProbe(){
+    const char* uri=std::getenv("PEERCHAT_TURN_TEST_URI");
+    require(uri&&*uri,"TURN infrastructure probe requires PEERCHAT_TURN_TEST_URI.");
+    require(validTurnUdpUri(uri),"PEERCHAT_TURN_TEST_URI must be a valid turn:user:password@host:port?transport=udp URI.");
+    std::cout<<"turn_probe_configuration=TURN configured; transport=udp; relay-only\n";
+    TurnPeer caller,answerer;caller.remote=&answerer;answerer.remote=&caller;
+    const char* servers[]={uri};rtcConfiguration config{};config.iceServers=servers;config.iceServersCount=1;config.certificateType=RTC_CERTIFICATE_ECDSA;config.iceTransportPolicy=RTC_TRANSPORT_POLICY_RELAY;config.disableAutoNegotiation=true;config.forceMediaTransport=true;
+    require(config.iceServers&&config.iceServersCount==1&&config.iceServers[0]==uri&&config.iceTransportPolicy==RTC_TRANSPORT_POLICY_RELAY,"TURN URI or relay-only transport policy was not installed in the tested PeerConnection configuration");
+    auto create=[&](TurnPeer& peer){peer.pc=rtcCreatePeerConnection(&config);require(peer.pc>=0,"Could not create TURN relay probe peer connection");rtcSetUserPointer(peer.pc,&peer);rtcSetLocalDescriptionCallback(peer.pc,turnDescription);rtcSetLocalCandidateCallback(peer.pc,turnCandidate);rtcSetStateChangeCallback(peer.pc,turnState);rtcSetDataChannelCallback(peer.pc,turnDataChannel);rtcSetTrackCallback(peer.pc,turnTrack);};
+    try{
+        create(caller);create(answerer);configureTurnData(caller,rtcCreateDataChannel(caller.pc,"peerchat-turn-probe"));require(caller.dc>=0,"Could not create TURN relay probe data channel");
+        rtcTrackInit track{};track.direction=RTC_DIRECTION_SENDRECV;track.codec=RTC_CODEC_OPUS;track.payloadType=111;track.ssrc=0xdecafbad;track.mid="0";track.name="PeerChat TURN probe";track.msid="peerchat";track.trackId="turn-probe";
+        caller.track=rtcAddTrackEx(caller.pc,&track);require(caller.track>=0,"Could not create TURN relay probe media track");rtcSetUserPointer(caller.track,&caller);rtcSetMessageCallback(caller.track,turnMedia);rtcPacketizerInit packetizer{};packetizer.ssrc=track.ssrc;packetizer.cname="peerchat-turn-probe";packetizer.payloadType=111;packetizer.clockRate=48000;require(rtcSetOpusPacketizer(caller.track,&packetizer)>=0&&rtcChainRtcpSrReporter(caller.track)>=0&&rtcChainRtcpReceivingSession(caller.track)>=0,"Could not configure TURN relay probe RTP packetizer");
+        require(rtcSetLocalDescription(caller.pc,"offer")>=0,"Could not start TURN relay probe offer");
+        auto deadline=std::chrono::steady_clock::now()+20s;while(std::chrono::steady_clock::now()<deadline&&!(caller.connected&&answerer.connected&&caller.dataOpen&&answerer.dataOpen))std::this_thread::sleep_for(20ms);
+        require(caller.connected&&answerer.connected&&caller.dataOpen&&answerer.dataOpen,"TURN/UDP relay probe did not establish DTLS data connectivity");require(selectedRelayPair(caller.pc)&&selectedRelayPair(answerer.pc),"TURN/UDP relay probe did not select relay candidate pairs");
+        const char data[]="peerchat-turn-data";const char media[]={0x12,0x34,0x56};require(rtcSendMessage(caller.dc,data,static_cast<int>(sizeof(data)-1))>=0,"TURN relay data send was rejected");require(rtcSendMessage(caller.track,media,static_cast<int>(sizeof(media)))>=0,"TURN relay media send was rejected");deadline=std::chrono::steady_clock::now()+5s;while(std::chrono::steady_clock::now()<deadline&&(answerer.dataMessages.load()<1||answerer.mediaPackets.load()<1))std::this_thread::sleep_for(20ms);require(answerer.dataMessages.load()>=1,"TURN relay did not carry the DTLS data probe");require(answerer.mediaPackets.load()>=1,"TURN relay did not carry the DTLS-SRTP media probe");std::cout<<"PASS: configured TURN/UDP selected relay pairs and carried DTLS data plus DTLS-SRTP media probes.\n";destroyTurnPeer(caller);destroyTurnPeer(answerer);
+    }catch(...){destroyTurnPeer(caller);destroyTurnPeer(answerer);throw;}
+}
 }
 
 int main(){
     try{
+        const char* configuredTurnUri=std::getenv("PEERCHAT_TURN_TEST_URI");
+        const char* infrastructureMode=std::getenv("PEERCHAT_TURN_INFRASTRUCTURE");
+        if((infrastructureMode&&std::string(infrastructureMode)=="1")||(configuredTurnUri&&*configuredTurnUri)){rtcInitLogger(RTC_LOG_NONE,nullptr);runConfiguredTurnProbe();return 0;}
         for(int cycle=0;cycle<3;++cycle){
         peerchat::VoiceMedia caller(-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24");
         peerchat::VoiceMedia answerer(-1,-1,static_cast<std::uint64_t>(cycle+1),"192.168.1.17/24");

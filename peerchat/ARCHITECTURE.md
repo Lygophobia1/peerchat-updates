@@ -102,6 +102,13 @@ presence, friend, or diagnostic state. The current `VoiceMedia` and `ScreenShare
 configurations remain unchanged in this checkpoint; a later shared media-ICE configuration will
 consume this boundary and explicitly choose TURN-only versus direct-media policy.
 
+The existing test-only TURN infrastructure probe is environment-gated and never consumes a profile
+setting: it accepts a local `PEERCHAT_TURN_TEST_URI`, creates fresh relay-only libdatachannel peer
+connections, and asserts `typ relay` on both selected pairs before sending bounded synthetic DTLS
+data and RTP payloads. A physical static-credential coturn proof passed. This is not a production
+static-credential path; the next physical proof must use the discovery issuer's temporary REST
+credentials after coturn is migrated to `use-auth-secret`.
+
 The WPF conversation shell keeps normal actions in the selected conversation header. DMs expose a
 compact Call action; an active call expands that header into a slim state/duration/mute/deafen/end
 strip. Engineering call details remain in that call area and load only when the user opens Details

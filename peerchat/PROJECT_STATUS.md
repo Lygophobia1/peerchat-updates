@@ -87,6 +87,15 @@ unique issuance/rate limiting, no plaintext-secret output, and existing discover
 regressions. Voice and screen sharing still use their accepted direct ICE configuration; no media
 route, capture, codec, call, or reliable-transport behavior changed here.
 
+**TURN infrastructure proof:** the physical coturn host at `173.225.14.37:3478/UDP` accepted a
+local, non-committed static-credential test URI through pinned libdatachannel 0.24.3/libjuice.
+The environment-gated probe forced `RTC_TRANSPORT_POLICY_RELAY`, produced selected `typ relay`
+pairs, established DTLS, and carried bounded synthetic data plus RTP payloads. It does not use the
+microphone/Opus-resampler path and never logs the static URI or credentials. This proves TURN/UDP
+compatibility only; the Pi still needs migration to the existing `37049f0` REST-secret contract,
+followed by a physical test using discovery-issued temporary credentials. Voice and screen-share
+production ICE configurations remain unchanged.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256
