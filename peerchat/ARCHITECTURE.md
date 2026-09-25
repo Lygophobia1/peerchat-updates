@@ -103,11 +103,13 @@ configurations remain unchanged in this checkpoint; a later shared media-ICE con
 consume this boundary and explicitly choose TURN-only versus direct-media policy.
 
 The existing test-only TURN infrastructure probe is environment-gated and never consumes a profile
-setting: it accepts a local `PEERCHAT_TURN_TEST_URI`, creates fresh relay-only libdatachannel peer
-connections, and asserts `typ relay` on both selected pairs before sending bounded synthetic DTLS
-data and RTP payloads. A physical static-credential coturn proof passed. This is not a production
-static-credential path; the next physical proof must use the discovery issuer's temporary REST
-credentials after coturn is migrated to `use-auth-secret`.
+setting. The physical coturn deployment now accepts discovery-issued temporary REST credentials;
+the probe builds the authenticated URI only in a child-process environment, forces relay-only
+libdatachannel peer connections, asserts `typ relay` on both selected pairs, and sends bounded
+synthetic DTLS data and RTP payloads. It also rejects invalid, expired, unauthenticated, and
+logged-out credentials before a fresh credential proves reissue. The authenticated `session_info`
+response exposes only the caller's registered device identity, allowing this proof without a UI
+copy path. No static credential is part of the client contract.
 
 The WPF conversation shell keeps normal actions in the selected conversation header. DMs expose a
 compact Call action; an active call expands that header into a slim state/duration/mute/deafen/end

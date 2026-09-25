@@ -34,7 +34,8 @@ another profile authenticates. The server never receives the local profile ID.
 - `register`: `username`, `password`, `publicIdentity`; returns session token, account ID,
   normalized username, and lifetime.
 - `login`: `username`, `password`; returns the same session fields.
-- `session_info`: authenticated account ID and username for restoring older saved sessions.
+- `session_info`: authenticated account ID, username, and only that account's registered primary
+  device `publicIdentity` for session restoration and authenticated device-bound operations.
 - `logout`: revokes only the presented session token; other profile/device sessions remain valid.
 - `media_turn_credentials`: returns one ephemeral TURN/UDP credential only to an authenticated
   account session for its registered `publicIdentity`. The response contains public TURN host/UDP
@@ -170,10 +171,10 @@ implementation are described in ARCHITECTURE.md; they are not discovery protocol
 Future ICE/TURN signaling may use coordination infrastructure, but it must remain authenticated to
 the same account/device trust relationship and must not make the server a call authority or content
 archive.
-STUN/TURN coordination is separate from social discovery. The server can now issue standard
-short-lived coturn REST credentials for TURN/UDP, but current voice and screen media do not yet
-request or consume them. Issuance is authenticated, account/device-bound, rate-limited, and
-memory-only; it neither makes discovery a media relay nor changes the current direct ICE behavior.
+STUN/TURN coordination is separate from social discovery. The server now issues standard
+short-lived coturn REST credentials for TURN/UDP, and the physical relay-only credential proof has
+passed. Issuance is authenticated, account/device-bound, rate-limited, and memory-only; it neither
+makes discovery a media relay nor changes the current direct ICE behavior until media integration.
 Future peer
 handoff proposals, arbitration, promotion and channel authority must remain authenticated peer/client
 operations, not discovery authority. No handoff wire messages or new server operations are added here.

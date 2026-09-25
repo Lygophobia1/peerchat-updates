@@ -1,4 +1,4 @@
-param([switch]$TurnInfrastructure)
+param([switch]$TurnInfrastructure,[switch]$TurnInfrastructureBuildOnly)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -7,10 +7,11 @@ try {
     $media=@('-Ibuild\native\install\include','voice_media.cpp','audio.cpp','-Lbuild\native\install\lib','-ldatachannel','-lopus','-lsrtp2','-ljuice','-lusrsctp','-lmbedtls','-lmbedx509','-lmbedcrypto','-leverest','-lp256m','-lssp','-lwinmm','-liphlpapi')
     $outputDirectory='build\tests\core'
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-    if($TurnInfrastructure) {
-        if([String]::IsNullOrWhiteSpace($env:PEERCHAT_TURN_TEST_URI)) { throw 'Set PEERCHAT_TURN_TEST_URI in this PowerShell session before running the TURN infrastructure probe.' }
+    if($TurnInfrastructure -or $TurnInfrastructureBuildOnly) {
+        if($TurnInfrastructure -and [String]::IsNullOrWhiteSpace($env:PEERCHAT_TURN_TEST_URI)) { throw 'Set PEERCHAT_TURN_TEST_URI in this PowerShell session before running the TURN infrastructure probe.' }
         & g++ -DPEERCHAT_TEST_VOICE_FRAMES -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_media_transport_test.cpp voice_media.cpp audio.cpp $media[0] $media[3..($media.Count-1)] -o "$outputDirectory\voice-media-transport-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
         if ($LASTEXITCODE -ne 0) { throw 'TURN infrastructure media test build failed' }
+        if($TurnInfrastructureBuildOnly) { Write-Host 'TURN infrastructure media probe built.'; return }
         $previousTurnInfrastructure=$env:PEERCHAT_TURN_INFRASTRUCTURE
         try { $env:PEERCHAT_TURN_INFRASTRUCTURE='1'; & ".\$outputDirectory\voice-media-transport-test.exe"; if ($LASTEXITCODE -ne 0) { throw 'TURN infrastructure media test failed' } }
         finally { if($null -eq $previousTurnInfrastructure){Remove-Item Env:PEERCHAT_TURN_INFRASTRUCTURE -ErrorAction SilentlyContinue}else{$env:PEERCHAT_TURN_INFRASTRUCTURE=$previousTurnInfrastructure} }

@@ -1,5 +1,21 @@
+param([switch]$PhysicalTurn)
 $ErrorActionPreference='Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
+if($PhysicalTurn) {
+    Push-Location $projectRoot
+    try {
+        & (Join-Path $projectRoot 'scripts\run-tests.ps1') -TurnInfrastructureBuildOnly
+        if($LASTEXITCODE -ne 0){throw 'TURN infrastructure probe build failed'}
+        $outputDirectory='build\tests\server'
+        New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+        $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
+        & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\server\DiscoveryIntegrationTest.cs
+        if($LASTEXITCODE -ne 0){throw 'Discovery TURN physical-proof harness build failed'}
+        & (Join-Path $projectRoot "$outputDirectory\DiscoveryIntegrationTest.exe") --physical-turn
+        if($LASTEXITCODE -ne 0){throw 'Discovery-issued TURN physical proof failed'}
+    } finally { Pop-Location }
+    return
+}
 Push-Location $projectRoot
 try {
     $outputDirectory='build\tests\server'
