@@ -748,6 +748,12 @@ Broader or uncertain changes remain open with the missing evidence.
 - **Resolved by targeted WPF smoke; included in accepted presentation — Settings navigation,
   Updates under Advanced, and sidebar version mismatch.** Navigation is selectable, Updates has its
   own page, and sidebar/About use runtime VersionInfo. No updater transport/validation changed.
+- **Open — Stage 8 candidate helper does not complete its requested destination in the current
+  Windows build host.** `scripts\package-stage8-candidate.ps1` invokes `build-desktop.ps1`, which
+  selects the legacy .NET Framework compiler. That compiler cannot compile the existing C# discard
+  assignment used by the checkpoint, so staging never runs. This is a packaging-tool/compiler
+  selection issue, not a TURN/media result. Repair it separately with a reproducible helper test;
+  do not alter the accepted media implementation to work around it.
 
 ## Deferred scope
 
