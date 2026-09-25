@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "media_telemetry.hpp"
+#include "media_ice_configuration.hpp"
 
 namespace peerchat {
 
@@ -21,7 +22,8 @@ public:
         std::string detail;
     };
 
-    VoiceMedia(int inputDevice=-1, int outputDevice=-1, std::uint64_t networkGeneration=0, std::string networkFingerprint={});
+    VoiceMedia(MediaIceConfiguration ice, int inputDevice=-1, int outputDevice=-1,
+               std::uint64_t networkGeneration=0, std::string networkFingerprint={});
     ~VoiceMedia();
     VoiceMedia(const VoiceMedia&) = delete;
     VoiceMedia& operator=(const VoiceMedia&) = delete;

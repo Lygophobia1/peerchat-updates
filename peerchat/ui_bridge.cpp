@@ -36,6 +36,14 @@ UI_API int ui_connect_ex(void* handle,const wchar_t* host,unsigned short port,co
 UI_API int ui_invalidate_route(void* handle,const wchar_t* peer,const wchar_t* staleHost,unsigned short stalePort,int allRoutes){try{static_cast<UiBridge*>(handle)->node.invalidateRoute(identity(peer),staleHost?staleHost:L"",stalePort,allRoutes!=0);return 1;}catch(...){return 0;}}
 UI_API int ui_invalidate_route_v2(void* handle,const wchar_t* peer,const wchar_t* staleHost,unsigned short stalePort,int allRoutes,unsigned long long expectedNetworkGeneration){try{static_cast<UiBridge*>(handle)->node.invalidateRoute(identity(peer),staleHost?staleHost:L"",stalePort,allRoutes!=0,expectedNetworkGeneration);return 1;}catch(...){return 0;}}
 UI_API int ui_network_context(void* handle,unsigned long long generation,const wchar_t* fingerprint){try{static_cast<UiBridge*>(handle)->node.setNetworkContext(generation,fingerprint?fingerprint:L"");return 1;}catch(...){return 0;}}
+// Credentials cross this presentation ABI only in memory.  No caller-visible
+// output or diagnostic is produced from this operation.
+UI_API int ui_media_ice_configuration(void* handle,const wchar_t* host,unsigned short port,const wchar_t* username,const wchar_t* password,long long expiry,unsigned long long profileSessionGeneration,unsigned long long discoveryGeneration,unsigned long long configurationGeneration){try{
+    peerchat::MediaIceConfiguration configuration;configuration.policy=peerchat::MediaIceConfiguration::Policy::RelayOnly;
+    configuration.host=identity(host);configuration.port=port;configuration.username=identity(username);configuration.password=identity(password);
+    configuration.expiresUtc=expiry;configuration.profileSessionGeneration=profileSessionGeneration;configuration.discoveryGeneration=discoveryGeneration;configuration.generation=configurationGeneration;
+    return static_cast<UiBridge*>(handle)->node.setMediaIceConfiguration(std::move(configuration))?1:0;
+}catch(...){return 0;}}
 UI_API int ui_candidates(void* handle,const wchar_t* peer,const wchar_t* lanHost,unsigned short lanPort,const wchar_t* publicHost,unsigned short publicPort,int relay,unsigned long long generation,int force){try{static_cast<UiBridge*>(handle)->node.updateCandidates(identity(peer),lanHost?lanHost:L"",lanPort,publicHost?publicHost:L"",publicPort,relay!=0,generation,force!=0);return 1;}catch(...){return 0;}}
 UI_API int ui_prepare_scoped_p2p_listener(void* handle,const wchar_t* peer){try{return static_cast<UiBridge*>(handle)->node.prepareScopedP2pListener(identity(peer))?1:0;}catch(...){return 0;}}
 UI_API int ui_begin_scoped_p2p(void* handle,const wchar_t* peer,const wchar_t* id,const wchar_t* host,unsigned short port,unsigned long long expiry,unsigned long long generation){try{return static_cast<UiBridge*>(handle)->node.beginScopedP2pProbe(identity(peer),identity(id),host?host:L"",port,expiry,generation)?1:0;}catch(...){return 0;}}

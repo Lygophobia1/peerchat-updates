@@ -92,6 +92,12 @@ public class DesktopApplication {
     string lastPublicCandidate="Unavailable",lastPublicCandidateSource="Unavailable",lastObservedAddressClassification="Unavailable";
     string shareHost=DefaultReachableHost(),networkFingerprint="";ulong networkGeneration=1;bool shareHostManuallyConfigured;
     DiscoveryClient discovery;
+    // Ephemeral media credentials are intentionally memory-only.  The WPF views
+    // never own them; this application orchestration boundary requests and passes
+    // them only for an authenticated profile/session.
+    MediaTurnCredentials mediaTurnCredentials;
+    ulong profileSessionGeneration=1,discoverySessionGeneration,mediaIceConfigurationGeneration;
+    bool mediaTurnRefreshInFlight;
     ProfileAccountLink accountLink;
     readonly ConnectionPreferenceStore connectionPreferenceStore; ConnectionPreferenceData connectionPreferences;
     sealed class ScopedP2pRequest { public string Id,Peer; public long AccountId,ExpiresUtc; public bool Initiated; }
@@ -227,6 +233,30 @@ public class DesktopApplication {
     // Account ID and renewable session material are DPAPI-protected inside exactly one profile.
     // The password is never retained. Legacy session files are imported only after server validation.
     void SaveDiscoverySession(){if(discovery==null||String.IsNullOrEmpty(discovery.SessionToken))return;SaveDiscoveryService(discovery.Host,discovery.Port,discovery.CertificateSha256);accountLink=accountStore.SaveSession(discovery.AccountId,discovery.Username,discovery.Host,discovery.Port,discovery.CertificateSha256,discovery.SessionToken);try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}
+    async Task<bool> EnsureMediaIceConfigurationAsync(){
+        var activeDiscovery=discovery;
+        long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if(activeDiscovery==null||String.IsNullOrEmpty(model.OwnId))return false;
+        if(mediaTurnCredentials!=null&&mediaTurnCredentials.ExpiresUtc>now+60)return true;
+        if(mediaTurnRefreshInFlight)return false;
+        mediaTurnRefreshInFlight=true;
+        try{
+            var issued=await Task.Run(()=>activeDiscovery.GetMediaTurnCredentials(model.OwnId));
+            // Account/profile or discovery session changes invalidate an in-flight result.
+            if(closing||activeDiscovery!=discovery||issued==null||issued.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+30)return false;
+            ulong next=++mediaIceConfigurationGeneration;
+            if(!core.SetMediaIceConfiguration(issued,profileSessionGeneration,discoverySessionGeneration,next))return false;
+            mediaTurnCredentials=issued;
+            return true;
+        }catch(Exception error){
+            // The exception can include remote protocol text; retain only a bounded
+            // local status and never log credential material.
+            model.Status="Media relay credentials are unavailable. Messaging remains connected.";
+            TraceUi("TURN credential request failed: "+error.GetType().Name);
+            Refresh();
+            return false;
+        }finally{mediaTurnRefreshInFlight=false;}
+    }
     static bool SessionRejected(Exception error){string value=(error.Message??"").ToLowerInvariant();return value.Contains("session_invalid")||value.Contains("different server account")||value.Contains("already linked");}
     async void RestoreDiscoverySession(){
         if(discoveryRestored||discovery!=null||String.IsNullOrEmpty(model.OwnId))return;discoveryRestored=true;accountLink=accountStore.Load();DiscoveryClient saved=null;long expectedAccount=accountLink==null?0:accountLink.AccountId;
@@ -234,7 +264,7 @@ public class DesktopApplication {
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Direct P2P":"Local profile ready · Sign in, create an account, or continue Offline / Direct P2P"):"@"+accountLink.Username+" signed out · Local history and Direct P2P remain available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
         }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Direct P2P · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
@@ -249,6 +279,8 @@ public class DesktopApplication {
             // Presence is a small authenticated heartbeat. It updates only this device's
             // presence/candidates and never fetches or rebuilds the friend snapshot.
             if(discovery!=null&&!presenceInFlight&&DateTime.UtcNow-lastPresenceUtc>=TimeSpan.FromSeconds(60))RefreshPresence();
+            if(discovery!=null&&!mediaTurnRefreshInFlight&&(model.VoiceStateCode!=0||activeScreenState!=0)&&
+                (mediaTurnCredentials==null||mediaTurnCredentials.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+60))_ = EnsureMediaIceConfigurationAsync();
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
@@ -1136,6 +1168,8 @@ public class DesktopApplication {
 			RefreshAutomaticShareHost();
 			PresenceResult presence = await Task.Run(() => candidate.ReportPresence(model.OwnId, "", 0, "", 0, false));
 			discovery = candidate;
+			discoverySessionGeneration++;
+			mediaTurnCredentials = null;
 			ApplyPresenceDiagnostics(presence);
 			core.SetGroupAccount(discovery.AccountId, discovery.Username);
 			core.LoadGroups();
@@ -1165,6 +1199,8 @@ public class DesktopApplication {
 			}
 			ClearScopedP2p(true);
 			discovery = null;
+			discoverySessionGeneration++;
+			mediaTurnCredentials = null;
 		authenticatedFriendSnapshotGeneration++;
 		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
 		automaticInitialPinAttempts.Clear();
@@ -3345,7 +3381,7 @@ public class DesktopApplication {
 
 
 
-    void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before calling.");return;}if(!model.Selected.Online){Notify("This friend is currently unavailable for call control. Messaging history remains available.");return;}if(model.VoiceStateCode!=0){Notify("Only one voice call can be active in this profile.");return;}string call=core.StartVoiceCall(model.Selected.Contact.peer);if(String.IsNullOrEmpty(call))Notify("Call control is unavailable for this peer. Messaging may still remain connected.");}
+    async void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before calling.");return;}if(!model.Selected.Online){Notify("This friend is currently unavailable for call control. Messaging history remains available.");return;}if(model.VoiceStateCode!=0){Notify("Only one voice call can be active in this profile.");return;}string peer=model.Selected.Contact.peer;if(!await EnsureMediaIceConfigurationAsync()){Notify("Voice media relay is unavailable. Messaging remains connected.");return;}if(model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||model.VoiceStateCode!=0)return;string call=core.StartVoiceCall(peer);if(String.IsNullOrEmpty(call))Notify("Call control is unavailable for this peer. Messaging may still remain connected.");}
     void BuildScreenShareControls(){
         var actions=Find<Button>("VoiceCall").Parent as StackPanel;
         screenStartButton=new Button{Content="Share Screen",Padding=new Thickness(11,8,11,8),Margin=new Thickness(6,0,0,0),ToolTip="Share a monitor or window with this verified friend"};
@@ -3389,7 +3425,7 @@ public class DesktopApplication {
         panel.Children.Add(new TextBlock{Text="Choose what to share",FontSize=22,FontWeight=FontWeights.SemiBold});
         var sourceList=new ComboBox{ItemsSource=sources,SelectedIndex=0,Margin=new Thickness(0,16,0,10)};panel.Children.Add(sourceList);
         var cursor=new CheckBox{Content="Show cursor",IsChecked=screenPreferences.CaptureCursor,Margin=new Thickness(0,0,0,12)};panel.Children.Add(cursor);
-        panel.Children.Add(new TextBlock{Text="Video travels over a separate encrypted direct media connection. Your friend must accept before viewing.",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,0,0,18)});
+        panel.Children.Add(new TextBlock{Text="Video travels over a separate encrypted media relay connection. Your friend must accept before viewing.",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,0,0,18)});
         var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
         var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=(sender,args)=>{dialog.DialogResult=false;dialog.Close();};
         var share=new Button{Content="Share Screen",Background=Brush("#275AA7")};share.Click+=(sender,args)=>{dialog.DialogResult=true;dialog.Close();};
@@ -3397,6 +3433,8 @@ public class DesktopApplication {
         if(dialog.ShowDialog()!=true)return;
         var chosen=sourceList.SelectedItem as ScreenSource;if(chosen==null)return;
         if(activeScreenState!=0||model.Groups||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||!model.Selected.Online){Notify("That conversation is no longer ready for sharing.");return;}
+        if(!await EnsureMediaIceConfigurationAsync()){Notify("Screen-share media relay is unavailable. Messaging remains connected.");return;}
+        if(activeScreenState!=0||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer)return;
         string id=core.StartScreenShare(peer,chosen.kind,chosen.handle,(uint)screenPreferences.FramesPerSecond,(uint)screenPreferences.BitrateBitsPerSecond,cursor.IsChecked==true);
         if(String.IsNullOrEmpty(id))Notify("Could not queue screen sharing for this peer.");
     }
@@ -3426,7 +3464,11 @@ public class DesktopApplication {
         viewer.Closing+=(sender,args)=>{if(!closing&&!closingScreenViewer&&activeScreenState!=0&&!String.IsNullOrEmpty(activeScreenId)&&core.EndScreenShare(activeScreenId))args.Cancel=true;};
         viewer.Closed+=(sender,args)=>{if(screenViewerWindow==viewer)screenViewerWindow=null;screenViewerChild=IntPtr.Zero;};
         screenViewerWindow=viewer;viewer.Show();
-        if(screenViewerChild==IntPtr.Zero||!core.AnswerScreenShare(activeScreenId,(ulong)screenViewerChild.ToInt64())){Notify("Could not open the secure screen viewer.");core.DeclineScreenShare(activeScreenId);closingScreenViewer=true;viewer.Close();closingScreenViewer=false;}
+        AnswerIncomingScreenShare(viewer);
+    }
+    async void AnswerIncomingScreenShare(Window viewer){
+        string id=activeScreenId;
+        if(screenViewerChild==IntPtr.Zero||!await EnsureMediaIceConfigurationAsync()||id!=activeScreenId||activeScreenState!=2||!core.AnswerScreenShare(id,(ulong)screenViewerChild.ToInt64())){Notify("Could not open the secure screen viewer.");if(!String.IsNullOrEmpty(id))core.DeclineScreenShare(id);closingScreenViewer=true;viewer.Close();closingScreenViewer=false;}
     }
     void HandleScreenShareEvent(CoreEvent e){
         if(e.shareLifetime<activeScreenLifetime||(e.shareLifetime==activeScreenLifetime&&e.shareGeneration<activeScreenGeneration))return;
@@ -3466,7 +3508,8 @@ public class DesktopApplication {
     void ToggleVoiceDeafen(){if(!core.SetVoiceDeafened(!model.VoiceDeafened))Notify("Deafen is unavailable until voice media is connected.");}
     void ShowVoiceDiagnostics(){var panel=Find<StackPanel>("ContextVoice");bool opening=panel.Visibility!=Visibility.Visible;panel.Visibility=opening?Visibility.Visible:Visibility.Collapsed;Find<Expander>("VoiceAdvancedExpander").IsExpanded=false;Find<TextBox>("VoiceDiagnosticsText").Text="Expand to load the bounded diagnostic snapshot.";}
     async void RefreshVoiceDiagnosticsText(){if(Find<StackPanel>("ContextVoice").Visibility!=Visibility.Visible||!Find<Expander>("VoiceAdvancedExpander").IsExpanded)return;string native=await Task.Run(()=>core.VoiceDiagnostics());bool active=model.VoiceStateCode!=0;string peer=active?model.VoicePeerId:recentVoicePeerId;var input=Find<ComboBox>("VoiceInput").SelectedItem as VoiceDevice;var output=Find<ComboBox>("VoiceOutput").SelectedItem as VoiceDevice;var text="call_id="+(active?model.VoiceCallId:recentVoiceCallId)+"\ncall_lifetime="+(active?model.VoiceCallLifetime:0)+"\ncall_type=voice\nexpected_peer_id="+(String.IsNullOrEmpty(peer)?"none":peer)+"\ncall_state="+(active?model.VoiceState:recentVoiceState)+"\nmedia_generation="+model.VoiceMediaGeneration+"\nmedia_state="+model.VoiceMediaState+"\ncontrol_available="+model.VoiceControlAvailable+"\nmedia_route="+VoiceConnectionMethod()+"\ninput_device="+(input==null?"none":input.name)+"\noutput_device="+(output==null?"none":output.name)+"\nmuted="+model.VoiceMuted+"\ndeafened="+model.VoiceDeafened+"\n"+(native??"media_state=unavailable");if(text.Length>8192)text=text.Substring(0,8192);if(Find<StackPanel>("ContextVoice").Visibility==Visibility.Visible&&Find<Expander>("VoiceAdvancedExpander").IsExpanded)Find<TextBox>("VoiceDiagnosticsText").Text=text;}
-    void ShowIncomingVoiceCall(){if(incomingVoiceWindow!=null||model.VoiceStateCode!=2)return;var conversation=model.FindByPeer(model.VoicePeerId);string friend=conversation==null?"Verified friend":conversation.Name;var dialog=new Window{Title="Incoming Voice Call",Owner=window,Width=430,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources,ShowInTaskbar=false};var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;panel.Children.Add(new TextBlock{Text="Incoming voice call",FontSize=24,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text=friend+" · verified PeerChat identity",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,7,0,20)});var row=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var decline=new Button{Content="Decline",Margin=new Thickness(0,0,8,0)};var answer=new Button{Content="Answer",Background=Brush("#275AA7")};decline.Click+=(s,e)=>{core.DeclineVoiceCall(model.VoiceCallId);dialog.Close();};answer.Click+=(s,e)=>{core.AnswerVoiceCall(model.VoiceCallId);dialog.Close();};row.Children.Add(decline);row.Children.Add(answer);panel.Children.Add(row);dialog.Closed+=(s,e)=>{if(incomingVoiceWindow==dialog)incomingVoiceWindow=null;};incomingVoiceWindow=dialog;try{MessageBeep(0xFFFFFFFF);}catch{}dialog.Show();dialog.Activate();}
+    void ShowIncomingVoiceCall(){if(incomingVoiceWindow!=null||model.VoiceStateCode!=2)return;var conversation=model.FindByPeer(model.VoicePeerId);string friend=conversation==null?"Verified friend":conversation.Name;var dialog=new Window{Title="Incoming Voice Call",Owner=window,Width=430,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),Resources=window.Resources,ShowInTaskbar=false};var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;panel.Children.Add(new TextBlock{Text="Incoming voice call",FontSize=24,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text=friend+" · verified PeerChat identity",Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,7,0,20)});var row=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var decline=new Button{Content="Decline",Margin=new Thickness(0,0,8,0)};var answer=new Button{Content="Answer",Background=Brush("#275AA7")};decline.Click+=(s,e)=>{core.DeclineVoiceCall(model.VoiceCallId);dialog.Close();};answer.Click+=(s,e)=>{AnswerIncomingVoiceCall(dialog);};row.Children.Add(decline);row.Children.Add(answer);panel.Children.Add(row);dialog.Closed+=(s,e)=>{if(incomingVoiceWindow==dialog)incomingVoiceWindow=null;};incomingVoiceWindow=dialog;try{MessageBeep(0xFFFFFFFF);}catch{}dialog.Show();dialog.Activate();}
+    async void AnswerIncomingVoiceCall(Window dialog){string call=model.VoiceCallId;if(!await EnsureMediaIceConfigurationAsync()||call!=model.VoiceCallId||!core.AnswerVoiceCall(call)){Notify("Voice media relay is unavailable. Messaging remains connected.");core.DeclineVoiceCall(call);}dialog.Close();}
     void HandleVoiceEvent(CoreEvent e){string state=e.text??"Idle";int stateCode=e.callState;string name=(model.FindByPeer(e.peer)==null?"Verified friend":model.FindByPeer(e.peer).Name);if(!String.IsNullOrEmpty(e.detail))recentVoiceCallId=e.detail;if(!String.IsNullOrEmpty(e.peer))recentVoicePeerId=e.peer;if(stateCode!=0)recentVoiceState=state;voiceMuted=e.callMuted;voiceDeafened=e.callDeafened;if(stateCode==1||stateCode==2){voiceAudioError="";voiceStartedUtc=DateTime.UtcNow;voiceEndedUtc=DateTime.MinValue;voiceLastConnectedUtc=DateTime.MinValue;recentVoiceMuted=recentVoiceDeafened=false;}RecordConnection("voice",model.FindByPeer(e.peer),"call="+(e.detail??"")+"; lifetime="+e.callLifetime+"; media_generation="+e.mediaGeneration+"; media_state="+e.mediaState+"; control="+e.callControlAvailable+"; state="+state);if(stateCode==2)ShowIncomingVoiceCall();if(stateCode==5&&e.mediaState==2){if(voiceConnectedUtc==DateTime.MinValue)voiceConnectedUtc=DateTime.UtcNow;voiceLastConnectedUtc=voiceConnectedUtc;voiceTimer.Start();}if(stateCode==0){voiceTimer.Stop();voiceConnectedUtc=DateTime.MinValue;voiceEndedUtc=DateTime.UtcNow;voiceMuted=voiceDeafened=false;voiceAudioError="";if(incomingVoiceWindow!=null){incomingVoiceWindow.Close();incomingVoiceWindow=null;}LoadVoiceDevices(true);}model.Status=stateCode==0?"Voice call ended · normal messaging ready":"Voice call with "+name+" · "+state+(String.IsNullOrEmpty(voiceAudioError)?"":" · Audio unavailable: "+voiceAudioError);RefreshVoiceUi();}
     void RefreshVoiceUi(){
         bool active=model.VoiceStateCode!=0,connected=model.VoiceStateCode==5&&model.VoiceMediaState==2;

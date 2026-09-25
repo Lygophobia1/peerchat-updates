@@ -9,7 +9,7 @@ try {
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     if($TurnInfrastructure -or $TurnInfrastructureBuildOnly) {
         if($TurnInfrastructure -and [String]::IsNullOrWhiteSpace($env:PEERCHAT_TURN_TEST_URI)) { throw 'Set PEERCHAT_TURN_TEST_URI in this PowerShell session before running the TURN infrastructure probe.' }
-        & g++ -DPEERCHAT_TEST_VOICE_FRAMES -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_media_transport_test.cpp voice_media.cpp audio.cpp $media[0] $media[3..($media.Count-1)] -o "$outputDirectory\voice-media-transport-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+        & g++ -DPEERCHAT_TEST_VOICE_FRAMES -DPEERCHAT_TEST_MEDIA_DIRECT -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_media_transport_test.cpp voice_media.cpp audio.cpp $media[0] $media[3..($media.Count-1)] -o "$outputDirectory\voice-media-transport-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
         if ($LASTEXITCODE -ne 0) { throw 'TURN infrastructure media test build failed' }
         if($TurnInfrastructureBuildOnly) { Write-Host 'TURN infrastructure media probe built.'; return }
         $previousTurnInfrastructure=$env:PEERCHAT_TURN_INFRASTRUCTURE
@@ -22,19 +22,19 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Storage test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\tls_test.cpp tls.cpp storage.cpp group.cpp -o "$outputDirectory\tls-test.exe" -lcrypt32 -lbcrypt -lncrypt -lsecur32
     if ($LASTEXITCODE -ne 0) { throw 'TLS test build failed' }
-    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\node_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\node_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Node test build failed' }
-    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\peer_harness.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\peer-harness.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\peer_harness.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\peer-harness.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Process harness build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\group_test.cpp group.cpp storage.cpp -o "$outputDirectory\group-test.exe" -lcrypt32 -lbcrypt
     if ($LASTEXITCODE -ne 0) { throw 'Group ledger test build failed' }
-    & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\group_node_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\group-node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\group_node_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\group-node-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Group network test build failed' }
-    & g++ -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\voice-call-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Voice call-state test build failed' }
-    & g++ -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\reconnect_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\reconnect-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\reconnect_test.cpp node.cpp tls.cpp storage.cpp group.cpp $media -o "$outputDirectory\reconnect-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Reconnect/diagnostics test build failed' }
-    & g++ -DPEERCHAT_TEST_VOICE_FRAMES -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_media_transport_test.cpp voice_media.cpp audio.cpp $media[0] $media[3..($media.Count-1)] -o "$outputDirectory\voice-media-transport-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
+    & g++ -DPEERCHAT_TEST_VOICE_FRAMES -DPEERCHAT_TEST_MEDIA_DIRECT -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\voice_media_transport_test.cpp voice_media.cpp audio.cpp $media[0] $media[3..($media.Count-1)] -o "$outputDirectory\voice-media-transport-test.exe" -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt
     if ($LASTEXITCODE -ne 0) { throw 'Voice media transport test build failed' }
     & g++ -I. -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror tests\audio_test.cpp -o "$outputDirectory\audio-test.exe" -lwinmm
     if ($LASTEXITCODE -ne 0) { throw 'Native audio queue test build failed' }

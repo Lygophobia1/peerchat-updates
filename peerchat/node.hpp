@@ -2,6 +2,7 @@
 #include "storage.hpp"
 #include "group.hpp"
 #include "media_telemetry.hpp"
+#include "media_ice_configuration.hpp"
 #include <memory>
 
 namespace peerchat {
@@ -109,6 +110,7 @@ public:
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
     bool setVoiceVolumes(int inputPercent, int outputPercent);
+    bool setMediaIceConfiguration(MediaIceConfiguration configuration);
     std::wstring voiceDiagnostics();
     std::string startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor);
     bool answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow);

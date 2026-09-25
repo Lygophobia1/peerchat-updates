@@ -3,6 +3,7 @@
 #define RTC_STATIC
 #include <rtc/rtc.h>
 #include "windows_media/peerchat_screen_media.h"
+#include "media_ice_configuration.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -36,6 +37,7 @@ public:
         std::uint64_t presentationWindow = 0;
         std::uint32_t width = 0, height = 0, fps = 60, bitrate = 20000000;
         bool captureCursor = true;
+        MediaIceConfiguration ice;
     };
     struct Statistics {
         std::uint64_t encodedSubmitted = 0, rtpReceived = 0;
@@ -97,6 +99,8 @@ public:
         return pc_ >= 0 && rtcSetRemoteDescription(pc_, answer.c_str(), "answer") >= 0;
     }
     bool addCandidate(const std::string& candidate, const std::string& mid) {
+        if (options_.ice.policy == MediaIceConfiguration::Policy::RelayOnly &&
+            !MediaIceConfiguration::relayCandidate(candidate)) return false;
         return pc_ >= 0 && rtcAddRemoteCandidate(pc_, candidate.c_str(), mid.c_str()) >= 0;
     }
 
@@ -453,8 +457,11 @@ private:
             EventKind::Description, sdp, type);
     }
     static void candidate(int, const char* value, const char* mid, void* context) {
-        if (context && value) static_cast<ScreenShareMedia*>(context)->push(
-            EventKind::Candidate, value, mid ? mid : "0");
+        if (!context || !value) return;
+        auto& self = *static_cast<ScreenShareMedia*>(context);
+        if (self.options_.ice.policy == MediaIceConfiguration::Policy::RelayOnly &&
+            !MediaIceConfiguration::relayCandidate(value)) return;
+        self.push(EventKind::Candidate, value, mid ? mid : "0");
     }
     static void state(int, rtcState value, void* context) {
         if (!context) return;
@@ -629,12 +636,23 @@ private:
             decoder_ = api_.decoderOpen(&viewer);
             if (!decoder_) { error = "Windows H.264 screen decoder or viewer failed"; stop(); return false; }
         }
+        const auto now = static_cast<std::int64_t>(std::time(nullptr));
+        if (!options_.ice.valid(now) && options_.ice.policy != MediaIceConfiguration::Policy::DirectTestOnly) {
+            error = "TURN media credentials are unavailable or expiring. Messaging remains connected.";
+            stop();
+            return false;
+        }
         rtcConfiguration config{};
-        const char* servers[] = {"stun:stun.l.google.com:19302"};
-        config.iceServers = servers;
-        config.iceServersCount = 1;
+        std::string turnUri;
+        const char* servers[1]{};
+        if (options_.ice.policy == MediaIceConfiguration::Policy::RelayOnly) {
+            turnUri = options_.ice.turnUdpUri();
+            servers[0] = turnUri.c_str();
+            config.iceServers = servers;
+            config.iceServersCount = 1;
+        }
         config.certificateType = RTC_CERTIFICATE_ECDSA;
-        config.iceTransportPolicy = RTC_TRANSPORT_POLICY_ALL;
+        config.iceTransportPolicy = options_.ice.policy == MediaIceConfiguration::Policy::RelayOnly ? RTC_TRANSPORT_POLICY_RELAY : RTC_TRANSPORT_POLICY_ALL;
         config.disableAutoNegotiation = true;
         config.forceMediaTransport = true;
         pc_ = rtcCreatePeerConnection(&config);

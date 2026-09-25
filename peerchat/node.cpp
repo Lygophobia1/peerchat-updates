@@ -79,8 +79,8 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
@@ -102,6 +102,7 @@ struct Node::Impl {
     calls::CallManager calls;
     screen::ScreenShareManager screenShares;
     std::unique_ptr<ScreenShareMedia> screenMedia;
+    std::optional<MediaIceConfiguration> mediaIce;
     std::atomic<std::uint32_t> screenStopStage{0};
     std::atomic<std::uint64_t> screenStopStageSince{0};
     bool screenAvailable=false;
@@ -282,7 +283,8 @@ struct Node::Impl {
     }
     bool configureScreenMedia(){
         auto active=screenShares.active();if(!active)return false;
-        stopScreenMedia();screenStopStage=0;screenStopStageSince=0;screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
+        if(!mediaIce||!mediaIce->valid(static_cast<std::int64_t>(std::time(nullptr))))return false;
+        stopScreenMedia();screenStopStage=0;screenStopStageSince=0;screenOptions.ice=*mediaIce;screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
         screenMediaLifetime=active->lifetime;screenMediaGeneration=active->generation;
         screenNetworkGeneration=networkGeneration;screenTelemetryAt=0;screenReportedRoute=screenReportedWidth=screenReportedHeight=0;return true;
     }
@@ -296,7 +298,7 @@ struct Node::Impl {
         auto connection=screenConnection(active->peer);
         if(!connection){active->controlAvailable=false;screenRetryAt=nowMilliseconds()+500;return;}
         active->controlAvailable=true;
-        if(active->sender){screenLastRestartAt=nowMilliseconds();screenShares.restart(nowMilliseconds()+MediaRecoveryWindowMilliseconds);configureScreenMedia();std::string error;
+        if(active->sender){screenLastRestartAt=nowMilliseconds();screenShares.restart(nowMilliseconds()+MediaRecoveryWindowMilliseconds);if(!configureScreenMedia()){screenRetryAt=nowMilliseconds()+1000;screenEvent(L"TURN media credentials are unavailable · waiting to recover");return;}std::string error;
             if(!screenMedia->startOffer(error)){stopScreenMedia();screenRetryAt=nowMilliseconds()+1000;return;}
             screenRetryAt=nowMilliseconds()+MediaRecoveryRetryMilliseconds;
         }else{protocol::Writer request(protocol::ScreenRecoveryRequest);request.string(active->id);request.number(active->generation);packet(*connection,request);screenRetryAt=nowMilliseconds()+2000;}
@@ -331,10 +333,10 @@ struct Node::Impl {
     void publishVoiceTelemetry(){if(!voiceMedia){resetVoiceTelemetry();return;}auto telemetry=voiceMedia->telemetry();voiceInputLevel=telemetry.inputLevel;voiceOutputLevel=telemetry.outputLevel;voiceTelemetryFlags=(telemetry.active?1u:0u)|(telemetry.inputAvailable?2u:0u)|(telemetry.outputAvailable?4u:0u);}
     void stopVoiceMedia(){resetVoiceTelemetry();if(voiceMedia){lastVoiceDiagnostics=voiceSignalingDiagnostics()+L"\n"+voiceMedia->diagnostics();voiceMedia->stop();}voiceMedia.reset();voiceMediaLifetime=voiceMediaGeneration=0;}
     void clearVoice(const std::wstring& reason,bool failed=false){auto active=calls.active();if(!active&&!voiceMedia)return;std::string callId=active?active->id.value:std::string{},peer=active?calls.peer():std::string{};std::uint64_t lifetime=active?active->lifetime:0,generation=active?active->mediaGeneration:0;voiceEvent(calls::State::Ending,reason);stopVoiceMedia();calls.finish(failed?calls::State::Failed:calls::State::Ended);NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.peerId=peer;event.detail=std::wstring(callId.begin(),callId.end());event.callLifetime=lifetime;event.callState=static_cast<std::uint32_t>(calls::State::Idle);event.callType=static_cast<std::uint32_t>(calls::CallType::Voice);event.mediaState=static_cast<std::uint32_t>(calls::MediaState::Closed);event.mediaGeneration=generation;event.text=L"Idle";if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
-    void configureVoiceMedia(std::uint64_t generation){voiceMedia=std::make_unique<VoiceMedia>(voiceInputDevice,voiceOutputDevice,networkGeneration,std::string(networkFingerprint.begin(),networkFingerprint.end()));voiceMedia->setVolumes(voiceInputPercent/100.0f,voiceOutputPercent/100.0f);voiceMediaLifetime=calls.lifetime();voiceMediaGeneration=generation;if(auto active=calls.active())voiceMedia->setDeafened(active->deafened);voiceNetworkGeneration=networkGeneration;voiceNetworkFingerprint=networkFingerprint;}
+    bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->valid(static_cast<std::int64_t>(std::time(nullptr))))return false;voiceMedia=std::make_unique<VoiceMedia>(*mediaIce,voiceInputDevice,voiceOutputDevice,networkGeneration,std::string(networkFingerprint.begin(),networkFingerprint.end()));voiceMedia->setVolumes(voiceInputPercent/100.0f,voiceOutputPercent/100.0f);voiceMediaLifetime=calls.lifetime();voiceMediaGeneration=generation;if(auto active=calls.active())voiceMedia->setDeafened(active->deafened);voiceNetworkGeneration=networkGeneration;voiceNetworkFingerprint=networkFingerprint;return true;}
     void interruptVoiceMedia(const std::wstring& reason){auto active=calls.active();if(!active)return;if(!active->mediaRecoveryCapable){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}clearVoice(reason,true);return;}calls.interruptMedia(nowMilliseconds(),nowMilliseconds()+MediaRecoveryWindowMilliseconds);stopVoiceMedia();voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");}
     void serviceMediaRecovery(){auto active=calls.active();if(!active||!calls.mediaRetryDue(nowMilliseconds()))return;auto connection=voiceConnection(calls.peer());if(!connection){calls.deferMediaRetry(nowMilliseconds(),500);return;}calls.observeControl(true);if(profile.peerId<calls.peer()){
-            auto generation=calls.beginMediaRecovery(nowMilliseconds(),MediaRecoveryRetryMilliseconds);if(!generation)return;configureVoiceMedia(generation);std::wstring error;if(!voiceMedia->startOffer(error)){stopVoiceMedia();calls.deferMediaRetry(nowMilliseconds(),1000);return;}voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");
+            auto generation=calls.beginMediaRecovery(nowMilliseconds(),MediaRecoveryRetryMilliseconds);if(!generation)return;if(!configureVoiceMedia(generation)){calls.deferMediaRetry(nowMilliseconds(),1000);voiceEvent(active->state,L"TURN media credentials are unavailable · waiting to recover");return;}std::wstring error;if(!voiceMedia->startOffer(error)){stopVoiceMedia();calls.deferMediaRetry(nowMilliseconds(),1000);return;}voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");
         }else{protocol::Writer request(protocol::CallMediaRecoveryRequest);request.string(active->id.value);request.number(active->mediaGeneration);packet(*connection,request);calls.deferMediaRetry(nowMilliseconds(),2000);}}
     void mediaEvents(){
         auto active=calls.active();if(!voiceMedia||!active)return;
@@ -349,7 +351,7 @@ struct Node::Impl {
             }else if(event.kind==VoiceMedia::EventKind::Candidate){
                 if(connection){voiceLastSignalConnection=connection->attemptId;++voiceCandidatesSent;protocol::Writer signal(generation>1?protocol::CallMediaCandidate:protocol::CallCandidate);signal.string(callId);if(generation>1)signal.number(generation);signal.string(event.value);signal.string(event.detail);packet(*connection,signal);}
             }else if(event.kind==VoiceMedia::EventKind::Connected){
-                auto route=voiceMedia->route();auto callRoute=route==VoiceMedia::Route::DirectLanIce?calls::MediaRoute::DirectLanIce:route==VoiceMedia::Route::NatTraversedIce?calls::MediaRoute::NatTraversedIce:route==VoiceMedia::Route::TurnRelay?calls::MediaRoute::TurnRelay:calls::MediaRoute::Unknown;calls.transition(callId,calls::State::Connected);calls.transitionMedia(generation,calls::MediaState::Connected,callRoute);if(active->muted){std::wstring ignored;voiceMedia->setMuted(true,ignored);}voiceMedia->setDeafened(active->deafened);voiceEvent(calls::State::Connected,L"Direct WebRTC · Opus · DTLS-SRTP");
+                auto route=voiceMedia->route();auto callRoute=route==VoiceMedia::Route::DirectLanIce?calls::MediaRoute::DirectLanIce:route==VoiceMedia::Route::NatTraversedIce?calls::MediaRoute::NatTraversedIce:route==VoiceMedia::Route::TurnRelay?calls::MediaRoute::TurnRelay:calls::MediaRoute::Unknown;calls.transition(callId,calls::State::Connected);calls.transitionMedia(generation,calls::MediaState::Connected,callRoute);if(active->muted){std::wstring ignored;voiceMedia->setMuted(true,ignored);}voiceMedia->setDeafened(active->deafened);voiceEvent(calls::State::Connected,L"WebRTC · Opus · DTLS-SRTP");
                 if(connection){protocol::Writer ready(protocol::CallConnected);ready.string(callId);packet(*connection,ready);}
             }else if(event.kind==VoiceMedia::EventKind::AudioError){
                 notice(NodeEvent::Kind::Error,L"Voice audio device error: "+std::wstring(event.value.begin(),event.value.end()),peer);
@@ -518,7 +520,7 @@ struct Node::Impl {
             if(active&&screenShares.matches(id,c.peerId)){
                 if(generation==active->generation)return;
                 if(!active->sender&&active->state!=screen::State::Incoming&&screenShares.acceptGeneration(generation,nowMilliseconds()+MediaRecoveryWindowMilliseconds)){
-                    stopScreenMedia();configureScreenMedia();std::string error;
+                    stopScreenMedia();if(!configureScreenMedia()){interruptScreen(L"TURN media credentials are unavailable · waiting to recover");return;}std::string error;
                     if(!screenMedia->startAnswer(sdp,error))interruptScreen(L"Could not restart secure screen media");
                     else screenEvent(L"Screen media reconnecting");
                 }
@@ -583,7 +585,7 @@ struct Node::Impl {
         if(r.type()==protocol::CallAnswer){auto callId=r.string();auto sdp=r.string();r.end();protocol::check(protocol::id(callId,32)&&!sdp.empty()&&sdp.size()<=32768);auto active=calls.active();if(active&&active->state==calls::State::Outgoing&&active->direction==calls::Direction::Outgoing&&calls.peer()==c.peerId&&active->id.value==callId&&voiceMedia){voiceAnswerReceivedOn=voiceLastSignalConnection=c.attemptId;std::wstring error;if(!voiceMedia->setAnswer(sdp,error)){clearVoice(error,true);return;}calls.transition(callId,calls::State::ConnectingMedia,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceConnectTimeout).count()));voiceEvent(calls::State::ConnectingMedia);}return;}
         if(r.type()==protocol::CallCandidate){auto callId=r.string();auto candidate=r.string();auto mid=r.string();r.end();protocol::check(protocol::id(callId,32)&&candidate.size()<=4096&&mid.size()<=64);auto active=calls.active();if(active&&active->id.value==callId&&active->participants.count(c.peerId)){voiceLastSignalConnection=c.attemptId;++voiceCandidatesReceived;if(voiceMedia){std::wstring error;if(!voiceMedia->addCandidate(candidate,mid,error))notice(NodeEvent::Kind::Error,error,c.peerId);}else{auto& pending=active->participants[c.peerId].candidates;if(pending.size()<64)pending.emplace_back(std::move(candidate),std::move(mid));}}return;}
         if(r.type()==protocol::CallMediaRecoveryRequest){auto callId=r.string();auto knownGeneration=r.number();r.end();protocol::check(c.mediaRecovery&&protocol::id(callId,32));auto active=calls.active();if(active&&active->id.value==callId&&calls.peer()==c.peerId&&profile.peerId<c.peerId){if(active->mediaState==calls::MediaState::Connected)interruptVoiceMedia(L"Peer requested media recovery");if(auto current=calls.active())if(current->mediaState==calls::MediaState::Interrupted&&knownGeneration>=current->mediaGeneration)calls.deferMediaRetry(nowMilliseconds(),0);}return;}
-        if(r.type()==protocol::CallMediaRestart){auto callId=r.string();auto generation=r.number();auto sdp=r.string();r.end();protocol::check(c.mediaRecovery&&protocol::id(callId,32)&&generation>1&&!sdp.empty()&&sdp.size()<=32768);auto active=calls.active();if(!active||active->id.value!=callId||calls.peer()!=c.peerId||!calls.acceptMediaGeneration(generation,nowMilliseconds()+MediaRecoveryWindowMilliseconds))return;stopVoiceMedia();configureVoiceMedia(generation);std::wstring error;if(!voiceMedia->startAnswer(sdp,error)){stopVoiceMedia();calls.deferMediaRetry(nowMilliseconds(),1000);voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");return;}voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");return;}
+        if(r.type()==protocol::CallMediaRestart){auto callId=r.string();auto generation=r.number();auto sdp=r.string();r.end();protocol::check(c.mediaRecovery&&protocol::id(callId,32)&&generation>1&&!sdp.empty()&&sdp.size()<=32768);auto active=calls.active();if(!active||active->id.value!=callId||calls.peer()!=c.peerId||!calls.acceptMediaGeneration(generation,nowMilliseconds()+MediaRecoveryWindowMilliseconds))return;stopVoiceMedia();if(!configureVoiceMedia(generation)){calls.deferMediaRetry(nowMilliseconds(),1000);voiceEvent(active->state,L"TURN media credentials are unavailable · waiting to recover");return;}std::wstring error;if(!voiceMedia->startAnswer(sdp,error)){stopVoiceMedia();calls.deferMediaRetry(nowMilliseconds(),1000);voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");return;}voiceEvent(active->state,L"Voice connection interrupted · Reconnecting…");return;}
         if(r.type()==protocol::CallMediaAnswer){auto callId=r.string();auto generation=r.number();auto sdp=r.string();r.end();protocol::check(c.mediaRecovery&&protocol::id(callId,32)&&generation>1&&!sdp.empty()&&sdp.size()<=32768);auto active=calls.active();if(active&&active->id.value==callId&&calls.peer()==c.peerId&&voiceMedia&&calls.matchesMedia(active->lifetime,callId,c.peerId,generation)){std::wstring error;if(!voiceMedia->setAnswer(sdp,error)){interruptVoiceMedia(error);}}return;}
         if(r.type()==protocol::CallMediaCandidate){auto callId=r.string();auto generation=r.number();auto candidate=r.string();auto mid=r.string();r.end();protocol::check(c.mediaRecovery&&protocol::id(callId,32)&&generation>1&&candidate.size()<=4096&&mid.size()<=64);auto active=calls.active();if(active&&voiceMedia&&calls.matchesMedia(active->lifetime,callId,c.peerId,generation)){std::wstring error;if(!voiceMedia->addCandidate(candidate,mid,error))notice(NodeEvent::Kind::Error,error,c.peerId);}return;}
         if(r.type()==protocol::CallConnected){auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));return;}
@@ -713,6 +715,13 @@ struct Node::Impl {
                 auto contact=contacts.find(command.peer);if(contact!=contacts.end()&&!command.text.empty()&&command.port){auto& endpoints=contact->second.endpoints;endpoints.erase(std::remove_if(endpoints.begin(),endpoints.end(),[&](const Endpoint& endpoint){return endpoint.host==command.text&&endpoint.port==command.port;}),endpoints.end());store->saveContact(contact->second);}auto activeCall=calls.active();if(decision.activeWinnerCancelled&&activeCall&&calls.peer()==command.peer){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}emitSessionSnapshot(command.peer);
             }
             else if(command.action==Action::NetworkContext){bool changed=networkGeneration&&command.accountId>networkGeneration;bool screenNetworkChanged=changed&&networkFingerprint!=command.text;networkGeneration=command.accountId;networkFingerprint=command.text;if(sessionTransports)sessionTransports->observeNetwork(sessionEpoch,networkGeneration);if(changed&&calls.active()&&calls.active()->state==calls::State::Connected)interruptVoiceMedia(L"Network changed");if(screenNetworkChanged&&screenShares.active())interruptScreen(L"Network changed · reconnecting screen media");}
+            else if(command.action==Action::MediaIceConfiguration){
+                if(!command.ice.valid(static_cast<std::int64_t>(std::time(nullptr)))){
+                    notice(NodeEvent::Kind::Error,L"TURN media configuration was rejected because it is invalid or expiring.");
+                    continue;
+                }
+                mediaIce=std::move(command.ice);
+            }
             else if(command.action==Action::AuthenticatedFriends){
                 authenticatedAccountId=command.accountId;
                 authenticatedFriendSnapshotGeneration=command.sourceHandle;
@@ -790,14 +799,14 @@ struct Node::Impl {
                 screenPriorSentBytes=screenPriorReceivedBytes=0;
                 screenOptions={};screenOptions.sender=true;screenOptions.sourceKind=command.sourceKind;screenOptions.sourceHandle=command.sourceHandle;
                 screenOptions.fps=command.fps;screenOptions.bitrate=command.bitrate;screenOptions.captureCursor=command.accepted;
-                configureScreenMedia();std::string error;
+                if(!configureScreenMedia()){clearScreen(L"TURN media credentials are unavailable or expiring. Messaging remains connected.");continue;}std::string error;
                 if(!screenMedia->startOffer(error)){clearScreen(widenUtf8(error));continue;}screenEvent(L"Starting screen share");
             }else if(command.action==Action::ScreenAnswer){
                 auto active=screenShares.active();if(!active||active->id!=command.id||active->state!=screen::State::Incoming)continue;
                 if(!screenConnection(active->peer)){clearScreen(L"Peer unavailable for screen-share control");continue;}
                 screenOptions={};screenOptions.sender=false;screenOptions.presentationWindow=command.sourceHandle;
                 screenOptions.width=1280;screenOptions.height=720;screenOptions.fps=60;
-                configureScreenMedia();std::string error;
+                if(!configureScreenMedia()){clearScreen(L"TURN media credentials are unavailable or expiring. Messaging remains connected.");continue;}std::string error;
                 if(!screenMedia->startAnswer(active->remoteOffer,error)){clearScreen(widenUtf8(error));continue;}
                 for(const auto& candidate:active->candidates)screenMedia->addCandidate(candidate.first,candidate.second);
                 active->candidates.clear();screenShares.transition(screen::State::Connecting,nowMilliseconds()+20000);screenEvent(L"Connecting screen media");
@@ -815,12 +824,12 @@ struct Node::Impl {
                 auto connection=voiceConnection(command.peer);
                 if(!connection)throw std::runtime_error("The verified peer is unavailable or does not advertise voice call control");
                 if(!calls.beginOutgoing({command.id},calls::CallType::Voice,{command.peer},nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceRingTimeout).count())))throw std::runtime_error("A voice call is already active");
-                calls.setMediaRecoveryCapable(command.peer,connection->mediaRecovery);calls.beginInitialMedia(command.id);resetVoiceSignaling(connection);configureVoiceMedia(calls.active()->mediaGeneration);std::wstring error;
+                calls.setMediaRecoveryCapable(command.peer,connection->mediaRecovery);calls.beginInitialMedia(command.id);resetVoiceSignaling(connection);if(!configureVoiceMedia(calls.active()->mediaGeneration)){clearVoice(L"TURN media credentials are unavailable or expiring. Messaging remains connected.",true);continue;}std::wstring error;
                 if(!voiceMedia->startOffer(error)){clearVoice(error,true);continue;}voiceEvent(calls::State::Outgoing);
             }else if(command.action==Action::VoiceAnswer){
                 auto active=calls.active();if(!active||active->state!=calls::State::Incoming||active->direction!=calls::Direction::Incoming||active->id.value!=command.id)throw std::runtime_error("That incoming call is no longer available");
                 auto peer=calls.peer();auto connection=voiceConnection(peer);if(!connection){clearVoice(L"Peer unavailable for call control");continue;}
-                calls.transition(command.id,calls::State::ConnectingMedia,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceConnectTimeout).count()));voiceEvent(calls::State::ConnectingMedia);configureVoiceMedia(active->mediaGeneration);std::wstring error;
+                calls.transition(command.id,calls::State::ConnectingMedia,nowMilliseconds()+static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(VoiceConnectTimeout).count()));voiceEvent(calls::State::ConnectingMedia);if(!configureVoiceMedia(active->mediaGeneration)){clearVoice(L"TURN media credentials are unavailable or expiring. Messaging remains connected.",true);continue;}std::wstring error;
                 auto& participant=active->participants[peer];if(!voiceMedia->startAnswer(participant.remoteDescription,error)){clearVoice(error,true);continue;}for(const auto& candidate:participant.candidates)voiceMedia->addCandidate(candidate.first,candidate.second,error);participant.candidates.clear();
             }else if(command.action==Action::VoiceDecline){
                 auto active=calls.active();if(!active||active->state!=calls::State::Incoming||active->direction!=calls::Direction::Incoming||active->id.value!=command.id)continue;
@@ -868,6 +877,11 @@ struct Node::Impl {
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
+#ifdef PEERCHAT_TEST_MEDIA_DIRECT
+            // Existing deterministic core fixtures do not contact discovery. Their
+            // explicit build flag is the only place direct test ICE is permitted.
+            mediaIce=MediaIceConfiguration::directForTests();
+#endif
             if(listeningPortOverride)profile.listenPort=listeningPortOverride;
             if(!displayNameOverride.empty())profile.name=displayNameOverride;
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
@@ -1029,6 +1043,15 @@ bool Node::setVoiceMuted(bool muted){Impl::Command command{};command.action=Impl
 bool Node::setVoiceDeafened(bool deafened){Impl::Command command{};command.action=Impl::Action::VoiceDeafen;command.accepted=deafened;return impl_->command(std::move(command));}
 bool Node::setVoiceDevices(int inputDevice,int outputDevice){if(inputDevice < -1||outputDevice < -1)return false;Impl::Command command{};command.action=Impl::Action::VoiceDevices;command.port=static_cast<std::uint16_t>(inputDevice+1);command.before=outputDevice;return impl_->command(std::move(command));}
 bool Node::setVoiceVolumes(int inputPercent,int outputPercent){if(inputPercent<0||inputPercent>200||outputPercent<0||outputPercent>200)return false;Impl::Command command{};command.action=Impl::Action::VoiceLevels;command.port=static_cast<std::uint16_t>(inputPercent);command.before=outputPercent;return impl_->command(std::move(command));}
+bool Node::setMediaIceConfiguration(MediaIceConfiguration configuration){
+    if(!configuration.valid(static_cast<std::int64_t>(std::time(nullptr)))
+#ifdef PEERCHAT_TEST_MEDIA_DIRECT
+       && configuration.policy!=MediaIceConfiguration::Policy::DirectTestOnly
+#endif
+    )return false;
+    Impl::Command command{};command.action=Impl::Action::MediaIceConfiguration;command.ice=std::move(configuration);
+    return impl_->command(std::move(command));
+}
 std::wstring Node::voiceDiagnostics(){auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command command{};command.action=Impl::Action::VoiceDiagnostics;command.response=response;if(!impl_->command(std::move(command))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return L"media_state=unavailable\nlatest_audio_error=diagnostic request timed out";return result.get();}
 MediaTelemetry Node::voiceTelemetry() const {MediaTelemetry result;result.inputLevel=impl_->voiceInputLevel.load();result.outputLevel=impl_->voiceOutputLevel.load();auto flags=impl_->voiceTelemetryFlags.load();result.active=(flags&1u)!=0;result.inputAvailable=(flags&2u)!=0;result.outputAvailable=(flags&4u)!=0;return result;}
 std::vector<NodeEvent> Node::poll(){std::lock_guard<std::mutex> lock(impl_->eventMutex);std::vector<NodeEvent> events;while(!impl_->events.empty()){events.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}return events;}

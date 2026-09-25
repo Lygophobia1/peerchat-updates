@@ -102,6 +102,15 @@ presence, friend, or diagnostic state. The current `VoiceMedia` and `ScreenShare
 configurations remain unchanged in this checkpoint; a later shared media-ICE configuration will
 consume this boundary and explicitly choose TURN-only versus direct-media policy.
 
+`MediaIceConfiguration` is the immutable, memory-only compatibility boundary from authenticated
+desktop/discovery orchestration into the native media engines. It carries only the relay-only
+policy, public TURN UDP host/port, temporary credential, expiry, and profile/discovery/configuration
+generations. `Node` forwards it for a new media generation but does not issue, persist, or choose
+media policy. VoiceMedia and ScreenShareMedia neither request nor log credentials; they install
+TURN-only relay ICE, reject direct candidates, and leave reliable messaging/control untouched if
+media setup fails. A running allocated PeerConnection is not invalidated solely by credential
+expiry; a recovery generation requires a fresh configuration.
+
 The existing test-only TURN infrastructure probe is environment-gated and never consumes a profile
 setting. The physical coturn deployment now accepts discovery-issued temporary REST credentials;
 the probe builds the authenticated URI only in a child-process environment, forces relay-only

@@ -27,6 +27,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_invalidate_route_v2(IntPtr handle,string peer,string staleHost,ushort stalePort,int allRoutes,ulong expectedNetworkGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr handle,ulong generation,string fingerprint);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_media_ice_configuration(IntPtr handle,string host,ushort port,string username,string password,long expiry,ulong profileSessionGeneration,ulong discoveryGeneration,ulong configurationGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_candidates(IntPtr handle,string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,int relay,ulong generation,int force);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_prepare_scoped_p2p_listener(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_begin_scoped_p2p(IntPtr handle,string peer,string id,string host,ushort port,ulong expiry,ulong generation);
@@ -97,6 +98,12 @@ public sealed class CoreAdapter : IDisposable {
     public void Connect(string host,ushort port,string peer,string source="Direct",string route="manual",bool force=false){if(ui_connect_ex(handle,host,port,peer,source,route,force?1:0)==0)throw new InvalidOperationException("Invalid connection details.");}
     public void InvalidateRoute(string peer,string staleHost="",ushort stalePort=0,bool allRoutes=false,ulong expectedNetworkGeneration=0){if(!String.IsNullOrEmpty(peer))ui_invalidate_route_v2(handle,peer,staleHost??"",stalePort,allRoutes?1:0,expectedNetworkGeneration);}
     public void SetNetworkContext(ulong generation,string fingerprint){ui_network_context(handle,generation,fingerprint??"");}
+    // The desktop application owns authenticated discovery orchestration.  This
+    // adapter only forwards one validated, memory-only configuration to native media.
+    public bool SetMediaIceConfiguration(MediaTurnCredentials value,ulong profileSessionGeneration,ulong discoveryGeneration,ulong configurationGeneration){
+        if(value==null||String.IsNullOrWhiteSpace(value.Host)||String.IsNullOrWhiteSpace(value.Username)||String.IsNullOrWhiteSpace(value.Password)||value.Port<1||value.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds())return false;
+        return ui_media_ice_configuration(handle,value.Host,(ushort)value.Port,value.Username,value.Password,value.ExpiresUtc,profileSessionGeneration,discoveryGeneration,configurationGeneration)!=0;
+    }
     public void UpdateCandidates(string peer,string lanHost,ushort lanPort,string publicHost,ushort publicPort,bool relay,ulong generation,bool force=false){ui_candidates(handle,peer,lanHost??"",lanPort,publicHost??"",publicPort,relay?1:0,generation,force?1:0);}
     public bool PrepareScopedP2pListener(string peer){return !String.IsNullOrEmpty(peer)&&ui_prepare_scoped_p2p_listener(handle,peer)!=0;}
     public bool BeginScopedP2p(string peer,string id,string host,ushort port,ulong expiry,ulong generation){return ui_begin_scoped_p2p(handle,peer,id,host,port,expiry,generation)!=0;}

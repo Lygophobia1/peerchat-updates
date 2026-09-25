@@ -70,6 +70,7 @@ int main() {
         senderOptions.height = 480;
         senderOptions.fps = 60;
         senderOptions.bitrate = 4000000;
+        senderOptions.ice = peerchat::MediaIceConfiguration::directForTests();
         peerchat::ScreenShareMedia::Options receiverOptions = senderOptions;
         receiverOptions.sender = false;
         receiverOptions.sourceHandle = 0;

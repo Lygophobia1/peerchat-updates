@@ -97,6 +97,17 @@ fingerprint-copy handling are checkpointed independently. No TURN password, REST
 authenticated URI is logged. Voice and screen-share production ICE configurations remain unchanged
 until the next shared `MediaIceConfiguration` checkpoint.
 
+**TURN/media checkpoint 2:** VoiceMedia and ScreenShareMedia now consume the same immutable,
+memory-only `MediaIceConfiguration` supplied by authenticated desktop/discovery orchestration. A
+new media generation requires a current account/profile-bound, discovery-bound credential with
+sufficient remaining lifetime; recovery refreshes it before reuse. Both engines install only
+TURN/UDP with `RTC_TRANSPORT_POLICY_RELAY`, suppress non-relay local candidates, reject non-relay
+remote candidates, and fail the media attempt without affecting reliable relay messaging when the
+configuration is absent, invalid, or expiring. Existing allocations are not torn down at issuance
+expiry. The desktop/native build, voice transport/lifecycle fixture, and screen media/node fixture
+pass. TURN-first two-PC voice + screen-share acceptance is still required before packaging this as
+a physical candidate.
+
 **Development publication evidence:** `v4.0.1-dev.1` is a GitHub prerelease at
 `https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1`. Its
 runtime-only ZIP is `3,147,619` bytes with SHA-256
