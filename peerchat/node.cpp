@@ -895,7 +895,10 @@ struct Node::Impl {
             // Pending friend IDs are intentionally reconnectable too. The first
             // successful TLS handshake supplies the public key that turns the
             // saved fingerprint reference into a verified contact.
-            for(const auto& c:contacts)if(!c.second.endpoints.empty()){const auto& endpoint=c.second.endpoints.front();sessionTransports->seedRetry(c.first,routeObservation(endpoint.host,endpoint.port,L"Saved contact",L"automatic reconnect",false,{nextRouteRevision++}),nowMilliseconds());emitSessionSnapshot(c.first);}
+            // Persisted contacts may contain historical direct endpoints from older builds. They
+            // are identity data, not an authorization to probe. Server-first startup deliberately
+            // seeds no direct retry; only relay policy or a fresh scoped P2P authorization can
+            // create a new route attempt.
             while(running){
                 drain();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
                 if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}

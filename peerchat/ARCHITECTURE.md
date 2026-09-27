@@ -283,10 +283,10 @@ The two network roles are independent:
 |---|---|---|
 | Discovery bind address | Local interface used by the account service, commonly `0.0.0.0` | Server `Port` |
 | Advertised discovery endpoint | Hostname/address clients use for account/discovery TLS | `PublicHostname` + server `Port` |
-| Client P2P listener | Native direct-chat listener, commonly `0.0.0.0:7777` | Client profile |
-| LAN P2P candidate | Current private/local address for that listener | Client presence + client listener port |
-| Public P2P candidate | Public address mapped to that listener | Observed/configured address + client listener port |
-| Self-hosted P2P fallback | Optional public address for a client colocated with the server | `SelfHostedPublicP2PHost` + client listener port |
+| Client P2P listener | Temporary native direct-chat listener, inactive in relay-only mode | Explicit Direct Only or scoped P2P lifetime |
+| LAN P2P candidate | Temporary private/local address for that listener | Scoped mutual-consent exchange only |
+| Public P2P candidate | Temporary public address mapped to that listener | Scoped mutual-consent exchange only |
+| Self-hosted P2P fallback | Optional direct-mode public address for a colocated client | Explicit direct-mode operation only |
 
 The discovery port never becomes a P2P candidate port. A client may use `localhost` for discovery
 while advertising a non-loopback LAN P2P candidate. The server rejects loopback, unspecified,
@@ -295,31 +295,29 @@ When discovery arrives over loopback, the server uses the explicit self-hosted P
 if the advertised LAN address belongs to a server-host interface. Remote authenticated clients
 may use a validated server-observed public IPv4 plus their advertised P2P listener port.
 
-Presence stores the LAN/public candidates, source, observed-address classification, current device
-identity, and last-seen time. Only authenticated friends receive endpoint candidates. Public
-username search returns public profile/device fields without endpoints.
+Relay-only presence stores current device identity and last-seen time, with empty reliable direct
+endpoint fields. It never synthesizes a server-observed public candidate. Temporary direct
+candidates are memory-only, peer/device/request-bound consent data; they are not ordinary presence,
+friend, contact, or profile state. Public username search remains endpoint-free.
 
 ## Candidate selection and direct connection
 
-One WPF friend-snapshot reconciliation path serves normal refresh, friend dialogs and manual repair.
-Concurrent refresh callers share its task and responses are rejected after account sign-out/change.
-Try Reconnect refreshes presence/friends when possible, then invokes the existing candidate selector.
-Explicit retry retires stale attempts for that expected identity; unchanged presence does not destroy
-an in-progress trust handshake. Wrong-identity suspension begins at detection, before socket cleanup.
+One WPF friend-snapshot reconciliation path serves login, discovery-event invalidation, bounded
+channel-reconnect repair, dialogs, and manual repair. Concurrent refresh callers share its task and
+responses are rejected after account sign-out/change. In Server Relay mode, Try Reconnect refreshes
+only authoritative friend state and asks the manager for its relay route; it never republishes
+presence, consults saved endpoints, allocates a listener, or starts P2P consent. Explicit retry
+retires stale attempts for that expected identity; unchanged presence does not destroy an in-progress
+trust handshake. Wrong-identity suspension begins at detection, before socket cleanup.
 Group invite candidates come from `ChatViewModel.GroupInviteCandidates`, keyed by established account
 membership rather than endpoint/presence. The open picker updates on friend/group model events.
 
-Opening a friend DM consumes the authoritative friend snapshot. The client compares a private LAN
-candidate against a freshly enumerated snapshot of active local IPv4 interfaces using each
-interface's real subnet mask. Enumeration and mask failures are isolated per adapter/address so a
-broken virtual adapter cannot make a later valid Ethernet/Wi-Fi subnet appear remote. Automatic
-presence refresh also re-detects the advertised physical LAN address after network changes; an
-explicit user-configured endpoint remains unchanged. Per-peer diagnostics retain every evaluated
-local address/prefix, the candidate, the match result, and why an interface was ignored.
-WPF publishes a same-subnet LAN candidate and a valid public candidate without selecting between
-them. The manager tries LAN before public, advances promptly after route failure, and may request an
-authenticated relay after an eight-second bounded direct window. TLS identity mismatch suspends that
-attempt behind the existing trust boundary and never triggers silent rebinding.
+Opening a friend DM consumes the authoritative friend snapshot but deliberately clears any historical
+reliable LAN/public endpoint before forwarding the route observation to the manager. Ordinary
+snapshot, saved, stale, and network-change data therefore select only the authenticated server relay.
+Local subnet enumeration remains available solely to validate an explicitly authorized scoped P2P
+candidate; it does not itself create or publish one. TLS identity mismatch remains behind the
+existing trust boundary and never triggers silent rebinding.
 
 The WPF conversation identity is `account:<account-id>`, not an endpoint, session, presence state,
 or device Peer ID. A DPAPI-protected index inside the selected profile attaches current and known
@@ -344,42 +342,37 @@ behalf and cannot decrypt the inner peer TLS. Duplicate, stale, third-party and 
 attachments are rejected. The inner verified Peer ID remains authoritative; changing direct/relay
 route for the same key does not prompt again, while a changed key uses the existing verification UX.
 
-While relay is active, direct probes continue on manager-owned bounded backoff. Failed candidates do
-not affect the relay winner. A fully authenticated direct candidate uses the existing Stage 5 handoff
-before promotion and relay drain. Relay never replaces a healthy direct winner. Stage 6 call-control
+While relay is active, no direct probe exists unless the user started a scoped mutual-consent request.
+A failed scoped candidate does not affect the relay winner. A fully authenticated direct candidate
+uses the existing Stage 5 handoff only after explicit promotion and relay drain. Relay never replaces
+a healthy direct winner. Stage 6 call-control
 frames can use either authenticated reliable winner; WebRTC audio remains an independent direct
 ICE/DTLS-SRTP path and is never carried by the reliable server relay.
 
-Each native outbound attempt has an ID plus expected Peer ID, concrete endpoint, candidate source,
-and route. Saved-contact failures use exponential retry backoff with per-attempt jitter from five
-seconds up to a five-minute cap. A changed presence/candidate or Try Reconnect can request an
-immediate attempt without clearing trust or failure history. If an endpoint presents a different
-Peer ID, that attempt remains behind explicit verification; rejection suspends automatic retry for
-that endpoint until a manual retry or candidate update. A fresh authoritative candidate matching an
-already-running endpoint updates that attempt's source/route metadata in place rather than leaving
-it labelled as a saved-contact attempt or interrupting an active trust decision.
+Each native outbound attempt has an ID plus expected Peer ID, concrete route, candidate source, and
+route class. Relay retry/backoff is manager-owned. Direct retry/backoff belongs only to an explicit
+Direct Only route or a current scoped P2P authorization; no saved-contact retry survives relay-only
+startup. If an endpoint presents a different Peer ID, that attempt remains behind explicit
+verification; rejection suspends automatic retry for that endpoint until a new authorized attempt.
 
 ## Discovery events and presence
 
-Login/reconnect fetches one authoritative friend snapshot, then opens a long-lived authenticated
-TLS event stream. Events are invalidation notifications; SQLite friend/account state remains
-authoritative. Event reconnect uses bounded backoff and triggers a repair snapshot. A slow safety
-snapshot runs every three minutes while the channel is healthy or one minute while reconnecting.
-
-A separate 60-second presence heartbeat updates the current device/candidates only. Repeating an
-identical heartbeat does not broadcast another friend event. Presence expires after 90 seconds and
-the server emits an offline notification.
+Login fetches one authoritative friend snapshot, then opens one long-lived authenticated TLS event
+stream bound to the authenticated device identity. That channel is the normal relay-only presence
+lease: the server renews it every 30 seconds without a parallel client request socket. Friend,
+presence, account/friendship, and scoped-P2P changes arrive as invalidation events; SQLite
+friend/account state remains authoritative. Channel reconnect uses bounded backoff and exactly one
+repair snapshot. The slow safety snapshot runs every fifteen minutes while healthy and every three
+minutes while reconnecting, solely as missed-event protection. Presence expires after 90 seconds
+after an abrupt channel disappearance and the server emits an offline notification.
 
 Windows `NetworkAddressChanged` is the event-driven runtime recovery trigger; bursts are debounced
 without polling. A real active-address/subnet fingerprint change increments the managed network
-generation, requests native invalidation for that exact generation, cancels obsolete discovery work,
-and removes saved private endpoints outside every current subnet while retaining contact identity,
-trust, conversation, history, and outbox state. The client then publishes its newly detected candidate,
-forces a fresh authoritative friend snapshot, and runs the same candidate selector again.
-Discovery-channel recovery performs publish-before-snapshot as well, so an interface change that
-occurred while discovery was unreachable is repaired on reconnection. The manager compares the
-request's network generation with each route observation: delayed invalidation from an older network
-cannot close a newly authenticated route. Exact-endpoint refresh also retains a healthy winner.
+generation, cancels obsolete scoped P2P work, and requests one authoritative friend reconciliation
+while retaining contact identity, trust, conversation, history, and outbox state. Relay-only operation
+does not publish a newly detected direct candidate. The manager compares the request's network
+generation with each scoped route observation so delayed invalidation cannot close a newly
+authenticated winner.
 
 An out-of-subnet saved private endpoint is not retried while discovery is unavailable. Identity and
 conversation state survive. Rapid network changes are coalesced through WPF recovery flags. Route
@@ -626,7 +619,7 @@ or certificates.
 Relay-only startup creates no reliable direct TCP listener, publishes no reliable direct candidate,
 and does not touch Windows Firewall. Explicit Direct Only or authorized scoped reliable P2P acquires
 a temporary `0.0.0.0` listener on an OS-selected port; its port is runtime-only and is released when
-the scope is cancelled or discarded. The future consent UI obtains firewall permission before it
+the scope is cancelled or discarded. The explicit consent UI obtains firewall permission before it
 begins that lifecycle.
 
 The installation rule remains `PeerChat P2P (Private)`, but is now application-scoped rather than

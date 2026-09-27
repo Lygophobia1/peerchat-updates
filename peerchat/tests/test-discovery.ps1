@@ -1,5 +1,8 @@
 param([switch]$PhysicalTurn)
 $ErrorActionPreference='Stop'
+# PowerShell hosts do not consistently preload the .NET Framework DPAPI type.
+# The isolated server fixture deliberately protects its temporary TURN test secret.
+Add-Type -AssemblyName System.Security
 $projectRoot = Split-Path $PSScriptRoot -Parent
 if($PhysicalTurn) {
     Push-Location $projectRoot
@@ -74,7 +77,12 @@ try {
     $startServer={Start-Process -FilePath $serverExecutable -ArgumentList $serverArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $serverLog -RedirectStandardError $serverError}
     $server=& $startServer;Start-Sleep -Milliseconds 700
     if($server.HasExited){throw "Discovery server exited during startup: $(Get-Content -Raw $serverError)"}
-    try { & $testExecutable localhost $fingerprint 17443 $managementPipe;if($LASTEXITCODE -ne 0){throw 'Discovery integration test failed'} } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+    try {
+        & $testExecutable localhost $fingerprint 17443 $managementPipe
+        if($LASTEXITCODE -ne 0){throw 'Discovery integration test failed'}
+        if(-not (Select-String -LiteralPath $serverLog -SimpleMatch -Pattern 'direct candidates=False' -Quiet)){throw 'Relay-only integration clients did not publish direct candidates=False'}
+        if(Select-String -LiteralPath $serverLog -SimpleMatch -Pattern 'Server-observed Internet address' -Quiet){throw 'Relay-only integration clients caused a server-observed direct candidate'}
+    } finally { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     $server=& $startServer;Start-Sleep -Milliseconds 700
     if($server.HasExited){throw "Discovery server restart failed: $(Get-Content -Raw $serverError)"}
     try {

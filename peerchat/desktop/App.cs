@@ -263,9 +263,9 @@ public class DesktopApplication {
         try{
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
-            if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Direct P2P":"Local profile ready · Sign in, create an account, or continue Offline / Direct P2P"):"@"+accountLink.Username+" signed out · Local history and Direct P2P remain available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
-        }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Direct P2P · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
+            if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Server Relay":"Local profile ready · Sign in, create an account, or continue offline"):"@"+accountLink.Username+" signed out · Local history remains available";Refresh();PromptProfileAccountSetup();return;}
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
+        }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Server Relay · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
         if(busy||closing)return;
@@ -274,11 +274,12 @@ public class DesktopApplication {
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
             // authoritative snapshot, so this timer is only a repair mechanism.
-            TimeSpan snapshotCadence=discovery!=null&&discovery.EventChannelConnected?TimeSpan.FromSeconds(180):TimeSpan.FromSeconds(60);
+            // Events own the normal presence path. A snapshot is only missed-event repair,
+            // never a short-lived online probe.
+            TimeSpan snapshotCadence=discovery!=null&&discovery.EventChannelConnected?TimeSpan.FromMinutes(15):TimeSpan.FromMinutes(3);
             if(discovery!=null&&!friendRefreshInFlight&&DateTime.UtcNow-lastFriendRefreshUtc>=snapshotCadence){TraceUi("friend snapshot refresh dispatched");RefreshFriendState();}
             // Presence is a small authenticated heartbeat. It updates only this device's
             // presence/candidates and never fetches or rebuilds the friend snapshot.
-            if(discovery!=null&&!presenceInFlight&&DateTime.UtcNow-lastPresenceUtc>=TimeSpan.FromSeconds(60))RefreshPresence();
             if(discovery!=null&&!mediaTurnRefreshInFlight&&(model.VoiceStateCode!=0||activeScreenState!=0)&&
                 (mediaTurnCredentials==null||mediaTurnCredentials.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+60))_ = EnsureMediaIceConfigurationAsync();
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
@@ -809,14 +810,15 @@ public class DesktopApplication {
 		bool flag2 = model.Groups && model.SelectedGroup != null;
 		Find<TextBlock>("LocalProfile").Text = ((localProfile == null) ? model.Name : localProfile.Name) + ((accountLink == null) ? " · Unlinked" : (" · @" + accountLink.Username));
 		profileName.Text = ((localProfile == null) ? model.Name : localProfile.Name);
-		profileHandle.Text = ((discovery != null) ? ("@" + discovery.Username + " · Online") : ((accountLink != null) ? ("@" + accountLink.Username + " · Offline / Direct P2P") : (accountStore.Exists ? "Account link unavailable · Offline / Direct P2P" : "Unlinked · Offline / Direct P2P")));
+		profileHandle.Text = ((discovery != null) ? ("@" + discovery.Username + " · Online") : ((accountLink != null) ? ("@" + accountLink.Username + " · Offline / Server Relay") : (accountStore.Exists ? "Account link unavailable · Offline / Server Relay" : "Unlinked · Offline")));
 		Find<TextBlock>("OwnId").Text = ((model.OwnId.Length == 0) ? "Waiting for identity" : model.OwnId);
 		Find<TextBlock>("OwnId").ToolTip = model.OwnId;
-		Find<TextBlock>("Listener").Text = (model.Listening ? ("●  Listening on " + shareHost + ":" + model.Port) : "○  Not listening");
-		Find<TextBlock>("Listener").Foreground = Brush(model.Listening ? "#36D873" : "#A1AEBB");
+		bool reliableListenerActive = model.Listening && model.Port > 0;
+		Find<TextBlock>("Listener").Text = (reliableListenerActive ? ("●  Reliable P2P listener: " + shareHost + ":" + model.Port) : "○  Reliable P2P listener: Not active");
+		Find<TextBlock>("Listener").Foreground = Brush(reliableListenerActive ? "#36D873" : "#A1AEBB");
 		int num = model.Conversations.Values.Count((ConversationModel c) => c.Online);
 		Find<TextBlock>("PeerCount").Text = num + " peers connected";
-		Find<TextBlock>("CompactConnectionStatus").Text = (flag ? ConnectionStatusText(model.Selected) : (model.Listening ? "Ready for direct connections" : "Offline"));
+		Find<TextBlock>("CompactConnectionStatus").Text = (flag ? ConnectionStatusText(model.Selected) : (model.Listening ? "Server Relay ready" : "Offline"));
 		Find<TextBlock>("CompactConnectionStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#EDF1F5");
 		Find<TextBlock>("LastConnectionFailure").Text = "Last failure: " + (flag ? connectionAttempts.For(model.Selected).Failure : "None");
 		Find<TextBlock>("Status").Text = model.Status;
@@ -830,9 +832,9 @@ public class DesktopApplication {
 		Find<TextBlock>("MediaConnectionState").Text="State: "+VoiceConnectionState();
 		Find<TextBlock>("StorageStatus").Text = (model.Listening ? "Local history: encrypted on this PC" : "Local profile: not ready");
 		Find<TextBlock>("VersionText").Text = "App version: " + PeerChat.VersionInfo.Display;
-		Find<TextBlock>("EndpointHint").Text = "Shareable endpoint: " + shareHost + ":" + model.Port;
-		Find<TextBlock>("LanEndpoint").Text = "LAN: " + shareHost + ":" + model.Port;
-		Find<TextBlock>("PublicEndpoint").Text = "Public: Detecting…";
+		Find<TextBlock>("EndpointHint").Text = reliableListenerActive ? "Temporary P2P endpoint: " + shareHost + ":" + model.Port : "Reliable direct endpoint: not active";
+		Find<TextBlock>("LanEndpoint").Text = reliableListenerActive ? "LAN: " + shareHost + ":" + model.Port : "LAN: not published";
+		Find<TextBlock>("PublicEndpoint").Text = reliableListenerActive ? "Public: scoped P2P exchange only" : "Public: not published";
 		Find<TextBlock>("FriendAreaStatus").Text = "Friends · " + model.Conversations.Values.Count((ConversationModel item) => item.IsFriend) + "   Incoming · " + friendState.Incoming.Count + "   Pending · " + friendState.Outgoing.Count;
 		UpdateFriendRequestsButton();
 		bool flag3 = discovery != null && !string.IsNullOrEmpty(discovery.SessionToken);
@@ -1173,7 +1175,7 @@ public class DesktopApplication {
 			ApplyPresenceDiagnostics(presence);
 			core.SetGroupAccount(discovery.AccountId, discovery.Username);
 			core.LoadGroups();
-			discovery.StartEventChannel(HandleDiscoveryEvent);
+            discovery.StartEventChannel(model.OwnId,HandleDiscoveryEvent);
 			SaveDiscoverySession();
 			model.Status = "Signed in as " + discovery.Username + " · Discoverable";
 		}
@@ -1252,11 +1254,14 @@ public class DesktopApplication {
 			{
 				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
 				if(notification!=null&&(notification.Event=="p2p_accepted"||notification.Event=="p2p_candidates_ready"||notification.Event=="p2p_declined"||notification.Event=="p2p_cancelled")){HandleP2pEvent(notification);return;}
-				if (notification != null && notification.Event == "channel_connected")
-				{
-					model.Status = "Discovery reconnected · refreshing network presence…";
-					Refresh();
-					BeginNetworkRecovery("discovery channel reconnected", false);
+                if (notification != null && notification.Event == "channel_connected")
+                {
+                    model.Status = "Discovery reconnected · reconciling friend state…";
+                    Refresh();
+                    // One bounded reconciliation after a real channel reconnect. The channel
+                    // itself owns the relay-only presence lease; it must not restart direct
+                    // routing or perform a one-shot presence probe.
+                    RefreshFriendState();
 				}
 				else
 				{
@@ -1297,11 +1302,18 @@ public class DesktopApplication {
 		{
 			return presenceRefreshTask;
 		}
-		DiscoveryClient discoveryClient = discovery;
-		if (discoveryClient == null || string.IsNullOrEmpty(discoveryClient.SessionToken))
-		{
-			return Task.FromResult(false);
-		}
+        DiscoveryClient discoveryClient = discovery;
+        if (discoveryClient == null || string.IsNullOrEmpty(discoveryClient.SessionToken))
+        {
+            return Task.FromResult(false);
+        }
+        // A healthy authenticated event subscription renews relay-only presence on the server.
+        // Do not create a parallel short-lived discovery connection merely to poll liveness.
+        if (discoveryClient.EventChannelConnected)
+        {
+            lastPresenceUtc = DateTime.UtcNow;
+            return Task.FromResult(true);
+        }
 		RefreshAutomaticShareHost();
 		presenceInFlight = true;
 		lastPresenceUtc = DateTime.UtcNow;
@@ -1471,7 +1483,7 @@ public class DesktopApplication {
 		DiscoveryClient source = discovery;
 		if (source == null || string.IsNullOrEmpty(source.SessionToken))
 		{
-			model.Status = "Network changed · Offline / Direct P2P · stale private routes discarded";
+			model.Status = "Network changed · Offline / Server Relay · stale private routes discarded";
 			Refresh();
 			return;
 		}
@@ -1584,8 +1596,11 @@ public class DesktopApplication {
 			bool reused;
 			ConversationModel conversationModel = model.BindFriend(item.AccountId, item.Username, item.PublicIdentity, friendConversationBinding.KnownPeerIds, out reused);
 			ContactData contact = conversationModel.Contact;
-			bool flag = contact == null || contact.peer != item.PublicIdentity || contact.host != (item.EndpointHost ?? "") || contact.port != (ushort)Math.Max(0, Math.Min(65535, item.EndpointPort));
-			bool flag2 = flag || contact.publicHost != (item.PublicEndpointHost ?? "") || contact.publicPort != (ushort)Math.Max(0, Math.Min(65535, item.PublicEndpointPort));
+            // Ordinary friend snapshots are intentionally endpoint-free in Server Relay mode.
+            // Direct route hints are scoped to an explicit P2P authorization and never become
+            // saved presence/contact data here.
+            bool flag = contact == null || contact.peer != item.PublicIdentity || !String.IsNullOrEmpty(contact.host) || contact.port != 0;
+            bool flag2 = flag || !String.IsNullOrEmpty(contact.publicHost) || contact.publicPort != 0;
 			bool value;
 			bool flag3 = !friendPresence.TryGetValue(item.AccountId, out value) || value != item.Online;
 			friendPresence[item.AccountId] = item.Online;
@@ -1598,14 +1613,14 @@ public class DesktopApplication {
 			{
 				peer = item.PublicIdentity,
 				name = item.Username,
-				host = (item.EndpointHost ?? ""),
-				port = (ushort)Math.Max(0, Math.Min(65535, item.EndpointPort)),
-				publicHost = (item.PublicEndpointHost ?? ""),
-				publicPort = (ushort)Math.Max(0, Math.Min(65535, item.PublicEndpointPort)),
+                host = "",
+                port = 0,
+                publicHost = "",
+                publicPort = 0,
 				verified = verified
 			};
 			conversationModel.Refresh();
-			TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + item.AccountId + "; username=" + item.Username + "; device Peer ID=" + item.PublicIdentity + "; local conversation=" + conversationModel.ConversationId + "; endpoint=" + (item.EndpointHost ?? "") + ":" + item.EndpointPort);
+            TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + item.AccountId + "; username=" + item.Username + "; device Peer ID=" + item.PublicIdentity + "; local conversation=" + conversationModel.ConversationId + "; ordinary route=server relay");
 			ConnectFriendCandidate(item,conversationModel,false,(flag2||flag3)?"candidate update":"authoritative refresh");
 		}
 		model.ReconcileFriends(hashSet);
@@ -2788,13 +2803,13 @@ public class DesktopApplication {
 	private void ConnectFriendCandidate(DiscoverySearchResult friend, ConversationModel conversation, bool force, string trigger)
 	{
 		var details=connectionAttempts.Update(new CoreEvent{expected=friend.PublicIdentity},conversation);details.Presence=friend.Online?"Online":"Offline";details.CandidateSeenUtc=friend.CandidateSeenUtc;
-		string lan=friend.EndpointHost??"",publicHost=friend.PublicEndpointHost??"";int lanPort=friend.EndpointPort,publicPort=friend.PublicEndpointPort;
-		bool validLan=!String.IsNullOrWhiteSpace(lan)&&lanPort>0&&lanPort<=65535,validPublic=!String.IsNullOrWhiteSpace(publicHost)&&publicPort>0&&publicPort<=65535;
-		var subnet=validLan?CurrentLocalSubnetDecision(lan):new LocalSubnetDecision{SameSubnet=false,Diagnostics="LAN candidate unavailable; subnet classification not performed"};details.LocalSubnetDiagnostics=subnet.Diagnostics;
-		bool eligibleLan=validLan&&subnet.SameSubnet,relayAvailable=discovery!=null&&!String.IsNullOrEmpty(discovery.SessionToken);
-		lastPublicCandidate=validPublic?publicHost+":"+publicPort:"Unavailable";lastPublicCandidateSource=String.IsNullOrEmpty(friend.PublicCandidateSource)?"Discovery friend state":friend.PublicCandidateSource;lastObservedAddressClassification=String.IsNullOrEmpty(friend.ObservedAddressClassification)?"Unavailable":friend.ObservedAddressClassification;
-		TraceUi("Candidate provider update: account="+friend.AccountId+"; generation="+networkGeneration+"; LAN="+(eligibleLan?lan+":"+lanPort:"ineligible")+"; public="+(validPublic?publicHost+":"+publicPort:"none")+"; relay="+relayAvailable+"; trigger="+trigger+"; interfaces="+subnet.Diagnostics.Replace('\n','|'));
-		core.UpdateCandidates(friend.PublicIdentity,eligibleLan?lan:"",eligibleLan?(ushort)lanPort:(ushort)0,validPublic?publicHost:"",validPublic?(ushort)publicPort:(ushort)0,relayAvailable,networkGeneration,force);
+		var subnet=new LocalSubnetDecision{SameSubnet=false,Diagnostics="Reliable direct candidates are disabled for ordinary relay presence"};details.LocalSubnetDiagnostics=subnet.Diagnostics;
+		bool relayAvailable=discovery!=null&&!String.IsNullOrEmpty(discovery.SessionToken);
+		lastPublicCandidate="Unavailable";lastPublicCandidateSource="Relay-only presence";lastObservedAddressClassification="Not evaluated";
+		TraceUi("Server-first route update: account="+friend.AccountId+"; generation="+networkGeneration+"; relay="+relayAvailable+"; direct candidates suppressed; trigger="+trigger);
+		// The manager receives only its relay route on ordinary presence/manual reconnect.
+		// P2P candidates enter solely through BeginScopedP2p after mutual consent.
+		core.UpdateCandidates(friend.PublicIdentity,"",0,"",0,relayAvailable,networkGeneration,force);
 			if(conversation.SessionRevision==0){conversation.ConnectionState="Finding server relay";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · secure server relay"+(connectionPreferences.AllowDirectP2p?", manual P2P available":"")+"…";Refresh();
 	}
 
@@ -2877,10 +2892,12 @@ public class DesktopApplication {
 		bool reused;
 		ConversationModel conversationModel = model.BindFriend(friend.AccountId, friend.Username, friend.PublicIdentity, knownPeers, out reused);
 		bool verified = conversationModel.Contact != null && conversationModel.Contact.peer == friend.PublicIdentity && conversationModel.Contact.verified;
-		string host = friend.EndpointHost ?? "";
-		string publicHost = friend.PublicEndpointHost ?? "";
-		int endpointPort = friend.EndpointPort;
-		int publicEndpointPort = friend.PublicEndpointPort;
+		// Normal discovery presence deliberately carries no reusable reliable P2P route.
+		// Scoped consent supplies temporary candidates directly to the native probe path.
+		string host = "";
+		string publicHost = "";
+		int endpointPort = 0;
+		int publicEndpointPort = 0;
 		conversationModel.Contact = new ContactData
 		{
 			peer = friend.PublicIdentity,
@@ -3311,27 +3328,17 @@ public class DesktopApplication {
 		DiscoveryClient source = discovery;
 		try
 		{
-			string refreshResult = "offline; using saved identity/endpoints";
+			string refreshResult = "relay reconnect requested";
 			if (source != null && selected.AccountId > 0)
 			{
-				RefreshAutomaticShareHost();
-				try
-				{
-					await Task.Run(() => source.ReportPresence(model.OwnId, "", 0, "", 0, false));
-				}
-				catch
-				{
-				}
-				if (discovery != source || closing || closed)
-				{
-					return;
-				}
+				// Reconnect follows the manager-owned Server Relay policy. It never republishes
+				// presence, consults saved endpoints, creates a listener, or starts P2P consent.
 				bool refreshed = await RefreshFriendsAsync();
 				if (discovery != source || closing || closed)
 				{
 					return;
 				}
-				refreshResult = (refreshed ? "authoritative friend snapshot refreshed" : "refresh unavailable; using saved candidates");
+				refreshResult = (refreshed ? "authoritative friend snapshot refreshed; relay reconnect requested" : "relay discovery refresh unavailable");
 				if (refreshed && !selected.IsFriend)
 				{
 					RecordConnection("repair", selected, "Account is no longer an established friend");
@@ -3347,31 +3354,8 @@ public class DesktopApplication {
 				OpenFriendConversation(current, true, "manual retry");
 				return;
 			}
-			ContactData contact = selected.Contact;
-			RecordConnection("repair", selected, refreshResult);
-			if (contact == null || string.IsNullOrEmpty(contact.host) || contact.port == 0)
-			{
-				Notify("No reachable candidates are saved for this conversation.");
-				return;
-			}
-			if (IsPrivateCandidate(contact.host))
-			{
-				LocalSubnetDecision localSubnetDecision = CurrentLocalSubnetDecision(contact.host);
-				connectionAttempts.Update(null, selected).LocalSubnetDiagnostics = localSubnetDecision.Diagnostics;
-				if (!localSubnetDecision.SameSubnet)
-				{
-					core.InvalidateRoute(contact.peer, contact.host, contact.port, false, networkGeneration);
-					contact.host = "";
-					contact.port = 0;
-					connectionAttempts.Update(null, selected).RefreshResult = "stale saved private endpoint discarded after network change";
-					RecordConnection("network-change", selected, "Stale saved private endpoint discarded; discovery is unavailable");
-					Notify("The saved LAN address belongs to the previous network. Connect discovery or use a current Direct P2P endpoint.");
-					return;
-				}
-			}
-			core.Connect(contact.host, contact.port, contact.peer, "Saved contact", "manual retry", true);
-			model.Status = "Reconnecting to " + selected.Name + "…";
-			Refresh();
+			RecordConnection("repair", selected, refreshResult+"; no direct route was attempted");
+			Notify("Server Relay is unavailable. No direct route was attempted; use Try P2P Connection only if you want to request a scoped direct probe.");
 		}
 		finally
 		{

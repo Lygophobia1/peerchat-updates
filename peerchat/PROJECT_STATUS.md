@@ -76,6 +76,17 @@ relay winner. Desktop build, discovery privacy integration, and targeted reconne
 pass. Physical two-client consent/probe/promotion validation remains required. Voice/screen-share
 ICE remain unchanged.
 
+**Current physical-validation leads (not yet attributed to current source):** the older
+`turn-first-media-physical-a289fd7-20260925` package proved Server Relay messaging, TURN voice, and
+initial TURN screen transport, but reported a fresh-profile screen-share crash, a later trust/pin
+change after that crash, a local screen-share stop/hang, and an incomplete scoped-P2P attempt. The
+source checkpoint `a289fd7` already includes the prior single-GPU-worker and bounded screen-teardown
+fixes; it is therefore not valid to classify the stop/hang as current until the newly staged
+validation package is tested. A media crash changing the persistent device Peer ID/public key is a
+release-blocking identity defect: identity load failure must fail closed, never silently create a
+replacement. Retest current source first and capture the precise screen pipeline or scoped-P2P
+transition before changing feature behavior.
+
 **TURN/media checkpoint 1:** discovery now has an optional server-side TURN/UDP credential issuer.
 It stores the coturn REST shared secret only as CurrentUser-DPAPI-protected server configuration,
 then issues unique, short-lived standard REST HMAC credentials to authenticated account/device
