@@ -34,8 +34,13 @@ struct NodeEvent {
     std::uint64_t shareLifetime=0;
     std::uint64_t shareGeneration=0;
     std::uint32_t shareState=0;
-    std::uint32_t screenRoute=0,screenWidth=0,screenHeight=0;
+    std::uint32_t screenRoute=0,screenWidth=0,screenHeight=0,screenFps=0;
+    double screenBitrateMbps=0;
     std::wstring screenSummary,screenDetails;
+    // Authoritative screen-media classification. These are intentionally
+    // separate from the user-visible route and never contain credentials.
+    std::wstring screenFailureDomain,screenFailureReason,screenRecoveryTrigger;
+    std::uint64_t screenRecoveryGenerationFrom=0,screenRecoveryGenerationTo=0;
     std::uint32_t callState=0;
     std::uint32_t callType=0;
     std::uint32_t mediaState=0;
@@ -43,6 +48,7 @@ struct NodeEvent {
     bool callMuted=false;
     bool callDeafened=false;
     bool callControlAvailable=true;
+    bool screenMediaFailed=false;
     std::uint32_t reliableRoute=0;
     // The manager owns this value; WPF uses it only to present the optional
     // verified-direct standby/promotion controls.

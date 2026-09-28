@@ -43,6 +43,25 @@ int main() {
             && !share.matchesMedia(firstLifetime, firstId, peer, 1),
             "Previous share callback survived logical teardown");
         share.clear();
+        // A process must not carry peer/lifetime state from one share into the
+        // next. Mirror the physical A->B, A->C, B->A, A->B sequence before
+        // exercising the native media object below.
+        const std::string peerB(64, 'b'), peerC(64, 'c'), peerA(64, 'a');
+        const std::string shareAB(32, '1'), shareAC(32, '2'), shareBA(32, '3'), shareAB2(32, '4');
+        require(share.start(shareAB, peerB, true, peerchat::screen::State::Offering, 4000),
+            "Could not start A-to-B lifecycle");
+        const auto abLifetime = share.active()->lifetime;
+        share.clear();
+        require(share.start(shareAC, peerC, true, peerchat::screen::State::Offering, 5000) &&
+            !share.matchesMedia(abLifetime, shareAB, peerB, 1),
+            "A-to-B state survived into A-to-C");
+        share.clear();
+        require(share.start(shareBA, peerA, true, peerchat::screen::State::Offering, 6000),
+            "Could not start B-to-A lifecycle");
+        share.clear();
+        require(share.start(shareAB2, peerB, true, peerchat::screen::State::Offering, 7000),
+            "Could not start repeated A-to-B lifecycle");
+        share.clear();
         std::cerr << "logical_share_checks=passed\n";
         source = CreateWindowExW(0, L"STATIC", L"PeerChat H.264 sender test",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,

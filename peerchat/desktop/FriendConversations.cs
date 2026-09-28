@@ -61,7 +61,7 @@ public sealed class ConnectionAttemptDetails {
     public long AttemptId;
     public long CandidateSeenUtc;
     public string Presence="Unknown",RefreshResult="Not requested";
-    public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="local/direct",Route="None",TransportState="Offline",TrustState="No verification pending",Failure="None",LocalSubnetDiagnostics="Not evaluated";
+    public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="PeerChat server relay",Route="relay-only",TransportState="Offline",TrustState="No verification pending",Failure="None",LocalSubnetDiagnostics="Not evaluated";
     public bool HasLiveSession;
     public long LiveConnectionId,LatestFailedAttemptId,SessionEpoch,SessionRevision;
     public string LiveCandidate="None",LiveSource="None",LiveRoute="None",LiveDirection="unknown",LatestFailedCandidate="None",LatestFailedSource="None",LatestFailedRoute="None",LatestFailure="None";

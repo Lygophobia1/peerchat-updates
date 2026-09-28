@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <iomanip>
+#include <map>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -29,7 +30,12 @@ class ScreenShareMedia {
 public:
     enum class Route : std::uint32_t { Unknown, DirectHostIce, NatTraversedIce, TurnRelay };
     enum class EventKind { Description, Candidate, Connected, Disconnected, Failed };
-    struct Event { EventKind kind; std::string value, detail; };
+    // This is deliberately about the media-engine failure boundary, not a
+    // recovery decision.  ScreenShareManager/Node decide whether a failure is
+    // eligible for a new media generation.
+    enum class FailureDomain { None, LocalCapture, LocalEncoder, IceTurnTransport,
+                               DtlsSecurity, Rtp, RemoteDecoder, Presentation };
+    struct Event { EventKind kind; std::string value, detail; FailureDomain failure = FailureDomain::None; };
     struct Options {
         bool sender = false;
         std::uint32_t sourceKind = 0;
@@ -42,17 +48,39 @@ public:
     struct Statistics {
         std::uint64_t encodedSubmitted = 0, rtpReceived = 0;
         std::uint64_t accessUnitsDelivered = 0, lostPackets = 0;
+        std::uint64_t rtpSequenceGap = 0, rtpOutOfOrder = 0, rtpDuplicate = 0;
+        std::uint64_t rtpTimestampChangeBeforeMarker = 0, rtpIncompleteFuA = 0;
+        std::uint64_t rtpAbandonedAccessUnit = 0, rtpStaleGenerationPacket = 0;
         std::uint64_t decoded = 0, presented = 0;
         std::uint64_t captured = 0, encoderSubmitted = 0, encoded = 0;
         std::uint64_t droppedBeforeEncode = 0, droppedEncodedQueue = 0, droppedDecodeQueue = 0;
+        std::uint64_t senderSps = 0, senderPps = 0, senderIdr = 0, senderNonIdr = 0;
+        std::uint64_t receiverSps = 0, receiverPps = 0, receiverIdr = 0, receiverNonIdr = 0;
+        std::uint64_t keyframeRequests = 0;
         std::uint64_t captureCallbacks = 0, lastCaptureCallbackAgeMs = 0;
         std::uint32_t captureCallbackStage = 0, encoderWorkerStage = 0;
         std::uint64_t captureCallbackStageElapsedMs = 0, encoderWorkerStageElapsedMs = 0;
         std::uint32_t pendingCaptureFrame = 0, encodedQueueDepth = 0, encoderInputReady = 0;
+        std::uint32_t encoderStartupStage = PC_SCREEN_START_NONE, encoderStartupFailureOperation = 0;
+        std::int32_t encoderStartupFailureHresult = 0;
         bool encoderFailed = false;
+        std::uint32_t encoderFailedOperation = 0;
+        std::int32_t encoderLastHresult = 0, encoderProcessInputHresult = 0, encoderProcessOutputHresult = 0;
+        std::uint64_t encoderProcessInputFailures = 0, encoderProcessOutputFailures = 0;
+        std::uint64_t encoderStreamChanges = 0, encoderOutputTypeRenegotiations = 0;
+        std::int32_t encoderOutputTypeRenegotiationHresult = 0;
+        std::uint32_t encoderOutputTypeWidth = 0, encoderOutputTypeHeight = 0, encoderOutputTypeFps = 0;
+        bool encoderCbrSupported = false, encoderCbrApplied = false;
+        bool encoderLowLatencySupported = false, encoderLowLatencyApplied = false;
+        bool encoderForceKeyframeSupported = false, encoderForceKeyframeApplied = false;
+        std::wstring encoderName, adapterName, encoderOutputTypeName;
+        std::uint64_t adapterDriverVersion = 0;
         std::uint32_t decoderQueueDepth = 0, decoderWorkerStage = 0;
         std::uint64_t decoderWorkerStageElapsedMs = 0;
         std::uint32_t largestDecoderAccessUnitBytes = 0;
+        std::int32_t decoderLastProcessInput = 0, decoderLastProcessOutput = 0;
+        std::uint64_t decoderProcessInputFailures = 0, decoderProcessOutputFailures = 0;
+        std::uint64_t decoderStreamChanges = 0, decoderNeedMoreInput = 0, decoderOutputSuccesses = 0;
         std::uint64_t encodedBytesSubmitted = 0, mediaBytesReceived = 0;
         double captureFps = 0, encodeFps = 0, transmittedFps = 0;
         double receivedFps = 0, renderedFps = 0, outgoingMbps = 0, incomingMbps = 0;
@@ -127,7 +155,11 @@ public:
                 }
                 if (popped == 0) break;
                 if (popped < 0 || info.length == 0 || info.length > encodedScratch_.size()) {
-                    push(EventKind::Failed, "Windows screen encoder failed");
+                    failed_ = true;
+                    if (!localFailureReported_) {
+                        localFailureReported_ = true;
+                        push(EventKind::Failed, "Windows screen encoder failed", {}, encoderFailureDomain());
+                    }
                     break;
                 }
                 if (rtcSendMessage(track_, reinterpret_cast<const char*>(encodedScratch_.data()),
@@ -142,6 +174,29 @@ public:
                         static_cast<std::uint32_t>(90000u / options_.fps));
             }
         }
+        if (!options_.sender && decoder_ && !localFailureReported_) {
+            pc_screen_decoder_status status{};
+            status.structure_size = sizeof(status);
+            if (api_.decoderStatus(decoder_, &status) && status.failed) {
+                failed_ = true;
+                localFailureReported_ = true;
+                const auto domain = status.worker_stage >= PC_SCREEN_DECODER_PRESENT_SETUP
+                    ? FailureDomain::Presentation : FailureDomain::RemoteDecoder;
+                push(EventKind::Failed, domain == FailureDomain::Presentation
+                    ? "Windows screen presentation failed" : "Windows H.264 screen decoder failed", {}, domain);
+            }
+        }
+        if (options_.sender && encoder_ && !localFailureReported_ &&
+            std::chrono::steady_clock::now() >= startupDeadline_) {
+            const auto data = statistics();
+            if (!data.captured && !data.encoderFailed) {
+                failed_ = true;
+                localFailureReported_ = true;
+                startupWatchdogFailed_ = true;
+                push(EventKind::Failed, "Screen capture startup timed out before the first frame callback", {},
+                    FailureDomain::LocalCapture);
+            }
+        }
         return result;
     }
 
@@ -151,6 +206,13 @@ public:
         value.rtpReceived = rtpReceived_;
         value.accessUnitsDelivered = accessUnitsDelivered_;
         value.lostPackets = lostPackets_;
+        value.rtpSequenceGap = rtpSequenceGap_;
+        value.rtpOutOfOrder = rtpOutOfOrder_;
+        value.rtpDuplicate = rtpDuplicate_;
+        value.rtpTimestampChangeBeforeMarker = rtpTimestampChangeBeforeMarker_;
+        value.rtpIncompleteFuA = rtpIncompleteFuA_;
+        value.rtpAbandonedAccessUnit = rtpAbandonedAccessUnit_;
+        value.rtpStaleGenerationPacket = rtpStaleGenerationPacket_;
         value.encodedBytesSubmitted = encodedBytesSubmitted_;
         value.mediaBytesReceived = mediaBytesReceived_;
         value.connected = connected_;
@@ -176,7 +238,35 @@ public:
                 value.pendingCaptureFrame = status.pending_capture_frame;
                 value.encodedQueueDepth = status.encoded_queue_depth;
                 value.encoderInputReady = status.encoder_input_ready;
+                value.encoderStartupStage = status.startup_stage;
+                value.encoderStartupFailureOperation = status.startup_failure_operation;
+                value.encoderStartupFailureHresult = status.startup_failure_hresult;
                 value.encoderFailed = status.failed != 0;
+                value.encoderFailedOperation = status.failed_operation;
+                value.encoderLastHresult = status.last_hresult;
+                value.encoderProcessInputHresult = status.process_input_hresult;
+                value.encoderProcessOutputHresult = status.process_output_hresult;
+                value.encoderProcessInputFailures = status.process_input_failures;
+                value.encoderProcessOutputFailures = status.process_output_failures;
+                value.encoderStreamChanges = status.stream_change_count;
+                value.encoderOutputTypeRenegotiations = status.output_type_renegotiation_count;
+                value.encoderOutputTypeRenegotiationHresult = status.output_type_renegotiation_hresult;
+                value.encoderOutputTypeWidth = status.output_type_width;
+                value.encoderOutputTypeHeight = status.output_type_height;
+                value.encoderOutputTypeFps = status.output_type_frames_per_second;
+                value.encoderCbrSupported = status.cbr_control_supported != 0;
+                value.encoderCbrApplied = status.cbr_control_applied != 0;
+                value.encoderLowLatencySupported = status.low_latency_control_supported != 0;
+                value.encoderLowLatencyApplied = status.low_latency_control_applied != 0;
+                value.encoderForceKeyframeSupported = status.force_keyframe_control_supported != 0;
+                value.encoderForceKeyframeApplied = status.force_keyframe_control_applied != 0;
+                value.encoderName = status.encoder_name;
+                value.adapterName = status.adapter_name;
+                value.encoderOutputTypeName = status.output_type_name;
+                value.adapterDriverVersion = status.driver_version;
+                value.keyframeRequests = status.keyframe_requests;
+                value.senderSps = status.sps_nals;value.senderPps = status.pps_nals;
+                value.senderIdr = status.idr_nals;value.senderNonIdr = status.non_idr_nals;
                 value.failed = value.failed || value.encoderFailed;
             }
         }
@@ -194,6 +284,13 @@ public:
                 value.decoderWorkerStage = status.worker_stage;
                 value.decoderWorkerStageElapsedMs = status.worker_stage_elapsed_ms;
                 value.largestDecoderAccessUnitBytes = status.largest_access_unit_bytes;
+                value.decoderLastProcessInput = status.last_process_input_hresult;
+                value.decoderLastProcessOutput = status.last_process_output_hresult;
+                value.decoderProcessInputFailures = status.process_input_failures;
+                value.decoderProcessOutputFailures = status.process_output_failures;
+                value.decoderStreamChanges = status.stream_change_count;
+                value.decoderNeedMoreInput = status.need_more_input_count;
+                value.decoderOutputSuccesses = status.output_success_count;
                 if (status.decode_operations) {
                     value.decodeLatencyAvailable = true;
                     value.averageDecodeMs = double(status.decode_latency_microseconds_total) /
@@ -201,6 +298,7 @@ public:
                 }
             }
         }
+        value.receiverSps=receiverSps_;value.receiverPps=receiverPps_;value.receiverIdr=receiverIdr_;value.receiverNonIdr=receiverNonIdr_;
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard sampleLock(sampleMutex_);
         if (samples_.empty() || now - samples_.back().time >= std::chrono::milliseconds(500)) {
@@ -230,6 +328,18 @@ public:
 
     std::wstring diagnostics() const {
         auto data = statistics();
+        std::wstring firstAccessUnits = L"none";
+        {
+            std::lock_guard lock(mutex_);
+            if (!firstAccessUnitNals_.empty()) {
+                firstAccessUnits.clear();
+                for (size_t i = 0; i < firstAccessUnitNals_.size(); ++i) {
+                    if (i) firstAccessUnits += L" | ";
+                    const auto& item = firstAccessUnitNals_[i];
+                    firstAccessUnits.append(item.begin(), item.end());
+                }
+            }
+        }
         char local[512]{}, remote[512]{};
         std::wstring pair = L"unavailable";
         if (pc_ >= 0 && rtcGetSelectedCandidatePair(pc_, local, sizeof(local),
@@ -295,12 +405,52 @@ public:
             << L"\npending_capture_frame=" << data.pendingCaptureFrame
             << L"\nencoded_queue_depth=" << data.encodedQueueDepth
             << L"\nencoder_input_ready=" << data.encoderInputReady
+            << L"\nscreen_start_stage=" << data.encoderStartupStage
+            << L"\nscreen_start_stage_name=" << startupStageName(data.encoderStartupStage)
+            << L"\nscreen_start_command_accepted=true"
+            << L"\nscreen_start_video_track_created=" << (track_ >= 0 ? L"true" : L"false")
+            << L"\nscreen_start_video_track_open=" << (data.trackOpen ? L"true" : L"false")
+            << L"\nscreen_start_failure_domain=" << (startupWatchdogFailed_ ? L"local_capture" : startupFailureDomain(data.encoderStartupFailureOperation))
+            << L"\nscreen_start_failure_hresult=0x" << std::hex << static_cast<std::uint32_t>(data.encoderStartupFailureHresult) << std::dec
+            << L"\nscreen_start_failure_reason=" << (startupWatchdogFailed_ ? L"capture startup watchdog expired before first callback" : startupFailureReason(data.encoderStartupFailureOperation))
             << L"\nencoder_failed=" << (data.encoderFailed ? L"true" : L"false")
+            << L"\nencoder_failed_operation=" << data.encoderFailedOperation
+            << L"\nencoder_last_hresult=0x" << std::hex << static_cast<std::uint32_t>(data.encoderLastHresult)
+            << L"\nencoder_process_input_hresult=0x" << static_cast<std::uint32_t>(data.encoderProcessInputHresult)
+            << L"\nencoder_process_output_hresult=0x" << static_cast<std::uint32_t>(data.encoderProcessOutputHresult) << std::dec
+            << L"\nencoder_process_input_failures=" << data.encoderProcessInputFailures
+            << L"\nencoder_process_output_failures=" << data.encoderProcessOutputFailures
+            << L"\nencoder_stream_change_count=" << data.encoderStreamChanges
+            << L"\nencoder_output_type_renegotiation_count=" << data.encoderOutputTypeRenegotiations
+            << L"\nencoder_output_type_renegotiation_hresult=0x" << std::hex << static_cast<std::uint32_t>(data.encoderOutputTypeRenegotiationHresult) << std::dec
+            << L"\nencoder_output_type=" << (data.encoderOutputTypeName.empty() ? L"Unavailable" : data.encoderOutputTypeName)
+            << L"\nencoder_output_type_width=" << data.encoderOutputTypeWidth
+            << L"\nencoder_output_type_height=" << data.encoderOutputTypeHeight
+            << L"\nencoder_output_type_fps=" << data.encoderOutputTypeFps
+            << L"\nencoder_mft=" << (data.encoderName.empty() ? L"Unavailable" : data.encoderName)
+            << L"\nencoder_adapter=" << (data.adapterName.empty() ? L"Unavailable" : data.adapterName)
+            << L"\nencoder_driver_version=" << data.adapterDriverVersion
+            << L"\nencoder_cbr_control=" << (data.encoderCbrSupported ? (data.encoderCbrApplied ? L"applied" : L"unsupported/rejected") : L"unavailable")
+            << L"\nencoder_low_latency_control=" << (data.encoderLowLatencySupported ? (data.encoderLowLatencyApplied ? L"applied" : L"unsupported/rejected") : L"unavailable")
+            << L"\nencoder_force_keyframe_control=" << (data.encoderForceKeyframeSupported ? (data.encoderForceKeyframeApplied ? L"applied" : L"unsupported/rejected") : L"unavailable")
+            << L"\nh264_sender_sps=" << data.senderSps << L"\nh264_sender_pps=" << data.senderPps
+            << L"\nh264_sender_idr=" << data.senderIdr << L"\nh264_sender_non_idr=" << data.senderNonIdr
+            << L"\nh264_receiver_sps=" << data.receiverSps << L"\nh264_receiver_pps=" << data.receiverPps
+            << L"\nh264_receiver_idr=" << data.receiverIdr << L"\nh264_receiver_non_idr=" << data.receiverNonIdr
+            << L"\nh264_first_access_units=" << firstAccessUnits
+            << L"\nkeyframe_requests=" << data.keyframeRequests
             << L"\ndropped_decode_queue=" << data.droppedDecodeQueue
             << L"\ndecoder_queue_depth=" << data.decoderQueueDepth
             << L"\ndecoder_worker_stage=" << data.decoderWorkerStage
             << L"\ndecoder_worker_stage_elapsed_ms=" << data.decoderWorkerStageElapsedMs
             << L"\nlargest_decoder_access_unit_bytes=" << data.largestDecoderAccessUnitBytes
+            << L"\ndecoder_process_input_hresult=0x" << std::hex << static_cast<std::uint32_t>(data.decoderLastProcessInput)
+            << L"\ndecoder_process_output_hresult=0x" << static_cast<std::uint32_t>(data.decoderLastProcessOutput) << std::dec
+            << L"\ndecoder_process_input_failures=" << data.decoderProcessInputFailures
+            << L"\ndecoder_process_output_failures=" << data.decoderProcessOutputFailures
+            << L"\ndecoder_stream_change_count=" << data.decoderStreamChanges
+            << L"\ndecoder_need_more_input_count=" << data.decoderNeedMoreInput
+            << L"\ndecoder_output_success_count=" << data.decoderOutputSuccesses
             << L"\ndropped_decode_queue_semantics=complete access units refused by full 8-frame decoder queue"
             << L"\ncomplete_access_units_delivered_semantics=complete access units accepted into decoder queue"
             << L"\ntransport_dropped_frames=Unavailable (pinned libdatachannel C API)"
@@ -320,6 +470,13 @@ public:
             << L"\nremote_rtp_callback_packets=" << data.rtpReceived
             << L"\ncomplete_access_units_delivered=" << data.accessUnitsDelivered
             << L"\nrtp_reassembly_discontinuities=" << data.lostPackets
+            << L"\nrtp_sequence_gap=" << data.rtpSequenceGap
+            << L"\nrtp_out_of_order=" << data.rtpOutOfOrder
+            << L"\nrtp_duplicate=" << data.rtpDuplicate
+            << L"\nrtp_timestamp_change_before_marker=" << data.rtpTimestampChangeBeforeMarker
+            << L"\nrtp_incomplete_fu_a=" << data.rtpIncompleteFuA
+            << L"\nrtp_abandoned_access_unit=" << data.rtpAbandonedAccessUnit
+            << L"\nrtp_stale_generation_packet=" << data.rtpStaleGenerationPacket
             << L"\ndecoded_frames=" << data.decoded
             << L"\npresented_frames=" << data.presented
             << L"\nmedia_failed=" << (data.failed ? L"true" : L"false");
@@ -340,6 +497,18 @@ public:
         if (left.find(" typ host") != std::string::npos &&
             right.find(" typ host") != std::string::npos) return Route::DirectHostIce;
         return Route::Unknown;
+    }
+
+    std::wstring startupDiagnostics() const {
+        const auto data = statistics();
+        std::wostringstream out;
+        out << L"screen_start_stage=" << data.encoderStartupStage
+            << L"\nscreen_start_stage_name=" << startupStageName(data.encoderStartupStage)
+            << L"\nscreen_start_failure_domain=" << (startupWatchdogFailed_ ? L"local_capture" : startupFailureDomain(data.encoderStartupFailureOperation))
+            << L"\nscreen_start_failure_hresult=0x" << std::hex
+            << static_cast<std::uint32_t>(data.encoderStartupFailureHresult) << std::dec
+            << L"\nscreen_start_failure_reason=" << (startupWatchdogFailed_ ? L"capture startup watchdog expired before first callback" : startupFailureReason(data.encoderStartupFailureOperation));
+        return out.str();
     }
 
     void stop(const std::function<void(std::uint32_t)>& progress = {}) {
@@ -400,6 +569,7 @@ private:
         decltype(&pc_screen_query_capabilities) queryCapabilities = nullptr;
         decltype(&pc_screen_encoder_open) encoderOpen = nullptr;
         decltype(&pc_screen_encoder_pop) encoderPop = nullptr;
+        decltype(&pc_screen_encoder_request_keyframe) encoderRequestKeyframe = nullptr;
         decltype(&pc_screen_encoder_status_get) encoderStatus = nullptr;
         decltype(&pc_screen_encoder_close) encoderClose = nullptr;
         decltype(&pc_screen_decoder_open) decoderOpen = nullptr;
@@ -433,6 +603,7 @@ private:
             PC_SCREEN_IMPORT(queryCapabilities, "pc_screen_query_capabilities")
             PC_SCREEN_IMPORT(encoderOpen, "pc_screen_encoder_open")
             PC_SCREEN_IMPORT(encoderPop, "pc_screen_encoder_pop")
+            PC_SCREEN_IMPORT(encoderRequestKeyframe, "pc_screen_encoder_request_keyframe")
             PC_SCREEN_IMPORT(encoderStatus, "pc_screen_encoder_status_get")
             PC_SCREEN_IMPORT(encoderClose, "pc_screen_encoder_close")
             PC_SCREEN_IMPORT(decoderOpen, "pc_screen_decoder_open")
@@ -446,7 +617,8 @@ private:
             if (module) FreeLibrary(module);
             module = nullptr;
             queryCapabilities = nullptr;
-            encoderOpen = nullptr; encoderPop = nullptr; encoderStatus = nullptr; encoderClose = nullptr;
+            encoderOpen = nullptr; encoderPop = nullptr; encoderRequestKeyframe = nullptr;
+            encoderStatus = nullptr; encoderClose = nullptr;
             decoderOpen = nullptr; decoderPush = nullptr;
             decoderStatus = nullptr; decoderClose = nullptr;
         }
@@ -472,14 +644,21 @@ private:
             self.push(EventKind::Connected);
         } else if (value == RTC_FAILED) {
             self.failed_ = true;
-            self.push(EventKind::Failed, "Secure screen media failed");
+            self.push(EventKind::Failed, "ICE/TURN/DTLS screen media transport failed", {},
+                FailureDomain::IceTurnTransport);
         } else if (value == RTC_DISCONNECTED || value == RTC_CLOSED) {
             self.connected_ = false;
             self.push(EventKind::Disconnected);
         }
     }
     static void opened(int, void* context) {
-        if (context) {auto& self=*static_cast<ScreenShareMedia*>(context);if(!self.stopping_)self.trackOpen_=true;}
+        if (!context) return;
+        auto& self = *static_cast<ScreenShareMedia*>(context);
+        if (self.stopping_) return;
+        self.trackOpen_ = true;
+        // Capture starts before SDP/ICE completes. An independent bootstrap is
+        // required when this particular sender track becomes usable.
+        if (self.options_.sender) self.requestEncoderKeyframe();
     }
     static void closed(int, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->trackOpen_ = false;
@@ -528,32 +707,88 @@ private:
 
     bool appendNal(const std::uint8_t* data, size_t length) {
         if (!length || rtpFrame_.size() + length + 4 > 8 * 1024 * 1024) return false;
+        const auto type = data[0] & 31;
+        currentAuNalTypes_.push_back(type);
+        switch (type) {
+        case 7: ++receiverSps_; ++currentAuSps_; break;
+        case 8: ++receiverPps_; ++currentAuPps_; break;
+        case 5: ++receiverIdr_; ++currentAuIdr_; break;
+        case 1: ++receiverNonIdr_; ++currentAuNonIdr_; break;
+        default: break;
+        }
         rtpFrame_.insert(rtpFrame_.end(), {0, 0, 0, 1});
         rtpFrame_.insert(rtpFrame_.end(), data, data + length);
         return true;
     }
 
-    void received(const char* packet, int size) {
-        if (stopping_ || options_.sender || !decoder_) return;
-        const std::uint8_t* payload = nullptr;
-        size_t length = 0;
+    struct ReceivedRtpPacket {
         std::uint16_t sequence = 0;
         std::uint32_t timestamp = 0;
         bool marker = false;
-        if (!parseRtp(packet, size, payload, length, sequence, timestamp, marker)) return;
-        ++rtpReceived_;
-        mediaBytesReceived_ += static_cast<std::uint64_t>(size);
-        std::lock_guard lock(mutex_);
-        if (stopping_ || !decoder_) return;
-        if (rtpActive_ && (timestamp != rtpTimestamp_ || sequence !=
-                static_cast<std::uint16_t>(lastSequence_ + 1))) {
+        std::vector<std::uint8_t> payload;
+    };
+
+    static std::int16_t sequenceDistance(std::uint16_t value, std::uint16_t expected) {
+        return static_cast<std::int16_t>(value - expected);
+    }
+
+    void resetCurrentAccessUnit(bool abandoned) {
+        if (abandoned && !rtpFrame_.empty()) {
             ++lostPackets_;
-            rtpFrame_.clear();
-            rtpFragmented_ = false;
+            ++rtpAbandonedAccessUnit_;
+            if (rtpFragmented_) ++rtpIncompleteFuA_;
         }
-        rtpActive_ = true;
-        rtpTimestamp_ = timestamp;
-        lastSequence_ = sequence;
+        rtpFrame_.clear();
+        rtpFragmented_ = false;
+        rtpActive_ = false;
+        currentAuSps_ = currentAuPps_ = currentAuIdr_ = currentAuNonIdr_ = 0;
+        currentAuNalTypes_.clear();
+        currentAuFirstSequence_ = currentAuLastSequence_ = 0;
+    }
+
+    void completeCurrentAccessUnit(const ReceivedRtpPacket& packet) {
+        if (!rtpFrame_.empty() && firstAccessUnitNals_.size() < 32) {
+            std::ostringstream types;
+            for (size_t index = 0; index < currentAuNalTypes_.size(); ++index) {
+                if (index) types << ',';
+                types << currentAuNalTypes_[index];
+            }
+            const auto vcl = std::count_if(currentAuNalTypes_.begin(), currentAuNalTypes_.end(),
+                [](std::uint8_t type) { return type == 1 || type == 5; });
+            firstAccessUnitNals_.push_back("timestamp=" + std::to_string(rtpTimestamp_) +
+                ";first_sequence=" + std::to_string(currentAuFirstSequence_) +
+                ";last_sequence=" + std::to_string(currentAuLastSequence_) +
+                ";marker=" + (packet.marker ? "1" : "0") +
+                ";nal_types=" + types.str() + ";bytes=" + std::to_string(rtpFrame_.size()) +
+                ";vcl=" + std::to_string(vcl) + ";idr_and_non_idr=" +
+                ((currentAuIdr_ && currentAuNonIdr_) ? "true" : "false") +
+                ";single_timestamp=true");
+        }
+        if (!rtpFrame_.empty() && !rtpFragmented_ &&
+            api_.decoderPush(decoder_, rtpFrame_.data(),
+                static_cast<std::uint32_t>(rtpFrame_.size()),
+                static_cast<std::uint64_t>(rtpTimestamp_) * 10000000ull / 90000ull) == 1)
+            ++accessUnitsDelivered_;
+        resetCurrentAccessUnit(false);
+    }
+
+    void processReceivedPacket(const ReceivedRtpPacket& packet) {
+        if (!rtpActive_) {
+            rtpActive_ = true;
+            rtpTimestamp_ = packet.timestamp;
+            currentAuFirstSequence_ = packet.sequence;
+        } else if (packet.timestamp != rtpTimestamp_) {
+            // A timestamp change before the previous marker is a real AU boundary
+            // failure, never an invitation to combine pictures in one decoder sample.
+            ++rtpTimestampChangeBeforeMarker_;
+            resetCurrentAccessUnit(true);
+            rtpActive_ = true;
+            rtpTimestamp_ = packet.timestamp;
+            currentAuFirstSequence_ = packet.sequence;
+        }
+        currentAuLastSequence_ = packet.sequence;
+        const auto* payload = packet.payload.data();
+        const auto length = packet.payload.size();
         const auto nalType = payload[0] & 31;
         bool valid = true;
         if (nalType >= 1 && nalType <= 23) {
@@ -582,37 +817,171 @@ private:
             if (end) rtpFragmented_ = false;
         } else valid = false;
         if (!valid) {
-            rtpFrame_.clear();
-            rtpFragmented_ = false;
+            resetCurrentAccessUnit(true);
+            return;
         }
-        if (marker) {
-            if (!rtpFrame_.empty() && !rtpFragmented_ &&
-                api_.decoderPush(decoder_, rtpFrame_.data(),
-                    static_cast<std::uint32_t>(rtpFrame_.size()),
-                    static_cast<std::uint64_t>(timestamp) * 10000000ull / 90000ull) == 1)
-                ++accessUnitsDelivered_;
-            rtpFrame_.clear();
-            rtpFragmented_ = false;
-            rtpActive_ = false;
+        if (packet.marker) completeCurrentAccessUnit(packet);
+    }
+
+    void drainReceivedPackets() {
+        while (sequenceInitialized_) {
+            auto next = pendingRtpPackets_.find(expectedSequence_);
+            if (next == pendingRtpPackets_.end()) break;
+            ReceivedRtpPacket packet = std::move(next->second);
+            pendingRtpPackets_.erase(next);
+            processReceivedPacket(packet);
+            ++expectedSequence_;
         }
+    }
+
+    void queueReceivedPacket(ReceivedRtpPacket packet) {
+        if (!sequenceInitialized_) {
+            sequenceInitialized_ = true;
+            expectedSequence_ = packet.sequence;
+        }
+        const auto distance = sequenceDistance(packet.sequence, expectedSequence_);
+        if (distance < 0) {
+            // A packet that has already passed the bounded reorder window is stale;
+            // retain it as evidence without damaging the current access unit.
+            ++rtpOutOfOrder_;
+            return;
+        }
+        if (distance > kRtpReorderWindow) {
+            // The missing span exceeded the bounded window. Drop only the incomplete
+            // current AU, then resume at this newer packet.
+            rtpSequenceGap_ += static_cast<std::uint16_t>(distance);
+            resetCurrentAccessUnit(true);
+            pendingRtpPackets_.clear();
+            expectedSequence_ = packet.sequence;
+        } else if (distance > 0) {
+            auto [_, inserted] = pendingRtpPackets_.emplace(packet.sequence, std::move(packet));
+            if (!inserted) ++rtpDuplicate_;
+            else ++rtpOutOfOrder_;
+            if (!inserted || pendingRtpPackets_.size() < kRtpReorderWindow) return;
+            // Do not wait without bound for one missing RTP packet. This bounded
+            // skip is the point at which a gap becomes permanent.
+            const auto first = pendingRtpPackets_.begin()->first;
+            rtpSequenceGap_ += static_cast<std::uint16_t>(sequenceDistance(first, expectedSequence_));
+            resetCurrentAccessUnit(true);
+            expectedSequence_ = first;
+            drainReceivedPackets();
+            return;
+        }
+        pendingRtpPackets_.emplace(packet.sequence, std::move(packet));
+        drainReceivedPackets();
+    }
+
+    void received(const char* packet, int size) {
+        if (stopping_) { ++rtpStaleGenerationPacket_; return; }
+        if (options_.sender || !decoder_) return;
+        const std::uint8_t* payload = nullptr;
+        size_t length = 0;
+        std::uint16_t sequence = 0;
+        std::uint32_t timestamp = 0;
+        bool marker = false;
+        if (!parseRtp(packet, size, payload, length, sequence, timestamp, marker)) return;
+        ++rtpReceived_;
+        mediaBytesReceived_ += static_cast<std::uint64_t>(size);
+        std::lock_guard lock(mutex_);
+        if (stopping_ || !decoder_) { ++rtpStaleGenerationPacket_; return; }
+        ReceivedRtpPacket copied;
+        copied.sequence = sequence;
+        copied.timestamp = timestamp;
+        copied.marker = marker;
+        copied.payload.assign(payload, payload + length);
+        queueReceivedPacket(std::move(copied));
     }
     static void message(int, const char* packet, int size, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->received(packet, size);
     }
 
-    void push(EventKind kind, std::string value = {}, std::string detail = {}) {
+    FailureDomain encoderFailureDomain() const {
+        if (!encoder_ || !api_.encoderStatus) return FailureDomain::LocalEncoder;
+        pc_screen_encoder_status status{};
+        status.structure_size = sizeof(status);
+        if (!api_.encoderStatus(encoder_, &status)) return FailureDomain::LocalEncoder;
+        return status.failed_operation == PC_SCREEN_ENCODER_FAILURE_WGC ||
+               status.failed_operation == PC_SCREEN_ENCODER_FAILURE_CAPTURE
+            ? FailureDomain::LocalCapture : FailureDomain::LocalEncoder;
+    }
+
+    static const wchar_t* startupStageName(std::uint32_t stage) {
+        switch(stage) {
+        case PC_SCREEN_START_SOURCE_VALIDATED:return L"source validated";
+        case PC_SCREEN_START_D3D_DEVICE_CREATED:return L"D3D11 device created";
+        case PC_SCREEN_START_D3D_BRIDGE_CREATED:return L"Direct3D device bridge created";
+        case PC_SCREEN_START_WGC_ITEM_ACQUIRED:return L"WGC item acquired";
+        case PC_SCREEN_START_ENCODER_ENUMERATION:return L"encoder enumeration started";
+        case PC_SCREEN_START_ENCODER_CREATED:return L"encoder created";
+        case PC_SCREEN_START_FRAME_POOL_CREATED:return L"capture frame pool created";
+        case PC_SCREEN_START_CAPTURE_SESSION_CREATED:return L"capture session created";
+        case PC_SCREEN_START_CALLBACK_REGISTERED:return L"frame callback registered";
+        case PC_SCREEN_START_CAPTURE_STARTED:return L"capture started; awaiting first callback";
+        case PC_SCREEN_START_FIRST_CAPTURED:return L"first captured frame";
+        case PC_SCREEN_START_FIRST_ENCODER_INPUT:return L"first encoder input";
+        default:return L"command accepted";
+        }
+    }
+    static const wchar_t* startupFailureDomain(std::uint32_t operation) {
+        return operation == PC_SCREEN_ENCODER_FAILURE_WGC || operation == PC_SCREEN_ENCODER_FAILURE_CAPTURE
+            ? L"local_capture" : operation ? L"local_encoder" : L"none";
+    }
+    static const wchar_t* startupFailureReason(std::uint32_t operation) {
+        switch(operation) {
+        case PC_SCREEN_ENCODER_FAILURE_WGC:return L"Windows Graphics Capture initialization failed";
+        case PC_SCREEN_ENCODER_FAILURE_D3D11:return L"D3D11 device initialization failed";
+        case PC_SCREEN_ENCODER_FAILURE_ENUMERATE_MFT:return L"H.264 encoder enumeration failed";
+        case PC_SCREEN_ENCODER_FAILURE_ACTIVATE_MFT:return L"H.264 encoder activation failed";
+        case PC_SCREEN_ENCODER_FAILURE_CAPTURE:return L"screen capture callback failed";
+        case PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE:return L"H.264 encoder media type configuration failed";
+        case PC_SCREEN_ENCODER_FAILURE_PROCESS_INPUT:return L"H.264 encoder ProcessInput failed";
+        case PC_SCREEN_ENCODER_FAILURE_PROCESS_OUTPUT:return L"H.264 encoder ProcessOutput failed";
+        case PC_SCREEN_ENCODER_FAILURE_EXCEPTION:return L"screen-media initialization exception";
+        default:return L"none";
+        }
+    }
+
+    void push(EventKind kind, std::string value = {}, std::string detail = {},
+              FailureDomain failure = FailureDomain::None) {
         if (stopping_) return;
         std::lock_guard lock(mutex_);
         if (stopping_) return;
         if (events_.size() == 128) events_.pop_front();
-        events_.push_back({kind, std::move(value), std::move(detail)});
+        events_.push_back({kind, std::move(value), std::move(detail), failure});
     }
+
+    void requestEncoderKeyframe() {
+        if (!options_.sender || !encoder_ || stopping_) return;
+        if (api_.encoderRequestKeyframe(encoder_)) ++senderKeyframeRequests_;
+    }
+
 
     bool create(std::string& error) {
         stopping_ = false;
         connected_ = failed_ = trackOpen_ = false;
+        localFailureReported_ = false;
+        startupWatchdogFailed_ = false;
+        startupDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
         encodedSubmitted_ = rtpReceived_ = accessUnitsDelivered_ = lostPackets_ = 0;
+        rtpSequenceGap_ = rtpOutOfOrder_ = rtpDuplicate_ = 0;
+        rtpTimestampChangeBeforeMarker_ = rtpIncompleteFuA_ = rtpAbandonedAccessUnit_ = 0;
+        rtpStaleGenerationPacket_ = 0;
         encodedBytesSubmitted_ = mediaBytesReceived_ = 0;
+        receiverSps_ = receiverPps_ = receiverIdr_ = receiverNonIdr_ = 0;
+        senderKeyframeRequests_ = 0;
+        {
+            std::lock_guard lock(mutex_);
+            rtpFrame_.clear();
+            rtpActive_ = rtpFragmented_ = false;
+            rtpTimestamp_ = 0;
+            expectedSequence_ = 0;
+            sequenceInitialized_ = false;
+            pendingRtpPackets_.clear();
+            currentAuSps_ = currentAuPps_ = currentAuIdr_ = currentAuNonIdr_ = 0;
+            currentAuNalTypes_.clear();
+            currentAuFirstSequence_ = currentAuLastSequence_ = 0;
+            firstAccessUnitNals_.clear();
+        }
         { std::lock_guard sampleLock(sampleMutex_); samples_.clear(); }
         encodedWidth_ = encodedHeight_ = 0;
         if (!api_.open()) { error = "Windows screen media adapter is unavailable"; return false; }
@@ -707,14 +1076,28 @@ private:
     std::deque<Event> events_;
     std::vector<std::uint8_t> rtpFrame_;
     std::vector<std::uint8_t> encodedScratch_;
-    std::uint16_t lastSequence_ = 0;
+    static constexpr std::int16_t kRtpReorderWindow = 32;
+    std::map<std::uint16_t, ReceivedRtpPacket> pendingRtpPackets_;
+    std::uint16_t expectedSequence_ = 0;
     std::uint32_t rtpTimestamp_ = 0;
-    bool rtpActive_ = false, rtpFragmented_ = false;
+    bool sequenceInitialized_ = false, rtpActive_ = false, rtpFragmented_ = false;
+    std::uint64_t currentAuSps_ = 0, currentAuPps_ = 0, currentAuIdr_ = 0, currentAuNonIdr_ = 0;
+    std::vector<std::uint8_t> currentAuNalTypes_;
+    std::uint16_t currentAuFirstSequence_ = 0, currentAuLastSequence_ = 0;
+    std::deque<std::string> firstAccessUnitNals_;
     std::atomic<bool> stopping_{true}, trackOpen_{false}, connected_{false}, failed_{false};
+    bool localFailureReported_ = false;
+    std::atomic<bool> startupWatchdogFailed_{false};
+    std::chrono::steady_clock::time_point startupDeadline_{};
     std::atomic<std::uint64_t> encodedSubmitted_{0}, rtpReceived_{0};
     std::atomic<std::uint32_t> encodedWidth_{0}, encodedHeight_{0};
     std::atomic<std::uint64_t> accessUnitsDelivered_{0}, lostPackets_{0};
+    std::atomic<std::uint64_t> rtpSequenceGap_{0}, rtpOutOfOrder_{0}, rtpDuplicate_{0};
+    std::atomic<std::uint64_t> rtpTimestampChangeBeforeMarker_{0}, rtpIncompleteFuA_{0};
+    std::atomic<std::uint64_t> rtpAbandonedAccessUnit_{0}, rtpStaleGenerationPacket_{0};
     std::atomic<std::uint64_t> encodedBytesSubmitted_{0}, mediaBytesReceived_{0};
+    std::atomic<std::uint64_t> receiverSps_{0}, receiverPps_{0}, receiverIdr_{0}, receiverNonIdr_{0};
+    std::atomic<std::uint64_t> senderKeyframeRequests_{0};
     struct RateSample {
         std::chrono::steady_clock::time_point time;
         std::uint64_t captured, encoded, submitted, received, presented, sentBytes, receivedBytes;

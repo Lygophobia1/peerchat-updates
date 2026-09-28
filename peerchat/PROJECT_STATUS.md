@@ -146,6 +146,60 @@ encryption-regression evidence remains open; no DPAPI/encryption behavior was we
 
 ## Stage 8 implementation and remaining acceptance
 
+- **Open — local encoder failure must not restart TURN media.** Physical Intel
+  encoder failure exposed that `ScreenShareMedia` reported both a terminal local
+  encoder fault and ICE/DTLS failure as one generic event, causing the node to
+  enter Stage 7 recovery and create mismatched generations for the same logical
+  share. The media event boundary now classifies local capture, local encoder,
+  ICE/TURN transport, DTLS/security, RTP, remote decoder, and presentation
+  failures. Local capture/encoder/decoder/presentation faults end the logical
+  share and signal `ScreenEnd`; only ICE/TURN and RTP transport failures enter
+  bounded recovery. Diagnostics expose failure domain/reason, recovery trigger,
+  and from/to generation. This requires a physical Intel-failure retest; it is
+  not yet accepted as a resolution.
+- **Open — multi-share H.264 bootstrap/decode regression.** Physical TURN-relayed
+  A→B / A→C / B→A / A→B testing proved RTP and complete access-unit delivery while
+  a later receiver accepted hundreds of units but decoded zero frames. This is not a
+  TURN or presentation result. Each screen-media generation now clears receiver RTP
+  state, creates a fresh adapter decoder, requests a sender keyframe when its track
+  opens, and preserves SPS/PPS/IDR bootstrap access units ahead of expendable deltas
+  in the bounded encoder queue. The receiver now holds a bounded 32-packet RTP reorder
+  window before declaring a sequence gap, never combines different RTP timestamps in one
+  decoder sample, and records the first 32 access units with timestamp, sequence range,
+  marker, ordered NAL types, VCL count, and IDR/non-IDR mix. Diagnostics separately count
+  gaps, late/out-of-order packets, duplicates, timestamp changes before marker, incomplete
+  FU-A, abandoned units, and stale callbacks. Decoder diagnostics now include Media Foundation
+  ProcessInput/ProcessOutput HRESULTs plus stream-change, need-more-input, and output-success
+  counts; IDR samples are marked as clean points. Physical multi-peer validation is required;
+  the non-interactive build-host capture test cannot exercise WGC reliably.
+- **Open — machine-specific ScreenMedia encoder/fail-fast investigations.** A
+  directional physical result has one PC capturing two frames but producing no
+  H.264 output, while a separate PC fail-fasts inside `PeerChat.ScreenMedia.dll`
+  (`0xc0000409`) before usable sharing. Encoder diagnostics now identify the
+  local MFT, adapter/driver identifier, configuration-control outcome, failed
+  operation and HRESULTs without exposing screen content. The retained old DLL
+  has no matching PDB/map, so its `+0x23CBD` offset cannot be safely symbolized.
+  The adapter build now supports opt-in `-Symbols` output for a future exact
+  reproduction. Neither issue is accepted or treated as a TURN/relay failure.
+- **Open — Intel Quick Sync output-format renegotiation.** Physical diagnostics
+  showed Intel's H.264 MFT accepting its first input and returning
+  `MF_E_TRANSFORM_STREAM_CHANGE` from `ProcessOutput`. That is Media Foundation
+  format-control flow, not a terminal encoder fault. The encoder now queries
+  compatible available H.264 output types, applies the selected type, records
+  the resulting type, and resumes output with a bounded four-attempt guard.
+  `MF_E_TRANSFORM_NEED_MORE_INPUT` and stream change remain distinct nonfatal
+  results. Failed renegotiation is still a local encoder failure and cannot
+  restart TURN/ICE. AMD local pipeline build/probe coverage remains green;
+  Intel TURN-relayed physical validation is still required.
+- **Open — pre-capture screen-share startup stall.** A separate physical state
+  reached TURN relay selection without a media connection, track open, WGC
+  callback, encoder input, or encoder identity. Startup diagnostics now retain
+  local progress from command/source validation through D3D/WGC/frame-pool/
+  session/callback/capture/encoder milestones, plus track creation/open and any
+  pre-capture HRESULT/domain/reason. A 12-second local capture-start watchdog
+  ends a no-frame startup as `local_capture`; it does not recreate TURN or call
+  it a secure-media failure. Physical reproduction is required to identify the
+  actual stalled milestone on the affected machine.
 - Receiver diagnostics now distinguish complete access units accepted by the bounded decoder
   queue from units refused because its eight slots are full, and expose queue depth plus the
   current decode/presentation stage and its elapsed time. In the physical snapshot, 43 accepted
@@ -743,6 +797,13 @@ Broader or uncertain changes remain open with the missing evidence.
 - **Open — intermittent CLR/WPF `0xe0434352`.** No matching actionable stack/reliable reproduction
   in the reviewed evidence. Needs packaged exception/Windows crash evidence; general baseline
   acceptance is not proof this intermittent condition is resolved.
+- **Open — post-abnormal-restart peer TLS certificate validity.** Physical relay recovery reached
+  peer TLS but failed before Peer ID presentation with `Peer certificate expired or is not yet
+  valid`. The encrypted profile persists the P-256 key/Peer ID, while a self-signed certificate is
+  regenerated per process and previously started at the generator's exact UTC time. The current
+  narrow fix backdates `NotBefore` by one day, preserves normal expiry validation, and records
+  safe certificate/key/date diagnostics. Focused TLS persistence coverage passes; normal restart,
+  hard-kill, and screen-crash two-PC validation remain required before resolution.
 - **Resolved by Stage 5.5 physical acceptance — false `Network route changed` / `Network connection
   lost` teardown.** Generation-checked invalidation and stale-completion rejection passed automated
   coverage, then the accepted `f5368fd` direct/relay/network-switch run confirmed the healthy winner

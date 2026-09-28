@@ -76,7 +76,9 @@ public:
             decodedWidth_, decodedHeight_, droppedDecodeQueue_,
             decodeLatencyMicrosecondsTotal_, decodeOperations_,
             static_cast<uint32_t>(queue_.size()), workerStage_.load(),
-            since && now >= since ? now - since : 0, largestAccessUnitBytes_};
+            since && now >= since ? now - since : 0, largestAccessUnitBytes_,
+            lastProcessInput_, lastProcessOutput_, processInputFailures_, processOutputFailures_,
+            streamChangeCount_, needMoreInputCount_, outputSuccessCount_};
         return 1;
     }
 
@@ -249,8 +251,17 @@ private:
             MFT_OUTPUT_DATA_BUFFER result{};
             DWORD status = 0;
             const HRESULT produced = decoder_->ProcessOutput(0, 1, &result, &status);
-            if (produced == MF_E_TRANSFORM_NEED_MORE_INPUT) return true;
+            {std::lock_guard lock(mutex_);lastProcessOutput_=static_cast<int32_t>(produced);if(FAILED(produced)&&produced!=MF_E_TRANSFORM_NEED_MORE_INPUT&&produced!=MF_E_TRANSFORM_STREAM_CHANGE)++processOutputFailures_;}
+            if (produced == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                std::lock_guard lock(mutex_);
+                ++needMoreInputCount_;
+                return true;
+            }
             if (produced == MF_E_TRANSFORM_STREAM_CHANGE) {
+                {
+                    std::lock_guard lock(mutex_);
+                    ++streamChangeCount_;
+                }
                 bool selected = false;
                 for (DWORD index = 0;; ++index) {
                     ComPtr<IMFMediaType> available;
@@ -274,6 +285,7 @@ private:
             {
                 std::lock_guard lock(mutex_);
                 ++decoded_;
+                ++outputSuccessCount_;
             }
             if (!present(sample.Get())) return false;
             {
@@ -296,7 +308,24 @@ private:
         ComPtr<IMFSample> sample;
         if (FAILED(MFCreateSample(&sample)) || FAILED(sample->AddBuffer(buffer.Get())) ||
             FAILED(sample->SetSampleTime(static_cast<LONGLONG>(frame.timestamp)))) return false;
-        return SUCCEEDED(decoder_->ProcessInput(0, sample.Get(), 0)) && drain();
+        // The input is one complete Annex-B access unit. A clean-point marker lets
+        // the decoder prioritize the independently decodable IDR bootstrap.
+        if (containsIdr(frame.bytes)) sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
+        sample->SetSampleDuration(10000000ll / std::max<uint32_t>(1, options_.frames_per_second));
+        const HRESULT accepted=decoder_->ProcessInput(0, sample.Get(), 0);
+        {std::lock_guard lock(mutex_);lastProcessInput_=static_cast<int32_t>(accepted);if(FAILED(accepted))++processInputFailures_;}
+        return SUCCEEDED(accepted) && drain();
+    }
+
+    static bool containsIdr(const std::vector<uint8_t>& bytes) {
+        for (size_t index = 0; index + 4 < bytes.size(); ++index) {
+            const bool three = bytes[index] == 0 && bytes[index + 1] == 0 && bytes[index + 2] == 1;
+            const bool four = index + 5 < bytes.size() && bytes[index] == 0 && bytes[index + 1] == 0 &&
+                bytes[index + 2] == 0 && bytes[index + 3] == 1;
+            if (three && (bytes[index + 3] & 31) == 5) return true;
+            if (four && (bytes[index + 4] & 31) == 5) return true;
+        }
+        return false;
     }
 
     void run() {
@@ -354,6 +383,9 @@ private:
     uint64_t droppedDecodeQueue_ = 0, decodeLatencyMicrosecondsTotal_ = 0, decodeOperations_ = 0;
     uint32_t decodedWidth_ = 0, decodedHeight_ = 0;
     uint32_t largestAccessUnitBytes_ = 0;
+    int32_t lastProcessInput_ = 0, lastProcessOutput_ = 0;
+    uint64_t processInputFailures_ = 0, processOutputFailures_ = 0;
+    uint64_t streamChangeCount_ = 0, needMoreInputCount_ = 0, outputSuccessCount_ = 0;
     std::atomic<uint32_t> workerStage_{PC_SCREEN_DECODER_INITIALIZING};
     std::atomic<uint64_t> workerStageSince_{0};
     UINT presentationWidth_ = 0, presentationHeight_ = 0;

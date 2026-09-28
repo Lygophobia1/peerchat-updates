@@ -63,6 +63,9 @@ PC_SCREEN_API pc_screen_encoder* __cdecl pc_screen_encoder_open(
     const pc_screen_encoder_options* options);
 PC_SCREEN_API int __cdecl pc_screen_encoder_pop(pc_screen_encoder* encoder,
     uint8_t* output, uint32_t output_capacity, pc_screen_encoded_frame* frame);
+// Requests the next usable encoder input to become an IDR/bootstrap point. This
+// is best effort on hardware that exposes the standard Media Foundation control.
+PC_SCREEN_API int __cdecl pc_screen_encoder_request_keyframe(pc_screen_encoder* encoder);
 PC_SCREEN_API void __cdecl pc_screen_encoder_close(pc_screen_encoder* encoder);
 
 typedef struct pc_screen_encoder_status {
@@ -82,6 +85,44 @@ typedef struct pc_screen_encoder_status {
     uint32_t encoded_queue_depth;
     uint32_t encoder_input_ready;
     uint32_t failed;
+    // Startup is intentionally separate from ICE/media state. The adapter
+    // retains the last local stage/error until it is closed.
+    uint32_t startup_stage;
+    uint32_t startup_failure_operation;
+    int32_t startup_failure_hresult;
+    uint64_t keyframe_requests;
+    uint64_t sps_nals;
+    uint64_t pps_nals;
+    uint64_t idr_nals;
+    uint64_t non_idr_nals;
+    // Bounded, non-secret encoder failure/configuration telemetry. HRESULTs
+    // are reported only after a failure or media operation; names describe
+    // local hardware/software and never include captured content.
+    uint32_t failed_operation;
+    int32_t last_hresult;
+    int32_t process_input_hresult;
+    int32_t process_output_hresult;
+    uint64_t process_input_failures;
+    uint64_t process_output_failures;
+    // MF_E_TRANSFORM_STREAM_CHANGE is normal Media Foundation control flow,
+    // not an encoder fault. These values describe the bounded H.264 output
+    // type renegotiation and never include encoded screen data.
+    uint64_t stream_change_count;
+    uint64_t output_type_renegotiation_count;
+    int32_t output_type_renegotiation_hresult;
+    uint32_t output_type_width;
+    uint32_t output_type_height;
+    uint32_t output_type_frames_per_second;
+    uint32_t cbr_control_supported;
+    uint32_t cbr_control_applied;
+    uint32_t low_latency_control_supported;
+    uint32_t low_latency_control_applied;
+    uint32_t force_keyframe_control_supported;
+    uint32_t force_keyframe_control_applied;
+    wchar_t encoder_name[128];
+    wchar_t adapter_name[128];
+    wchar_t output_type_name[64];
+    uint64_t driver_version;
 } pc_screen_encoder_status;
 // Stages identify the current native operation; no per-frame content is logged.
 enum {
@@ -98,6 +139,37 @@ enum {
     PC_SCREEN_ENCODER_CREATE_SAMPLE = 11,
     PC_SCREEN_ENCODER_CREATE_COPY_TEXTURE = 12,
     PC_SCREEN_ENCODER_COPY_CAPTURE = 13
+};
+enum {
+    PC_SCREEN_START_NONE = 0,
+    PC_SCREEN_START_SOURCE_VALIDATED = 1,
+    PC_SCREEN_START_D3D_DEVICE_CREATED = 2,
+    PC_SCREEN_START_D3D_BRIDGE_CREATED = 3,
+    PC_SCREEN_START_WGC_ITEM_ACQUIRED = 4,
+    PC_SCREEN_START_ENCODER_ENUMERATION = 5,
+    PC_SCREEN_START_ENCODER_CREATED = 6,
+    PC_SCREEN_START_FRAME_POOL_CREATED = 7,
+    PC_SCREEN_START_CAPTURE_SESSION_CREATED = 8,
+    PC_SCREEN_START_CALLBACK_REGISTERED = 9,
+    PC_SCREEN_START_CAPTURE_STARTED = 10,
+    PC_SCREEN_START_FIRST_CAPTURED = 11,
+    PC_SCREEN_START_FIRST_ENCODER_INPUT = 12
+};
+enum {
+    PC_SCREEN_ENCODER_FAILURE_NONE = 0,
+    PC_SCREEN_ENCODER_FAILURE_MF_STARTUP = 1,
+    PC_SCREEN_ENCODER_FAILURE_WGC = 2,
+    PC_SCREEN_ENCODER_FAILURE_D3D11 = 3,
+    PC_SCREEN_ENCODER_FAILURE_VIDEO_PROCESSOR = 4,
+    PC_SCREEN_ENCODER_FAILURE_ENUMERATE_MFT = 5,
+    PC_SCREEN_ENCODER_FAILURE_ACTIVATE_MFT = 6,
+    PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER = 7,
+    PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE = 8,
+    PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE = 9,
+    PC_SCREEN_ENCODER_FAILURE_PROCESS_INPUT = 10,
+    PC_SCREEN_ENCODER_FAILURE_PROCESS_OUTPUT = 11,
+    PC_SCREEN_ENCODER_FAILURE_CAPTURE = 12,
+    PC_SCREEN_ENCODER_FAILURE_EXCEPTION = 13
 };
 PC_SCREEN_API int __cdecl pc_screen_encoder_status_get(pc_screen_encoder* encoder,
     pc_screen_encoder_status* status);
@@ -127,6 +199,13 @@ typedef struct pc_screen_decoder_status {
     uint32_t worker_stage;
     uint64_t worker_stage_elapsed_ms;
     uint32_t largest_access_unit_bytes;
+    int32_t last_process_input_hresult;
+    int32_t last_process_output_hresult;
+    uint64_t process_input_failures;
+    uint64_t process_output_failures;
+    uint64_t stream_change_count;
+    uint64_t need_more_input_count;
+    uint64_t output_success_count;
 } pc_screen_decoder_status;
 
 // A snapshot of the decoder worker, not a separate recovery or lifecycle owner.

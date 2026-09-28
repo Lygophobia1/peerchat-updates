@@ -7,11 +7,11 @@ try {
  & (Join-Path $projectRoot 'scripts\build-desktop.ps1') -OutputDirectory $OutputDirectory
  $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
  $references=@('System.dll','System.Core.dll','System.Web.Extensions.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }
- & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$OutputDirectory\ProfileManagerTest.exe" $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\LocalProfiles.cs .\desktop\ProfileAccounts.cs .\desktop\VoicePreferences.cs .\tests\ProfileManagerTest.cs
+ & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$OutputDirectory\ProfileManagerTest.exe" $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\LocalProfiles.cs .\desktop\Diagnostics.cs .\desktop\ProfileAccounts.cs .\desktop\VoicePreferences.cs .\tests\ProfileManagerTest.cs
  if($LASTEXITCODE -ne 0){throw 'Profile manager test build failed'}
  & ".\$OutputDirectory\ProfileManagerTest.exe"
  if($LASTEXITCODE -ne 0){throw 'Profile manager regression failed'}
- & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$OutputDirectory\AdapterTest.exe" $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\ProfileAccounts.cs .\desktop\VoicePreferences.cs .\desktop\LocalProfiles.cs .\desktop\AdapterTest.cs
+ & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$OutputDirectory\AdapterTest.exe" $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\ProfileAccounts.cs .\desktop\VoicePreferences.cs .\desktop\LocalProfiles.cs .\desktop\Diagnostics.cs .\desktop\AdapterTest.cs
  if($LASTEXITCODE -ne 0){throw 'Adapter test build failed'}
  & ".\$OutputDirectory\AdapterTest.exe"
  if($LASTEXITCODE -ne 0){throw 'Adapter regression failed'}

@@ -10,6 +10,7 @@
 #include <bcrypt.h>
 #include <wincrypt.h>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -23,6 +24,20 @@ struct Cert {PCCERT_CONTEXT h{};~Cert(){if(h)CertFreeCertificateContext(h);}};
 struct Key {NCRYPT_KEY_HANDLE h{};~Key(){if(h)NCryptFreeObject(h);}};
 struct Provider {NCRYPT_PROV_HANDLE h{};~Provider(){if(h)NCryptFreeObject(h);}};
 struct Credential {CredHandle h{};bool valid=false;~Credential(){if(valid)FreeCredentialsHandle(&h);}};
+std::string utc(const FILETIME& value) {
+    SYSTEMTIME time{};
+    if(!FileTimeToSystemTime(&value,&time))return "unavailable";
+    char text[32]{};
+    std::snprintf(text,sizeof(text),"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds);
+    return text;
+}
+std::string utcNow() {FILETIME value{};GetSystemTimeAsFileTime(&value);return utc(value);}
+std::string hex(const BYTE* bytes,DWORD length) {
+    static constexpr char Digits[]="0123456789abcdef";
+    std::string result;result.reserve(static_cast<size_t>(length)*2);
+    for(DWORD i=0;i<length;i++){result.push_back(Digits[bytes[i]>>4]);result.push_back(Digits[bytes[i]&15]);}
+    return result;
+}
 Blob certificateKey(PCCERT_CONTEXT certificate) {
     BCRYPT_KEY_HANDLE key{};
     check(CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,&certificate->pCertInfo->SubjectPublicKeyInfo,0,nullptr,&key)!=FALSE,"Unsupported peer certificate public key");
@@ -31,6 +46,14 @@ Blob certificateKey(PCCERT_CONTEXT certificate) {
     BCryptDestroyKey(key);security(status,"Could not read peer public identity");
     check(result.size()==sizeof(BCRYPT_ECCKEY_BLOB)+64,"Peer identity is not P-256");
     auto* header=reinterpret_cast<const BCRYPT_ECCKEY_BLOB*>(result.data());check(header->dwMagic==BCRYPT_ECDSA_PUBLIC_P256_MAGIC,"Unsupported peer identity curve");return result;
+}
+std::string certificateDiagnostics(PCCERT_CONTEXT certificate) {
+    check(certificate&&certificate->pCertInfo,"Missing TLS certificate");
+    DWORD hashLength=0;
+    check(CertGetCertificateContextProperty(certificate,CERT_SHA256_HASH_PROP_ID,nullptr,&hashLength)!=FALSE&&hashLength==32,"Cannot read TLS certificate hash");
+    std::array<BYTE,32> hash{};
+    check(CertGetCertificateContextProperty(certificate,CERT_SHA256_HASH_PROP_ID,hash.data(),&hashLength)!=FALSE,"Cannot read TLS certificate hash");
+    return "peer_id="+Storage::publicKeyId(certificateKey(certificate))+"; certificate_sha256="+hex(hash.data(),hashLength)+"; not_before_utc="+utc(certificate->pCertInfo->NotBefore)+"; not_after_utc="+utc(certificate->pCertInfo->NotAfter);
 }
 }
 using namespace tls_detail;
@@ -52,9 +75,20 @@ struct TlsCredentials::Impl {
         check(CertStrToNameW(X509_ASN_ENCODING,name.c_str(),CERT_X500_NAME_STR,nullptr,nullptr,&size,nullptr)!=FALSE,"Cannot encode certificate name");
         Blob subject(size);check(CertStrToNameW(X509_ASN_ENCODING,name.c_str(),CERT_X500_NAME_STR,nullptr,subject.data(),&size,nullptr)!=FALSE,"Cannot encode identity certificate");
         CERT_NAME_BLOB subjectBlob{size,subject.data()};CRYPT_ALGORITHM_IDENTIFIER algorithm{};algorithm.pszObjId=const_cast<LPSTR>(szOID_ECDSA_SHA256);
-        SYSTEMTIME end{};GetSystemTime(&end);end.wYear+=10;if(end.wMonth==2&&end.wDay==29)end.wDay=28;
+        // The certificate is intentionally ephemeral while the P-256 identity key is
+        // durable.  Backdate NotBefore by one day to tolerate ordinary clock skew
+        // between peers without disabling certificate validity checks.  NotAfter is
+        // still an explicit ten-year UTC expiry.
+        SYSTEMTIME now{};GetSystemTime(&now);FILETIME startFile{};
+        check(SystemTimeToFileTime(&now,&startFile)!=FALSE,"Cannot create TLS certificate start time");
+        ULARGE_INTEGER startValue{};startValue.LowPart=startFile.dwLowDateTime;startValue.HighPart=startFile.dwHighDateTime;
+        constexpr ULONGLONG OneDay=24ull*60ull*60ull*10000000ull;
+        check(startValue.QuadPart>OneDay,"Cannot create TLS certificate start time");startValue.QuadPart-=OneDay;
+        startFile.dwLowDateTime=startValue.LowPart;startFile.dwHighDateTime=startValue.HighPart;
+        SYSTEMTIME start{};check(FileTimeToSystemTime(&startFile,&start)!=FALSE,"Cannot create TLS certificate start time");
+        SYSTEMTIME end=now;end.wYear+=10;if(end.wMonth==2&&end.wDay==29)end.wDay=28;
         CRYPT_KEY_PROV_INFO keyInfo{};keyInfo.pwszContainerName=keyName.data();keyInfo.pwszProvName=const_cast<LPWSTR>(MS_KEY_STORAGE_PROVIDER);keyInfo.dwKeySpec=0;
-        certificate.h=CertCreateSelfSignCertificate(key.h,&subjectBlob,0,&keyInfo,&algorithm,nullptr,&end,nullptr);
+        certificate.h=CertCreateSelfSignCertificate(key.h,&subjectBlob,0,&keyInfo,&algorithm,&start,&end,nullptr);
         check(certificate.h!=nullptr,"Cannot create identity certificate");
         HCRYPTPROV_OR_NCRYPT_KEY_HANDLE acquired{};DWORD spec=0;BOOL release=FALSE;
         check(CryptAcquireCertificatePrivateKey(certificate.h,CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG|CRYPT_ACQUIRE_COMPARE_KEY_FLAG,nullptr,&acquired,&spec,&release)!=FALSE,"Certificate provider cannot reopen the persistent private key");
@@ -95,7 +129,11 @@ struct TlsSession::Impl {
             if(inBuffers[1].BufferType==SECBUFFER_EXTRA){check(inBuffers[1].cbBuffer<=input.size(),"Invalid TLS extra data");input.erase(input.begin(),input.end()-inBuffers[1].cbBuffer);}else input.clear();
             if(result==SEC_E_OK) {
                 Cert peer;security(QueryContextAttributesW(&context,SECPKG_ATTR_REMOTE_CERT_CONTEXT,&peer.h),"Peer did not present a certificate");
-                check(CertVerifyTimeValidity(nullptr,peer.h->pCertInfo)==0,"Peer certificate expired or is not yet valid");
+                LONG timeValidity=CertVerifyTimeValidity(nullptr,peer.h->pCertInfo);
+                if(timeValidity!=0){
+                    std::string state=timeValidity<0?"not yet valid":"expired";
+                    throw std::runtime_error("Peer certificate "+state+"; cert_verify_time_validity="+std::to_string(timeValidity)+"; verifier_utc="+utcNow()+"; "+certificateDiagnostics(peer.h));
+                }
                 check(CryptVerifyCertificateSignatureEx(0,X509_ASN_ENCODING,CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT,const_cast<PCERT_CONTEXT>(peer.h),CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT,const_cast<PCERT_CONTEXT>(peer.h),0,nullptr)!=FALSE,"Peer certificate is not a valid self-signed identity");
                 remoteKey=certificateKey(peer.h);security(QueryContextAttributesW(&context,SECPKG_ATTR_STREAM_SIZES,&sizes),"Cannot query TLS stream sizes");
                 established=true;return;
@@ -118,6 +156,7 @@ struct TlsSession::Impl {
 };
 TlsCredentials::TlsCredentials(const Profile& identity):impl_(std::make_shared<Impl>(identity)){}
 TlsCredentials::~TlsCredentials()=default;
+std::string TlsCredentials::certificateDiagnostics()const{return tls_detail::certificateDiagnostics(impl_->certificate.h);}
 TlsSession::TlsSession(const TlsCredentials& identity,bool incoming):impl_(std::make_unique<Impl>(identity.impl_,incoming)){}
 TlsSession::~TlsSession()=default;
 void TlsSession::receive(const Blob& encrypted){append(impl_->input,encrypted.data(),encrypted.size());if(!impl_->established)impl_->handshake();impl_->decrypt();}

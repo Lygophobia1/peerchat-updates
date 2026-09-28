@@ -14,9 +14,17 @@ try {
  $testExe=(Resolve-Path "$OutputDirectory\UiSmoke.exe").Path
  $resultRoot=(Resolve-Path build\tests\runtime).Path
  $runToken=[Guid]::NewGuid().ToString('N').Substring(0,8)
- $first=Start-Process -WindowStyle Hidden -FilePath $testExe -ArgumentList ('"'+$profile.FullName+'\A" 29431 "'+$resultRoot+'\wpf-A" '+$runToken) -PassThru
- $second=Start-Process -WindowStyle Hidden -FilePath $testExe -ArgumentList ('"'+$profile.FullName+'\B" 29432 "'+$resultRoot+'\wpf-B" '+$runToken) -PassThru
- $first.WaitForExit();$second.WaitForExit()
- Get-Content "$resultRoot\wpf-A.txt","$resultRoot\wpf-B.txt"
- if($first.ExitCode -ne 0 -or $second.ExitCode -ne 0){throw 'WPF UI test failed'}
+ $firstResult="$resultRoot\wpf-A-$runToken"
+ $secondResult="$resultRoot\wpf-B-$runToken"
+ $first=Start-Process -WindowStyle Hidden -FilePath $testExe -ArgumentList ('"'+$profile.FullName+'\A" 29431 "'+$firstResult+'" '+$runToken) -PassThru
+ $second=Start-Process -WindowStyle Hidden -FilePath $testExe -ArgumentList ('"'+$profile.FullName+'\B" 29432 "'+$secondResult+'" '+$runToken) -PassThru
+ $firstFinished=$first.WaitForExit(120000)
+ $secondFinished=$second.WaitForExit(120000)
+ if(!$firstFinished){try{$first.Kill()}catch{};$first.WaitForExit()}
+ if(!$secondFinished){try{$second.Kill()}catch{};$second.WaitForExit()}
+ $firstLog=if(Test-Path "$firstResult.txt"){Get-Content "$firstResult.txt" -Raw}else{'No result file was written.'}
+ $secondLog=if(Test-Path "$secondResult.txt"){Get-Content "$secondResult.txt" -Raw}else{'No result file was written.'}
+ Write-Output "Profile A: exited=$($first.HasExited) exit_code=$($first.ExitCode) finished_before_timeout=$firstFinished result=$firstLog"
+ Write-Output "Profile B: exited=$($second.HasExited) exit_code=$($second.ExitCode) finished_before_timeout=$secondFinished result=$secondLog"
+ if(!$firstFinished -or !$secondFinished -or $first.ExitCode -ne 0 -or $second.ExitCode -ne 0){throw 'WPF UI test failed; see per-profile exit status and unique result files above.'}
 } finally {Pop-Location}

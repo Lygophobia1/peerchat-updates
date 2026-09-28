@@ -8,6 +8,8 @@
 #include <mferror.h>
 #include <mfidl.h>
 #include <mftransform.h>
+#include <codecapi.h>
+#include <icodecapi.h>
 #include <wrl/client.h>
 #include <Windows.Graphics.Capture.Interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -18,6 +20,7 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -27,6 +30,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <string>
 
 using Microsoft::WRL::ComPtr;
 using namespace winrt::Windows::Graphics::Capture;
@@ -37,7 +41,23 @@ namespace {
 struct EncodedFrame {
     std::vector<uint8_t> bytes;
     pc_screen_encoded_frame info{};
+    bool bootstrap = false;
 };
+
+bool h264_nals(const std::vector<uint8_t>& bytes,uint64_t& sps,uint64_t& pps,uint64_t& idr,uint64_t& nonIdr) {
+    bool bootstrap=false;
+    for(size_t index=0;index+3<bytes.size();) {
+        size_t start=0;
+        if(bytes[index]==0&&bytes[index+1]==0&&bytes[index+2]==1) start=3;
+        else if(index+4<bytes.size()&&bytes[index]==0&&bytes[index+1]==0&&bytes[index+2]==0&&bytes[index+3]==1) start=4;
+        if(!start){++index;continue;}
+        const auto type=bytes[index+start]&31;
+        if(type==7){++sps;bootstrap=true;}else if(type==8){++pps;bootstrap=true;}
+        else if(type==5){++idr;bootstrap=true;}else if(type==1)++nonIdr;
+        index+=start;
+    }
+    return bootstrap;
+}
 
 struct CapturedFrame {
     Direct3D11CaptureFrame frame{nullptr};
@@ -113,17 +133,55 @@ public:
         const auto callbackTick = lastCaptureCallbackTick_.load();
         const auto captureStageTick = captureStageSince_.load();
         const auto workerStageTick = workerStageSince_.load();
-        *value = {sizeof(*value), capturedFrames_, submittedFrames_, encodedFrames_,
-            droppedBeforeEncode_, droppedEncodedQueue_, captureCallbackCount_.load(),
-            callbackTick && now >= callbackTick ? now - callbackTick : 0,
-            captureStage_.load(), captureStageTick && now >= captureStageTick ?
-                now - captureStageTick : 0,
-            workerStage_.load(), workerStageTick && now >= workerStageTick ?
-                now - workerStageTick : 0,
-            pending_.frame ? 1u : 0u, static_cast<uint32_t>(output_.size()),
-            inputReady_ ? 1u : 0u, failed_ ? 1u : 0u};
+        *value = {};
+        value->structure_size = sizeof(*value);
+        value->captured_frames = capturedFrames_;
+        value->submitted_to_encoder = submittedFrames_;
+        value->encoded_frames = encodedFrames_;
+        value->dropped_before_encode = droppedBeforeEncode_;
+        value->dropped_encoded_queue = droppedEncodedQueue_;
+        value->capture_callback_count = captureCallbackCount_.load();
+        value->last_capture_callback_age_ms = callbackTick && now >= callbackTick ? now - callbackTick : 0;
+        value->capture_callback_stage = captureStage_.load();
+        value->capture_callback_stage_elapsed_ms = captureStageTick && now >= captureStageTick ? now - captureStageTick : 0;
+        value->encoder_worker_stage = workerStage_.load();
+        value->encoder_worker_stage_elapsed_ms = workerStageTick && now >= workerStageTick ? now - workerStageTick : 0;
+        value->pending_capture_frame = pending_.frame ? 1u : 0u;
+        value->encoded_queue_depth = static_cast<uint32_t>(output_.size());
+        value->encoder_input_ready = inputReady_ ? 1u : 0u;
+        value->failed = failed_ ? 1u : 0u;
+        value->startup_stage = startupStage_.load();
+        value->startup_failure_operation = startupFailureOperation_;
+        value->startup_failure_hresult = startupFailureHresult_;
+        value->keyframe_requests = keyframeRequests_;
+        value->sps_nals = spsNals_; value->pps_nals = ppsNals_;
+        value->idr_nals = idrNals_; value->non_idr_nals = nonIdrNals_;
+        value->failed_operation = failedOperation_;
+        value->last_hresult = lastHresult_;
+        value->process_input_hresult = processInputHresult_;
+        value->process_output_hresult = processOutputHresult_;
+        value->process_input_failures = processInputFailures_;
+        value->process_output_failures = processOutputFailures_;
+        value->stream_change_count = streamChangeCount_;
+        value->output_type_renegotiation_count = outputTypeRenegotiationCount_;
+        value->output_type_renegotiation_hresult = outputTypeRenegotiationHresult_;
+        value->output_type_width = outputTypeWidth_;
+        value->output_type_height = outputTypeHeight_;
+        value->output_type_frames_per_second = outputTypeFramesPerSecond_;
+        value->cbr_control_supported = cbrControlSupported_ ? 1u : 0u;
+        value->cbr_control_applied = cbrControlApplied_ ? 1u : 0u;
+        value->low_latency_control_supported = lowLatencyControlSupported_ ? 1u : 0u;
+        value->low_latency_control_applied = lowLatencyControlApplied_ ? 1u : 0u;
+        value->force_keyframe_control_supported = forceKeyframeControlSupported_ ? 1u : 0u;
+        value->force_keyframe_control_applied = forceKeyframeControlApplied_ ? 1u : 0u;
+        wcsncpy_s(value->encoder_name, encoderName_.c_str(), _TRUNCATE);
+        wcsncpy_s(value->adapter_name, adapterName_.c_str(), _TRUNCATE);
+        wcsncpy_s(value->output_type_name, outputTypeName_.c_str(), _TRUNCATE);
+        value->driver_version = driverVersion_;
         return 1;
     }
+
+    int requestKeyframe() { forceKeyframe_ = true; ++keyframeRequests_; return 1; }
 
     void onEvent(IMFAsyncResult* async) {
         ComPtr<IMFMediaEventGenerator> source;
@@ -156,56 +214,91 @@ private:
         workerStageSince_ = GetTickCount64();
         workerStage_ = stage;
     }
-    void fail() {
+    void setStartupStage(uint32_t stage) { startupStage_ = stage; }
+    void rememberStartupFailure(HRESULT result, std::uint32_t operation) {
+        if (firstCaptureObserved_) return;
+        std::lock_guard lock(mutex_);
+        if (!startupFailureOperation_) {
+            startupFailureOperation_ = operation;
+            startupFailureHresult_ = static_cast<int32_t>(result);
+        }
+    }
+    void fail(HRESULT result = E_FAIL, std::uint32_t operation = PC_SCREEN_ENCODER_FAILURE_EXCEPTION) {
+        rememberStartupFailure(result, operation);
         {
             std::lock_guard lock(mutex_);
             failed_ = true;
             running_ = false;
+            if (failedOperation_ == PC_SCREEN_ENCODER_FAILURE_NONE) {
+                lastHresult_ = static_cast<int32_t>(result);
+                failedOperation_ = operation;
+            }
         }
         condition_.notify_all();
     }
 
     bool initialize() {
-        if (FAILED(MFStartup(MF_VERSION))) return false;
+        const auto rejected = [this](HRESULT result, std::uint32_t operation) {
+            rememberStartupFailure(result, operation);
+            std::lock_guard lock(mutex_);
+            lastHresult_ = static_cast<int32_t>(result);
+            failedOperation_ = operation;
+            return false;
+        };
+        const HRESULT startup = MFStartup(MF_VERSION);
+        if (FAILED(startup)) return rejected(startup, PC_SCREEN_ENCODER_FAILURE_MF_STARTUP);
         mediaFoundationStarted_ = true;
-        if (!GraphicsCaptureSession::IsSupported()) return false;
-        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        if (!GraphicsCaptureSession::IsSupported()) return rejected(E_NOTIMPL, PC_SCREEN_ENCODER_FAILURE_WGC);
+        setStartupStage(PC_SCREEN_START_SOURCE_VALIDATED);
+        const HRESULT d3d = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                nullptr, 0, D3D11_SDK_VERSION, &d3d_, nullptr, &d3dContext_))) return false;
+                nullptr, 0, D3D11_SDK_VERSION, &d3d_, nullptr, &d3dContext_);
+        if (FAILED(d3d)) return rejected(d3d, PC_SCREEN_ENCODER_FAILURE_D3D11);
+        setStartupStage(PC_SCREEN_START_D3D_DEVICE_CREATED);
         // Only the encoder worker uses our immediate context for copy and conversion.
         // The asynchronous Media Foundation MFT shares the device through the DXGI
         // manager, so it still needs the device's context multithread protection.
         ComPtr<ID3D10Multithread> multithread;
-        if (FAILED(d3d_.As(&multithread))) return false;
+        if (FAILED(d3d_.As(&multithread))) return rejected(E_NOINTERFACE, PC_SCREEN_ENCODER_FAILURE_D3D11);
         multithread->SetMultithreadProtected(TRUE);
         ComPtr<IDXGIDevice> dxgi;
-        if (FAILED(d3d_.As(&dxgi))) return false;
+        if (FAILED(d3d_.As(&dxgi))) return rejected(E_NOINTERFACE, PC_SCREEN_ENCODER_FAILURE_D3D11);
+        ComPtr<IDXGIAdapter> adapter;
+        if (SUCCEEDED(dxgi->GetAdapter(&adapter))) {
+            DXGI_ADAPTER_DESC description{};
+            if (SUCCEEDED(adapter->GetDesc(&description))) adapterName_ = description.Description;
+            LARGE_INTEGER version{};
+            if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(ID3D11Device), &version)))
+                driverVersion_ = static_cast<uint64_t>(version.QuadPart);
+        }
         winrt::com_ptr<IInspectable> inspectable;
         winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()));
         auto winrtDevice = inspectable.as<IDirect3DDevice>();
+        setStartupStage(PC_SCREEN_START_D3D_BRIDGE_CREATED);
         auto factory = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
         if (options_.source_kind == PC_SCREEN_MONITOR) {
             MONITORINFO info{};
             info.cbSize = sizeof(info);
             auto monitor = reinterpret_cast<HMONITOR>(options_.source_handle);
-            if (!GetMonitorInfoW(monitor, &info)) return false;
+            if (!GetMonitorInfoW(monitor, &info)) return rejected(HRESULT_FROM_WIN32(GetLastError()), PC_SCREEN_ENCODER_FAILURE_WGC);
             winrt::check_hresult(factory->CreateForMonitor(monitor,
                 winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item_)));
         } else if (options_.source_kind == PC_SCREEN_WINDOW) {
             auto window = reinterpret_cast<HWND>(options_.source_handle);
-            if (!IsWindow(window)) return false;
+            if (!IsWindow(window)) return rejected(E_INVALIDARG, PC_SCREEN_ENCODER_FAILURE_WGC);
             winrt::check_hresult(factory->CreateForWindow(window,
                 winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item_)));
-        } else return false;
+        } else return rejected(E_INVALIDARG, PC_SCREEN_ENCODER_FAILURE_WGC);
+        setStartupStage(PC_SCREEN_START_WGC_ITEM_ACQUIRED);
         auto size = item_.Size();
         if (size.Width < 48 || size.Height < 48 || size.Width > 16384 ||
             size.Height > 16384 || static_cast<uint64_t>(size.Width) * size.Height > 100000000)
-            return false;
+            return rejected(E_INVALIDARG, PC_SCREEN_ENCODER_FAILURE_WGC);
         width_ = static_cast<UINT>(size.Width) & ~1u;
         height_ = static_cast<UINT>(size.Height) & ~1u;
-        if (!width_ || !height_) return false;
+        if (!width_ || !height_) return rejected(E_INVALIDARG, PC_SCREEN_ENCODER_FAILURE_WGC);
 
-        if (FAILED(d3d_.As(&videoDevice_)) || FAILED(d3dContext_.As(&videoContext_))) return false;
+        if (FAILED(d3d_.As(&videoDevice_)) || FAILED(d3dContext_.As(&videoContext_))) return rejected(E_NOINTERFACE, PC_SCREEN_ENCODER_FAILURE_VIDEO_PROCESSOR);
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         content.InputFrameRate = {options_.frames_per_second, 1};
@@ -215,28 +308,64 @@ private:
         content.OutputWidth = width_;
         content.OutputHeight = height_;
         content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-        if (FAILED(videoDevice_->CreateVideoProcessorEnumerator(&content, &videoEnumerator_)) ||
-            FAILED(videoDevice_->CreateVideoProcessor(videoEnumerator_.Get(), 0, &videoProcessor_)))
-            return false;
+        const HRESULT enumerator = videoDevice_->CreateVideoProcessorEnumerator(&content, &videoEnumerator_);
+        if (FAILED(enumerator)) return rejected(enumerator, PC_SCREEN_ENCODER_FAILURE_VIDEO_PROCESSOR);
+        const HRESULT processor = videoDevice_->CreateVideoProcessor(videoEnumerator_.Get(), 0, &videoProcessor_);
+        if (FAILED(processor)) return rejected(processor, PC_SCREEN_ENCODER_FAILURE_VIDEO_PROCESSOR);
 
+        setStartupStage(PC_SCREEN_START_ENCODER_ENUMERATION);
         MFT_REGISTER_TYPE_INFO outputType{MFMediaType_Video, MFVideoFormat_H264};
         IMFActivate** activations = nullptr;
         UINT32 count = 0;
-        if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+        const HRESULT enumeration = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
                 MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                nullptr, &outputType, &activations, &count)) || !count) return false;
+                nullptr, &outputType, &activations, &count);
+        if (FAILED(enumeration) || !count) return rejected(FAILED(enumeration) ? enumeration : MF_E_TOPO_CODEC_NOT_FOUND,
+            PC_SCREEN_ENCODER_FAILURE_ENUMERATE_MFT);
+        UINT32 nameLength = 0;
+        if (SUCCEEDED(activations[0]->GetStringLength(MFT_FRIENDLY_NAME_Attribute, &nameLength)) && nameLength) {
+            std::vector<wchar_t> name(static_cast<size_t>(nameLength) + 1);
+            if (SUCCEEDED(activations[0]->GetString(MFT_FRIENDLY_NAME_Attribute, name.data(),
+                    static_cast<UINT32>(name.size()), nullptr))) encoderName_ = name.data();
+        }
         const HRESULT activation = activations[0]->ActivateObject(IID_PPV_ARGS(&encoder_));
         for (UINT32 index = 0; index < count; ++index) activations[index]->Release();
         CoTaskMemFree(activations);
-        if (FAILED(activation)) return false;
+        if (FAILED(activation)) return rejected(activation, PC_SCREEN_ENCODER_FAILURE_ACTIVATE_MFT);
+        setStartupStage(PC_SCREEN_START_ENCODER_CREATED);
+        // Request the standard CBR mean-rate controls when this hardware MFT
+        // implements them.  MF_MT_AVG_BITRATE remains the compatibility path;
+        // unsupported codec controls are non-fatal and never change quality
+        // policy on their own.
+        ComPtr<ICodecAPI> codec;
+        if (SUCCEEDED(encoder_.As(&codec))) {
+            cbrControlSupported_ = true;
+            VARIANT value{};
+            VariantInit(&value);
+            value.vt = VT_UI4;
+            value.ulVal = eAVEncCommonRateControlMode_CBR;
+            const HRESULT mode = codec->SetValue(&CODECAPI_AVEncCommonRateControlMode, &value);
+            value.ulVal = options_.bitrate_bits_per_second;
+            const HRESULT bitrate = codec->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value);
+            cbrControlApplied_ = SUCCEEDED(mode) && SUCCEEDED(bitrate);
+            VariantClear(&value);
+        }
         ComPtr<IMFAttributes> attributes;
-        if (FAILED(encoder_->GetAttributes(&attributes)) ||
-            FAILED(attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE))) return false;
+        const HRESULT encoderAttributes = encoder_->GetAttributes(&attributes);
+        if (FAILED(encoderAttributes)) return rejected(encoderAttributes, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        const HRESULT asynchronous = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+        if (FAILED(asynchronous)) return rejected(asynchronous, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        lowLatencyControlSupported_ = true;
+        const HRESULT lowLatency = attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+        lowLatencyControlApplied_ = SUCCEEDED(lowLatency);
         UINT token = 0;
-        if (FAILED(MFCreateDXGIDeviceManager(&token, &deviceManager_)) ||
-            FAILED(deviceManager_->ResetDevice(d3d_.Get(), token)) ||
-            FAILED(encoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
-                reinterpret_cast<ULONG_PTR>(deviceManager_.Get())))) return false;
+        const HRESULT manager = MFCreateDXGIDeviceManager(&token, &deviceManager_);
+        if (FAILED(manager)) return rejected(manager, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+        const HRESULT reset = deviceManager_->ResetDevice(d3d_.Get(), token);
+        if (FAILED(reset)) return rejected(reset, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+        const HRESULT managerMessage = encoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+            reinterpret_cast<ULONG_PTR>(deviceManager_.Get()));
+        if (FAILED(managerMessage)) return rejected(managerMessage, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
 
         ComPtr<IMFMediaType> mediaOutput;
         if (FAILED(MFCreateMediaType(&mediaOutput)) ||
@@ -248,7 +377,9 @@ private:
             FAILED(MFSetAttributeRatio(mediaOutput.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)) ||
             FAILED(mediaOutput->SetUINT32(MF_MT_AVG_BITRATE, options_.bitrate_bits_per_second)) ||
             FAILED(mediaOutput->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
-            FAILED(encoder_->SetOutputType(0, mediaOutput.Get(), 0))) return false;
+            FAILED(encoder_->SetOutputType(0, mediaOutput.Get(), 0)))
+            return rejected(E_FAIL, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE);
+        recordOutputType(mediaOutput.Get());
         ComPtr<IMFMediaType> mediaInput;
         if (FAILED(MFCreateMediaType(&mediaInput)) ||
             FAILED(mediaInput->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
@@ -259,22 +390,29 @@ private:
             FAILED(MFSetAttributeRatio(mediaInput.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)) ||
             FAILED(mediaInput->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
             FAILED(encoder_->SetInputType(0, mediaInput.Get(), 0)) ||
-            FAILED(encoder_.As(&events_))) return false;
+            FAILED(encoder_.As(&events_))) return rejected(E_FAIL, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE);
         eventSink_.Attach(new EventSink(weak_from_this()));
 
         pool_ = Direct3D11CaptureFramePool::CreateFreeThreaded(
             winrtDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+        setStartupStage(PC_SCREEN_START_FRAME_POOL_CREATED);
         auto weak = weak_from_this();
         frameToken_ = pool_.FrameArrived([weak](Direct3D11CaptureFramePool const& sender,
             winrt::Windows::Foundation::IInspectable const&) {
             if (auto owner = weak.lock()) owner->onCapture(sender);
         });
+        setStartupStage(PC_SCREEN_START_CALLBACK_REGISTERED);
         session_ = pool_.CreateCaptureSession(item_);
+        setStartupStage(PC_SCREEN_START_CAPTURE_SESSION_CREATED);
         session_.IsCursorCaptureEnabled(options_.capture_cursor != 0);
-        if (FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)) ||
-            FAILED(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)) ||
-            FAILED(events_->BeginGetEvent(eventSink_.Get(), nullptr))) return false;
+        const HRESULT begin = encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        if (FAILED(begin)) return rejected(begin, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        const HRESULT start = encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        if (FAILED(start)) return rejected(start, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        const HRESULT event = events_->BeginGetEvent(eventSink_.Get(), nullptr);
+        if (FAILED(event)) return rejected(event, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
         session_.StartCapture();
+        setStartupStage(PC_SCREEN_START_CAPTURE_STARTED);
         return true;
     }
 
@@ -301,6 +439,8 @@ private:
                 std::lock_guard lock(mutex_);
                 if (!running_) return;
                 ++capturedFrames_;
+                firstCaptureObserved_ = true;
+                setStartupStage(PC_SCREEN_START_FIRST_CAPTURED);
                 if (pending_.frame) ++droppedBeforeEncode_;
                 pending_ = {std::move(frame), now};
             }
@@ -363,10 +503,87 @@ private:
             options_.frames_per_second;
         if (FAILED(sample->SetSampleTime(time)) ||
             FAILED(sample->SetSampleDuration(10000000ll / options_.frames_per_second))) return false;
+        if(forceKeyframe_.exchange(false)) {
+            ComPtr<ICodecAPI> codec;
+            if (SUCCEEDED(encoder_.As(&codec))) {
+                forceKeyframeControlSupported_ = true;
+                VARIANT value{};
+                VariantInit(&value);
+                value.vt = VT_UI4;
+                value.ulVal = 1;
+                forceKeyframeControlApplied_ = SUCCEEDED(codec->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value));
+                VariantClear(&value);
+            }
+            // Retained as the compatible fallback for MFTs without ICodecAPI.
+            sample->SetUINT32(MFSampleExtension_CleanPoint,TRUE);
+        }
         setWorkerStage(PC_SCREEN_ENCODER_INPUT);
-        const bool accepted = SUCCEEDED(encoder_->ProcessInput(0, sample.Get(), 0));
+        const HRESULT processInput = encoder_->ProcessInput(0, sample.Get(), 0);
+        {
+            std::lock_guard lock(mutex_);
+            processInputHresult_ = static_cast<int32_t>(processInput);
+            if (FAILED(processInput)) ++processInputFailures_;
+        }
+        if (FAILED(processInput)) {
+            fail(processInput, PC_SCREEN_ENCODER_FAILURE_PROCESS_INPUT);
+            return false;
+        }
+        firstEncoderInputObserved_ = true;
+        setStartupStage(PC_SCREEN_START_FIRST_ENCODER_INPUT);
+        const bool accepted = true;
         if (accepted) { std::lock_guard lock(mutex_); ++submittedFrames_; }
         return accepted;
+    }
+
+    void recordOutputType(IMFMediaType* type) {
+        if (!type) return;
+        GUID subtype{};
+        UINT32 width = 0, height = 0, numerator = 0, denominator = 0;
+        type->GetGUID(MF_MT_SUBTYPE, &subtype);
+        MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width, &height);
+        MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &numerator, &denominator);
+        std::lock_guard lock(mutex_);
+        outputTypeName_ = subtype == MFVideoFormat_H264 ? L"H.264" : L"unexpected";
+        outputTypeWidth_ = width;
+        outputTypeHeight_ = height;
+        outputTypeFramesPerSecond_ = denominator ? numerator / denominator : 0;
+    }
+
+    bool renegotiateOutputType() {
+        // An MFT can request a new output type after its first input. Keep the
+        // same encoder and logical media generation: this is format control
+        // flow, not an ICE/DTLS or local capture failure.
+        if (++outputTypeRenegotiationAttempts_ > kMaxOutputTypeRenegotiations) {
+            std::lock_guard lock(mutex_);
+            outputTypeRenegotiationHresult_ = static_cast<int32_t>(MF_E_TRANSFORM_STREAM_CHANGE);
+            return false;
+        }
+        HRESULT result = MF_E_NO_MORE_TYPES;
+        for (DWORD index = 0;; ++index) {
+            ComPtr<IMFMediaType> available;
+            const HRESULT candidate = encoder_->GetOutputAvailableType(0, index, &available);
+            if (candidate == MF_E_NO_MORE_TYPES) break;
+            if (FAILED(candidate)) { result = candidate; break; }
+            GUID major{}, subtype{};
+            if (FAILED(available->GetGUID(MF_MT_MAJOR_TYPE, &major)) ||
+                FAILED(available->GetGUID(MF_MT_SUBTYPE, &subtype)) ||
+                major != MFMediaType_Video || subtype != MFVideoFormat_H264) continue;
+            // The available type is supplied by this exact MFT after its
+            // format change, so use it intact rather than forcing stale output
+            // attributes back onto an Intel/AMD implementation.
+            result = encoder_->SetOutputType(0, available.Get(), 0);
+            if (SUCCEEDED(result)) {
+                ComPtr<IMFMediaType> current;
+                if (SUCCEEDED(encoder_->GetOutputCurrentType(0, &current))) recordOutputType(current.Get());
+                break;
+            }
+        }
+        {
+            std::lock_guard lock(mutex_);
+            outputTypeRenegotiationHresult_ = static_cast<int32_t>(result);
+            if (SUCCEEDED(result)) ++outputTypeRenegotiationCount_;
+        }
+        return SUCCEEDED(result);
     }
 
     bool collect() {
@@ -384,12 +601,28 @@ private:
         }
         DWORD status = 0;
         const HRESULT output = encoder_->ProcessOutput(0, 1, &result, &status);
+        {
+            std::lock_guard lock(mutex_);
+            processOutputHresult_ = static_cast<int32_t>(output);
+            if (output == MF_E_TRANSFORM_STREAM_CHANGE) ++streamChangeCount_;
+            else if (FAILED(output) && output != MF_E_TRANSFORM_NEED_MORE_INPUT) ++processOutputFailures_;
+        }
+        if (result.pEvents) { result.pEvents->Release(); result.pEvents = nullptr; }
         if (output == MF_E_TRANSFORM_NEED_MORE_INPUT) return true;
-        if (FAILED(output)) return false;
+        if (output == MF_E_TRANSFORM_STREAM_CHANGE) {
+            if (!supplied && result.pSample) { result.pSample->Release(); result.pSample = nullptr; }
+            if (!renegotiateOutputType()) { fail(MF_E_TRANSFORM_STREAM_CHANGE, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE); return false; }
+            // This is an asynchronous MFT. The stream-change notification has
+            // consumed the current output-ready event; Intel Quick Sync can
+            // return E_UNEXPECTED if ProcessOutput is re-entered before it
+            // raises the next METransformHaveOutput event. The worker will
+            // resume through that normal event path (or a NeedInput event).
+            return true;
+        }
+        if (FAILED(output)) { fail(output, PC_SCREEN_ENCODER_FAILURE_PROCESS_OUTPUT); return false; }
         ComPtr<IMFSample> sample;
         if (supplied) sample = supplied;
         else sample.Attach(result.pSample);
-        if (result.pEvents) result.pEvents->Release();
         ComPtr<IMFMediaBuffer> bytes;
         if (FAILED(sample->ConvertToContiguousBuffer(&bytes))) return false;
         BYTE* pointer = nullptr;
@@ -405,17 +638,34 @@ private:
         LONGLONG time = 0;
         sample->GetSampleTime(&time);
         frame.info.timestamp_100ns = time >= 0 ? static_cast<uint64_t>(time) : 0;
-        for (size_t index = 0; index + 4 < frame.bytes.size(); ++index) {
-            if (frame.bytes[index] == 0 && frame.bytes[index + 1] == 0 &&
-                frame.bytes[index + 2] == 1 && (frame.bytes[index + 3] & 31) == 5) {
-                frame.info.keyframe = 1;
-                break;
-            }
-        }
+        uint64_t sps=0,pps=0,idr=0,nonIdr=0;
+        const bool bootstrap = h264_nals(frame.bytes, sps, pps, idr, nonIdr);
+        frame.bootstrap = bootstrap;
+        frame.info.keyframe = bootstrap ? 1u : 0u;
         {
             std::lock_guard lock(mutex_);
             ++encodedFrames_;
-            if (output_.size() == 3) { output_.pop_front(); ++droppedEncodedQueue_; }
+            spsNals_ += sps;
+            ppsNals_ += pps;
+            idrNals_ += idr;
+            nonIdrNals_ += nonIdr;
+            // Real-time deltas are expendable. A new receiver's only SPS/PPS/IDR
+            // bootstrap is not: evict a delta first and drop a new delta when the
+            // bounded queue contains bootstrap material only.
+            if (output_.size() == 4) {
+                auto discard = std::find_if(output_.begin(), output_.end(),
+                    [](const auto& value) { return !value.bootstrap; });
+                if (discard != output_.end()) {
+                    output_.erase(discard);
+                    ++droppedEncodedQueue_;
+                } else if (!frame.bootstrap) {
+                    ++droppedEncodedQueue_;
+                    return true;
+                } else {
+                    output_.pop_front();
+                    ++droppedEncodedQueue_;
+                }
+            }
             output_.push_back(std::move(frame));
         }
         return true;
@@ -491,6 +741,25 @@ private:
     uint64_t frameIndex_ = 0;
     uint64_t capturedFrames_ = 0, submittedFrames_ = 0, encodedFrames_ = 0;
     uint64_t droppedBeforeEncode_ = 0, droppedEncodedQueue_ = 0;
+    uint64_t keyframeRequests_ = 0, spsNals_ = 0, ppsNals_ = 0, idrNals_ = 0, nonIdrNals_ = 0;
+    std::uint32_t failedOperation_ = PC_SCREEN_ENCODER_FAILURE_NONE;
+    int32_t lastHresult_ = 0, processInputHresult_ = 0, processOutputHresult_ = 0;
+    uint64_t processInputFailures_ = 0, processOutputFailures_ = 0;
+    std::uint32_t startupFailureOperation_ = 0;
+    int32_t startupFailureHresult_ = 0;
+    std::atomic<uint32_t> startupStage_{PC_SCREEN_START_NONE};
+    std::atomic<bool> firstCaptureObserved_{false}, firstEncoderInputObserved_{false};
+    static constexpr uint32_t kMaxOutputTypeRenegotiations = 4;
+    uint64_t streamChangeCount_ = 0, outputTypeRenegotiationCount_ = 0;
+    uint32_t outputTypeRenegotiationAttempts_ = 0;
+    int32_t outputTypeRenegotiationHresult_ = 0;
+    uint32_t outputTypeWidth_ = 0, outputTypeHeight_ = 0, outputTypeFramesPerSecond_ = 0;
+    std::atomic<bool> cbrControlSupported_{false}, cbrControlApplied_{false};
+    std::atomic<bool> lowLatencyControlSupported_{false}, lowLatencyControlApplied_{false};
+    std::atomic<bool> forceKeyframeControlSupported_{false}, forceKeyframeControlApplied_{false};
+    std::wstring encoderName_, adapterName_, outputTypeName_;
+    uint64_t driverVersion_ = 0;
+    std::atomic<bool> forceKeyframe_{false};
     std::atomic<uint64_t> captureCallbackCount_{0}, lastCaptureCallbackTick_{0};
     std::atomic<uint32_t> captureStage_{PC_SCREEN_CAPTURE_IDLE};
     std::atomic<uint64_t> captureStageSince_{0};
@@ -539,6 +808,11 @@ extern "C" int __cdecl pc_screen_encoder_pop(pc_screen_encoder* encoder,
     uint8_t* output, uint32_t output_capacity, pc_screen_encoded_frame* frame) {
     try { return encoder && encoder->state ? encoder->state->pop(output, output_capacity, frame) : -2; }
     catch (...) { return -2; }
+}
+
+extern "C" int __cdecl pc_screen_encoder_request_keyframe(pc_screen_encoder* encoder) {
+    try { return encoder && encoder->state ? encoder->state->requestKeyframe() : 0; }
+    catch (...) { return 0; }
 }
 
 extern "C" int __cdecl pc_screen_encoder_status_get(pc_screen_encoder* encoder,

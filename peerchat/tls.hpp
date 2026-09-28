@@ -12,6 +12,9 @@ public:
     ~TlsCredentials();
     TlsCredentials(const TlsCredentials&)=delete;
     TlsCredentials& operator=(const TlsCredentials&)=delete;
+    // Public certificate metadata only.  This is deliberately diagnostic data:
+    // it never includes the private key or any TLS/session secret.
+    std::string certificateDiagnostics() const;
 private:
     struct Impl;
     std::shared_ptr<Impl> impl_;
