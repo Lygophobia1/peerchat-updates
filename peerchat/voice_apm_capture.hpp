@@ -6,6 +6,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
+#include <utility>
 
 namespace peerchat {
 
@@ -18,12 +20,16 @@ public:
     VoiceApmCapture& operator=(const VoiceApmCapture&) = delete;
     ~VoiceApmCapture() { close(); }
 
-    bool open() {
+    bool open(bool noiseSuppression = true, bool automaticGain = true) {
         close();
         captureCalls_ = 0;
         processedFrames_ = 0;
         bypassedFrames_ = 0;
         failure_ = 0;
+        measuredFrames_ = 0;
+        preRms_ = prePeak_ = postRms_ = postPeak_ = 0.0f;
+        noiseSuppression_ = noiseSuppression;
+        automaticGain_ = automaticGain;
         module_ = LoadLibraryExW(L"PeerChat.AudioProcessing.dll", nullptr,
                                  LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (!module_) { failure_ = 1; return false; }
@@ -36,8 +42,8 @@ public:
         config.struct_size = sizeof(config);
         config.sample_rate_hz = PC_APM_SAMPLE_RATE_HZ;
         config.channels = PC_APM_CHANNELS;
-        config.noise_suppression_enabled = 1;
-        config.automatic_gain_enabled = 1;
+        config.noise_suppression_enabled = noiseSuppression ? 1u : 0u;
+        config.automatic_gain_enabled = automaticGain ? 1u : 0u;
         config.echo_cancellation_enabled = 0;
         instance_ = create_(&config);
         if (!instance_) { failure_ = 3; close(); return false; }
@@ -45,7 +51,8 @@ public:
         result.struct_size = sizeof(result);
         if (stats_(instance_, &result) != PC_APM_OK ||
             result.sample_rate_hz != 16000 || result.channels != 1 ||
-            result.noise_suppression_enabled != 1 || result.automatic_gain_enabled != 1 ||
+            result.noise_suppression_enabled != config.noise_suppression_enabled ||
+            result.automatic_gain_enabled != config.automatic_gain_enabled ||
             result.echo_cancellation_enabled != 0) {
             failure_ = 4;
             close();
@@ -60,6 +67,7 @@ public:
     bool processFrame(std::int16_t* pcm) {
         if (!pcm) return false;
         if (!active_) { ++bypassedFrames_; return false; }
+        const auto before = measure(pcm);
         for (unsigned block = 0; block != 2; ++block) {
             ++captureCalls_;
             const auto result = process_(instance_, pcm + block * 160,
@@ -71,6 +79,13 @@ public:
                 return false;
             }
         }
+        const auto after = measure(processed_.data());
+        const auto smooth = [this](std::atomic<float>& destination, float sample) {
+            destination = measuredFrames_ == 0 ? sample : destination.load() * 0.9f + sample * 0.1f;
+        };
+        smooth(preRms_, before.first); smooth(prePeak_, before.second);
+        smooth(postRms_, after.first); smooth(postPeak_, after.second);
+        ++measuredFrames_;
         for (unsigned sample = 0; sample != 320; ++sample) pcm[sample] = processed_[sample];
         ++processedFrames_;
         return true;
@@ -82,6 +97,13 @@ public:
     std::uint64_t captureCalls() const { return captureCalls_; }
     std::uint64_t processedFrames() const { return processedFrames_; }
     std::uint64_t bypassedFrames() const { return bypassedFrames_; }
+    std::uint64_t measuredFrames() const { return measuredFrames_; }
+    float preRms() const { return preRms_; }
+    float prePeak() const { return prePeak_; }
+    float postRms() const { return postRms_; }
+    float postPeak() const { return postPeak_; }
+    bool noiseSuppression() const { return noiseSuppression_; }
+    bool automaticGain() const { return automaticGain_; }
 
     void close() {
         if (instance_ && destroy_) destroy_(instance_);
@@ -93,6 +115,18 @@ public:
     }
 
 private:
+    static std::pair<float,float> measure(const std::int16_t* pcm) {
+        std::uint64_t squares = 0;
+        unsigned peak = 0;
+        for (unsigned i = 0; i != 320; ++i) {
+            const auto sample = static_cast<int>(pcm[i]);
+            const auto magnitude = static_cast<unsigned>(sample < 0 ? -sample : sample);
+            squares += static_cast<std::uint64_t>(magnitude) * magnitude;
+            if (magnitude > peak) peak = magnitude;
+        }
+        return {static_cast<float>(std::sqrt(static_cast<double>(squares) / 320.0) / 32768.0),
+                static_cast<float>(peak / 32768.0)};
+    }
     using Create = pc_apm* (*)(const pc_apm_config*);
     using Destroy = void (*)(pc_apm*);
     using Process = pc_apm_result (*)(pc_apm*, const std::int16_t*, std::int16_t*, std::uint32_t);
@@ -114,6 +148,9 @@ private:
     std::atomic<bool> active_{false};
     std::atomic<unsigned> failure_{0};
     std::atomic<std::uint64_t> captureCalls_{0}, processedFrames_{0}, bypassedFrames_{0};
+    std::atomic<std::uint64_t> measuredFrames_{0};
+    std::atomic<float> preRms_{0.0f}, prePeak_{0.0f}, postRms_{0.0f}, postPeak_{0.0f};
+    bool noiseSuppression_ = true, automaticGain_ = true;
 };
 
 } // namespace peerchat

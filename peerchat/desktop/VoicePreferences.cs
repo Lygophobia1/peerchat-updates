@@ -18,6 +18,7 @@ public sealed class VoicePreferenceData {
     public int InputDeviceId=-1,OutputDeviceId=-1;
     public string InputDeviceName="Windows default microphone",OutputDeviceName="Windows default output";
     public int InputVolume=100,OutputVolume=100;
+    public bool AudioProcessingEnabled=true,NoiseSuppressionEnabled=true,AutomaticGainEnabled=true;
 }
 
 // Profile preference only. No ephemeral call ID/state or audio content is stored.

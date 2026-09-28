@@ -232,6 +232,12 @@ MMRESULT openCapture(HWAVEIN& handle, int requested, HANDLE event, WAVEFORMATEX&
     else out << result;
     out << L"\ncapture_fallback_used=" << (fallback ? L"true" : L"false")
         << L"\ncapture_open_succeeded=" << (result == MMSYSERR_NOERROR ? L"true" : L"false");
+    if (result == MMSYSERR_NOERROR && handle) {
+        WAVEINCAPSW activeCaps{};
+        const auto activeResult = waveInGetDevCapsW(reinterpret_cast<UINT_PTR>(handle), &activeCaps, sizeof(activeCaps));
+        out << L"\ninput_active_device_name=" << (activeResult == MMSYSERR_NOERROR ? activeCaps.szPname : L"Unavailable")
+            << L"\ninput_active_device_query_mmresult=" << activeResult;
+    }
     diagnostics = out.str();
     return result;
 }
@@ -440,11 +446,25 @@ bool Audio::start(std::wstring& error) {
         if (result == MMSYSERR_NOERROR) break;
     }
     UINT outputId = WAVE_MAPPER;
-    const auto outputIdResult = waveOutGetID(state.output, &outputId);
-    WAVEOUTCAPSW outputCaps{};
-    waveOutGetDevCapsW(outputId, &outputCaps, sizeof(outputCaps));
+    const auto outputIdResult = result == MMSYSERR_NOERROR ? waveOutGetID(state.output, &outputId) : MMSYSERR_INVALHANDLE;
+    WAVEOUTCAPSW outputCaps{}, activeOutputCaps{};
+    if (result == MMSYSERR_NOERROR) waveOutGetDevCapsW(outputId, &outputCaps, sizeof(outputCaps));
+    const auto activeOutputResult = result == MMSYSERR_NOERROR ?
+        waveOutGetDevCapsW(reinterpret_cast<UINT_PTR>(state.output), &activeOutputCaps, sizeof(activeOutputCaps)) : MMSYSERR_INVALHANDLE;
+    DWORD preferredOutput=WAVE_MAPPER, preferredFlags=0;
+    const auto preferredOutputResult=waveOutMessage(reinterpret_cast<HWAVEOUT>(static_cast<UINT_PTR>(WAVE_MAPPER)),
+        audio_detail::preferredDeviceQuery,reinterpret_cast<DWORD_PTR>(&preferredOutput),reinterpret_cast<DWORD_PTR>(&preferredFlags));
+    WAVEOUTCAPSW preferredOutputCaps{};
+    const auto preferredCapsResult=preferredOutputResult==MMSYSERR_NOERROR&&preferredOutput!=WAVE_MAPPER?
+        waveOutGetDevCapsW(preferredOutput,&preferredOutputCaps,sizeof(preferredOutputCaps)):MMSYSERR_BADDEVICEID;
+    const std::wstring activeOutputName=activeOutputResult==MMSYSERR_NOERROR&&std::wstring(activeOutputCaps.szPname)!=L"Microsoft Sound Mapper"?
+        std::wstring(activeOutputCaps.szPname):preferredCapsResult==MMSYSERR_NOERROR?
+        std::wstring(preferredOutputCaps.szPname):L"Unavailable";
     state.playbackDiagnostics += L"\nplayback_resolved_id=" + std::to_wstring(static_cast<int>(outputId)) +
-        L"\nplayback_resolved_name=" + outputCaps.szPname + L"\nplayback_get_id_mmresult=" + std::to_wstring(outputIdResult);
+        L"\nplayback_resolved_name=" + outputCaps.szPname + L"\nplayback_get_id_mmresult=" + std::to_wstring(outputIdResult) +
+        L"\noutput_active_device_name=" + activeOutputName +
+        L"\noutput_active_device_query_mmresult=" + std::to_wstring(activeOutputResult) +
+        L"\noutput_default_query_mmresult=" + std::to_wstring(preferredOutputResult);
     if (result != MMSYSERR_NOERROR) {
         error = audio_detail::deviceError(L"Could not open the default speaker", result, false);
         state.closeDevices();

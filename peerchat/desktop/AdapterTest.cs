@@ -38,13 +38,20 @@ class AdapterTest {
     }
     static void TestVoicePreferences(string root){
         Func<byte[],byte[]> identity=data=>data;string path=Path.Combine(root,"voice-preferences");
-        var store=new VoicePreferenceStore(path,identity,identity);var value=new VoicePreferenceData{InputDeviceId=7,InputDeviceName="Test microphone",OutputDeviceId=8,OutputDeviceName="Test output",InputVolume=80,OutputVolume=125};store.Save(value);
-        var loaded=store.Load();Require(loaded.InputDeviceId==7&&loaded.OutputDeviceId==8&&loaded.InputVolume==80&&loaded.OutputVolume==125,"Voice preferences did not survive profile-local protected persistence");
+        var store=new VoicePreferenceStore(path,identity,identity);var value=new VoicePreferenceData{InputDeviceId=7,InputDeviceName="Test microphone",OutputDeviceId=8,OutputDeviceName="Test output",InputVolume=80,OutputVolume=125,AudioProcessingEnabled=false,NoiseSuppressionEnabled=false,AutomaticGainEnabled=true};store.Save(value);
+        var loaded=store.Load();Require(loaded.InputDeviceId==7&&loaded.OutputDeviceId==8&&loaded.InputVolume==80&&loaded.OutputVolume==125&&!loaded.AudioProcessingEnabled&&!loaded.NoiseSuppressionEnabled&&loaded.AutomaticGainEnabled,"Voice preferences did not survive profile-local protected persistence");
         VoicePreferenceStore.ResolveDevices(loaded,new VoiceDevices{inputs=new[]{new VoiceDevice{id=-1,name="Windows default microphone"}},outputs=new[]{new VoiceDevice{id=-1,name="Windows default output"}}});
         Require(loaded.InputDeviceId==-1&&loaded.OutputDeviceId==-1,"Missing audio devices did not fall back safely to system defaults");
         Require(!File.ReadAllText(Path.Combine(path,"voice-preferences.dat")).Contains("call"),"Live call state leaked into persistent voice preferences");
+        var other=new VoicePreferenceStore(Path.Combine(root,"voice-preferences-other"),identity,identity).Load();
+        Require(other.AudioProcessingEnabled&&other.NoiseSuppressionEnabled&&other.AutomaticGainEnabled,"New profile did not retain default-on APM settings independently");
+        string legacyPath=Path.Combine(root,"voice-preferences-legacy");Directory.CreateDirectory(legacyPath);
+        File.WriteAllText(Path.Combine(legacyPath,"voice-preferences.dat"),"{\"Version\":1,\"InputDeviceId\":-1,\"OutputDeviceId\":-1,\"InputDeviceName\":\"Windows default microphone\",\"OutputDeviceName\":\"Windows default output\",\"InputVolume\":100,\"OutputVolume\":100}");
+        var legacy=new VoicePreferenceStore(legacyPath,identity,identity).Load();
+        Require(legacy.AudioProcessingEnabled&&legacy.NoiseSuppressionEnabled&&legacy.AutomaticGainEnabled,"Existing voice preferences without APM fields lost default-on processing");
     }
     static int Main(string[] args){try{
+        if(args.Contains("--voice-preferences-only")){TestVoicePreferences(Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","voice-preferences-"+Guid.NewGuid().ToString("N")));Console.WriteLine("PASS: profile-local Voice Audio Processing settings and defaults.");return 0;}
         TestLocalSubnetTransition();if(args.Contains("--subnet-only")){Console.WriteLine("PASS: bidirectional same-LAN classification and runtime cross-subnet invalidation.");return 0;}
         var eligibility=new ChatViewModel();bool reused;
         for(int i=1;i<=4;i++){var friend=eligibility.BindFriend(i,i==4?"Sammy":"Friend "+i,new string((char)('a'+i),64),null,out reused);friend.Online=i!=4;friend.Contact.verified=i!=4;}

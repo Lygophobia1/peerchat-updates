@@ -116,6 +116,7 @@ public:
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
     bool setVoiceVolumes(int inputPercent, int outputPercent);
+    bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain);
     bool setMediaIceConfiguration(MediaIceConfiguration configuration);
     std::wstring voiceDiagnostics();
     std::string startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor);

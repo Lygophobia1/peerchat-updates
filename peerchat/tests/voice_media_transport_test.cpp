@@ -72,8 +72,12 @@ int main(){
         const char* configuredTurnUri=std::getenv("PEERCHAT_TURN_TEST_URI");
         const char* infrastructureMode=std::getenv("PEERCHAT_TURN_INFRASTRUCTURE");
         if((infrastructureMode&&std::string(infrastructureMode)=="1")||(configuredTurnUri&&*configuredTurnUri)){rtcInitLogger(RTC_LOG_NONE,nullptr);runConfiguredTurnProbe();return 0;}
-        for(int cycle=0;cycle<3;++cycle){
-        peerchat::VoiceMedia caller(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24");
+        for(int cycle=0;cycle<4;++cycle){
+        peerchat::VoiceMedia::ProcessingOptions processing;
+        if(cycle==1)processing.enabled=false;
+        if(cycle==2)processing.automaticGain=false;
+        if(cycle==3)processing.noiseSuppression=false;
+        peerchat::VoiceMedia caller(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24",processing);
         peerchat::VoiceMedia answerer(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),"192.168.1.17/24");
         std::wstring error;
         require(caller.startOffer(error),"Could not create caller offer");
@@ -102,7 +106,9 @@ int main(){
         auto a=caller.diagnostics(),b=answerer.diagnostics();
         std::wcerr<<L"Caller diagnostics:\n"<<a<<L"\nAnswerer diagnostics:\n"<<b<<L'\n';
         require(countAtLeast(a,L"capture_frames=",12)&&countAtLeast(a,L"encoded_frames=",12)&&countAtLeast(a,L"opus_submitted=",12),"Caller did not capture/encode/submit injected PCM");
-        require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_noise_suppression=true")!=std::wstring::npos&&a.find(L"apm_automatic_gain=true")!=std::wstring::npos&&a.find(L"apm_echo_cancellation=false")!=std::wstring::npos,"Capture-side APM did not process two 10 ms blocks per Opus frame with NS/AGC enabled and AEC disabled");
+        require(a.find(L"echo_cancellation=false")!=std::wstring::npos,"Echo cancellation must stay disabled");
+        if(processing.enabled)require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_enabled=true")!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression=")+(processing.noiseSuppression?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"automatic_gain_control=")+(processing.automaticGain?L"true":L"false"))!=std::wstring::npos&&countAtLeast(a,L"apm_level_frames=",12),"Capture-side APM configuration or two-block cadence did not match requested options");
+        else require(a.find(L"apm_enabled=false")!=std::wstring::npos&&countAtLeast(a,L"apm_raw_bypass_frames=",12)&&a.find(L"apm_capture_10ms_calls=0")!=std::wstring::npos,"Disabled processing did not preserve raw 20 ms PCM-to-Opus path");
         require(countAtLeast(b,L"capture_frames=",12)&&countAtLeast(b,L"encoded_frames=",12)&&countAtLeast(b,L"opus_submitted=",12),"Answerer did not capture/encode/submit injected PCM");
         require(countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"decoded_frames=",12)&&countAtLeast(a,L"playback_frames=",12),"Caller did not receive/decode/queue answerer Opus");
         require(countAtLeast(b,L"received_packets=",12)&&countAtLeast(b,L"decoded_frames=",12)&&countAtLeast(b,L"playback_frames=",12),"Answerer did not receive/decode/queue caller Opus");
@@ -111,12 +117,10 @@ int main(){
         const auto callerLevel=caller.telemetry(),answererLevel=answerer.telemetry();
         require(!callerLevel.outputAvailable||callerLevel.outputLevel>0,"Caller decoded non-silent PCM but output telemetry stayed at zero");
         require(!answererLevel.outputAvailable||answererLevel.outputLevel>0,"Answerer decoded non-silent PCM but output telemetry stayed at zero");
-        caller.testFailApmNextFrame();
-        caller.testInjectPcm(pcm);
-        require(countAtLeast(caller.diagnostics(),L"apm_raw_bypass_frames=",1)&&countAtLeast(caller.diagnostics(),L"encoded_frames=",13),"APM failure did not bypass to the original 20 ms Opus frame");
-        bool apmWarning=false;
-        for(const auto& event:caller.poll())if(event.kind==peerchat::VoiceMedia::EventKind::AudioProcessingError)apmWarning=true;
-        require(apmWarning,"APM bypass did not report a nonfatal diagnostic event");
+        if(processing.enabled){caller.testFailApmNextFrame();caller.testInjectPcm(pcm);
+            require(countAtLeast(caller.diagnostics(),L"apm_raw_bypass_frames=",1)&&countAtLeast(caller.diagnostics(),L"encoded_frames=",13),"APM failure did not bypass to the original 20 ms Opus frame");
+            bool apmWarning=false;for(const auto& event:caller.poll())if(event.kind==peerchat::VoiceMedia::EventKind::AudioProcessingError)apmWarning=true;
+            require(apmWarning,"APM bypass did not report a nonfatal diagnostic event");}
         caller.stop();answerer.stop();
         }
         std::cout<<"PASS: injected PCM crossed direct ICE/DTLS-SRTP as timestamped Opus and reached both playback queues.\n";

@@ -14,6 +14,11 @@ namespace peerchat {
 // a bounded event queue so the PeerChat node remains the signaling authority.
 class VoiceMedia {
 public:
+    struct ProcessingOptions {
+        bool enabled = true;
+        bool noiseSuppression = true;
+        bool automaticGain = true;
+    };
     enum class Route { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
     enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError, AudioProcessingError };
     struct Event {
@@ -24,6 +29,9 @@ public:
 
     VoiceMedia(MediaIceConfiguration ice, int inputDevice=-1, int outputDevice=-1,
                std::uint64_t networkGeneration=0, std::string networkFingerprint={});
+    VoiceMedia(MediaIceConfiguration ice, int inputDevice, int outputDevice,
+               std::uint64_t networkGeneration, std::string networkFingerprint,
+               ProcessingOptions processing);
     ~VoiceMedia();
     VoiceMedia(const VoiceMedia&) = delete;
     VoiceMedia& operator=(const VoiceMedia&) = delete;
