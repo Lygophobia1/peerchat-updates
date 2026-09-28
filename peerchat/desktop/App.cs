@@ -1195,7 +1195,9 @@ public class DesktopApplication {
 		}
 		catch (Exception ex)
 		{
-			model.Status = ex.Message;
+			string message=AccountFailureMessage(ex,login);
+			model.Status = message;
+			Notify(message);
 		}
 		finally
 		{
@@ -1203,6 +1205,25 @@ public class DesktopApplication {
 			Refresh();
 		}
 		RefreshFriendState();
+	}
+
+	static string AccountFailureMessage(Exception error,bool login)
+	{
+		var rejected=error as DiscoveryRequestException;
+		if(rejected!=null)
+		{
+			switch(rejected.ErrorCode)
+			{
+				case "login_failed": return "Couldn't sign in. Check the username and password, then try again.";
+				case "registration_failed": return "Couldn't create the account. That username may already be in use; try another.";
+				case "invalid_registration": return "Choose a valid username and enter a password to create the account.";
+				case "device_already_registered": return "This device identity is already linked to an account. Sign in with that account or switch local profiles.";
+				case "session_invalid": return "The sign-in session is no longer valid. Please sign in again.";
+				case "session_superseded": return "This profile was signed in again elsewhere. Sign in again to continue.";
+			}
+		}
+		if((error.Message??"").Contains("This local profile is linked to"))return "This local profile is already linked to another account. Switch local profiles to use a different account.";
+		return login?"Couldn't sign in to PeerChat. Check your connection and try again.":"Couldn't create the PeerChat account. Check your connection and try again.";
 	}
 
 	private async void SignOut()
