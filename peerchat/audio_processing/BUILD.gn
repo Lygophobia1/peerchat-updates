@@ -1,0 +1,20 @@
+import("//webrtc.gni")
+
+shared_library("peerchat_audio_processing") {
+  output_name = "PeerChat.AudioProcessing"
+  sources = [ "peerchat_audio_processing.cpp" ]
+  include_dirs = [ "." ]
+  defines = [ "PC_APM_BUILDING_DLL" ]
+  deps = [
+    "//api/audio:audio_processing",
+    "//api/audio:builtin_audio_processing_builder",
+    "//api/environment:environment_factory",
+    "//modules/audio_processing:audio_processing",
+  ]
+}
+
+executable("peerchat_audio_processing_test") {
+  sources = [ "audio_processing_test.cpp" ]
+  include_dirs = [ "." ]
+  deps = [ ":peerchat_audio_processing" ]
+}

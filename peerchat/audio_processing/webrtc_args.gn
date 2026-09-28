@@ -1,0 +1,22 @@
+is_debug = false
+is_component_build = false
+is_clang = true
+clang_use_chrome_plugins = false
+target_cpu = "x64"
+rtc_include_tests = false
+rtc_build_examples = false
+rtc_enable_protobuf = false
+use_rtti = true
+use_custom_libcxx = false
+enable_rust = false
+enable_rust_cxx = false
+rtc_rust = false
+use_llvm_libatomic = false
+
+# Use the locally installed Visual Studio and Windows SDK only for this
+# standalone APM DLL. PeerChat's production native core remains MinGW-built.
+visual_studio_path = "C:/Program Files/Microsoft Visual Studio/18/Community"
+visual_studio_version = "2022"
+windows_sdk_path = "C:/Program Files (x86)/Windows Kits/10"
+windows_sdk_version = "10.0.26100.0"
+wdk_path = "C:/Program Files (x86)/Windows Kits/10"

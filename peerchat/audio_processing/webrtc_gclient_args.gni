@@ -1,0 +1,5 @@
+# Generated-equivalent arguments for the standalone pinned WebRTC checkout.
+# This keeps the APM build outside Chromium branding and internal sources.
+build_with_chromium = false
+checkout_src_internal = false
+generate_location_tags = false
