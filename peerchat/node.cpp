@@ -941,6 +941,27 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
     }
+    void reapDeadConnections(){
+        for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
+            auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch,wasRelay=connection.relay;
+            std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;
+            std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;
+            if(connection.directTransport)connection.directTransport->closed(utf8(reason),!connection.online);
+            auto close=sessionTransports->closeTransport(sessionEpoch,{connection.attemptId},utf8(reason),!connection.online);
+            auto disconnected=connectionEvent(NodeEvent::Kind::Disconnected,reason,connection,id);
+            if(deliveries)deliveries->retireTransport({connection.attemptId});
+            emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"transport closed: "+reason,connection,id));
+            if(wasRelay&&connection.relayPipe){std::lock_guard<std::mutex> lock(connection.relayPipe->mutex);connection.relayPipe->closed=true;connection.relayPipe->changed.notify_all();}
+            {std::lock_guard<std::mutex> lock(relayMutex);relayPipes.erase(connection.attemptId);}it=connections.erase(it);
+            if(!id.empty()&&!close.hasActiveWinner&&!close.hasPendingAttempt){
+                auto activeCall=calls.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeCall&&calls.peer()==id){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}
+                auto activeShare=screenShares.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeShare&&activeShare->peer==id){activeShare->controlAvailable=false;screenEvent(L"Share control unavailable · waiting to reconnect");}
+                emit(std::move(disconnected));
+                if(wasRelay){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
+                else scheduleReconnect(id,host,port,source,route,mismatch);
+            }else if(!id.empty())emitSessionSnapshot(id);
+        }else ++it;
+    }
     void run(const std::wstring& directory,std::uint16_t listeningPortOverride,const std::wstring& displayNameOverride,bool startDirectListener){
         WSADATA data{};bool winsock=false;
         try {
@@ -974,7 +995,10 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // seeds no direct retry; only relay policy or a fresh scoped P2P authorization can
             // create a new route attempt.
             while(running){
-                drain();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
+                drain();
+                // Relay-only idle iterations skip the direct-socket select below, so retire
+                // relay EOFs here before that early sleep/continue can bypass manager cleanup.
+                reapDeadConnections();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
                 if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}
                 if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 if(calls.mediaTimedOut(nowMilliseconds())||calls.controlAndMediaTimedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Voice connection could not be restored",true);}
@@ -987,6 +1011,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     auto pipe=std::make_shared<RelayPipe>();{std::lock_guard<std::mutex> lock(relayMutex);relayPipes[attempt]=pipe;}
                     NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=relay.remoteDeviceId;request.attemptId=attempt;request.networkGeneration=relay.networkRevision;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated discovery service";request.route=L"manager-owned bounded direct fallback";request.text=L"Relay transport requested";emit(std::move(request));emitSessionSnapshot(relay.remoteDeviceId);
                 }
+                for(auto& c:connections)if(!c->dead&&c->relay&&!c->online&&Clock::now()-c->began>std::chrono::seconds(20)){c->closeReason=L"relay peer authentication timeout";c->dead=true;}
+                reapDeadConnections();
                 // Winsock rejects select() with no sockets. Relay-only idle
                 // profiles intentionally have neither a direct listener nor a
                 // direct connection, so yield briefly and return to the
@@ -1007,26 +1033,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     auto age=Clock::now()-c->began;if(!c->online&&age>std::chrono::seconds(c->hello?120:10)){emit(connectionEvent(NodeEvent::Kind::Error,L"TCP connection timeout: the peer did not respond in time.",*c,c->peerId.empty()?c->expected:c->peerId));c->closeReason=L"local authentication timeout";c->dead=true;}
                     if(c->output.size()>c->sent&&Clock::now()-c->lastProgress>std::chrono::seconds(15)){c->closeReason=L"local send timeout";c->dead=true;}
                 }catch(const std::exception& error){c->dead=true;std::string detail=error.what();std::wstring safeDetail(detail.begin(),detail.end());std::wstring stage=!c->hello?L"TLS handshake failure: ":L"application protocol/identity failure: ";c->closeReason=stage+safeDetail;emit(connectionEvent(NodeEvent::Kind::Error,c->closeReason,*c,c->peerId.empty()?c->expected:c->peerId));}
-                for(auto& c:connections)if(!c->dead&&c->relay&&!c->online&&Clock::now()-c->began>std::chrono::seconds(20)){c->closeReason=L"relay peer authentication timeout";c->dead=true;}
-                for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
-                    auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch,wasRelay=connection.relay;
-                    std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;
-                    std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;
-                    if(connection.directTransport)connection.directTransport->closed(utf8(reason),!connection.online);
-                    auto close=sessionTransports->closeTransport(sessionEpoch,{connection.attemptId},utf8(reason),!connection.online);
-                    auto disconnected=connectionEvent(NodeEvent::Kind::Disconnected,reason,connection,id);
-                    if(deliveries)deliveries->retireTransport({connection.attemptId});
-                    emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"transport closed: "+reason,connection,id));
-                    if(wasRelay&&connection.relayPipe){std::lock_guard<std::mutex> lock(connection.relayPipe->mutex);connection.relayPipe->closed=true;connection.relayPipe->changed.notify_all();}
-                    {std::lock_guard<std::mutex> lock(relayMutex);relayPipes.erase(connection.attemptId);}it=connections.erase(it);
-                    if(!id.empty()&&!close.hasActiveWinner&&!close.hasPendingAttempt){
-                        auto activeCall=calls.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeCall&&calls.peer()==id){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}
-                        auto activeShare=screenShares.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeShare&&activeShare->peer==id){activeShare->controlAvailable=false;screenEvent(L"Share control unavailable · waiting to reconnect");}
-                        emit(std::move(disconnected));
-                        if(wasRelay){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
-                        else scheduleReconnect(id,host,port,source,route,mismatch);
-                    }else if(!id.empty())emitSessionSnapshot(id);
-                }else ++it;
+                reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
