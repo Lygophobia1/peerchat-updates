@@ -8,13 +8,46 @@
 > - Discovery wire/API and authority contract: `docs/DISCOVERY_PROTOCOL.md`
 
 **Accepted product baseline:** v4.0.0, physically accepted by the user.
-**Actual source/runtime metadata:** `4.0.1-dev.1`; Development prerelease published. This is not a stable Release.
-**Current stage:** Stage 8 one-to-one screen sharing passed current physical two-profile acceptance in the isolated `stage8-single-gpu-worker-20260923` build: 2560×1440 sharing, an active voice call, text, Stop Share, and a second Start Share all remained usable. The accepted fix gives one encoder worker ownership of PeerChat D3D11 copy/conversion work and leaves the WGC callback as a bounded newest-frame handoff. Cross-network acceptance remains unproven. Oversized-message crash, simultaneous-share overload and VirtualBox capability remain separate investigations.
-**Next action:** verify an installed Development client receives `4.0.1-dev.1`, then perform sustained cross-network screen sharing and a longer multi-machine stress run as follow-up acceptance.
-**Latest Git checkpoint:** current `refactor/session-transport` checkpoint (`Add TURN credential
-issuer boundary`); Development feed commit `2a91e18` publishes `v4.0.1-dev.1`.
+**Actual source/runtime metadata:** base version `4.0.1-dev`. Each development build receives a new immutable numeric revision; the current validated package is `4.0.1-dev.7`. This is not a stable Release.
+**Current stage:** the accepted product state includes TURN-first 1:1 voice/screen media, relay-first reliable messaging with explicit optional P2P, screen-media diagnostics/lifecycle work, and capture-side WebRTC APM controls. ServerAdmin runtime staging, discovery heartbeat/lease cleanup, and safe account-authentication feedback are separately checkpointed below. No AEC/render-reference path is implemented, and physical APM A/B sound-quality validation remains pending.
+**Current validation package:** `build/development/4.0.1-dev.7/`; built from the current worktree by `build.ps1 -All`, with native/managed dependency audit passing. Earlier `4.0.1-dev.1` and `.4` comparison directories were preserved.
+**Next action:** perform the planned controlled physical voice comparison using a known local wired/USB output. Do not begin AEC or alter the current APM/NS/AGC behavior before that comparison.
+**Recent Git checkpoints:** `1f2ce56` safe authentication feedback; `e303cd9` heartbeat presence leases; `d46cd73` ServerAdmin runtime layout; `12dc0d5` voice processing controls and versioned builds; capture-side APM `05b8f6d`.
 **Release work:** stable metadata/artifact selection, signing-key backup and formal publication remain
 separate; no release publication, final tag, or key change occurred in this stage.
+
+## Bounded post-APM backlog checkpoints
+
+- `05b8f6d` integrates the standalone WebRTC Audio Processing Module into microphone capture. It
+  preserves 16 kHz mono and the existing 20 ms Opus framing by processing two 10 ms APM blocks per
+  frame. `12dc0d5` adds per-profile processing/NS/AGC controls, keeps AEC off/unavailable, exposes
+  bounded pre/post level diagnostics, and allocates immutable versioned development build folders.
+  The present package passes the capture lifecycle test. Physical A/B audio-quality testing is
+  pending; no gain or noise-suppression tuning has been inferred from the earlier Bluetooth-routed
+  test.
+- `d46cd73` stages the matching `PeerChat.Server.exe` beside ServerAdmin, matching its existing
+  runtime assumption. The isolated smoke test verifies Admin opens, starts the staged Server,
+  receives management status, and shuts it down.
+- `e303cd9` makes current clients renew their own authenticated presence lease over the existing
+  event channel. Graceful close clears device presence promptly, silent loss expires within the
+  bounded lease, and a fresh authenticated device session replaces stale event state. Legacy
+  clients retain their prior compatible lease behavior.
+- `1f2ce56` maps safe authentication rejection codes to useful account UI messages without showing
+  credentials, tokens, or internal exception details.
+- History paging was already implemented: direct/group views load bounded pages, offer older-page
+  retrieval, preserve position as older messages are prepended, and avoid unconditional scroll-to-end
+  during history insertion. Settings/Updates navigation was also already fixed and is covered by the
+  current UI smoke test. No production changes were needed for either audit.
+- Group text architecture remains client-owned and signed, with delivery through the established
+  verified peer session, scoped ACK/dedupe, authorization, durable retry, and bounded history pages.
+  The ledger regression passes. The older `group_node_test.cpp` currently assumes ordinary direct
+  listener links; it cannot validate default relay-only operation and fails with connection-refused
+  diagnostics. That is a test-coverage mismatch, not authorization to restore implicit direct
+  probing. Group voice/screen sharing remains out of scope.
+- Full `build.ps1 -All` validation passed for `4.0.1-dev.7`, including Client/Core, ScreenMedia,
+  validated APM staging, Updater, Server, ServerAdmin, package dependency/import audit, and the
+  focused package/UI/ServerAdmin smoke checks. Focused discovery lease/auth, profile and diagnostics
+  retention, APM capture, and group-ledger regressions passed.
 
 **Local profile maintenance:** backup, reset, and restore now use a restart-assisted, profile-ID
 bootstrap request rather than modifying an active profile. The active desktop stops profile-owned
