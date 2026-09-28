@@ -104,6 +104,15 @@ limitations are documented in ARCHITECTURE.md, not dictated by this wire contrac
 sends `friend_event` frames for friend requests/updates, friendship changes, and actual presence
 changes. Repeated identical heartbeats do not emit presence events.
 
+Current clients include `clientHeartbeats: true` and send an `event_heartbeat` frame on this same
+authenticated TLS channel every 20 seconds. The server renews that device's relay-only presence
+lease only after receiving a valid heartbeat, and closes/clears the device lease after 75 seconds
+without one. A clean channel close clears the device's lease immediately; account presence remains
+online while another device still has a live lease. A newer authenticated session subscribing for
+the same account/device replaces the older event channel, and that older session cannot reclaim the
+event lease. Older protocol-v1 clients that omit `clientHeartbeats` retain the prior server-renewed
+lease behavior for compatibility.
+
 Events notify clients to reconcile authoritative friend/account state; they are not a second source
 of truth. Client snapshot, heartbeat and event-reconnect timing is implementation policy documented
 in ARCHITECTURE.md. Discovery unavailability does not command P2P session teardown.
