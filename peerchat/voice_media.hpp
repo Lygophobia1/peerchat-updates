@@ -15,7 +15,7 @@ namespace peerchat {
 class VoiceMedia {
 public:
     enum class Route { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
-    enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError };
+    enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError, AudioProcessingError };
     struct Event {
         EventKind kind;
         std::string value;
@@ -40,6 +40,7 @@ public:
     std::wstring diagnostics();
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
     void testInjectPcm(const std::vector<unsigned char>& pcm);
+    void testFailApmNextFrame();
 #endif
     std::vector<Event> poll();
     void stop();

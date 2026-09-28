@@ -424,6 +424,8 @@ struct Node::Impl {
                 if(connection){protocol::Writer ready(protocol::CallConnected);ready.string(callId);packet(*connection,ready);}
             }else if(event.kind==VoiceMedia::EventKind::AudioError){
                 notice(NodeEvent::Kind::Error,L"Voice audio device error: "+std::wstring(event.value.begin(),event.value.end()),peer);
+            }else if(event.kind==VoiceMedia::EventKind::AudioProcessingError){
+                notice(NodeEvent::Kind::Error,L"Voice audio processing degraded: "+std::wstring(event.value.begin(),event.value.end()),peer);
             }else {interruptVoiceMedia(event.kind==VoiceMedia::EventKind::Failed?L"Secure media connection failed":L"Media disconnected");return;}
         }
         publishVoiceTelemetry();
