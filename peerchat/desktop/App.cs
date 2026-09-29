@@ -190,6 +190,7 @@ public class DesktopApplication {
         Find<ScrollViewer>("MessageScroll").ScrollChanged+=(s,e)=>{if(e.VerticalChange<0&&e.VerticalOffset<=48)Older();};
         Click("PeerInfo",ShowConversationFlyout);Click("GroupMembers",()=>ShowGroupFlyout("GroupMembers","members"));Click("GroupInvite",()=>ShowGroupFlyout("GroupInvite","invite"));Click("GroupOverflow",()=>ShowGroupFlyout("GroupOverflow","settings"));
         Click("Details",EditShareableEndpoint);
+        Click("ToggleRightPane",ToggleRightPane);
         Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
@@ -197,6 +198,11 @@ public class DesktopApplication {
         Find<Expander>("VoiceAdvancedExpander").Expanded+=(s,e)=>RefreshVoiceDiagnosticsText();
         var removeMenu=new ContextMenu();var clearHistoryItem=new MenuItem{Header="Delete Conversation History"};var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(clearHistoryItem);removeMenu.Items.Add(new Separator());removeMenu.Items.Add(removeItem);clearHistoryItem.Click+=(s,e)=>DeleteSelectedConversationHistory();removeItem.Click+=(s,e)=>RemoveSelectedContact();
         var list=Find<ListBox>("ContactList");list.ContextMenu=removeMenu;list.PreviewMouseRightButtonDown+=(s,e)=>{var element=e.OriginalSource as DependencyObject;var item=ItemsControl.ContainerFromElement(list,element) as ListBoxItem;if(item!=null){item.IsSelected=true;item.Focus();}};
+    }
+    void ToggleRightPane(){
+        var column=(ColumnDefinition)window.FindName("RightPaneColumn");var pane=Find<Border>("RightDetailsPane");var button=Find<Button>("ToggleRightPane");bool opening=column.Width.Value<=0;
+        if(opening){pane.Visibility=Visibility.Visible;column.Width=new GridLength(292);button.Content="‹";button.ToolTip="Collapse Security and Connection pane";AutomationProperties.SetName(button,"Collapse Security and Connection pane");}
+        else{pane.Visibility=Visibility.Collapsed;column.Width=new GridLength(0);button.Content="›";button.ToolTip="Show Security and Connection pane";AutomationProperties.SetName(button,"Show Security and Connection pane");}
     }
     // Centralized lightweight geometry set. The same line weight and blue/white palette is used
     // for every action; the OS font glyphs are intentionally not used as app branding.
