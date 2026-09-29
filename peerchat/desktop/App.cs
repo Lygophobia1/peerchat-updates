@@ -177,7 +177,7 @@ public class DesktopApplication {
         ButtonIcon("CopyCompact","\uE8C8",null);var profileCard=new StackPanel{Orientation=Orientation.Horizontal};profileCard.Children.Add(new Border{Width=34,Height=34,CornerRadius=new CornerRadius(17),Background=Brush("#365D89"),Child=new TextBlock{Text="P",FontSize=18,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});var profileText=new StackPanel{Margin=new Thickness(10,0,0,0),VerticalAlignment=VerticalAlignment.Center};profileName.Text=localProfile==null?"Your profile":localProfile.Name;profileName.FontWeight=FontWeights.SemiBold;profileHandle.Text="Local profile and account";profileHandle.Foreground=Brush("#A1AEBB");profileHandle.FontSize=11;profileText.Children.Add(profileName);profileText.Children.Add(profileHandle);profileCard.Children.Add(profileText);Find<Button>("Profile").Content=profileCard;
         foreach(string name in new[]{"Manual","QuickManual"})ButtonIcon(name,"\uE774","Manual Connect");
         ButtonIcon("Settings","\uE713","Settings");ButtonIcon("Reconnect","\uE72C","Try Reconnect");
-        ButtonIcon("Details","\uE701","My Connection");ButtonIcon("PeerInfo","\uE946",null);ButtonIcon("VoiceCall","\uE717","Call");ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
+		ButtonIcon("Details","\uE701","Shareable Endpoint");ButtonIcon("PeerInfo","\uE946",null);ButtonIcon("VoiceCall","\uE717","Call");ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
@@ -862,7 +862,7 @@ public class DesktopApplication {
 		Find<TextBlock>("HeaderStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#A1AEBB");
 		Find<StackPanel>("ChatEmpty").Visibility = ((!flag2) ? ((flag && model.Selected.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible) : ((model.SelectedGroup.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible));
 		Find<TextBlock>("EmptyTitle").Text = ((!flag2) ? (model.Groups ? "A place for your people" : (flag ? "The start of your conversation" : "Good conversations start here.")) : (model.SelectedGroup.Invited ? "You’re invited" : "Start the group conversation"));
-		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a client-owned group. The server is not the source of truth." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Use Find Friends to discover people, or add a manual connection as an advanced fallback.")) : (model.SelectedGroup.Invited ? "Open group details to accept or decline this signed invitation." : "Messages are signed, stored locally, and replicated directly to members."));
+		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a client-owned group. The server is not the source of truth." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Find friends to start a conversation. Messaging uses PeerChat Server Relay by default; optional direct P2P requires mutual consent.")) : (model.SelectedGroup.Invited ? "Open group details to accept or decline this signed invitation." : "Messages are signed, stored locally, and replicated directly to members."));
 		Find<Button>("EmptyAction").Content = (model.Groups ? "＋    Create Group" : "＋    Add Friend");
 		Find<Button>("EmptyAction").Visibility = ((flag || flag2) ? Visibility.Collapsed : Visibility.Visible);
 		Find<Button>("GroupNew").Visibility = ((!model.Groups) ? Visibility.Collapsed : Visibility.Visible);
@@ -2345,31 +2345,27 @@ public class DesktopApplication {
 			}
 		};
 		stackPanel6.Children.Add(button8);
-		advancedPanel.Children.Add(SettingsCard("PeerChat Service", "The public service assists discovery and relationships; direct peer communication remains an advanced fallback.", stackPanel6));
+		advancedPanel.Children.Add(SettingsCard("PeerChat Service", "Provides authenticated discovery and PeerChat Server Relay for reliable messaging and control. Direct P2P is optional and requires mutual consent.", stackPanel6));
 		StackPanel stackPanel7 = new StackPanel();
+		bool settingsListenerActive = model.Listening && model.Port > 0;
 		stackPanel7.Children.Add(new TextBlock
 		{
-			Text = "LAN: " + shareHost + ":" + model.Port,
+			Text = settingsListenerActive ? ("LAN candidate: " + shareHost + ":" + model.Port) : "LAN candidate: Not published",
 			Foreground = Brush("#D7E2EC")
 		});
 		stackPanel7.Children.Add(new TextBlock
 		{
-			Text = "Public: Detecting…",
+			Text = settingsListenerActive ? "Public candidate: Scoped P2P exchange only" : "Public candidate: Not published",
 			Foreground = Brush("#AAB7C4"),
 			Margin = new Thickness(0.0, 7.0, 0.0, 0.0)
 		});
 		stackPanel7.Children.Add(new TextBlock
 		{
-			Text = (model.Listening ? "● Listening on local network" : "○ Listener not ready"),
-			Foreground = Brush(model.Listening ? "#36D873" : "#AAB7C4"),
+			Text = settingsListenerActive ? ("● Reliable P2P listener active on " + model.Port) : "○ Reliable P2P listener: Not active",
+			Foreground = Brush(settingsListenerActive ? "#36D873" : "#AAB7C4"),
 			Margin = new Thickness(0.0, 7.0, 0.0, 0.0)
 		});
-		advancedPanel.Children.Add(SettingsCard("Connection Details", "Current endpoints are diagnostics, not permanent identity.", stackPanel7));
-		advancedPanel.Children.Add(SettingsCard("Privacy & Trust", "Discoverability and trusted server/peer controls will be wired with the Milestone 2 service contract.", new TextBlock
-		{
-			Text = "Discoverable\nFriends Only\nHidden\n\nNo private keys, passwords, tokens, or message contents are shown here.",
-			Foreground = Brush("#AAB7C4")
-		}));
+		advancedPanel.Children.Add(SettingsCard("Connection Details", "Direct endpoints are shown only while a temporary P2P listener is active. TURN is used for media relay, not messaging.", stackPanel7));
 		StackPanel stackPanel8 = new StackPanel();
 		stackPanel8.Children.Add(new TextBlock
 		{
@@ -3443,7 +3439,7 @@ public class DesktopApplication {
         screenDetailsText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=11,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Consolas")};
         var detailsScroll=new ScrollViewer{Content=screenDetailsText,MaxHeight=260,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Margin=new Thickness(0,6,0,0)};
         screenConnectionPanel.Children.Add(new Expander{Header="Advanced screen statistics",Foreground=Brush("#EDF1F5"),Background=Brush("#101820"),Content=detailsScroll,Margin=new Thickness(0,8,0,0)});
-        var context=Find<StackPanel>("ContextConnection");context.Children.Insert(context.Children.IndexOf(Find<TextBlock>("MediaConnectionState"))+1,screenConnectionPanel);
+        var context=Find<StackPanel>("ConnectionPanelContent");context.Children.Insert(context.Children.IndexOf(Find<TextBlock>("MediaConnectionState"))+1,screenConnectionPanel);
     }
     async void StartScreenShare(){
         if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified||!model.Selected.Online){Notify("Choose a connected, verified direct-message friend before sharing.");return;}

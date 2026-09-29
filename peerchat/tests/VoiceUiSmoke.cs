@@ -29,7 +29,13 @@ class VoiceUiSmoke {
             var input=window.FindName("VoiceInput") as ComboBox;var output=window.FindName("VoiceOutput") as ComboBox;
             var inputMeter=window.FindName("VoiceInputMeter") as ProgressBar;var outputMeter=window.FindName("VoiceOutputMeter") as ProgressBar;
             var advanced=(Expander)window.FindName("VoiceAdvancedExpander");var inline=(StackPanel)window.FindName("ContextVoice");var connectionContext=(StackPanel)window.FindName("ContextConnection");var voiceCard=(Border)window.FindName("VoiceCard");
+            var connectionPanel=(Expander)window.FindName("ConnectionPanelExpander");var securityPanel=(Expander)window.FindName("SecurityPanelExpander");var screenConnection=(StackPanel)typeof(DesktopApplication).GetField("screenConnectionPanel",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(desktop);
             Require(input!=null&&output!=null&&inputMeter!=null&&outputMeter!=null,"Voice selectors or meters are missing");
+            Require(connectionPanel!=null&&securityPanel!=null&&!connectionPanel.IsExpanded&&!securityPanel.IsExpanded,"Security and Connection panels should start collapsed with clear expanders");
+            connectionPanel.IsExpanded=true;securityPanel.IsExpanded=true;window.UpdateLayout();
+            Require(connectionPanel.IsExpanded&&securityPanel.IsExpanded&&((TextBlock)window.FindName("ReliableConnectionMethod")).Text.Length>0&&((TextBlock)window.FindName("Security")).Text.Length>0,"Expanding the panels did not preserve current connection/security details");
+            Require(screenConnection!=null&&IsInside(screenConnection,connectionPanel),"Screen-media connection details were lost from the collapsible Connection panel");
+            connectionPanel.IsExpanded=false;securityPanel.IsExpanded=false;window.UpdateLayout();Require(!connectionPanel.IsExpanded&&!securityPanel.IsExpanded,"Security and Connection panels could not be collapsed again");connectionPanel.IsExpanded=true;
             Require(FindButton(window,"Share Screen")!=null,"DM header is missing screen sharing action");
 			var version=window.FindName("VersionText") as TextBlock;Require(version!=null&&version.Text=="App version: "+PeerChat.VersionInfo.Display,"Sidebar version is not projected from the packaged version metadata");
             bool settingsVerified=false;var settingsTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(80)};settingsTimer.Tick+=(sender,tickArgs)=>{
@@ -69,7 +75,7 @@ class VoiceUiSmoke {
             model.VoiceState="Idle";model.VoiceStateCode=0;model.VoiceCallId="";refresh.Invoke(desktop,null);Require(voiceCard.Visibility==Visibility.Collapsed&&inline.Visibility==Visibility.Collapsed,"Ending a call did not collapse the header strip and inline diagnostics");
             Press(window,"VoiceRefreshDevices");var newInput=input.SelectedItem as VoiceDevice;var newOutput=output.SelectedItem as VoiceDevice;
             Require(newInput!=null&&newOutput!=null&&newInput.id==oldInput.id&&newInput.name==oldInput.name&&newOutput.id==oldOutput.id&&newOutput.name==oldOutput.name,"Refresh Devices did not preserve valid selections");
-            File.WriteAllText(args[2],"PASS: Settings navigation/pages, authoritative reliable/media route labels, stale media-generation UI rejection, inline capped diagnostics, header call-strip lifecycle, dark device controls, meters, and refresh selection persistence.");
+            File.WriteAllText(args[2],"PASS: collapsible Security/Connection panels retain diagnostics, settings navigation/pages, authoritative reliable/media route labels, stale media-generation UI rejection, inline capped diagnostics, header call-strip lifecycle, dark device controls, meters, and refresh selection persistence.");
         }catch(Exception error){result=1;File.WriteAllText(args[2],"FAIL: "+error);}finally{window.Close();}};
         app.Run(window);return result;
     }
