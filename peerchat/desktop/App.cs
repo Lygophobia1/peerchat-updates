@@ -167,7 +167,7 @@ public class DesktopApplication {
     T Find<T>(string name) where T:FrameworkElement {return (T)window.FindName(name);}
     void Click(string name,Action action){Find<Button>(name).Click+=(s,e)=>{var started=Stopwatch.StartNew();TraceUi(name+" action started");try{action();}catch(Exception error){Notify(error.Message);}finally{TraceUi(name+" action returned after "+started.ElapsedMilliseconds+" ms");}};}
     void BindActions(){
-        Find<Button>("ViewConnectionLog").Content="Connection & Diagnostics";
+        Find<Button>("ViewConnectionLog").Content="Connection & Diagnostics";Find<Button>("ViewConnectionLog").ToolTip="Open connection and transport diagnostics";
         Find<Button>("Details").Content="Shareable Endpoint";
         // Windows' bundled symbol font gives consistent icons without image assets.
         foreach(string name in new[]{"AddFriend","QuickAdd"})ButtonIcon(name,"\uE8FA","Add Friend");
@@ -176,8 +176,8 @@ public class DesktopApplication {
         foreach(string name in new[]{"CopyId","QuickCopy"})ButtonIcon(name,"\uE8C8","Copy My ID");
         ButtonIcon("CopyCompact","\uE8C8",null);var profileCard=new StackPanel{Orientation=Orientation.Horizontal};profileCard.Children.Add(new Border{Width=34,Height=34,CornerRadius=new CornerRadius(17),Background=Brush("#365D89"),Child=new TextBlock{Text="P",FontSize=18,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});var profileText=new StackPanel{Margin=new Thickness(10,0,0,0),VerticalAlignment=VerticalAlignment.Center};profileName.Text=localProfile==null?"Your profile":localProfile.Name;profileName.FontWeight=FontWeights.SemiBold;profileHandle.Text="Local profile and account";profileHandle.Foreground=Brush("#A1AEBB");profileHandle.FontSize=11;profileText.Children.Add(profileName);profileText.Children.Add(profileHandle);profileCard.Children.Add(profileText);Find<Button>("Profile").Content=profileCard;
         foreach(string name in new[]{"Manual","QuickManual"})ButtonIcon(name,"\uE774","Manual Connect");
-		ButtonIcon("ViewConnectionLog","\uE713",null);ButtonIcon("Settings","\uE713","Settings");Find<Button>("Settings").ToolTip="Settings";AutomationProperties.SetName(Find<Button>("Settings"),"Settings");ButtonIcon("Reconnect","\uE72C","Try Reconnect");
-		ButtonIcon("Details","\uE701","Shareable Endpoint");ButtonIcon("PeerInfo","\uE946",null);ButtonIcon("VoiceCall","\uE717",null);ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
+		ButtonIcon("Settings","\uE713","Settings");Find<Button>("Settings").ToolTip="Settings";AutomationProperties.SetName(Find<Button>("Settings"),"Settings");ButtonIcon("Reconnect","\uE72C","Try Reconnect");
+		ButtonIcon("Details","\uE701","Shareable Endpoint");ButtonIcon("PeerInfo","\uE701",null);ButtonIcon("VoiceCall","\uE717",null);ButtonIcon("Send","\uE724",null);ButtonIcon("Attachment","\uE723",null);
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
@@ -207,10 +207,11 @@ public class DesktopApplication {
     }
     void ArrangeHeaderActions(){
         var actions=Find<Button>("VoiceCall").Parent as StackPanel;if(actions==null)return;
-        var call=Find<Button>("VoiceCall");var diagnostics=Find<Button>("ViewConnectionLog");var toggle=Find<Button>("ToggleRightPane");
+        var call=Find<Button>("VoiceCall");var details=Find<Button>("PeerInfo");var toggle=Find<Button>("ToggleRightPane");
         actions.Children.Remove(call);call.Width=36;call.Height=36;call.Padding=new Thickness(0);call.Margin=new Thickness(6,0,0,0);call.ToolTip="Call";AutomationProperties.SetName(call,"Call");
+        actions.Children.Remove(details);
         if(screenStartButton!=null){actions.Children.Remove(screenStartButton);actions.Children.Add(screenStartButton);}actions.Children.Add(call);
-        var diagnosticsParent=diagnostics.Parent as Panel;if(diagnosticsParent!=null)diagnosticsParent.Children.Remove(diagnostics);diagnostics.Width=36;diagnostics.Height=36;diagnostics.Padding=new Thickness(0);diagnostics.Margin=new Thickness(6,0,0,0);diagnostics.ToolTip="Connection & Diagnostics";AutomationProperties.SetName(diagnostics,"Connection & Diagnostics");actions.Children.Add(diagnostics);
+        details.Width=36;details.Height=36;details.Padding=new Thickness(0);details.Margin=new Thickness(6,0,0,0);details.ToolTip="Conversation Details";AutomationProperties.SetName(details,"Conversation Details");actions.Children.Add(details);
         var toggleBorder=toggle.Parent as Border;if(toggleBorder!=null){toggleBorder.Child=null;var layout=Find<Grid>("MainLayout");layout.Children.Remove(toggleBorder);}
         toggle.Width=36;toggle.Height=36;toggle.Padding=new Thickness(0);toggle.Margin=new Thickness(6,0,0,0);toggle.FontSize=19;toggle.ToolTip="Collapse Security and Connection pane";AutomationProperties.SetName(toggle,"Collapse Security and Connection pane");actions.Children.Add(toggle);
         var layoutGrid=Find<Grid>("MainLayout");if(layoutGrid.ColumnDefinitions.Count>2)layoutGrid.ColumnDefinitions[2].Width=new GridLength(0);
