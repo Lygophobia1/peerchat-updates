@@ -26,14 +26,18 @@ public sealed class DiagnosticsConnectionScope {
     public string AccountId {get;set;}
     public string ConversationId {get;set;}
     public string RemotePeerId {get;set;}
+    // Presentation-only metadata. Never participates in Key or scope matching.
+    public string AccountDisplayName {get;set;}
     public string Key {get{return (Profile??"")+"|"+(AccountId??"")+"|"+(ConversationId??"")+"|"+(RemotePeerId??"");}}
     public string Label {
         get {
             string peer=String.IsNullOrEmpty(RemotePeerId)?"peer not yet presented":RemotePeerId;
-            string conversation=String.IsNullOrEmpty(ConversationId)?"conversation unavailable":ConversationId;
+            string conversation=DisplayConversation(ConversationId,AccountDisplayName);
+            if(String.IsNullOrEmpty(conversation))conversation="conversation unavailable";
             return conversation+" · "+peer;
         }
     }
+    static string DisplayConversation(string conversation,string username){if(String.IsNullOrEmpty(conversation))return "";long id;const string prefix="account:";if(conversation.StartsWith(prefix,StringComparison.OrdinalIgnoreCase)&&Int64.TryParse(conversation.Substring(prefix.Length),out id)&&id>0&&!String.IsNullOrWhiteSpace(username))return username+":"+id;return conversation;}
 }
 public sealed class FailureSnapshot {
     public string Id {get;set;}
@@ -99,28 +103,39 @@ public sealed class DiagnosticsService {
     public static DiagnosticsSnapshot Clone(DiagnosticsSnapshot value){
         if(value==null)return null;return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=(value.Sections??new List<DiagnosticsSection>()).Select(s=>new DiagnosticsSection{Name=s.Name,Details=s.Details}).ToList()};
     }
-    public static string FormatSummary(DiagnosticsSnapshot value){
+    public static string FormatSummary(DiagnosticsSnapshot value){return FormatSummary(value,null,null);}
+    public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName){return FormatSummary(value,accountDisplayName,null);}
+    public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){
         if(value==null)return "PeerChat diagnostics unavailable.";
-        var text=new System.Text.StringBuilder("PeerChat diagnostics\nBuild: "+Safe(value.Build,160)+"\nProfile: "+Safe(value.Profile,160)+"\nStatus: "+Safe(value.Status,320)+"\nCaptured UTC: "+Safe(value.TimestampUtc,64));var connection=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(s=>s.Name=="Connection");if(connection!=null){foreach(string key in new[]{"Friend presence:","Winning route:","TCP/TLS state:","Latest failed reason:"}){string line=(connection.Details??"").Replace("\r","").Split('\n').FirstOrDefault(item=>item.StartsWith(key,StringComparison.OrdinalIgnoreCase));if(line!=null)text.AppendLine().Append(line.Trim());}}
+        var text=new System.Text.StringBuilder("PeerChat diagnostics\nBuild: "+Safe(value.Build,160)+"\nProfile: "+Safe(value.Profile,160)+"\nStatus: "+Safe(value.Status,320)+"\nCaptured UTC: "+Safe(value.TimestampUtc,64));var connection=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(s=>s.Name=="Connection");if(connection!=null){string details=PresentIdentity(connection.Details,accountDisplayName);foreach(string key in new[]{"Account:","Conversation:","Account ID:","Conversation ID:","Friend presence:","Winning route:","TCP/TLS state:","Latest failed reason:"}){string line=(details??"").Replace("\r","").Split('\n').FirstOrDefault(item=>item.StartsWith(key,StringComparison.OrdinalIgnoreCase));if(line!=null)text.AppendLine().Append(line.Trim());}}
+        foreach(string sectionName in new[]{"Voice","Screen share"}){var section=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(item=>item.Name==sectionName);string label=section==null?"":ResolvePeerDisplayLabel(section.Details,peerDisplayName);if(!String.IsNullOrEmpty(label))text.AppendLine().Append(sectionName).Append(" peer: ").Append(label);}
         return DiagnosticsPrivacyFilter.Redact(text.ToString());
     }
-    public static string FormatFailureSummary(FailureSnapshot value){if(value==null)return "PeerChat diagnostics unavailable.";return DiagnosticsPrivacyFilter.Redact(Safe(value.Title,160)+"\nOperation: "+Safe(value.OperationType,64)+"\nReason: "+Safe(value.Reason,512)+"\nStage: "+Safe(value.Stage,256)+"\n"+FormatSummary(value.Diagnostics));}
-    public static string FormatFailureFull(FailureSnapshot value){if(value==null)return "PeerChat diagnostics unavailable.";return DiagnosticsPrivacyFilter.Redact("failure_id="+Safe(value.Id,160)+"\nfailure_utc="+Safe(value.TimestampUtc,64)+"\noperation_type="+Safe(value.OperationType,64)+"\noperation_id="+Safe(value.OperationId,160)+"\nfailure_domain="+Safe(value.FailureDomain,96)+"\nreason="+Safe(value.Reason,512)+"\nstage="+Safe(value.Stage,256)+"\ngeneration="+value.Generation+"\nmodule="+Safe(value.Module,160)+"\n\n"+FormatFull(value.Diagnostics));}
-    public static string FormatFull(DiagnosticsSnapshot value){
+    public static string FormatFailureSummary(FailureSnapshot value){return FormatFailureSummary(value,null,null);}
+    public static string FormatFailureSummary(FailureSnapshot value,Func<string,string> accountDisplayName){return FormatFailureSummary(value,accountDisplayName,null);}
+    public static string FormatFailureSummary(FailureSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){if(value==null)return "PeerChat diagnostics unavailable.";return DiagnosticsPrivacyFilter.Redact(Safe(value.Title,160)+"\nOperation: "+Safe(value.OperationType,64)+"\nReason: "+Safe(value.Reason,512)+"\nStage: "+Safe(value.Stage,256)+"\n"+FormatSummary(value.Diagnostics,accountDisplayName,peerDisplayName));}
+    public static string FormatFailureFull(FailureSnapshot value){return FormatFailureFull(value,null,null);}
+    public static string FormatFailureFull(FailureSnapshot value,Func<string,string> accountDisplayName){return FormatFailureFull(value,accountDisplayName,null);}
+    public static string FormatFailureFull(FailureSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){if(value==null)return "PeerChat diagnostics unavailable.";return DiagnosticsPrivacyFilter.Redact("failure_id="+Safe(value.Id,160)+"\nfailure_utc="+Safe(value.TimestampUtc,64)+"\noperation_type="+Safe(value.OperationType,64)+"\noperation_id="+Safe(value.OperationId,160)+"\nfailure_domain="+Safe(value.FailureDomain,96)+"\nreason="+Safe(value.Reason,512)+"\nstage="+Safe(value.Stage,256)+"\ngeneration="+value.Generation+"\nmodule="+Safe(value.Module,160)+"\n\n"+FormatFull(value.Diagnostics,accountDisplayName,peerDisplayName));}
+    public static string FormatFull(DiagnosticsSnapshot value){return FormatFull(value,null,null);}
+    public static string FormatFull(DiagnosticsSnapshot value,Func<string,string> accountDisplayName){return FormatFull(value,accountDisplayName,null);}
+    public static string FormatFull(DiagnosticsSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){
         if(value==null)return "PeerChat diagnostics unavailable.";var text=new System.Text.StringBuilder(4096);
         text.AppendLine("PeerChat full diagnostics");text.AppendLine("snapshot_utc="+Safe(value.TimestampUtc,64));text.AppendLine("build="+Safe(value.Build,160));text.AppendLine("profile="+Safe(value.Profile,160));text.AppendLine("status="+Safe(value.Status,320));
-        foreach(var section in value.Sections??new List<DiagnosticsSection>()){text.AppendLine();text.AppendLine("=== "+Safe(section.Name,80)+" ===");text.AppendLine(section.Details??"Unavailable");if(text.Length>65536){text.Length=65520;text.AppendLine("[diagnostics truncated]");break;}}
+        foreach(var section in value.Sections??new List<DiagnosticsSection>()){text.AppendLine();text.AppendLine("=== "+Safe(section.Name,80)+" ===");string label=(section.Name=="Voice"||section.Name=="Screen share")?ResolvePeerDisplayLabel(section.Details,peerDisplayName):"";if(!String.IsNullOrEmpty(label))text.AppendLine("logical_peer="+label);text.AppendLine(PresentIdentity(section.Details,accountDisplayName)??"Unavailable");if(text.Length>65536){text.Length=65520;text.AppendLine("[diagnostics truncated]");break;}}
         return DiagnosticsPrivacyFilter.Redact(text.ToString());
     }
     // The sources remain authoritative.  These helpers only project one frozen
     // snapshot into the logical session selected by the diagnostics UI.
-    public static IList<DiagnosticsConnectionScope> ConnectionScopes(DiagnosticsSnapshot value){
+    public static IList<DiagnosticsConnectionScope> ConnectionScopes(DiagnosticsSnapshot value){return ConnectionScopes(value,null);}
+    public static IList<DiagnosticsConnectionScope> ConnectionScopes(DiagnosticsSnapshot value,Func<string,string> accountDisplayName){
         var scopes=new Dictionary<string,DiagnosticsConnectionScope>(StringComparer.Ordinal);
         if(value==null)return new List<DiagnosticsConnectionScope>();
         AddScope(scopes,ScopeFromConnectionDetails(value.Profile,Section(value,"Connection")));
         foreach(string line in Lines(Section(value,"Connection events")))AddScope(scopes,ScopeFromEvent(value.Profile,line));
         AddScope(scopes,ScopeFromMedia(value.Profile,Section(value,"Voice")));
         AddScope(scopes,ScopeFromMedia(value.Profile,Section(value,"Screen share")));
+        foreach(var scope in scopes.Values){string username=ResolveAccountDisplayName(scope.AccountId,accountDisplayName);scope.AccountDisplayName=String.IsNullOrWhiteSpace(username)?"":username.Trim();}
         return scopes.Values.OrderBy(scope=>scope.ConversationId??"").ThenBy(scope=>scope.RemotePeerId??"").ToList();
     }
     public static DiagnosticsSnapshot ProjectConnection(DiagnosticsSnapshot value,DiagnosticsConnectionScope scope,string component){
@@ -163,6 +178,14 @@ public sealed class DiagnosticsService {
     static string Value(string value,string key){var match=Regex.Match(value??"","(?:^|\\s)"+Regex.Escape(key)+"=([^\\s]+)",RegexOptions.IgnoreCase);return match.Success?match.Groups[1].Value:"";}
     static string First(string left,string right){return String.IsNullOrEmpty(Clean(left))?right:left;}
     static string Clean(string value){if(String.IsNullOrWhiteSpace(value)||value=="-"||value.Equals("none",StringComparison.OrdinalIgnoreCase)||value.Equals("unavailable",StringComparison.OrdinalIgnoreCase)||value.Equals("unspecified",StringComparison.OrdinalIgnoreCase)||value.Equals("not presented",StringComparison.OrdinalIgnoreCase)||value.Equals("not verified/available",StringComparison.OrdinalIgnoreCase))return "";return value.Trim();}
+    static string ResolveAccountDisplayName(string accountId,Func<string,string> resolve){long id;if(resolve==null||!Int64.TryParse(accountId,out id)||id<=0)return "";try{return resolve(id.ToString())??"";}catch{return "";}}
+    static string ResolvePeerDisplayLabel(string details,Func<string,string> resolve){if(resolve==null)return "";string peer=First(Value(details,"expected_peer_id"),Value(details,"verified_peer_id"));if(String.IsNullOrEmpty(peer))return "";try{return resolve(peer)??"";}catch{return "";}}
+    static string PresentIdentity(string details,Func<string,string> resolver){
+        if(String.IsNullOrEmpty(details)||resolver==null)return details;
+        string replaced=Regex.Replace(details,@"(?im)^Account ID:\s*(\d+)\s*$",match=>{string name=ResolveAccountDisplayName(match.Groups[1].Value,resolver);return String.IsNullOrEmpty(name)?match.Value:"Account: "+name+":"+match.Groups[1].Value;});
+        replaced=Regex.Replace(replaced,@"(?im)^Conversation ID:\s*account:(\d+)\s*$",match=>{string name=ResolveAccountDisplayName(match.Groups[1].Value,resolver);return String.IsNullOrEmpty(name)?match.Value:"Conversation: "+name+":"+match.Groups[1].Value;});
+        return Regex.Replace(replaced,@"(?i)(\baccount=)(\d+)(\s+conversation=)account:\2\b",match=>{string name=ResolveAccountDisplayName(match.Groups[2].Value,resolver);return String.IsNullOrEmpty(name)?match.Value:match.Groups[1].Value+name+":"+match.Groups[2].Value+match.Groups[3].Value+name+":"+match.Groups[2].Value;});
+    }
     static void Add(List<DiagnosticsSection> values,string name,string content){if(!String.IsNullOrWhiteSpace(content))values.Add(new DiagnosticsSection{Name=name,Details=DiagnosticsPrivacyFilter.Redact(content)});}
     static string Read(Func<string> source){try{return source==null?"":source()??"";}catch(Exception error){return "Unavailable: "+error.GetType().Name;}}
     static string Safe(string value,int limit){value=(value??"").Replace('\r',' ').Replace('\n',' ');return value.Length>limit?value.Substring(0,limit):value;}
