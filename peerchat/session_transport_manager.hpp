@@ -42,12 +42,14 @@ public:
         if (epoch != epoch_ || !instance.value) return false;
         auto found = transports_.find(instance.value);
         if (found != transports_.end()) {
-            return found->second.expectedRemoteDeviceId == expectedRemoteDeviceId;
+            return found->second.authorization.scope == ReliableAuthorizationScope::Friend &&
+                   found->second.expectedRemoteDeviceId == expectedRemoteDeviceId;
         }
         TransportRecord record;
         record.handoffCandidate=canPrepareHandoff(expectedRemoteDeviceId,route);
         record.instance = instance;
         record.expectedRemoteDeviceId = std::move(expectedRemoteDeviceId);
+        record.authorization.expectedRemoteDeviceId = record.expectedRemoteDeviceId;
         record.route = std::move(route);
         record.state = TransportState::Connecting;
         record.startedMilliseconds = record.lastProgressMilliseconds = nowMilliseconds;
@@ -55,6 +57,55 @@ public:
         const auto& expected = transports_.at(instance.value).expectedRemoteDeviceId;
         if (!expected.empty()) touch(expected);
         return true;
+    }
+
+    bool registerGroupControlAttempt(SessionEpoch epoch, TransportInstanceId instance,
+                                     ReliableAuthorization authorization,
+                                     RouteObservation route, std::uint64_t nowMilliseconds) {
+        if (epoch != epoch_ || !instance.value || !authorization.valid() ||
+            authorization.scope != ReliableAuthorizationScope::GroupControl ||
+            route.kind != TransportKind::Relay || route.routeClass != RouteClass::ServerRelay ||
+            transports_.count(instance.value)) return false;
+        const auto remote = authorization.expectedRemoteDeviceId;
+        TransportRecord record;
+        record.instance = instance;
+        record.route = std::move(route);
+        record.expectedRemoteDeviceId = remote;
+        record.authorization = std::move(authorization);
+        record.state = TransportState::Connecting;
+        record.startedMilliseconds = record.lastProgressMilliseconds = nowMilliseconds;
+        const auto key = record.continuityKey();
+        transports_.emplace(instance.value, std::move(record));
+        continuityFor(key, remote);
+        touch(key);
+        return true;
+    }
+
+    std::optional<ReliableAuthorization> authorization(SessionEpoch epoch,
+                                                        TransportInstanceId instance) const {
+        if (epoch != epoch_) return {};
+        auto found = transports_.find(instance.value);
+        if (found == transports_.end() || found->second.closed || found->second.cancelled) return {};
+        return found->second.authorization;
+    }
+
+    // The authenticated roster provider calls this on every epoch change or
+    // revocation. The caller closes the returned physical relay instances.
+    std::vector<TransportInstanceId> invalidateGroupControl(SessionEpoch epoch,
+                                                              const std::string& groupId,
+                                                              std::uint64_t currentGeneration) {
+        std::vector<TransportInstanceId> closed;
+        if (epoch != epoch_ || !ReliableAuthorization::hexId(groupId, 32)) return closed;
+        for (auto& item : transports_) {
+            auto& record = item.second;
+            if (record.closed || record.authorization.scope != ReliableAuthorizationScope::GroupControl ||
+                record.authorization.groupId != groupId ||
+                (currentGeneration && record.authorization.rosterGeneration == currentGeneration)) continue;
+            record.cancelled = true;
+            closed.push_back(record.instance);
+            closeTransport(epoch, record.instance, "group-control roster authorization superseded", false);
+        }
+        return closed;
     }
 
     bool observeTransport(const TransportEvent& event, std::uint64_t nowMilliseconds) {
@@ -66,7 +117,15 @@ public:
             found = transports_.find(event.transportInstance().value);
         }
         auto& record = found->second;
-        if (record.closed) return false;
+        if (record.closed || record.cancelled) return false;
+        if (record.authorization.scope == ReliableAuthorizationScope::GroupControl &&
+            ((!event.expectedRemoteDeviceId().empty() &&
+              event.expectedRemoteDeviceId() != record.authorization.expectedRemoteDeviceId) ||
+             event.route().kind != TransportKind::Relay ||
+             event.route().routeClass != RouteClass::ServerRelay ||
+             (!event.presentedRemoteDeviceId().empty() &&
+              event.presentedRemoteDeviceId() != record.authorization.expectedRemoteDeviceId)))
+            return false;
         record.route = event.route();
         record.state = event.state();
         if (!event.expectedRemoteDeviceId().empty()) record.expectedRemoteDeviceId = event.expectedRemoteDeviceId();
@@ -113,7 +172,7 @@ public:
         if (!found) return false;
         (*found)->locallyTrusted = true;
         (*found)->state = TransportState::LocallyTrusted;
-        const auto peer = (*found)->remoteDeviceId();
+        const auto peer = (*found)->continuityKey();
         if (!peer.empty()) touch(peer);
         return true;
     }
@@ -140,6 +199,36 @@ public:
         if (peer.empty() || !candidate.locallyTrusted || !candidate.remoteAccepted) {
             decision.disposition = WinnerDisposition::RejectedNotReady;
             decision.reasonUtf8 = "transport is not mutually authenticated and trusted";
+            return decision;
+        }
+        if (candidate.authorization.scope == ReliableAuthorizationScope::GroupControl) {
+            if (candidate.route.kind != TransportKind::Relay ||
+                candidate.route.routeClass != RouteClass::ServerRelay ||
+                candidate.expectedRemoteDeviceId != candidate.presentedRemoteDeviceId ||
+                candidate.expectedRemoteDeviceId != candidate.authorization.expectedRemoteDeviceId) {
+                decision.disposition = WinnerDisposition::RejectedNotReady;
+                decision.reasonUtf8 = "group-control identity or route is not authorized";
+                return decision;
+            }
+            const auto key = candidate.continuityKey();
+            auto& scoped = continuityFor(key, peer);
+            if (scoped.activeTransport.value && scoped.activeTransport.value != instance.value) {
+                auto previous = transports_.find(scoped.activeTransport.value);
+                if (previous != transports_.end() && !previous->second.closed) {
+                    previous->second.cancelled = true;
+                    previous->second.state = TransportState::Closing;
+                    decision.retire.push_back(previous->second.instance);
+                    decision.disposition = WinnerDisposition::ReplacedExisting;
+                    decision.reasonUtf8 = "group-control relay replaced prior scoped session";
+                }
+            }
+            if (decision.disposition != WinnerDisposition::ReplacedExisting)
+                decision.disposition = WinnerDisposition::Activated;
+            candidate.state = TransportState::Active;
+            scoped.activeTransport = instance;
+            scoped.sessionEstablished = true;
+            scoped.session.observeLegacyActive(instance);
+            touch(key);
             return decision;
         }
         auto& continuity = continuityFor(peer);
@@ -708,6 +797,7 @@ private:
         TransportInstanceId instance;
         RouteObservation route;
         TransportState state = TransportState::Created;
+        ReliableAuthorization authorization;
         std::string expectedRemoteDeviceId;
         std::string presentedRemoteDeviceId;
         std::uint64_t capabilities = 0;
@@ -722,8 +812,10 @@ private:
         bool standby = false;
         std::uint64_t handoffBegan = 0;
         std::string remoteDeviceId() const { return presentedRemoteDeviceId.empty() ? expectedRemoteDeviceId : presentedRemoteDeviceId; }
-        std::string continuityKey() const { return !locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId(); }
-        bool matches(const std::string& peer) const { return !peer.empty() && (expectedRemoteDeviceId == peer || presentedRemoteDeviceId == peer); }
+        std::string continuityKey() const { return authorization.scope == ReliableAuthorizationScope::GroupControl
+            ? authorization.continuityKey()
+            : (!locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId()); }
+        bool matches(const std::string& peer) const { return !peer.empty() && (expectedRemoteDeviceId == peer || presentedRemoteDeviceId == peer || continuityKey() == peer); }
     };
 
     struct ContinuityState {
@@ -769,14 +861,15 @@ private:
         return &found->second;
     }
 
-    ContinuityState& continuityFor(const std::string& peer) {
-        auto found = continuities_.find(peer);
+    ContinuityState& continuityFor(const std::string& key,const std::string& remoteDeviceId) {
+        auto found = continuities_.find(key);
         if (found == continuities_.end()) {
-            PeerSessionIdentity identity{localProfileScope_, localDeviceId_, peer};
-            found = continuities_.emplace(peer, ContinuityState(PeerSession(std::move(identity), epoch_))).first;
+            PeerSessionIdentity identity{localProfileScope_, localDeviceId_, remoteDeviceId};
+            found = continuities_.emplace(key, ContinuityState(PeerSession(std::move(identity), epoch_))).first;
         }
         return found->second;
     }
+    ContinuityState& continuityFor(const std::string& peer) { return continuityFor(peer, peer); }
 
     void touch(const std::string& peer) { if (!peer.empty()) ++continuityFor(peer).revision; }
 

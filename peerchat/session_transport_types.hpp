@@ -29,6 +29,38 @@ struct RouteRevision {
 enum class TransportKind : std::uint8_t { Direct, Relay };
 enum class RouteClass : std::uint8_t { Unknown, DirectLan, DirectInternet, ServerRelay };
 
+// Authorization is independent of the physical relay route. A group-only
+// session never inherits the permissions of a friend conversation with the
+// same device, or vice versa.
+enum class ReliableAuthorizationScope : std::uint8_t { Friend, GroupControl };
+struct ReliableAuthorization {
+    ReliableAuthorizationScope scope = ReliableAuthorizationScope::Friend;
+    std::string groupId;
+    std::uint64_t rosterGeneration = 0;
+    std::string expectedRemoteDeviceId;
+
+    static bool hexId(const std::string& value, std::size_t length) {
+        if (value.size() != length) return false;
+        for (char c : value)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    }
+    bool valid() const {
+        if (!hexId(expectedRemoteDeviceId, 64)) return false;
+        return scope == ReliableAuthorizationScope::Friend
+            ? groupId.empty() && rosterGeneration == 0
+            : scope == ReliableAuthorizationScope::GroupControl &&
+              hexId(groupId, 32) && rosterGeneration > 0;
+    }
+    std::string continuityKey() const {
+        return scope == ReliableAuthorizationScope::Friend
+            ? expectedRemoteDeviceId
+            : "group-control:" + groupId + ":" + expectedRemoteDeviceId;
+    }
+    bool permitsDirectMessage() const { return scope == ReliableAuthorizationScope::Friend; }
+    bool permitsGroupKeyControl() const { return scope == ReliableAuthorizationScope::GroupControl; }
+};
+
 struct PeerSessionIdentity {
     // localProfileScope is an opaque local-only profile identifier. It is not
     // an account ID, Peer ID, endpoint, credential, or wire value.

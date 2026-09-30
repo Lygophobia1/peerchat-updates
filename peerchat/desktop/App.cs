@@ -114,6 +114,83 @@ public class DesktopApplication {
     readonly Dictionary<long,DiscoverySearchResult> friendDirectory=new Dictionary<long,DiscoverySearchResult>();
     readonly Dictionary<long,bool> friendPresence=new Dictionary<long,bool>();
     FriendState friendState=new FriendState();
+    List<GroupInviteResult> groupInvites=new List<GroupInviteResult>();
+    readonly Dictionary<string,ServerGroupRoster> serverGroupRosters=new Dictionary<string,ServerGroupRoster>(StringComparer.Ordinal);
+    readonly HashSet<string> groupControlRequested=new HashSet<string>(StringComparer.Ordinal);
+    sealed class GroupControlViewState {public long RosterGeneration;public string Connection="Not established",Handoff="Not started",LastOffer="None",LastAck="None";public bool KeyReady;}
+    readonly Dictionary<string,GroupControlViewState> groupControlViews=new Dictionary<string,GroupControlViewState>(StringComparer.Ordinal);
+    void ObserveGroupControl(CoreEvent e){
+        if(e==null||String.IsNullOrEmpty(e.authorizationGroupId))return;
+        string key=e.authorizationGroupId+":"+(e.peer??"");GroupControlViewState state;
+        if(!groupControlViews.TryGetValue(key,out state)){state=new GroupControlViewState();groupControlViews[key]=state;}
+        if(e.authorizationRosterGeneration>0&&e.authorizationRosterGeneration!=state.RosterGeneration){state.RosterGeneration=e.authorizationRosterGeneration;state.Handoff="Not started";state.KeyReady=false;state.LastOffer=state.LastAck="None";}
+        if(e.kind==18)state.Connection="Scoped relay requested";
+        else if(e.kind==17)state.Connection=e.connected?"Authenticated peer TLS ready":"Connecting / unavailable";
+        else if(e.kind==4)state.Connection="Disconnected / retry pending";
+        else if(e.kind==8)state.Connection="Failed";
+        if(e.kind==16){
+            string status=e.text??"";
+            if(status=="Authenticated group-control relay ready")state.Connection="Authenticated peer TLS ready";
+            else if(status=="Current group key generation ready locally"){state.KeyReady=true;state.Handoff="Current key ready locally";}
+            else if(status=="Group key offer sent; awaiting ACK"){state.Handoff="Offered";state.LastOffer="Sent over authenticated peer TLS";}
+            else if(status=="Group key handoff acknowledged"){state.KeyReady=true;state.Handoff="Acknowledged";state.LastAck="Local protected key saved; ACK sent";}
+            else if(status=="Group key offer acknowledged by member"){state.Handoff="Acknowledged";state.LastAck="Authenticated member ACK received";}
+        }
+    }
+    readonly HashSet<string> pendingNewGroupRegistrations=new HashSet<string>(StringComparer.Ordinal);
+    readonly HashSet<string> groupRegistrationsInFlight=new HashSet<string>(StringComparer.Ordinal);
+    readonly Dictionary<string,string> groupRegistrationStatus=new Dictionary<string,string>(StringComparer.Ordinal);
+    Task groupStateRefreshTask;
+    bool groupStateRefreshQueued;
+    ulong groupStateRevision;
+    void RefreshGroupState(){if(groupStateRefreshTask!=null&&!groupStateRefreshTask.IsCompleted){groupStateRefreshQueued=true;return;}groupStateRefreshTask=RefreshGroupStateAsync();}
+    async Task RefreshGroupStateAsync(){
+        var service=discovery;string localPeer=model.OwnId;ulong session=discoverySessionGeneration,profileGeneration=profileSessionGeneration,revision=groupStateRevision;
+        if(service==null||String.IsNullOrEmpty(localPeer))return;
+        try{
+            var rosters=await Task.Run(()=>service.GroupState(localPeer));
+            if(discovery!=service||discoverySessionGeneration!=session||profileSessionGeneration!=profileGeneration||groupStateRevision!=revision||closing)return;
+            var incoming=rosters.Where(value=>value!=null&&!String.IsNullOrEmpty(value.LegacyGroupId)&&!String.IsNullOrEmpty(value.GroupId)).ToDictionary(value=>value.LegacyGroupId,value=>value,StringComparer.Ordinal);
+            if(serverGroupRosters.Keys.Any(key=>!incoming.ContainsKey(key))){core.ClearAuthenticatedGroupRosters();groupControlRequested.Clear();}
+            serverGroupRosters.Clear();
+            foreach(var pair in incoming){serverGroupRosters[pair.Key]=pair.Value;core.SetAuthenticatedGroupRoster(service.AccountId,session,pair.Value);}
+            var authorizedRequests=new HashSet<string>(incoming.Values.SelectMany(roster=>roster.Members.Where(value=>value.State=="member"&&value.PeerId!=localPeer).Select(value=>roster.GroupId+":"+roster.RosterGeneration+":"+value.PeerId)),StringComparer.Ordinal);
+            groupControlRequested.RemoveWhere(value=>!authorizedRequests.Contains(value));
+            foreach(var roster in incoming.Values){
+                var local=roster.Members.FirstOrDefault(value=>value.AccountId==service.AccountId&&value.PeerId==localPeer&&value.State=="member");
+                if(local==null)continue;
+                bool distributor=roster.DistributorPeerId==localPeer;
+                foreach(var remote in roster.Members.Where(value=>value.State=="member"&&value.PeerId!=localPeer&&(distributor||value.PeerId==roster.DistributorPeerId))){
+                    string requestKey=roster.GroupId+":"+roster.RosterGeneration+":"+remote.PeerId;
+                    if(groupControlRequested.Add(requestKey)&&!core.BeginGroupControl(roster.GroupId,remote.AccountId,remote.PeerId,session))groupControlRequested.Remove(requestKey);
+                }
+            }
+            Refresh();
+        }catch(Exception error){
+            if(discovery==service&&discoverySessionGeneration==session&&profileSessionGeneration==profileGeneration)TraceUi("group roster reconciliation unavailable: "+error.GetType().Name);
+        }finally{
+            if(groupStateRefreshQueued){groupStateRefreshQueued=false;window.Dispatcher.BeginInvoke((Action)(()=>{groupStateRefreshTask=null;RefreshGroupState();}));}
+        }
+    }
+    void RegisterPendingNewGroups(){
+        var service=discovery;if(service==null||service.AccountId<=0||String.IsNullOrEmpty(model.OwnId))return;
+        var session=discoverySessionGeneration;var profileGeneration=profileSessionGeneration;string localPeer=model.OwnId;
+        foreach(var group in model.GroupChats.Values){
+            if(group==null||group.Data==null||!pendingNewGroupRegistrations.Contains(group.Id)||group.Data.owner!=service.AccountId||serverGroupRosters.ContainsKey(group.Id)||!groupRegistrationsInFlight.Add(group.Id))continue;
+            var members=group.Data.members??new GroupMemberData[0];
+            // Only a group created by this client action may register. An old
+            // client-owned group is never silently reduced to an owner-only roster.
+            if(members.Length!=1||members[0].account!=service.AccountId||members[0].peer!=localPeer){groupRegistrationStatus[group.Id]="New group registration rejected: unexpected local membership";groupRegistrationsInFlight.Remove(group.Id);continue;}
+            string groupId=group.Id;
+            Task.Run(()=>{string proof=core.GroupCreationProof(groupId);if(String.IsNullOrEmpty(proof))throw new InvalidOperationException("Signed creation proof unavailable");return service.RegisterNewGroup(proof,localPeer);}).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
+                groupRegistrationsInFlight.Remove(groupId);
+                if(closing||discovery!=service||discoverySessionGeneration!=session||profileSessionGeneration!=profileGeneration)return;
+                if(task.IsFaulted||task.IsCanceled){groupRegistrationStatus[groupId]="Server registration unavailable; group is not active";return;}
+                var roster=task.Result;if(roster==null||roster.LegacyGroupId!=groupId||roster.Members.Count!=1||roster.Members[0].PeerId!=localPeer){groupRegistrationStatus[groupId]="Server roster conflict; group is not active";return;}
+                serverGroupRosters[groupId]=roster;groupStateRevision++;groupRegistrationStatus[groupId]="Authenticated server roster ready";pendingNewGroupRegistrations.Remove(groupId);model.Status="Group registered with the authenticated server roster.";Refresh();groupStateRefreshTask=null;RefreshGroupState();
+            })));
+        }
+    }
     DateTime lastFriendRefreshUtc=DateTime.MinValue;
     DateTime lastPresenceUtc=DateTime.MinValue;
     readonly TextBlock profileName=new TextBlock(), profileHandle=new TextBlock();
@@ -150,7 +227,7 @@ public class DesktopApplication {
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
-        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable"),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
+        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable"),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
         // Profile selection and any legacy migration finish before the native owner exists.
@@ -171,7 +248,7 @@ public class DesktopApplication {
         Find<Button>("Details").Content="Shareable Endpoint";
         // Windows' bundled symbol font gives consistent icons without image assets.
         foreach(string name in new[]{"AddFriend","QuickAdd"})ButtonIcon(name,"\uE8FA","Add Friend");
-        ButtonIcon("FindFriend","\uE721","Find Friends");ButtonIcon("FriendRequests","\uE8A7","Friend Requests");
+		ButtonIcon("FindFriend","\uE721","Find People");ButtonIcon("FriendRequests","\uE8A7","Requests");
         ButtonIcon("AccountRegister","\uE77B","Create Account");ButtonIcon("AccountLogin","\uE72E","Sign In");ButtonIcon("AccountSignOut","\uE7E8","Sign Out");
         foreach(string name in new[]{"CopyId","QuickCopy"})ButtonIcon(name,"\uE8C8","Copy My ID");
         ButtonIcon("CopyCompact","\uE8C8",null);var profileCard=new StackPanel{Orientation=Orientation.Horizontal};profileCard.Children.Add(new Border{Width=34,Height=34,CornerRadius=new CornerRadius(17),Background=Brush("#365D89"),Child=new TextBlock{Text="P",FontSize=18,HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}});var profileText=new StackPanel{Margin=new Thickness(10,0,0,0),VerticalAlignment=VerticalAlignment.Center};profileName.Text=localProfile==null?"Your profile":localProfile.Name;profileName.FontWeight=FontWeights.SemiBold;profileHandle.Text="Local profile and account";profileHandle.Foreground=Brush("#A1AEBB");profileHandle.FontSize=11;profileText.Children.Add(profileName);profileText.Children.Add(profileHandle);profileCard.Children.Add(profileText);Find<Button>("Profile").Content=profileCard;
@@ -222,7 +299,7 @@ public class DesktopApplication {
     void ButtonIcon(string name,string glyph,string text){var row=new StackPanel{Orientation=Orientation.Horizontal,VerticalAlignment=VerticalAlignment.Center};row.Children.Add(new System.Windows.Shapes.Path{Data=Geometry.Parse(IconGeometry(glyph,text)),Width=21,Height=21,Stretch=Stretch.Uniform,Stroke=Brush("#78BFFF"),StrokeThickness=1.8,Fill=Brush("Transparent"),VerticalAlignment=VerticalAlignment.Center});if(text!=null)row.Children.Add(new TextBlock{Text=text,Margin=new Thickness(14,0,0,0),VerticalAlignment=VerticalAlignment.Center});Find<Button>(name).Content=row;}
     // The compact sidebar keeps request counts on the Friend Requests action instead of adding
     // raw Friends/Incoming/Pending text above the conversation list.
-    void UpdateFriendRequestsButton(){var button=Find<Button>("FriendRequests");var row=new Grid();row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});var label=new StackPanel{Orientation=Orientation.Horizontal,VerticalAlignment=VerticalAlignment.Center};label.Children.Add(new System.Windows.Shapes.Path{Data=Geometry.Parse(IconGeometry("\uE8A7","Friend Requests")),Width=21,Height=21,Stretch=Stretch.Uniform,Stroke=Brush("#78BFFF"),StrokeThickness=1.8,Fill=Brush("Transparent"),VerticalAlignment=VerticalAlignment.Center});label.Children.Add(new TextBlock{Text="Friend Requests",Margin=new Thickness(14,0,0,0),VerticalAlignment=VerticalAlignment.Center});row.Children.Add(label);if(friendState.Incoming.Count>0){var badge=new Border{Background=Brush("#275AA7"),CornerRadius=new CornerRadius(12),Padding=new Thickness(8,3,8,3),Child=new TextBlock{Text=friendState.Incoming.Count.ToString(),FontWeight=FontWeights.SemiBold,FontSize=12}};Grid.SetColumn(badge,1);row.Children.Add(badge);}button.ToolTip=friendState.Friends.Count+" friend"+(friendState.Friends.Count==1?"":"s")+", "+friendState.Incoming.Count+" incoming request"+(friendState.Incoming.Count==1?"":"s");button.Content=row;}
+    void UpdateFriendRequestsButton(){var button=Find<Button>("FriendRequests");var row=new Grid();row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});var label=new StackPanel{Orientation=Orientation.Horizontal,VerticalAlignment=VerticalAlignment.Center};label.Children.Add(new System.Windows.Shapes.Path{Data=Geometry.Parse(IconGeometry("\uE8A7","Requests")),Width=21,Height=21,Stretch=Stretch.Uniform,Stroke=Brush("#78BFFF"),StrokeThickness=1.8,Fill=Brush("Transparent"),VerticalAlignment=VerticalAlignment.Center});label.Children.Add(new TextBlock{Text="Requests",Margin=new Thickness(14,0,0,0),VerticalAlignment=VerticalAlignment.Center});row.Children.Add(label);int pending=friendState.Incoming.Count+groupInvites.Count;if(pending>0){var badge=new Border{Background=Brush("#275AA7"),CornerRadius=new CornerRadius(12),Padding=new Thickness(8,3,8,3),Child=new TextBlock{Text=pending.ToString(),FontWeight=FontWeights.SemiBold,FontSize=12}};Grid.SetColumn(badge,1);row.Children.Add(badge);}button.ToolTip=friendState.Incoming.Count+" friend request"+(friendState.Incoming.Count==1?"":"s")+", "+groupInvites.Count+" group invite"+(groupInvites.Count==1?"":"s");button.Content=row;}
     async Task Start(ushort port,string name){
         if(busy)return;busy=true;timer.Stop();model.Listening=false;model.Status="Opening your encrypted profile…";Refresh();
         try{
@@ -295,7 +372,7 @@ public class DesktopApplication {
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Server Relay":"Local profile ready · Sign in, create an account, or continue offline"):"@"+accountLink.Username+" signed out · Local history remains available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();RefreshGroupState();
         }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Server Relay · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
@@ -316,6 +393,11 @@ public class DesktopApplication {
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
+                if(!String.IsNullOrEmpty(e.authorizationGroupId)){
+                    ObserveGroupControl(e);
+                    if(e.kind==18)StartRelay(e);
+                    continue;
+                }
                 // Live incoming messages notify even when their conversation is selected.
                 // History replay (kind 6) never notifies, and outgoing echoes are ignored.
                 bool incoming=e.kind==5&&e.messages!=null&&e.messages.Any(message=>message.sender!=model.OwnId&&!model.Get(e.peer).Messages.Any(existing=>existing.Data.id==message.id));
@@ -323,7 +405,7 @@ public class DesktopApplication {
                 bool initialDmHistory=e.kind==6&&model.Selected!=null&&model.FindByPeer(e.peer)==model.Selected&&model.Selected.Messages.Count==0;
                 bool initialGroupHistory=e.kind==11&&model.SelectedGroup!=null&&e.peer==model.SelectedGroup.Id&&model.SelectedGroup.Messages.Count==0;
                 model.Apply(e);
-                if(e.kind==9){if(InviteCandidatesChanged!=null)InviteCandidatesChanged();if(model.SelectedGroup!=null)RequestGroupHistory(model.SelectedGroup);}
+                if(e.kind==9){if(InviteCandidatesChanged!=null)InviteCandidatesChanged();if(model.SelectedGroup!=null)RequestGroupHistory(model.SelectedGroup);RegisterPendingNewGroups();}
                 if(e.kind==13)HandleVoiceEvent(e);
                 if(e.kind==19)HandleScreenShareEvent(e);
                 if(incoming||incomingGroup)incomingNotification=true;
@@ -371,6 +453,24 @@ public class DesktopApplication {
     }
     void StartRelay(CoreEvent request){
         ulong attempt=request.attempt>0?(ulong)request.attempt:0;var conversation=model.FindByPeer(request.expected)??model.FindByPeer(request.peer);var service=discovery;
+        if(!String.IsNullOrEmpty(request.authorizationGroupId)){
+            var roster=serverGroupRosters.Values.FirstOrDefault(value=>value.GroupId==request.authorizationGroupId);
+            bool current=attempt>0&&service!=null&&!String.IsNullOrEmpty(service.SessionToken)&&request.networkGeneration==(long)networkGeneration&&roster!=null&&roster.RosterGeneration==request.authorizationRosterGeneration&&roster.Members.Any(value=>value.AccountId==request.authorizationTargetAccountId&&value.PeerId==request.expected&&value.State=="member")&&roster.Members.Any(value=>value.AccountId==service.AccountId&&value.PeerId==model.OwnId&&value.State=="member");
+            if(!current){core.RelayClosed(attempt,"Group-control request is stale or outside the current authenticated roster.");return;}
+            string requestKey=request.authorizationGroupId+":"+request.authorizationRosterGeneration+":"+request.expected;
+            ulong session=discoverySessionGeneration,profileGeneration=profileSessionGeneration;
+            try{RelayTransport relay=null;relay=new RelayTransport(service,core,attempt,model.OwnId,request.authorizationTargetAccountId,request.expected,value=>{
+                lock(relayGate)relayTransports.Remove(value);
+                window.Dispatcher.BeginInvoke((Action)(()=>{
+                    groupControlRequested.Remove(requestKey);
+                    Task.Delay(15000).ContinueWith(_=>window.Dispatcher.BeginInvoke((Action)(()=>{
+                        if(!closing&&discovery==service&&discoverySessionGeneration==session&&profileSessionGeneration==profileGeneration)RefreshGroupState();
+                    })));
+                }));
+            },request.authorizationGroupId,request.authorizationRosterGeneration);lock(relayGate){if(relayTransports.ContainsKey(attempt)){relay.Dispose();return;}relayTransports.Add(attempt,relay);}relay.Start();}
+            catch(Exception error){core.RelayClosed(attempt,"Group-control relay startup failed: "+error.GetType().Name);}
+            return;
+        }
         if(attempt==0||request.networkGeneration!=(long)networkGeneration||conversation==null||conversation.AccountId<=0||service==null||String.IsNullOrEmpty(service.SessionToken)||String.IsNullOrEmpty(model.OwnId)){core.RelayClosed(attempt,"Relay request is stale or the authenticated account is unavailable.");return;}
         try{RelayTransport relay=null;relay=new RelayTransport(service,core,attempt,model.OwnId,conversation.AccountId,request.expected,value=>{lock(relayGate)relayTransports.Remove(value);});lock(relayGate){if(relayTransports.ContainsKey(attempt)){relay.Dispose();return;}relayTransports.Add(attempt,relay);}relay.Start();}
         catch(Exception error){core.RelayClosed(attempt,"Relay startup failed: "+error.GetType().Name);}
@@ -379,8 +479,8 @@ public class DesktopApplication {
     string CurrentHistoryKey(){return model.Groups&&model.SelectedGroup!=null?"group:"+model.SelectedGroup.Id:!model.Groups&&model.Selected!=null?model.Selected.ConversationId:"";}
     void Switch(bool groups){model.Groups=groups;if(groups){core.LoadGroups();RequestGroupHistory(model.SelectedGroup);}RefreshList();ShowConversation();Refresh();}
     void CreateGroup(){
-        if(discovery==null||discovery.AccountId<=0){Notify("Sign in once to bind your account identity before creating a group. Existing groups continue to work directly when the server is unavailable.");return;}
-        var fields=Dialog("Create group",new[]{"Group name"},new[]{"My group"},"Create","The Group ID and signed state are created on this client. PeerChat’s server does not own the group.");if(fields==null)return;string name=fields[0].Trim();if(name.Length==0||name.Length>80){Notify("Use a group name from 1 to 80 characters.");return;}string id=core.CreateGroup(name);if(String.IsNullOrEmpty(id)){Notify("The group could not be created.");return;}model.Groups=true;model.Status="Creating signed local group…";core.LoadGroups();Refresh();
+        if(discovery==null||discovery.AccountId<=0){Notify("Sign in to create a group with an authenticated server roster.");return;}
+        var fields=Dialog("Create group",new[]{"Group name"},new[]{"My group"},"Create","PeerChat creates the signed group identity locally, then registers its membership roster with the authenticated server.");if(fields==null)return;string name=fields[0].Trim();if(name.Length==0||name.Length>80){Notify("Use a group name from 1 to 80 characters.");return;}string id=core.CreateGroup(name);if(String.IsNullOrEmpty(id)){Notify("The group could not be created.");return;}pendingNewGroupRegistrations.Add(id);groupRegistrationStatus[id]="Registering new group with server";model.Groups=true;model.Status="Creating signed group and registering membership…";core.LoadGroups();Refresh();
     }
     TextBlock FlyoutText(string text,double size=13,bool muted=false){return new TextBlock{Text=text,FontSize=size,Foreground=Brush(muted?"#A1AEBB":"#EDF1F5"),TextWrapping=TextWrapping.Wrap};}
     Button FlyoutAction(string text,Action action,bool destructive=false){var button=new Button{Content=text,Style=(Style)window.FindResource(typeof(Button)),Foreground=Brush("#EDF1F5")};button.Foreground=Brush("#EDF1F5");button.Background=Brush(destructive?"#632630":"#19222B");button.Padding=new Thickness(10,7,10,7);button.Margin=new Thickness(0,0,0,6);button.HorizontalContentAlignment=HorizontalAlignment.Left;button.Click+=(s,e)=>action();return button;}
@@ -404,7 +504,33 @@ public class DesktopApplication {
         panel.Children.Add(FlyoutAction("Copy Connection Details",()=>CopyConnectionDetails()));OpenHeaderFlyout("PeerInfo",panel);
     }
     void ShowGroupFlyout(string anchorName,string focus){
-        var group=model.SelectedGroup;if(group==null){Notify("Select a group first.");return;}var panel=new StackPanel();panel.Children.Add(FlyoutText(group.Name,18));panel.Children.Add(new TextBlock{Text=group.MemberCount+" members · client-owned",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
+        var group=model.SelectedGroup;if(group==null){Notify("Select a group first.");return;}var panel=new StackPanel();panel.Children.Add(FlyoutText(group.Name,18));
+        ServerGroupRoster authorizedRoster;
+        if(serverGroupRosters.TryGetValue(group.Id,out authorizedRoster)){
+            var local=authorizedRoster.Members.FirstOrDefault(value=>discovery!=null&&value.AccountId==discovery.AccountId&&value.PeerId==model.OwnId&&value.State=="member");
+            panel.Children.Add(FlyoutText("Group · authenticated server roster · generation "+authorizedRoster.RosterGeneration,12,true));
+            if(focus=="invite"){
+                panel.Children.Add(FlyoutText("Invite a person",15));
+                panel.Children.Add(FlyoutText("Invitations use the authenticated account flow. Friendship is not required.",12,true));
+                if(local!=null&&(local.Role=="owner"||local.Role=="admin"))panel.Children.Add(FlyoutAction("Find People",()=>{CloseHeaderFlyout();FindFriend();}));
+                else panel.Children.Add(FlyoutText("Only an owner or admin may invite members.",12,true));
+            }else if(focus=="members"){
+                var authorizedMembers=authorizedRoster.Members.Where(value=>value.State=="member").ToArray();
+                panel.Children.Add(FlyoutText("Members ("+authorizedMembers.Length+")",15));
+                foreach(var member in authorizedMembers){
+                    var target=member;string label=String.IsNullOrWhiteSpace(target.Username)?"Account "+target.AccountId:target.Username;
+                    panel.Children.Add(FlyoutText(label+" · "+target.Role+" · device "+target.PeerId.Substring(0,8),12));
+                    bool mayRemove=local!=null&&target.AccountId!=local.AccountId&&
+                        (local.Role=="owner"&&target.Role!="owner"||local.Role=="admin"&&target.Role=="member");
+                    if(mayRemove)panel.Children.Add(FlyoutAction("Remove "+label,()=>{CloseHeaderFlyout();RemoveServerGroupMember(group,target);},true));
+                }
+            }else{
+                panel.Children.Add(FlyoutText("Server Group ID\n"+authorizedRoster.GroupId,11,true));
+                panel.Children.Add(FlyoutText("The current roster controls GroupControl authorization. Content keys are exchanged only over authenticated peer TLS.",12,true));
+            }
+            OpenHeaderFlyout(anchorName,panel);return;
+        }
+        panel.Children.Add(new TextBlock{Text=group.MemberCount+" members · legacy local group (not server-authorized)",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,3,0,12)});
         var members=group.Data.members??new GroupMemberData[0];var invites=group.Data.invites??new GroupMemberData[0];var mine=members.FirstOrDefault(member=>member.peer==model.OwnId);var invitation=invites.FirstOrDefault(member=>member.peer==model.OwnId);
         if(focus=="invite"){
             panel.Children.Add(FlyoutText("Invite a friend",15));panel.Children.Add(new TextBlock{Text="Offline friends remain listed. Sending still requires a verified device.",Foreground=Brush("#A1AEBB"),FontSize=12,Margin=new Thickness(0,5,0,10)});
@@ -876,11 +1002,11 @@ public class DesktopApplication {
 		Find<Button>("AccountSignOut").Visibility = ((!flag3) ? Visibility.Collapsed : Visibility.Visible);
 		Find<TextBlock>("HeaderName").Text = (flag2 ? model.SelectedGroup.Name : (model.Groups ? "Groups" : (flag ? model.Selected.Name : "Your conversations")));
 		Find<TextBlock>("HeaderInitial").Text = (flag2 ? model.SelectedGroup.Initial : (model.Groups ? "G" : (flag ? model.Selected.Initial : "p")));
-		Find<TextBlock>("HeaderStatus").Text = ((!flag2) ? (model.Groups ? "Client-owned groups · direct P2P" : (flag ? ConnectionStatusText(model.Selected) : "Choose a friend to start chatting")) : (model.SelectedGroup.Invited ? "Group invitation · review before joining" : (model.SelectedGroup.MemberCount + " members · client-owned encrypted history")));
+		Find<TextBlock>("HeaderStatus").Text = ((!flag2) ? (model.Groups ? "Groups · authenticated server roster" : (flag ? ConnectionStatusText(model.Selected) : "Choose a friend to start chatting")) : (model.SelectedGroup.Invited ? "Group invitation · review before joining" : (serverGroupRosters.ContainsKey(model.SelectedGroup.Id) ? model.SelectedGroup.MemberCount + " members · group key control" : "Legacy local group · not server-authorized")));
 		Find<TextBlock>("HeaderStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#A1AEBB");
 		Find<StackPanel>("ChatEmpty").Visibility = ((!flag2) ? ((flag && model.Selected.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible) : ((model.SelectedGroup.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible));
 		Find<TextBlock>("EmptyTitle").Text = ((!flag2) ? (model.Groups ? "A place for your people" : (flag ? "The start of your conversation" : "Good conversations start here.")) : (model.SelectedGroup.Invited ? "You’re invited" : "Start the group conversation"));
-		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a client-owned group. The server is not the source of truth." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Find friends to start a conversation. Messaging uses PeerChat Server Relay by default; optional direct P2P requires mutual consent.")) : (model.SelectedGroup.Invited ? "Open group details to accept or decline this signed invitation." : "Messages are signed, stored locally, and replicated directly to members."));
+		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a group with an authenticated server roster. Group text will be available after the encrypted-message stage." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Find friends to start a conversation. Messaging uses PeerChat Server Relay by default; optional direct P2P requires mutual consent.")) : (model.SelectedGroup.Invited ? "Open Requests to accept or decline the authenticated group invitation." : "Group key handoff is available now. Group text remains paused until the encrypted-message stage."));
 		Find<Button>("EmptyAction").Content = (model.Groups ? "＋    Create Group" : "＋    Add Friend");
 		Find<Button>("EmptyAction").Visibility = ((flag || flag2) ? Visibility.Collapsed : Visibility.Visible);
 		Find<Button>("GroupNew").Visibility = ((!model.Groups) ? Visibility.Collapsed : Visibility.Visible);
@@ -893,7 +1019,7 @@ public class DesktopApplication {
 		bool canLoadOlder = (!model.Groups && model.Selected != null && model.Selected.Messages.Count > 0 && !model.Selected.HistoryExhausted) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
 		Find<Button>("Older").Visibility = canLoadOlder ? Visibility.Visible : Visibility.Collapsed;
 		bool flag4 = flag && model.Listening && model.Selected.Contact.verified && !busy;
-		bool flag5 = flag2 && !model.SelectedGroup.Invited && model.Listening && !busy;
+		bool flag5 = false; // Stage 1A never sends the legacy plaintext group-message format.
 		Find<Button>("Send").IsEnabled = flag4 || flag5;
 		TextBox textBox = Find<TextBox>("Composer");
 		textBox.IsEnabled = flag4 || flag5;
@@ -1204,10 +1330,12 @@ public class DesktopApplication {
 			discovery = candidate;
 			discoverySessionGeneration++;
 			mediaTurnCredentials = null;
+            serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
 			ApplyPresenceDiagnostics(presence);
 			core.SetGroupAccount(discovery.AccountId, discovery.Username);
 			core.LoadGroups();
             discovery.StartEventChannel(model.OwnId,HandleDiscoveryEvent);
+            RefreshGroupState();
 			SaveDiscoverySession();
 			model.Status = "Signed in as " + discovery.Username + " · Discoverable";
 		}
@@ -1256,6 +1384,7 @@ public class DesktopApplication {
 			discovery = null;
 			discoverySessionGeneration++;
 			mediaTurnCredentials = null;
+            serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
 		authenticatedFriendSnapshotGeneration++;
 		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
 		automaticInitialPinAttempts.Clear();
@@ -1264,6 +1393,7 @@ public class DesktopApplication {
 		discoveryRestored = true;
 		accountLink = accountStore.ClearSession();
 		friendState = new FriendState();
+        groupInvites.Clear();
 		friendRequestStates.Clear();
 		friendDirectory.Clear();
 		friendPresence.Clear();
@@ -1305,6 +1435,8 @@ public class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+				if(notification!=null&&notification.Event=="group_roster_changed"){groupStateRevision++;RefreshGroupState();return;}
+				if(notification!=null&&notification.Event=="group_invite_changed"){RefreshFriendState();return;}
 				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
 				if(notification!=null&&(notification.Event=="p2p_accepted"||notification.Event=="p2p_candidates_ready"||notification.Event=="p2p_declined"||notification.Event=="p2p_cancelled")){HandleP2pEvent(notification);return;}
                 if (notification != null && notification.Event == "channel_connected")
@@ -1315,6 +1447,7 @@ public class DesktopApplication {
                     // itself owns the relay-only presence lease; it must not restart direct
                     // routing or perform a one-shot presence probe.
                     RefreshFriendState();
+					groupStateRevision++;RefreshGroupState();
 				}
 				else
 				{
@@ -1600,11 +1733,14 @@ public class DesktopApplication {
 			try
 			{
 				FriendState state = await Task.Run(() => source.GetFriendState());
+				List<GroupInviteResult> invites = await Task.Run(() => source.GroupInvites());
 				if (discovery != source || closing || closed)
 				{
 					return false;
 				}
 				ApplyFriendSnapshot(state);
+                groupInvites=invites;
+                UpdateFriendRequestsButton();
 				return true;
 			}
 			catch (Exception ex)
@@ -1876,6 +2012,43 @@ public class DesktopApplication {
 		return border;
 	}
 
+    private async void RespondToServerGroupInvite(GroupInviteResult invitation,bool accept){
+        var service=discovery;string localPeer=model.OwnId;
+        if(service==null||String.IsNullOrEmpty(localPeer))return;
+        ulong profileGeneration=profileSessionGeneration,sessionGeneration=discoverySessionGeneration;
+        try{
+            await Task.Run(()=>service.RespondToGroupInvite(invitation.InviteId,localPeer,accept));
+            if(discovery!=service||profileSessionGeneration!=profileGeneration||discoverySessionGeneration!=sessionGeneration)return;
+            groupInvites.RemoveAll(item=>item.InviteId==invitation.InviteId);
+            UpdateFriendRequestsButton();
+            model.Status=accept?"Group invitation accepted · awaiting authenticated group-key handoff":"Group invitation declined.";
+            RefreshFriendState();RefreshGroupState();Refresh();
+        }catch(Exception error){
+            if(discovery==service&&profileSessionGeneration==profileGeneration&&discoverySessionGeneration==sessionGeneration){model.Status="Group invitation could not be processed: "+error.Message;RefreshFriendState();Refresh();}
+        }
+    }
+    private async void RemoveServerGroupMember(GroupModel group,ServerGroupMember target){
+        var service=discovery;ServerGroupRoster roster;
+        if(service==null||group==null||target==null||!serverGroupRosters.TryGetValue(group.Id,out roster))return;
+        var signedMember=group.Data==null?null:(group.Data.members??new GroupMemberData[0]).FirstOrDefault(value=>value.account==target.AccountId&&value.peer==target.PeerId);
+        if(signedMember==null){Notify("Wait for the current signed group roster before removing a member.");return;}
+        string label=String.IsNullOrWhiteSpace(target.Username)?"Account "+target.AccountId:target.Username;
+        if(!Confirm("Remove group member","Remove "+label+" (account "+target.AccountId+") from this group? A new group key generation will be required.","Remove"))return;
+        ulong session=discoverySessionGeneration,profileGeneration=profileSessionGeneration;string localPeer=model.OwnId;
+        try{
+            var updated=await Task.Run(()=>service.RemoveGroupMember(roster.GroupId,roster.RosterGeneration,target.AccountId,target.PeerId,localPeer));
+            if(discovery!=service||discoverySessionGeneration!=session||profileSessionGeneration!=profileGeneration)return;
+            // The server mutation is authoritative. Queue the matching signed
+            // local Remove only for this explicit action, never by comparing an
+            // old client-owned group against a newly discovered server roster.
+            if(!core.SetAuthenticatedGroupRoster(service.AccountId,session,updated)||!core.RemoveGroupMember(group.Id,target.AccountId)){
+                model.Status="Member removed on server, but the signed local group change could not be queued. Group key handoff is paused.";
+            }else model.Status=label+" removed. New group-key handoff pending.";
+            groupStateRevision++;RefreshGroupState();Refresh();
+        }catch(Exception error){
+            if(discovery==service&&discoverySessionGeneration==session&&profileSessionGeneration==profileGeneration){model.Status="Could not remove group member: "+error.Message;Refresh();}
+        }
+    }
 	private async void FriendRequestsDialog()
 	{
 		if (discovery == null)
@@ -1899,7 +2072,7 @@ public class DesktopApplication {
 		}
 		Window dialog = new Window
 		{
-			Title = "Friend Requests",
+			Title = "Requests",
 			Owner = window,
 			Width = 590.0,
 			Height = 650.0,
@@ -1926,13 +2099,13 @@ public class DesktopApplication {
 		StackPanel stack = (StackPanel)(scroll.Content = new StackPanel());
 		stack.Children.Add(new TextBlock
 		{
-			Text = "Friend Requests",
+			Text = "Requests",
 			FontSize = 25.0,
 			FontWeight = FontWeights.SemiBold
 		});
 		stack.Children.Add(new TextBlock
 		{
-			Text = "Server-backed requests, friends, and blocks.",
+			Text = "Friend requests, group invitations, friends, and blocks.",
 			Foreground = Brush("#A1AEBB"),
 			Margin = new Thickness(0.0, 5.0, 0.0, 18.0)
 		});
@@ -1958,6 +2131,22 @@ public class DesktopApplication {
 			}));
 		}
 		stack.Children.Add(SettingsCard("Incoming Requests", "Accept creates a durable account friendship.", incoming));
+        StackPanel groupIncoming=new StackPanel();
+        if(groupInvites.Count==0)groupIncoming.Children.Add(new TextBlock{Text="No group invitations yet.",Foreground=Brush("#A1AEBB")});
+        foreach(GroupInviteResult invitation in groupInvites){
+            var item=invitation;
+            var row=new Grid{Margin=new Thickness(0,5,0,5)};
+            row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
+            row.Children.Add(new TextBlock{Text="Group "+item.GroupId+" · invited by "+item.InviterUsername+":"+item.InviterAccountId,TextWrapping=TextWrapping.Wrap,VerticalAlignment=VerticalAlignment.Center,Foreground=Brush("#AAB7C4")});
+            var actions=new StackPanel{Orientation=Orientation.Horizontal};
+            var accept=new Button{Content="Accept",Padding=new Thickness(12,7,12,7),Background=Brush("#244C79")};
+            var decline=new Button{Content="Decline",Padding=new Thickness(12,7,12,7),Margin=new Thickness(7,0,0,0)};
+            accept.Click+=(s,e)=>{RespondToServerGroupInvite(item,true);dialog.Close();};
+            decline.Click+=(s,e)=>{RespondToServerGroupInvite(item,false);dialog.Close();};
+            actions.Children.Add(accept);actions.Children.Add(decline);Grid.SetColumn(actions,1);row.Children.Add(actions);
+            groupIncoming.Children.Add(row);
+        }
+        stack.Children.Add(SettingsCard("Group Invitations","Accepting authorizes this device for the group. The content key is delivered separately over authenticated peer TLS.",groupIncoming));
 		StackPanel outgoing = new StackPanel();
 		if (friendState.Outgoing.Count == 0)
 		{
@@ -2863,7 +3052,7 @@ public class DesktopApplication {
 			string listener=model.Port==0?"None (relay-only)":"0.0.0.0:"+model.Port;
 			string localCandidate=model.Port==0?"None (not published)":shareHost+":"+model.Port;
 			string publicCandidate=(selected==null||selected.Contact==null||String.IsNullOrWhiteSpace(selected.Contact.publicHost)||selected.Contact.publicPort==0)?"None":selected.Contact.publicHost+":"+selected.Contact.publicPort;
-			return "PeerChat connection details\nTimestamp: " + DateTime.UtcNow.ToString("O") + "\nProfile: " + ((localProfile == null) ? "Local" : localProfile.Name) + "\nAccount ID: " + ((selected == null || selected.AccountId <= 0) ? "Unavailable" : selected.AccountId.ToString()) + "\nConversation ID: " + ((selected == null) ? "None" : selected.ConversationId) + "\nDiscovery endpoint: " + array[0] + ":" + array[1] + "\nLocal P2P listener: " + listener + "\nLAN candidate: " + localCandidate + "\nLocal TLS certificate: " + localTlsCertificateDiagnostics + "\nFriend presence: " + connectionAttemptDetails.Presence + "\nCandidate seen UTC (server): " + connectionAttemptDetails.CandidateSeenUtc + "\nRefresh result: " + connectionAttemptDetails.RefreshResult + "\nPublic candidate: " + publicCandidate + "\nLive winning session: " + (connectionAttemptDetails.HasLiveSession ? "Connected" : "None") + "\nWinning connection ID: " + (connectionAttemptDetails.HasLiveSession ? connectionAttemptDetails.LiveConnectionId.ToString() : "None") + "\nWinning direction: " + connectionAttemptDetails.LiveDirection + "\nWinning endpoint: " + connectionAttemptDetails.LiveCandidate + "\nWinning source: " + connectionAttemptDetails.LiveSource + "\nWinning route: " + connectionAttemptDetails.LiveRoute + "\nCandidate source: " + connectionAttemptDetails.Source + "\nSelected candidate: " + connectionAttemptDetails.Candidate + "\nSelection reason: " + connectionAttemptDetails.Route + "\nExpected Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.ExpectedPeer) ? "Unspecified" : connectionAttemptDetails.ExpectedPeer) + "\nPresented/current Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.PresentedPeer) ? "Not presented" : connectionAttemptDetails.PresentedPeer) + "\nTCP/TLS state: " + connectionAttemptDetails.TransportState + "\nTrust state: " + connectionAttemptDetails.TrustState + "\nLatest failed attempt ID: " + ((connectionAttemptDetails.LatestFailedAttemptId > 0) ? connectionAttemptDetails.LatestFailedAttemptId.ToString() : "None") + "\nLatest failed endpoint: " + connectionAttemptDetails.LatestFailedCandidate + "\nLatest failed source: " + connectionAttemptDetails.LatestFailedSource + "\nLatest failed route: " + connectionAttemptDetails.LatestFailedRoute + "\nLatest failed reason: " + connectionAttemptDetails.LatestFailure + "\n\nLocal subnet classification:\n" + connectionAttemptDetails.LocalSubnetDiagnostics;
+			return "PeerChat connection details\nTimestamp: " + DateTime.UtcNow.ToString("O") + "\nProfile: " + ((localProfile == null) ? "Local" : localProfile.Name) + "\nAccount ID: " + ((selected == null || selected.AccountId <= 0) ? "Unavailable" : selected.AccountId.ToString()) + "\nConversation ID: " + ((selected == null) ? "None" : selected.ConversationId) + "\nDiscovery endpoint: " + array[0] + ":" + array[1] + "\nLocal P2P listener: " + listener + "\nLAN candidate: " + localCandidate + "\nLocal TLS certificate: " + localTlsCertificateDiagnostics + "\nFriend presence: " + connectionAttemptDetails.Presence + "\nCandidate seen UTC (server): " + connectionAttemptDetails.CandidateSeenUtc + "\nRefresh result: " + connectionAttemptDetails.RefreshResult + "\nPublic candidate: " + publicCandidate + "\nLive winning session: " + (connectionAttemptDetails.HasLiveSession ? "Connected" : "None") + "\nWinning connection ID: " + (connectionAttemptDetails.HasLiveSession ? connectionAttemptDetails.LiveConnectionId.ToString() : "None") + "\nWinning direction: " + connectionAttemptDetails.LiveDirection + "\nWinning endpoint: " + connectionAttemptDetails.LiveCandidate + "\nWinning source: " + connectionAttemptDetails.LiveSource + "\nWinning route: " + connectionAttemptDetails.LiveRoute + "\nCandidate source: " + connectionAttemptDetails.Source + "\nSelected candidate: " + connectionAttemptDetails.Candidate + "\nSelection reason: " + connectionAttemptDetails.Route + "\nExpected Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.ExpectedPeer) ? "Unspecified" : connectionAttemptDetails.ExpectedPeer) + "\nPresented/current Peer ID: " + (string.IsNullOrEmpty(connectionAttemptDetails.PresentedPeer) ? "Not presented" : connectionAttemptDetails.PresentedPeer) + "\nTCP/TLS state: " + connectionAttemptDetails.TransportState + "\nTrust state: " + connectionAttemptDetails.TrustState + "\nLatest progress/status: " + connectionAttemptDetails.LatestProgress + "\nLatest failed attempt ID: " + ((connectionAttemptDetails.LatestFailedAttemptId > 0) ? connectionAttemptDetails.LatestFailedAttemptId.ToString() : "None") + "\nLatest failed endpoint: " + connectionAttemptDetails.LatestFailedCandidate + "\nLatest failed source: " + connectionAttemptDetails.LatestFailedSource + "\nLatest failed route: " + connectionAttemptDetails.LatestFailedRoute + "\nLatest failed reason: " + connectionAttemptDetails.LatestFailure + "\n\nLocal subnet classification:\n" + connectionAttemptDetails.LocalSubnetDiagnostics;
 	}
 
 	private void ConnectFriendCandidate(DiscoverySearchResult friend, ConversationModel conversation, bool force, string trigger)
@@ -2990,6 +3179,26 @@ public class DesktopApplication {
 		ConnectFriendCandidate(friend, conversationModel, force, trigger);
 	}
 
+    async void InvitePersonToGroup(DiscoverySearchResult person){
+        var service=discovery;if(service==null||person==null||person.AccountId<=0)return;
+        var choices=model.GroupChats.Values.Select(group=>new{Group=group,Roster=serverGroupRosters.ContainsKey(group.Id)?serverGroupRosters[group.Id]:null})
+            .Where(item=>item.Roster!=null&&!item.Group.Invited&&(item.Group.Data.members??new GroupMemberData[0]).Any(member=>member.account==service.AccountId&&member.peer==model.OwnId&&member.role>=2))
+            .OrderBy(item=>item.Group.Name,StringComparer.CurrentCultureIgnoreCase).ToList();
+        if(choices.Count==0){Notify("No group with a ready server roster is available for invitations yet.");return;}
+        string selectedId=choices.Count==1?choices[0].Group.Id:null;
+        if(selectedId==null){
+            var picker=new Window{Title="Invite to Group",Owner=window,Width=410,Height=360,WindowStartupLocation=WindowStartupLocation.CenterOwner,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),Resources=window.Resources};
+            var list=new StackPanel{Margin=new Thickness(18)};picker.Content=new ScrollViewer{Content=list,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+            list.Children.Add(new TextBlock{Text="Choose a group for "+person.Username,FontSize=18,Margin=new Thickness(0,0,0,12)});
+            foreach(var choice in choices){string id=choice.Group.Id;var button=new Button{Content=choice.Group.Name+" · "+id.Substring(0,8),Margin=new Thickness(0,0,0,8),Padding=new Thickness(12,8,12,8)};button.Click+=(s,e)=>{selectedId=id;picker.DialogResult=true;picker.Close();};list.Children.Add(button);}
+            if(picker.ShowDialog()!=true)return;
+        }
+        var chosen=choices.FirstOrDefault(item=>item.Group.Id==selectedId);if(chosen==null||!Confirm("Invite to Group", "Invite "+person.Username+" (account "+person.AccountId+") to "+chosen.Group.Name+"? This does not create a friendship.","Invite"))return;
+        ulong session=discoverySessionGeneration;string localPeer=model.OwnId;
+        try{var response=await Task.Run(()=>service.InviteAccountToGroup(chosen.Roster.GroupId,chosen.Roster.RosterGeneration,person.AccountId,localPeer));if(discovery!=service||discoverySessionGeneration!=session)return;string state=Convert.ToString(response["state"]);Notify(state=="already_pending"?"This group invitation is already pending.":state=="already_member"?"This account is already a group member.":"Group invitation sent to "+person.Username+".");}
+        catch(Exception error){if(discovery==service&&discoverySessionGeneration==session)Notify("Could not send group invitation: "+error.Message);}
+    }
+
 	private Border DiscoveryCard(DiscoverySearchResult result)
 	{
 		Border border = new Border();
@@ -3006,6 +3215,10 @@ public class DesktopApplication {
 			Width = new GridLength(48.0)
 		});
 		grid.ColumnDefinitions.Add(new ColumnDefinition());
+		grid.ColumnDefinitions.Add(new ColumnDefinition
+		{
+			Width = GridLength.Auto
+		});
 		grid.ColumnDefinitions.Add(new ColumnDefinition
 		{
 			Width = GridLength.Auto
@@ -3032,6 +3245,7 @@ public class DesktopApplication {
 		ellipse.Width = 9.0;
 		ellipse.Height = 9.0;
 		ellipse.Fill = Brush(result.Online ? "#36D873" : "#71808E");
+		ellipse.Visibility = String.IsNullOrEmpty(result.PublicIdentity) ? Visibility.Collapsed : Visibility.Visible;
 		ellipse.Stroke = Brush("#18222C");
 		ellipse.StrokeThickness = 2.0;
 		ellipse.HorizontalAlignment = HorizontalAlignment.Right;
@@ -3062,7 +3276,7 @@ public class DesktopApplication {
 		});
 		stackPanel4.Children.Add(new TextBlock
 		{
-			Text = (result.Online ? "  ● Online" : "  ○ Offline"),
+			Text = String.IsNullOrEmpty(result.PublicIdentity) ? "  ·  Account " + result.AccountId : (result.Online ? "  ● Online" : "  ○ Offline"),
 			Foreground = Brush(result.Online ? "#36D873" : "#9AA7B4"),
 			FontSize = 12.0
 		});
@@ -3104,7 +3318,7 @@ public class DesktopApplication {
 			}
 			else if (requestState == "Friends")
 			{
-				OpenFriendConversation(discoverySearchResult);
+				DiscoverySearchResult friend;if(friendDirectory.TryGetValue(discoverySearchResult.AccountId,out friend))OpenFriendConversation(friend);else Notify("Refresh your friend list before opening this conversation.");
 			}
 			else
 			{
@@ -3113,6 +3327,9 @@ public class DesktopApplication {
 		};
 		Grid.SetColumn(button2, 2);
 		grid.Children.Add(button2);
+		var invite=new Button{Content="Invite to Group",Padding=new Thickness(12,8,12,8),Margin=new Thickness(8,0,0,0),ToolTip="Invite this account to a group without becoming friends"};
+		invite.Click+=(s,e)=>InvitePersonToGroup(result);
+		Grid.SetColumn(invite,3);grid.Children.Add(invite);
 		return border2;
 	}
 
@@ -3130,7 +3347,7 @@ public class DesktopApplication {
 		}
 		Window dialog = new Window
 		{
-			Title = "Find Friends",
+		Title = "Find People",
 			Owner = window,
 			Width = 610.0,
 			Height = 620.0,
@@ -3173,13 +3390,13 @@ public class DesktopApplication {
 		StackPanel stackPanel = new StackPanel();
 		stackPanel.Children.Add(new TextBlock
 		{
-			Text = "Find Friends",
+			Text = "Find People",
 			FontSize = 25.0,
 			FontWeight = FontWeights.SemiBold
 		});
 		stackPanel.Children.Add(new TextBlock
 		{
-			Text = "Find people by their public username or friend code.",
+			Text = "Find public accounts by username or exact account ID.",
 			Foreground = Brush("#A1AEBB"),
 			Margin = new Thickness(0.0, 5.0, 0.0, 18.0)
 		});
@@ -3211,7 +3428,7 @@ public class DesktopApplication {
 			Background = Brush("#17212A"),
 			BorderThickness = new Thickness(0.0),
 			Padding = new Thickness(0.0, 11.0, 0.0, 11.0),
-			ToolTip = "Search by username or friend code"
+			ToolTip = "Search by username or account ID"
 		};
 		Grid.SetColumn(query, 1);
 		grid2.Children.Add(query);
@@ -3271,15 +3488,15 @@ public class DesktopApplication {
 			state.Text = "Searching…";
 			try
 			{
-				List<DiscoverySearchResult> found = await Task.Run(() => discovery.Suggest(prefix));
+				List<PublicAccountResult> found = await Task.Run(() => discovery.SearchPeople(prefix));
 				dialog.Dispatcher.BeginInvoke((Action)delegate
 				{
 					if (request == generation && query.Text.Trim() == prefix)
 					{
 						collection.Clear();
-						foreach (DiscoverySearchResult item2 in found)
+						foreach (PublicAccountResult item2 in found)
 						{
-							collection.Add(item2);
+							collection.Add(new DiscoverySearchResult{AccountId=item2.AccountId,Username=item2.Username});
 						}
 						rebuildCards();
 					}
@@ -3584,7 +3801,22 @@ public class DesktopApplication {
         panel.Children.Add(new TextBlock{Text=DiagnosticsPrivacyFilter.Redact(failure.Title),FontSize=20,FontWeight=FontWeights.SemiBold});panel.Children.Add(new TextBlock{Text=DiagnosticsPrivacyFilter.Redact(failure.Reason),Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,18)});
         var actions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};var view=new Button{Content="View Diagnostics",Background=Brush("#275AA7"),Margin=new Thickness(0,0,8,0)};var copy=new Button{Content="Copy Diagnostics",Margin=new Thickness(0,0,8,0)};var dismiss=new Button{Content="Dismiss"};view.Click+=(s,e)=>{dialog.Close();ShowDiagnosticsWindow(failure);};copy.Click+=(s,e)=>CopyDiagnosticText(DiagnosticsService.FormatFailureFull(failure,DiagnosticAccountDisplayName,DiagnosticPeerDisplayName),"Failure diagnostics copied.");dismiss.Click+=(s,e)=>dialog.Close();actions.Children.Add(view);actions.Children.Add(copy);actions.Children.Add(dismiss);panel.Children.Add(actions);dialog.Closed+=(s,e)=>{if(failureNotification==dialog)failureNotification=null;};failureNotification=dialog;dialog.Show();
     }
-    sealed class DiagnosticsViewSelection { public DiagnosticsConnectionScope Scope; public string Component; public FailureSnapshot Failure; public bool Full; public bool Local; }
+    sealed class DiagnosticsViewSelection { public DiagnosticsConnectionScope Scope; public string GroupId; public string Component; public FailureSnapshot Failure; public bool Full; public bool Local; }
+    IList<GroupDiagnosticsData> CaptureGroupDiagnosticsData(){
+        var result=new List<GroupDiagnosticsData>();
+        foreach(var group in model.GroupChats.Values){
+            var members=group.Data.members??new GroupMemberData[0];var mine=members.FirstOrDefault(m=>m.peer==model.OwnId);
+            ServerGroupRoster roster;bool hasRoster=serverGroupRosters.TryGetValue(group.Id,out roster);string registration;groupRegistrationStatus.TryGetValue(group.Id,out registration);
+            var rosterMembers=hasRoster?roster.Members.Where(value=>value.State=="member").ToArray():new ServerGroupMember[0];
+            var localRoster=rosterMembers.FirstOrDefault(value=>discovery!=null&&value.AccountId==discovery.AccountId&&value.PeerId==model.OwnId);
+            var stateRows=hasRoster?groupControlViews.Where(value=>value.Key.StartsWith(roster.GroupId+":",StringComparison.Ordinal)&&value.Value.RosterGeneration==roster.RosterGeneration).Select(value=>value.Value).ToArray():new GroupControlViewState[0];
+            var data=new GroupDiagnosticsData{GroupId=group.Id,ServerGroupId=hasRoster?roster.GroupId:null,Name=group.Name,LocalRole=hasRoster?(localRoster==null?"Unavailable":localRoster.Role):mine==null?(group.Invited?"Invited":"Unavailable"):mine.role==3?"Owner":mine.role==2?"Admin":"Member",PendingInvites=hasRoster?roster.Members.Count(value=>value.State=="invited"):group.PendingInviteCount,RosterState=hasRoster?"Authenticated server roster ready":String.IsNullOrEmpty(registration)?"Legacy/local group — not registered":registration,RosterGeneration=hasRoster?roster.RosterGeneration:0,KeyGeneration=stateRows.Any(value=>value.KeyReady)?roster.RosterGeneration:0,GroupControlState=stateRows.Any(value=>value.Connection=="Authenticated peer TLS ready")?"Authenticated peer TLS ready":stateRows.Any(value=>value.Connection=="Scoped relay requested")?"Scoped relay requested":"Not established",E2eeState=hasRoster?"Group key control protected by peer TLS; encrypted group text pending Stage 1B":"Legacy signed group; not server-authorized",DeliveryState="Server ciphertext fanout not implemented (Stage 1C)",KeyHandoffState=stateRows.Any(value=>value.Handoff=="Acknowledged")?"Acknowledged":stateRows.Any(value=>value.Handoff=="Offered")?"Offered / awaiting ACK":stateRows.Any(value=>value.KeyReady)?"Current key ready locally":"Not started",LastKeyOfferResult=stateRows.Select(value=>value.LastOffer).FirstOrDefault(value=>value!="None")??"None",LastKeyAckResult=stateRows.Select(value=>value.LastAck).FirstOrDefault(value=>value!="None")??"None",Members=new List<GroupDiagnosticsMember>()};
+            if(hasRoster)foreach(var member in rosterMembers){DiscoverySearchResult presence=null;bool known=member.PeerId==model.OwnId||friendDirectory.TryGetValue(member.AccountId,out presence);if(known){data.MembersWithKnownPresence++;if(member.PeerId==model.OwnId||presence!=null&&presence.Online)data.KnownOnlineMembers++;}var conversation=model.FindByPeer(member.PeerId);GroupControlViewState state;groupControlViews.TryGetValue(roster.GroupId+":"+member.PeerId,out state);if(state!=null&&state.RosterGeneration!=roster.RosterGeneration)state=null;data.Members.Add(new GroupDiagnosticsMember{AccountId=member.AccountId,PeerId=member.PeerId,Name=String.IsNullOrWhiteSpace(member.Username)?"Account "+member.AccountId:member.Username,Role=member.Role,Relationship=conversation!=null&&conversation.IsFriend?"Friend":"None",GroupControlState=state==null?"Not established":state.Connection,KeyHandoffState=state==null?"Not started":state.Handoff});}
+            else foreach(var member in members){var conversation=model.FindByPeer(member.peer);data.Members.Add(new GroupDiagnosticsMember{AccountId=member.account,PeerId=member.peer,Name=member.name,Role=member.role==3?"Owner":member.role==2?"Admin":"Member",Relationship=conversation!=null&&conversation.IsFriend?"Friend":"None",GroupControlState="Not available",KeyHandoffState="Not started"});}
+            result.Add(data);
+        }
+        return result;
+    }
     string DiagnosticAccountDisplayName(string accountId){long id;if(!Int64.TryParse(accountId,out id)||id<=0)return "";DiscoverySearchResult known;if(friendDirectory.TryGetValue(id,out known)&&!String.IsNullOrWhiteSpace(known.Username))return known.Username;var binding=conversationIndex.Records.FirstOrDefault(value=>value.AccountId==id);return binding==null?"":binding.Username;}
     string DiagnosticPeerDisplayName(string peerId){var conversation=model.FindByPeer(peerId);if(conversation==null||conversation.AccountId<=0)return "";string name=conversation.AccountName;if(String.IsNullOrWhiteSpace(name))name=DiagnosticAccountDisplayName(conversation.AccountId.ToString());return String.IsNullOrWhiteSpace(name)?"":name+":"+conversation.AccountId;}
     void ShowDiagnosticsWindow(FailureSnapshot focus){
@@ -3596,12 +3828,15 @@ public class DesktopApplication {
         var entries=new ListBox{Background=Brush("#111920"),Foreground=Brush("#EDF1F5"),BorderBrush=Brush("#344351"),Padding=new Thickness(5)};Grid.SetColumn(entries,0);columns.Children.Add(entries);var splitter=new Border{Width=1,Background=Brush("#28343F")};Grid.SetColumn(splitter,1);columns.Children.Add(splitter);
         var detail=new TextBox{IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.NoWrap,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,FontFamily=new FontFamily("Consolas"),FontSize=12,Background=Brush("#0D141A"),Foreground=Brush("#EDF1F5"),BorderBrush=Brush("#344351"),Padding=new Thickness(12)};Grid.SetColumn(detail,2);columns.Children.Add(detail);
         Action<string> heading=text=>entries.Items.Add(new ListBoxItem{Content=text,IsEnabled=false,FontWeight=FontWeights.SemiBold,Foreground=Brush("#8FA8C4"),Padding=new Thickness(8,11,8,4)});
-        heading("Current");var scopes=DiagnosticsService.ConnectionScopes(current,DiagnosticAccountDisplayName);ListBoxItem first=null;foreach(var scope in scopes){var parent=new ListBoxItem{Content=DiagnosticsPrivacyFilter.Redact(scope.Label),IsEnabled=false,FontWeight=FontWeights.SemiBold,Padding=new Thickness(8,8,8,3)};entries.Items.Add(parent);foreach(string component in new[]{"Overview","Reliable Connection","Voice","Screen Share"}){var item=new ListBoxItem{Content="    "+component,Tag=new DiagnosticsViewSelection{Scope=scope,Component=component}};entries.Items.Add(item);if(first==null)first=item;}}
+        heading("Current");var scopes=DiagnosticsService.ConnectionScopes(current,DiagnosticAccountDisplayName);ListBoxItem first=null;foreach(var scope in scopes){var parent=new ListBoxItem{Content=DiagnosticsPrivacyFilter.Redact(scope.Label+"  ·  Direct Conversation"),IsEnabled=false,FontWeight=FontWeights.SemiBold,Padding=new Thickness(8,8,8,3)};entries.Items.Add(parent);foreach(string component in new[]{"Overview","Reliable Connection","Voice","Screen Share"}){var item=new ListBoxItem{Content="    "+component,Tag=new DiagnosticsViewSelection{Scope=scope,Component=component}};entries.Items.Add(item);if(first==null)first=item;}}
         if(scopes.Count==0){var item=new ListBoxItem{Content="No logical peer sessions are available",IsEnabled=false,Padding=new Thickness(8)};entries.Items.Add(item);}
+        var groupScopes=DiagnosticsService.GroupScopes(current);ListBoxItem firstGroup=null;
+        if(groupScopes.Count>0)heading("Groups");
+        foreach(var group in groupScopes){var parent=new ListBoxItem{Content=DiagnosticsPrivacyFilter.Redact("◈  "+group.Name+"  ·  Group · "+(group.Members==null?0:group.Members.Count)+" members"),IsEnabled=false,FontWeight=FontWeights.SemiBold,Foreground=Brush("#70B7ED"),Padding=new Thickness(8,8,8,3),ToolTip=group.GroupId};entries.Items.Add(parent);foreach(string component in new[]{"Overview","Connection","Voice","Screen Share"}){var item=new ListBoxItem{Content="    "+component,Tag=new DiagnosticsViewSelection{GroupId=group.GroupId,Component=component}};entries.Items.Add(item);if(firstGroup==null)firstGroup=item;}}
         heading("Recent Failures");foreach(var failure in failures){DateTime timestamp;var failureScopes=DiagnosticsService.ConnectionScopes(failure.Diagnostics,DiagnosticAccountDisplayName);string logicalLabel=failureScopes.Count==0?"":failureScopes[0].Label;string label=(DateTime.TryParse(failure.TimestampUtc,out timestamp)?timestamp.ToLocalTime().ToString("g")+"  ·  ":"")+failure.Title+(String.IsNullOrEmpty(logicalLabel)?"":"  ·  "+logicalLabel);entries.Items.Add(new ListBoxItem{Content=DiagnosticsPrivacyFilter.Redact(label),Tag=new DiagnosticsViewSelection{Failure=failure},Padding=new Thickness(8,4,8,4)});}
         heading("Local / Application");var localItem=new ListBoxItem{Content="My Connection",Tag=new DiagnosticsViewSelection{Local=true},Padding=new Thickness(8,4,8,4)};entries.Items.Add(localItem);var fullItem=new ListBoxItem{Content="Full Diagnostics / All Events",Tag=new DiagnosticsViewSelection{Full=true},Padding=new Thickness(8,4,8,4)};entries.Items.Add(fullItem);
-        DiagnosticsViewSelection selected=null;Func<DiagnosticsSnapshot> projected=()=>{if(selected==null||selected.Full)return current;if(selected.Local)return new DiagnosticsSnapshot{SnapshotId=current.SnapshotId,TimestampUtc=current.TimestampUtc,Build=current.Build,Profile=current.Profile,Status=current.Status,Sections=(current.Sections??new List<DiagnosticsSection>()).Where(section=>section.Name=="Local"||section.Name=="Security").Select(section=>new DiagnosticsSection{Name=section.Name,Details=section.Details}).ToList()};return DiagnosticsService.ProjectConnection(current,selected.Scope,selected.Component);};Func<string> fullText=()=>selected!=null&&selected.Failure!=null?DiagnosticsService.FormatFailureFull(selected.Failure,DiagnosticAccountDisplayName,DiagnosticPeerDisplayName):DiagnosticsService.FormatFull(projected(),DiagnosticAccountDisplayName,DiagnosticPeerDisplayName);Func<string> summaryText=()=>selected!=null&&selected.Failure!=null?DiagnosticsService.FormatFailureSummary(selected.Failure,DiagnosticAccountDisplayName,DiagnosticPeerDisplayName):DiagnosticsService.FormatSummary(projected(),DiagnosticAccountDisplayName,DiagnosticPeerDisplayName);Action update=()=>{selected=(entries.SelectedItem as ListBoxItem)?.Tag as DiagnosticsViewSelection;if(selected==null){detail.Text="Select a logical peer/session, retained failure, local information, or Full Diagnostics.";copySummary.IsEnabled=false;copyFull.IsEnabled=false;save.IsEnabled=false;return;}detail.Text=fullText();copySummary.IsEnabled=true;copyFull.IsEnabled=true;save.IsEnabled=true;};
-        entries.SelectionChanged+=(s,e)=>update();entries.SelectedItem=focus==null?(object)(first??fullItem):entries.Items.Cast<ListBoxItem>().FirstOrDefault(item=>{var value=item.Tag as DiagnosticsViewSelection;return value!=null&&value.Failure!=null&&value.Failure.Id==focus.Id;})??fullItem;
+        DiagnosticsViewSelection selected=null;Func<DiagnosticsSnapshot> projected=()=>{if(selected==null||selected.Full)return current;if(selected.Local)return new DiagnosticsSnapshot{SnapshotId=current.SnapshotId,TimestampUtc=current.TimestampUtc,Build=current.Build,Profile=current.Profile,Status=current.Status,Sections=(current.Sections??new List<DiagnosticsSection>()).Where(section=>section.Name=="Local"||section.Name=="Security").Select(section=>new DiagnosticsSection{Name=section.Name,Details=section.Details}).ToList()};if(!String.IsNullOrEmpty(selected.GroupId))return DiagnosticsService.ProjectGroup(current,selected.GroupId,selected.Component);return DiagnosticsService.ProjectConnection(current,selected.Scope,selected.Component);};Func<string> fullText=()=>selected!=null&&selected.Failure!=null?DiagnosticsService.FormatFailureFull(selected.Failure,DiagnosticAccountDisplayName,DiagnosticPeerDisplayName):DiagnosticsService.FormatFull(projected(),DiagnosticAccountDisplayName,DiagnosticPeerDisplayName);Func<string> summaryText=()=>selected!=null&&selected.Failure!=null?DiagnosticsService.FormatFailureSummary(selected.Failure,DiagnosticAccountDisplayName,DiagnosticPeerDisplayName):DiagnosticsService.FormatSummary(projected(),DiagnosticAccountDisplayName,DiagnosticPeerDisplayName);Action update=()=>{selected=(entries.SelectedItem as ListBoxItem)?.Tag as DiagnosticsViewSelection;if(selected==null){detail.Text="Select a logical peer/session, group, retained failure, local information, or Full Diagnostics.";copySummary.IsEnabled=false;copyFull.IsEnabled=false;save.IsEnabled=false;return;}detail.Text=fullText();edit.IsEnabled=String.IsNullOrEmpty(selected.GroupId);copySummary.IsEnabled=true;copyFull.IsEnabled=true;save.IsEnabled=true;};
+        entries.SelectionChanged+=(s,e)=>update();entries.SelectedItem=focus==null?(object)(model.Groups&&model.SelectedGroup!=null?entries.Items.Cast<ListBoxItem>().FirstOrDefault(item=>{var value=item.Tag as DiagnosticsViewSelection;return value!=null&&value.GroupId==model.SelectedGroup.Id&&value.Component=="Overview";})??firstGroup??first??fullItem:first??firstGroup??fullItem):entries.Items.Cast<ListBoxItem>().FirstOrDefault(item=>{var value=item.Tag as DiagnosticsViewSelection;return value!=null&&value.Failure!=null&&value.Failure.Id==focus.Id;})??fullItem;
         copySummary.Click+=(s,e)=>CopyDiagnosticText(summaryText(),"Diagnostic summary copied.");copyFull.Click+=(s,e)=>CopyDiagnosticText(fullText(),"Full diagnostics copied.");
         save.Click+=(s,e)=>{var picker=new Microsoft.Win32.SaveFileDialog{Title="Save PeerChat diagnostics",FileName="PeerChat-diagnostics-"+DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+".txt",Filter="Text files (*.txt)|*.txt|All files (*.*)|*.*"};if(picker.ShowDialog(dialog)==true)try{File.WriteAllText(picker.FileName,DiagnosticsPrivacyFilter.Redact(fullText()),new UTF8Encoding(false));}catch(Exception error){Notify("Could not save diagnostics: "+error.Message,dialog);}};
         dialog.Show();
@@ -3660,7 +3895,7 @@ public class DesktopApplication {
         long dmBefore=conversation.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
         conversation.HistoryLoading=true;conversation.LoadingHistoryPeer=peer;conversation.RequestedPeerHistory.Add(peer);historyScrollKey=conversation.ConversationId;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.History(peer,dmBefore);
     }
-    void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;bool queued=model.Groups&&model.SelectedGroup!=null?core.SendGroup(model.SelectedGroup.Id,text):model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
+    void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;if(model.Groups){Notify("Group text is paused until the encrypted group-message format is ready. No plaintext group message was sent.");return;}bool queued=model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
     void Notify(string text){Notify(text,null);}
     void Notify(string text,Window owner){Dialog("PeerChat",new string[0],new string[0],"OK",text,false,owner);}
     bool Confirm(string title,string text,string accept){return Dialog(title,new string[0],new string[0],accept,text,true)!=null;}

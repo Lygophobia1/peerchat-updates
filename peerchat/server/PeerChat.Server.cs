@@ -47,7 +47,12 @@ namespace PeerChat.Server {
                 "CREATE TABLE IF NOT EXISTS friend_requests(sender_id INTEGER NOT NULL REFERENCES accounts(id), recipient_id INTEGER NOT NULL REFERENCES accounts(id), state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(sender_id,recipient_id));" +
                 "CREATE INDEX IF NOT EXISTS friend_requests_recipient_state ON friend_requests(recipient_id,state,updated_utc);" +
                 "CREATE TABLE IF NOT EXISTS friendships(account_low INTEGER NOT NULL REFERENCES accounts(id), account_high INTEGER NOT NULL REFERENCES accounts(id), created_utc INTEGER NOT NULL, PRIMARY KEY(account_low,account_high));" +
-                "CREATE TABLE IF NOT EXISTS account_blocks(blocker_id INTEGER NOT NULL REFERENCES accounts(id), blocked_id INTEGER NOT NULL REFERENCES accounts(id), created_utc INTEGER NOT NULL, PRIMARY KEY(blocker_id,blocked_id));");
+                "CREATE TABLE IF NOT EXISTS account_blocks(blocker_id INTEGER NOT NULL REFERENCES accounts(id), blocked_id INTEGER NOT NULL REFERENCES accounts(id), created_utc INTEGER NOT NULL, PRIMARY KEY(blocker_id,blocked_id));" +
+                "CREATE TABLE IF NOT EXISTS group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, distributor_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);" +
+                "CREATE TABLE IF NOT EXISTS group_roster_devices(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, public_identity TEXT NOT NULL, role TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(group_id,account_id,public_identity));" +
+                "CREATE INDEX IF NOT EXISTS group_roster_members_by_device ON group_roster_devices(public_identity,state,group_id);" +
+                "CREATE TABLE IF NOT EXISTS group_invites(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, recipient_account_id INTEGER NOT NULL REFERENCES accounts(id), invite_id TEXT NOT NULL UNIQUE, inviter_account_id INTEGER NOT NULL REFERENCES accounts(id), inviter_identity TEXT NOT NULL, state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(group_id,recipient_account_id));" +
+                "CREATE INDEX IF NOT EXISTS group_invites_recipient_state ON group_invites(recipient_account_id,state,updated_utc);");
             // Existing Milestone 1 databases predate privacy controls. Add the non-sensitive
             // default once; future Friends Only/Hidden settings use this same column.
             try { Execute("ALTER TABLE accounts ADD COLUMN discoverability TEXT NOT NULL DEFAULT 'public';"); } catch { }
@@ -59,6 +64,7 @@ namespace PeerChat.Server {
             try { Execute("ALTER TABLE presence ADD COLUMN public_endpoint_port INTEGER;"); } catch { }
             try { Execute("ALTER TABLE presence ADD COLUMN public_candidate_source TEXT;"); } catch { }
             try { Execute("ALTER TABLE presence ADD COLUMN observed_classification TEXT;"); } catch { }
+            try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_event_id TEXT NOT NULL DEFAULT '';"); } catch { }
         }
         public void Execute(string sql) { lock (gate) { IntPtr error; if (Sqlite.sqlite3_exec(database, sql, IntPtr.Zero, IntPtr.Zero, out error) != 0) { string message=error==IntPtr.Zero?"SQLite error":Marshal.PtrToStringAnsi(error); if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error); throw new InvalidOperationException(message); } } }
         // Parameter values are hex/base64url or validated identifiers, never interpolated raw user input.
@@ -85,6 +91,17 @@ namespace PeerChat.Server {
         // accounts.username is UNIQUE COLLATE NOCASE, so this prefix query uses the account index.
         // Discovery returns only the public identity reference required for later friend actions.
         public List<Dictionary<string,object>> Suggestions(string prefix,long excludeAccount,int limit){lock(gate){var list=new List<Dictionary<string,object>>();IntPtr s=IntPtr.Zero;try{string sql="SELECT a.id,a.username,COALESCE((SELECT d2.public_identity FROM presence p2 JOIN devices d2 ON d2.id=p2.device_id WHERE d2.account_id=a.id ORDER BY p2.seen_utc DESC LIMIT 1),(SELECT d3.public_identity FROM devices d3 WHERE d3.account_id=a.id ORDER BY d3.id LIMIT 1)),COALESCE((SELECT max(p3.seen_utc) FROM presence p3 JOIN devices d3 ON d3.id=p3.device_id WHERE d3.account_id=a.id),0) FROM accounts a WHERE a.id<>"+excludeAccount+" AND a.discoverability='public' AND a.username LIKE "+Quote(prefix+"%")+" ESCAPE '\\' AND NOT EXISTS (SELECT 1 FROM account_blocks b WHERE (b.blocker_id="+excludeAccount+" AND b.blocked_id=a.id) OR (b.blocker_id=a.id AND b.blocked_id="+excludeAccount+")) ORDER BY a.username,a.id LIMIT "+limit;if(SqliteNative.prepare(database,sql,out s)!=0)return list;while(SqliteNative.step(s)==100){long seen=SqliteNative.columnLong(s,3);list.Add(new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(s,0)},{"username",SqliteNative.columnText(s,1)},{"publicIdentity",SqliteNative.columnText(s,2)},{"online",seen>=UnixNow()-90}});}return list;}finally{if(s!=IntPtr.Zero)SqliteNative.finalize(s);}}}
+        // Shared Find People lookup for friendship and group invites. Device IDs,
+        // presence and relationship state are intentionally absent; the caller
+        // must obtain separately authorized details for any later operation.
+        public List<Dictionary<string,object>> PeopleSearch(string query,long viewerAccount){lock(gate){
+            var results=new List<Dictionary<string,object>>();if(String.IsNullOrEmpty(query)||query.Length>32||query.Any(c=>!(Char.IsLetterOrDigit(c)||c=='-'||c=='_')))return results;
+            long exactId;bool byId=Int64.TryParse(query,out exactId)&&exactId>0;
+            if(query.Length<2&&!byId)return results;
+            string match="(a.username LIKE "+Quote(query+"%")+" OR a.id="+(byId?exactId:0)+")";
+            string sql="SELECT a.id,a.username FROM accounts a WHERE a.id<>"+viewerAccount+" AND a.discoverability='public' AND "+match+" AND NOT EXISTS (SELECT 1 FROM account_blocks b WHERE (b.blocker_id="+viewerAccount+" AND b.blocked_id=a.id) OR (b.blocker_id=a.id AND b.blocked_id="+viewerAccount+")) ORDER BY CASE WHEN a.id="+(byId?exactId:0)+" OR a.username="+Quote(query)+" COLLATE NOCASE THEN 0 ELSE 1 END,a.username COLLATE NOCASE,a.id LIMIT 15";
+            IntPtr statement=IntPtr.Zero;try{if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Could not search public accounts.");while(SqliteNative.step(statement)==100)results.Add(new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(statement,0)},{"username",SqliteNative.columnText(statement,1)}});return results;}finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+        }}
         static long Low(long a,long b){return Math.Min(a,b);} static long High(long a,long b){return Math.Max(a,b);}
         bool Exists(long accountId){return ScalarLong(database,"SELECT count(*) FROM accounts WHERE id="+accountId)>0;}
         bool Blocked(long a,long b){return ScalarLong(database,"SELECT count(*) FROM account_blocks WHERE (blocker_id="+a+" AND blocked_id="+b+") OR (blocker_id="+b+" AND blocked_id="+a+")")>0;}
@@ -92,6 +109,118 @@ namespace PeerChat.Server {
         // appropriate for a subscriber. It never exposes friendship data to the client.
         public bool Friends(long a,long b){return ScalarLong(database,"SELECT count(*) FROM friendships WHERE account_low="+Low(a,b)+" AND account_high="+High(a,b))>0;}
         public bool RelayAuthorized(long a,long b){lock(gate)return Friends(a,b)||ScalarLong(database,"SELECT count(*) FROM friend_requests WHERE state='pending' AND ((sender_id="+a+" AND recipient_id="+b+") OR (sender_id="+b+" AND recipient_id="+a+"))")>0;}
+        static bool GroupId(string value){return value!=null&&value.Length==32&&value.All(c=>(c>='0'&&c<='9')||(c>='a'&&c<='f'));}
+        static bool GroupPeerId(string value){return value!=null&&value.Length==64&&value.All(c=>(c>='0'&&c<='9')||(c>='a'&&c<='f'));}
+        string GroupRole(string group,long account,string device,string state="member"){
+            if(String.IsNullOrEmpty(device))return null;
+            return ScalarText(database,"SELECT role FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+" AND state="+Quote(state));
+        }
+        public bool GroupRelayAuthorized(string group,long a,string aDevice,long b,string bDevice,long generation=0){lock(gate){
+            return GroupId(group)&&a!=b&&(generation==0||generation>0&&ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group))==generation)&&OwnsDevice(a,aDevice)&&OwnsDevice(b,bDevice)&&
+                GroupRole(group,a,aDevice)!=null&&GroupRole(group,b,bDevice)!=null;
+        }}
+        public Dictionary<string,object> RegisterGroup(long account,string device,GroupRosterProof proof){lock(gate){
+            if(proof==null||proof.OwnerAccountId!=account||proof.OwnerIdentity!=device||!OwnsDevice(account,device))return null;
+            string group=proof.ServerGroupId;long existing=ScalarLong(database,"SELECT owner_account_id FROM group_rosters WHERE group_id="+Quote(group));
+            if(existing!=0){if(existing!=account||ScalarText(database,"SELECT owner_identity FROM group_rosters WHERE group_id="+Quote(group))!=device||ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.LegacyGroupId||ScalarText(database,"SELECT creation_event_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.CreateEventId)return null;return GroupRoster(group,account,device);}
+            Execute("BEGIN IMMEDIATE;");try{
+                Execute("INSERT INTO group_rosters(group_id,legacy_group_id,owner_account_id,owner_identity,distributor_identity,roster_generation,creation_event_id,created_utc) VALUES("+Quote(group)+","+Quote(proof.LegacyGroupId)+","+account+","+Quote(device)+","+Quote(device)+",1,"+Quote(proof.CreateEventId)+","+UnixNow()+");");
+                Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(group)+","+account+","+Quote(device)+",'owner','member');");
+                Execute("COMMIT;");return GroupRoster(group,account,device);
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        public Dictionary<string,object> GroupRoster(string group,long account,string device){lock(gate){
+            if(!GroupId(group)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null&&GroupRole(group,account,device,"invited")==null)return null;
+            long generation=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group));
+            var members=new List<Dictionary<string,object>>();IntPtr statement=IntPtr.Zero;
+            try{if(SqliteNative.prepare(database,"SELECT r.account_id,r.public_identity,r.role,r.state,a.username FROM group_roster_devices r JOIN accounts a ON a.id=r.account_id WHERE r.group_id="+Quote(group)+" ORDER BY r.account_id,r.public_identity",out statement)!=0)throw new InvalidOperationException("Cannot read group roster.");
+                while(SqliteNative.step(statement)==100)members.Add(new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(statement,0)},{"publicIdentity",SqliteNative.columnText(statement,1)},{"role",SqliteNative.columnText(statement,2)},{"state",SqliteNative.columnText(statement,3)},{"username",SqliteNative.columnText(statement,4)}});
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+            return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members}};
+        }}
+        public List<Dictionary<string,object>> GroupRostersForDevice(long account,string device){lock(gate){
+            var result=new List<Dictionary<string,object>>();if(!OwnsDevice(account,device))return result;
+            var ids=new List<string>();IntPtr statement=IntPtr.Zero;
+            try{if(SqliteNative.prepare(database,"SELECT group_id FROM group_roster_devices WHERE account_id="+account+" AND public_identity="+Quote(device)+" AND state='member' ORDER BY group_id LIMIT 200",out statement)!=0)throw new InvalidOperationException("Cannot list group rosters.");
+                while(SqliteNative.step(statement)==100)ids.Add(SqliteNative.columnText(statement,0));
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+            foreach(string id in ids){var roster=GroupRoster(id,account,device);if(roster!=null)result.Add(roster);}return result;
+        }}
+        public List<long> GroupMemberAccounts(string group){lock(gate){
+            var members=new List<long>();if(!GroupId(group))return members;IntPtr statement=IntPtr.Zero;
+            try{if(SqliteNative.prepare(database,"SELECT DISTINCT account_id FROM group_roster_devices WHERE group_id="+Quote(group)+" AND state='member' ORDER BY account_id",out statement)!=0)throw new InvalidOperationException("Cannot read group members.");
+                while(SqliteNative.step(statement)==100)members.Add(SqliteNative.columnLong(statement,0));return members;
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+        }}
+        public Dictionary<string,object> GroupInvite(string group,long actor,string actorDevice,long target,string targetDevice,long expectedGeneration){lock(gate){
+            if(!GroupId(group)||!GroupPeerId(actorDevice)||!GroupPeerId(targetDevice)||actor==target||!OwnsDevice(actor,actorDevice)||!OwnsDevice(target,targetDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            string role=GroupRole(group,actor,actorDevice);if(role!="owner"&&role!="admin")return null;
+            if(ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+" AND public_identity="+Quote(targetDevice))!=0)return null;
+            Execute("BEGIN IMMEDIATE;");try{
+                Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(group)+","+target+","+Quote(targetDevice)+",'member','invited');");
+                Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(actorDevice)+" WHERE group_id="+Quote(group)+";");
+                Execute("COMMIT;");return GroupRoster(group,actor,actorDevice);
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        // Invitation is account-scoped metadata. The recipient's device identity
+        // is supplied by its own authenticated session only when it accepts.
+        public Dictionary<string,object> GroupInviteAccount(string group,long actor,string actorDevice,long target,long expectedGeneration){lock(gate){
+            if(!GroupId(group)||!GroupPeerId(actorDevice)||actor==target||!Exists(target)||Blocked(actor,target)||
+               !OwnsDevice(actor,actorDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            string role=GroupRole(group,actor,actorDevice);if(role!="owner"&&role!="admin")return null;
+            if(ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+" AND state='member'")!=0)return new Dictionary<string,object>{{"state","already_member"},{"groupId",group}};
+            string existingState=ScalarText(database,"SELECT state FROM group_invites WHERE group_id="+Quote(group)+" AND recipient_account_id="+target);
+            if(existingState=="pending")return new Dictionary<string,object>{{"state","already_pending"},{"groupId",group},{"inviteId",ScalarText(database,"SELECT invite_id FROM group_invites WHERE group_id="+Quote(group)+" AND recipient_account_id="+target)}};
+            string inviteId=Guid.NewGuid().ToString("N"),now=UnixNow().ToString();
+            Execute("INSERT INTO group_invites(group_id,recipient_account_id,invite_id,inviter_account_id,inviter_identity,state,created_utc,updated_utc) VALUES("+Quote(group)+","+target+","+Quote(inviteId)+","+actor+","+Quote(actorDevice)+",'pending',"+now+","+now+") ON CONFLICT(group_id,recipient_account_id) DO UPDATE SET invite_id=excluded.invite_id,inviter_account_id=excluded.inviter_account_id,inviter_identity=excluded.inviter_identity,state='pending',created_utc=excluded.created_utc,updated_utc=excluded.updated_utc;");
+            return new Dictionary<string,object>{{"state","pending"},{"groupId",group},{"inviteId",inviteId}};
+        }}
+        public List<Dictionary<string,object>> GroupInvitesFor(long recipient){lock(gate){
+            var results=new List<Dictionary<string,object>>();IntPtr statement=IntPtr.Zero;
+            try{string sql="SELECT i.invite_id,i.group_id,i.inviter_account_id,a.username,i.created_utc FROM group_invites i JOIN accounts a ON a.id=i.inviter_account_id WHERE i.recipient_account_id="+recipient+" AND i.state='pending' ORDER BY i.updated_utc DESC,i.invite_id LIMIT 50";
+                if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Cannot read group invitations.");
+                while(SqliteNative.step(statement)==100)results.Add(new Dictionary<string,object>{{"inviteId",SqliteNative.columnText(statement,0)},{"groupId",SqliteNative.columnText(statement,1)},{"inviterAccountId",SqliteNative.columnLong(statement,2)},{"inviterUsername",SqliteNative.columnText(statement,3)},{"createdUtc",SqliteNative.columnLong(statement,4)}});
+                return results;
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+        }}
+        public Dictionary<string,object> GroupRespondAccount(string inviteId,long account,string device,bool accept){lock(gate){
+            if(!GroupId(inviteId)||!GroupPeerId(device)||!OwnsDevice(account,device))return null;
+            string group=ScalarText(database,"SELECT group_id FROM group_invites WHERE invite_id="+Quote(inviteId)+" AND recipient_account_id="+account+" AND state='pending'");if(group==null)return null;
+            long inviter=ScalarLong(database,"SELECT inviter_account_id FROM group_invites WHERE invite_id="+Quote(inviteId));
+            string inviterDevice=ScalarText(database,"SELECT inviter_identity FROM group_invites WHERE invite_id="+Quote(inviteId));
+            string role=GroupRole(group,inviter,inviterDevice);if(role!="owner"&&role!="admin")return null;
+            if(accept&&(Blocked(account,inviter)||ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND state='member'")!=0))return null;
+            Execute("BEGIN IMMEDIATE;");try{
+                Execute("UPDATE group_invites SET state="+Quote(accept?"accepted":"declined")+",updated_utc="+UnixNow()+" WHERE invite_id="+Quote(inviteId)+" AND state='pending';");
+                if(accept){Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(group)+","+account+","+Quote(device)+",'member','member');");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity=owner_identity WHERE group_id="+Quote(group)+";");}
+                Execute("COMMIT;");return accept?GroupRoster(group,account,device):new Dictionary<string,object>{{"state","declined"},{"groupId",group}};
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        public bool GroupRevokeAccountInvite(string inviteId,long actor,string actorDevice){lock(gate){
+            if(!GroupId(inviteId)||!GroupPeerId(actorDevice)||!OwnsDevice(actor,actorDevice))return false;
+            string group=ScalarText(database,"SELECT group_id FROM group_invites WHERE invite_id="+Quote(inviteId)+" AND state='pending'");if(group==null)return false;
+            string role=GroupRole(group,actor,actorDevice);if(role!="owner"&&role!="admin")return false;
+            Execute("UPDATE group_invites SET state='revoked',updated_utc="+UnixNow()+" WHERE invite_id="+Quote(inviteId)+" AND state='pending';");return true;
+        }}
+        public long GroupInviteRecipient(string inviteId){lock(gate)return GroupId(inviteId)?ScalarLong(database,"SELECT recipient_account_id FROM group_invites WHERE invite_id="+Quote(inviteId)):0;}
+        public Dictionary<string,object> GroupRespond(string group,long account,string device,bool accept,long expectedGeneration){lock(gate){
+            if(!GroupId(group)||String.IsNullOrEmpty(device)||!OwnsDevice(account,device)||GroupRole(group,account,device,"invited")==null||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            Execute("BEGIN IMMEDIATE;");try{
+                if(accept){Execute("UPDATE group_roster_devices SET state='member' WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+" AND state='invited';");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity=owner_identity WHERE group_id="+Quote(group)+";");}
+                else {Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+" AND state='invited';");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1 WHERE group_id="+Quote(group)+";");}
+                Execute("COMMIT;");return accept?GroupRoster(group,account,device):new Dictionary<string,object>{{"groupId",group},{"state","declined"}};
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        public Dictionary<string,object> GroupRemove(string group,long actor,string actorDevice,long target,string targetDevice,long expectedGeneration){lock(gate){
+            if(!GroupId(group)||String.IsNullOrEmpty(actorDevice)||String.IsNullOrEmpty(targetDevice)||actor==target||!OwnsDevice(actor,actorDevice)||!OwnsDevice(target,targetDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            string role=GroupRole(group,actor,actorDevice),targetRole=GroupRole(group,target,targetDevice);
+            if(targetRole==null||targetRole=="owner"||role!="owner"&&!(role=="admin"&&targetRole=="member"))return null;
+            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+" AND public_identity="+Quote(targetDevice)+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(actorDevice)+" WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return GroupRoster(group,actor,actorDevice);}catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        public Dictionary<string,object> GroupLeave(string group,long account,string device,long expectedGeneration){lock(gate){
+            if(!GroupId(group)||String.IsNullOrEmpty(device)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null||GroupRole(group,account,device)=="owner"||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity=owner_identity WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return new Dictionary<string,object>{{"groupId",group},{"state","left"}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
         void MakeFriends(long a,long b){Execute("INSERT OR IGNORE INTO friendships(account_low,account_high,created_utc) VALUES("+Low(a,b)+","+High(a,b)+","+UnixNow()+");");}
         // Every state transition is serialized and transactional. The authenticated account ID is
         // supplied by the server session lookup, never by a client-provided sender field.
@@ -114,7 +243,7 @@ namespace PeerChat.Server {
         }}
         public Dictionary<string,object> AdminLookup(string username){lock(gate){if(String.IsNullOrWhiteSpace(username))return null;var page=AdminAccounts(username,0,2);var rows=(List<Dictionary<string,object>>)page["accounts"];return rows.Count==1&&String.Equals((string)rows[0]["username"],username,StringComparison.OrdinalIgnoreCase)?rows[0]:null;}}
         List<long> RelatedAccounts(long accountId){var result=new List<long>();IntPtr statement=IntPtr.Zero;try{string sql="SELECT DISTINCT related FROM (SELECT CASE WHEN account_low="+accountId+" THEN account_high ELSE account_low END AS related FROM friendships WHERE account_low="+accountId+" OR account_high="+accountId+" UNION SELECT CASE WHEN sender_id="+accountId+" THEN recipient_id ELSE sender_id END AS related FROM friend_requests WHERE sender_id="+accountId+" OR recipient_id="+accountId+" UNION SELECT CASE WHEN blocker_id="+accountId+" THEN blocked_id ELSE blocker_id END AS related FROM account_blocks WHERE blocker_id="+accountId+" OR blocked_id="+accountId+")";if(SqliteNative.prepare(database,sql,out statement)!=0)return result;while(SqliteNative.step(statement)==100)result.Add(SqliteNative.columnLong(statement,0));return result;}finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}}
-        public Dictionary<string,object> AdminDeleteAccount(long accountId){lock(gate){string username=Username(accountId);if(String.IsNullOrEmpty(username))return null;var related=RelatedAccounts(accountId);Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM sessions WHERE account_id="+accountId+"; DELETE FROM presence WHERE device_id IN (SELECT id FROM devices WHERE account_id="+accountId+"); DELETE FROM friend_requests WHERE sender_id="+accountId+" OR recipient_id="+accountId+"; DELETE FROM friendships WHERE account_low="+accountId+" OR account_high="+accountId+"; DELETE FROM account_blocks WHERE blocker_id="+accountId+" OR blocked_id="+accountId+"; DELETE FROM devices WHERE account_id="+accountId+"; DELETE FROM accounts WHERE id="+accountId+";");Execute("COMMIT;");return new Dictionary<string,object>{{"accountId",accountId},{"username",username},{"relatedAccounts",related}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}}}
+        public Dictionary<string,object> AdminDeleteAccount(long accountId){lock(gate){string username=Username(accountId);if(String.IsNullOrEmpty(username))return null;var related=RelatedAccounts(accountId);Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM sessions WHERE account_id="+accountId+"; DELETE FROM presence WHERE device_id IN (SELECT id FROM devices WHERE account_id="+accountId+"); DELETE FROM group_invites WHERE recipient_account_id="+accountId+" OR inviter_account_id="+accountId+"; DELETE FROM friend_requests WHERE sender_id="+accountId+" OR recipient_id="+accountId+"; DELETE FROM friendships WHERE account_low="+accountId+" OR account_high="+accountId+"; DELETE FROM account_blocks WHERE blocker_id="+accountId+" OR blocked_id="+accountId+"; DELETE FROM devices WHERE account_id="+accountId+"; DELETE FROM accounts WHERE id="+accountId+";");Execute("COMMIT;");return new Dictionary<string,object>{{"accountId",accountId},{"username",username},{"relatedAccounts",related}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}}}
         public bool IsPresent(long accountId){lock(gate)return ScalarLong(database,"SELECT count(*) FROM presence p JOIN devices d ON d.id=p.device_id WHERE d.account_id="+accountId+" AND p.seen_utc>="+(UnixNow()-90))>0;}
         public string Username(long accountId){lock(gate)return ScalarText(database,"SELECT username FROM accounts WHERE id="+accountId);}
         static long UnixNow(){return DateTimeOffset.UtcNow.ToUnixTimeSeconds();}
@@ -138,14 +267,16 @@ namespace PeerChat.Server {
         // a presence record, friendship mutation, or peer-trust decision.
         sealed class DirectProbe { public string Id,InitiatorDevice,RecipientDevice,InitiatorHost,RecipientHost;public long Initiator,Recipient,Expires;public int InitiatorPort,RecipientPort;public bool Consented,InitiatorSubmitted,RecipientSubmitted; }
         sealed class RelayEndpoint {
-            public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId;public readonly string DeviceId,TargetDeviceId,Binding;public readonly object WriteGate=new object();public readonly ManualResetEvent Ready=new ManualResetEvent(false);
+            public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId,RosterGeneration;public readonly string DeviceId,TargetDeviceId,Binding,Scope,GroupId,SessionTokenHash;public readonly object WriteGate=new object();public readonly ManualResetEvent Ready=new ManualResetEvent(false);
             public RelayEndpoint Peer;public string SessionId;public bool Incoming;
-            public RelayEndpoint(TcpClient client,SslStream tls,long account,string device,long target,string targetDevice){Client=client;Tls=tls;AccountId=account;DeviceId=device;TargetAccountId=target;TargetDeviceId=targetDevice;Binding=account+":"+device+">"+target+":"+targetDevice;}
+            public RelayEndpoint(TcpClient client,SslStream tls,long account,string device,long target,string targetDevice,string scope,string groupId,long rosterGeneration,string tokenHash){Client=client;Tls=tls;AccountId=account;DeviceId=device;TargetAccountId=target;TargetDeviceId=targetDevice;Scope=scope;GroupId=groupId;RosterGeneration=rosterGeneration;SessionTokenHash=tokenHash;Binding=scope+":"+groupId+":"+rosterGeneration+":"+account+":"+device+">"+target+":"+targetDevice;}
         }
         readonly object relayGate=new object();readonly List<RelayEndpoint> waitingRelays=new List<RelayEndpoint>();readonly List<RelayEndpoint> relayEndpoints=new List<RelayEndpoint>();readonly HashSet<string> activeRelayBindings=new HashSet<string>(StringComparer.Ordinal);
         readonly object directProbeGate=new object();readonly Dictionary<string,DirectProbe> directProbes=new Dictionary<string,DirectProbe>(StringComparer.Ordinal);const int DirectProbeLifetimeSeconds=60;
         sealed class TurnCredentialRate { public long WindowUtc; public int Count; }
         readonly object turnCredentialGate=new object();readonly Dictionary<string,TurnCredentialRate> turnCredentialRates=new Dictionary<string,TurnCredentialRate>(StringComparer.Ordinal);
+        readonly object peopleSearchGate=new object();readonly Dictionary<long,Queue<long>> peopleSearchTimes=new Dictionary<long,Queue<long>>();
+        bool PermitPeopleSearch(long accountId){lock(peopleSearchGate){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();Queue<long> times;if(!peopleSearchTimes.TryGetValue(accountId,out times)){times=new Queue<long>();peopleSearchTimes[accountId]=times;}while(times.Count>0&&times.Peek()<=now-60)times.Dequeue();if(times.Count>=20)return false;times.Enqueue(now);return true;}}
         // A certificate can be loaded from a PFX for ordinary deployment or from CurrentUser\My
         // during local development. Neither path ever exposes its private key to clients.
         public DiscoveryServer(ServerConfiguration c){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);certificate=LoadCertificate(c);}
@@ -200,7 +331,58 @@ namespace PeerChat.Server {
             if(type=="media_turn_credentials")return MediaTurnCredentials(accountId,identity);
             if(type=="search") { if(!ValidUsername(username)){Log("WARNING","Rejected malformed username search.");return Error("invalid_search");}var found=accounts.Search(username,accountId);Log("DEBUG",found==null?"Username search returned no result.":"Username search completed.");return found==null?Error("not_found"):Ok(found); }
             if(type=="suggest") { if(String.IsNullOrEmpty(username)||username.Length>32||username.Any(c=>!(Char.IsLetterOrDigit(c)||c=='-'||c=='_')))return Error("invalid_search");var suggestions=accounts.Suggestions(username,accountId,15);Log("DEBUG","Username suggestions completed: "+suggestions.Count+" result(s).");return Ok(new Dictionary<string,object>{{"suggestions",suggestions}}); }
+            if(type=="people_search") { string query=Text(request,"query");long searchAccountId;if(String.IsNullOrEmpty(query)||query.Length>32||query.Any(c=>!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))||query.Length<2&&!Int64.TryParse(query,out searchAccountId))return Error("invalid_search");if(!PermitPeopleSearch(accountId))return Error("search_rate_limited");return Ok(new Dictionary<string,object>{{"accounts",accounts.PeopleSearch(query,accountId)}}); }
             if(type=="friend_state")return Ok(accounts.FriendState(accountId));
+            if(type=="group_register"){
+                GroupRosterProof proof;try{proof=GroupRosterProof.Parse(Text(request,"createProof"));}catch{return Error("invalid_group_proof");}
+                var roster=accounts.RegisterGroup(accountId,identity,proof);return roster==null?Error("group_registration_denied"):Ok(roster);
+            }
+            if(type=="group_roster"){
+                var roster=accounts.GroupRoster(Text(request,"groupId"),accountId,identity);return roster==null?Error("group_not_authorized"):Ok(roster);
+            }
+            if(type=="group_state")return Ok(new Dictionary<string,object>{{"groups",accounts.GroupRostersForDevice(accountId,identity)}});
+            if(type=="group_invite_account"){
+                long target,generation;if(!Int64.TryParse(Text(request,"targetAccountId"),out target)||!Int64.TryParse(Text(request,"rosterGeneration"),out generation)||generation<1)return Error("invalid_group_request");
+                var invite=accounts.GroupInviteAccount(Text(request,"groupId"),accountId,identity,target,generation);if(invite==null)return Error("group_invite_denied");
+                if(Convert.ToString(invite["state"])=="pending")Notify(target,new Dictionary<string,object>{{"event","group_invite_changed"}});
+                return Ok(invite);
+            }
+            if(type=="group_invite_state")return Ok(new Dictionary<string,object>{{"invites",accounts.GroupInvitesFor(accountId)}});
+            if(type=="group_invite_respond"){
+                string inviteId=Text(request,"inviteId"),action=Text(request,"action");if(action!="accept"&&action!="decline")return Error("invalid_group_request");
+                var result=accounts.GroupRespondAccount(inviteId,accountId,identity,action=="accept");if(result==null)return Error("group_invite_denied");
+                string group=Convert.ToString(result["groupId"]);if(action=="accept"){RetireGroupRelays(group);NotifyGroupRosterChanged(group);}
+                Notify(accountId,new Dictionary<string,object>{{"event","group_invite_changed"}});
+                return Ok(result);
+            }
+            if(type=="group_invite_revoke"){
+                string inviteId=Text(request,"inviteId");long recipient=accounts.GroupInviteRecipient(inviteId);
+                if(!accounts.GroupRevokeAccountInvite(inviteId,accountId,identity))return Error("group_invite_denied");
+                if(recipient>0)Notify(recipient,new Dictionary<string,object>{{"event","group_invite_changed"}});
+                return Ok(new Dictionary<string,object>{{"state","revoked"}});
+            }
+            if(type=="group_invite"||type=="group_remove"){
+                long target,generation;string targetDevice=Text(request,"targetPublicIdentity");
+                if(!Int64.TryParse(Text(request,"targetAccountId"),out target)||!Int64.TryParse(Text(request,"rosterGeneration"),out generation)||generation<1)return Error("invalid_group_request");
+                var roster=type=="group_invite"?accounts.GroupInvite(Text(request,"groupId"),accountId,identity,target,targetDevice,generation):accounts.GroupRemove(Text(request,"groupId"),accountId,identity,target,targetDevice,generation);
+                if(roster==null)return Error("group_not_authorized");
+                RetireGroupRelays(Text(request,"groupId"));
+                NotifyGroupRosterChanged(Text(request,"groupId"));
+                if(type=="group_remove")Notify(target,new Dictionary<string,object>{{"event","group_roster_changed"},{"groupId",Text(request,"groupId")}});
+                return Ok(roster);
+            }
+            if(type=="group_accept"||type=="group_decline"){
+                long generation;if(!Int64.TryParse(Text(request,"rosterGeneration"),out generation)||generation<1)return Error("invalid_group_request");
+                var roster=accounts.GroupRespond(Text(request,"groupId"),accountId,identity,type=="group_accept",generation);
+                if(roster!=null){RetireGroupRelays(Text(request,"groupId"));NotifyGroupRosterChanged(Text(request,"groupId"));Notify(accountId,new Dictionary<string,object>{{"event","group_roster_changed"},{"groupId",Text(request,"groupId")}});}
+                return roster==null?Error("group_not_authorized"):Ok(roster);
+            }
+            if(type=="group_leave"){
+                long generation;if(!Int64.TryParse(Text(request,"rosterGeneration"),out generation)||generation<1)return Error("invalid_group_request");
+                var roster=accounts.GroupLeave(Text(request,"groupId"),accountId,identity,generation);
+                if(roster!=null){RetireGroupRelays(Text(request,"groupId"));NotifyGroupRosterChanged(Text(request,"groupId"));Notify(accountId,new Dictionary<string,object>{{"event","group_roster_changed"},{"groupId",Text(request,"groupId")}});}
+                return roster==null?Error("group_not_authorized"):Ok(roster);
+            }
             if(type=="p2p_request"){long target;return Int64.TryParse(Text(request,"targetAccountId"),out target)?DirectProbeRequest(accountId,identity,target,Text(request,"targetPublicIdentity")):Error("invalid_account");}
             if(type=="p2p_consent"){return DirectProbeEnd(accountId,identity,Text(request,"requestId"),Flag(request,"accept",false));}
             if(type=="p2p_candidates"){int port;return Int32.TryParse(Text(request,"endpointPort"),out port)?DirectProbeCandidate(accountId,identity,Text(request,"requestId"),Text(request,"endpointHost"),port):Error("invalid_p2p_candidate");}
@@ -233,27 +415,37 @@ namespace PeerChat.Server {
             lock(relayGate){
                 if(activeRelayBindings.Contains(endpoint.Binding))return false;
                 activeRelayBindings.Add(endpoint.Binding);
-                RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
+                RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.Scope==endpoint.Scope&&value.GroupId==endpoint.GroupId&&value.RosterGeneration==endpoint.RosterGeneration&&value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
                 if(peer==null){waitingRelays.Add(endpoint);return true;}
                 waitingRelays.Remove(peer);string session=RandomToken();endpoint.Peer=peer;peer.Peer=endpoint;endpoint.SessionId=peer.SessionId=session;
                 endpoint.Incoming=String.CompareOrdinal(endpoint.DeviceId,peer.DeviceId)>0;peer.Incoming=!endpoint.Incoming;endpoint.Ready.Set();peer.Ready.Set();return true;
             }
         }
         void RemoveRelay(RelayEndpoint endpoint){lock(relayGate){waitingRelays.Remove(endpoint);relayEndpoints.Remove(endpoint);activeRelayBindings.Remove(endpoint.Binding);}try{if(endpoint.Peer!=null)endpoint.Peer.Client.Close();}catch{}endpoint.Ready.Dispose();}
+        void RetireGroupRelays(string groupId){
+            List<RelayEndpoint> stale;
+            lock(relayGate)stale=relayEndpoints.Where(value=>value.Scope=="group_key"&&value.GroupId==groupId).ToList();
+            foreach(var endpoint in stale)try{endpoint.Client.Close();}catch{}
+        }
+        void NotifyGroupRosterChanged(string groupId){foreach(long member in accounts.GroupMemberAccounts(groupId))Notify(member,new Dictionary<string,object>{{"event","group_roster_changed"},{"groupId",groupId}});}
         void RetireDeletedAccount(long accountId){List<EventClient> events;lock(eventGate){onlineAccounts.Remove(accountId);onlineCandidateSignatures.Remove(accountId);events=eventClients.Where(value=>value.AccountId==accountId).ToList();foreach(var value in events)eventClients.Remove(value);}foreach(var value in events)value.Dispose();List<RelayEndpoint> relays;lock(relayGate)relays=relayEndpoints.Where(value=>value.AccountId==accountId||value.TargetAccountId==accountId).ToList();foreach(var value in relays){try{value.Client.Close();}catch{}}}
         Dictionary<string,object> AdminDeleteAccount(long accountId){bool online=accounts.IsPresent(accountId);var deleted=accounts.AdminDeleteAccount(accountId);if(deleted==null)return Error("account_not_found");var related=deleted["relatedAccounts"] as List<long>;if(related!=null)foreach(var other in related)Broadcast(other,accountId,"friendship_changed",false);RetireDeletedAccount(accountId);Log("WARNING","Local administrator permanently deleted server account "+accountId+" ("+deleted["username"]+").");return Ok(new Dictionary<string,object>{{"state","account_deleted"},{"accountId",accountId},{"username",deleted["username"]},{"disconnectedActiveSession",online}});}
         void ServeRelay(TcpClient client,SslStream tls,Dictionary<string,object> request){
-            long accountId=accounts.Authenticate(TokenHash(Text(request,"sessionToken"))),targetAccountId;string device=Text(request,"publicIdentity"),targetDevice=Text(request,"targetPublicIdentity");
+            string tokenHash=TokenHash(Text(request,"sessionToken"));long accountId=accounts.Authenticate(tokenHash),targetAccountId;string device=Text(request,"publicIdentity"),targetDevice=Text(request,"targetPublicIdentity");
             if(accountId==0){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
             if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||accountId==targetAccountId||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
-            if(!accounts.RelayAuthorized(accountId,targetAccountId)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
-            var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice);lock(relayGate)relayEndpoints.Add(endpoint);
+            string scope=Text(request,"purpose")??"friend",groupId=Text(request,"groupId")??"";long rosterGeneration=0;
+            if(scope=="group_key"&&(!Int64.TryParse(Text(request,"rosterGeneration"),out rosterGeneration)||rosterGeneration<1)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("group_roster_generation_invalid"))));return;}
+            bool authorized=scope=="friend"&&groupId.Length==0&&rosterGeneration==0&&accounts.RelayAuthorized(accountId,targetAccountId)
+                ||scope=="group_key"&&accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration);
+            if(!authorized){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
+            var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice,scope,groupId,rosterGeneration,tokenHash);lock(relayGate)relayEndpoints.Add(endpoint);
             if(!PairRelay(endpoint)){lock(relayGate)relayEndpoints.Remove(endpoint);WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
             try{
                 if(!endpoint.Ready.WaitOne(TimeSpan.FromSeconds(15))){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_pair_timeout"))));return;}
-                var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming}})));lock(endpoint.WriteGate)WriteFrame(tls,ready);
+                var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}})));lock(endpoint.WriteGate)WriteFrame(tls,ready);
                 byte[] session=Encoding.ASCII.GetBytes(endpoint.SessionId);
-                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
+                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
             }finally{RemoveRelay(endpoint);Log("DEBUG","Authenticated opaque relay channel closed for account "+accountId+".");}
         }
         void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);Log("DEBUG","Discovery client connected.");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");

@@ -64,7 +64,7 @@ public sealed class ConnectionAttemptDetails {
     public string ExpectedPeer="",PresentedPeer="",Candidate="None",Source="PeerChat server relay",Route="relay-only",TransportState="Offline",TrustState="No verification pending",Failure="None",LocalSubnetDiagnostics="Not evaluated";
     public bool HasLiveSession;
     public long LiveConnectionId,LatestFailedAttemptId,SessionEpoch,SessionRevision;
-    public string LiveCandidate="None",LiveSource="None",LiveRoute="None",LiveDirection="unknown",LatestFailedCandidate="None",LatestFailedSource="None",LatestFailedRoute="None",LatestFailure="None";
+    public string LiveCandidate="None",LiveSource="None",LiveRoute="None",LiveDirection="unknown",LatestFailedCandidate="None",LatestFailedSource="None",LatestFailedRoute="None",LatestFailure="None",LatestProgress="None";
 }
 
 public sealed class LocalSubnetInterface {
@@ -109,7 +109,8 @@ public sealed class ConnectionAttemptTracker {
             if(e.kind==17){bool newer=e.sessionEpoch>value.SessionEpoch||(e.sessionEpoch==value.SessionEpoch&&e.sessionRevision>value.SessionRevision);acceptState=newer;if(newer){value.SessionEpoch=e.sessionEpoch;value.SessionRevision=e.sessionRevision;value.HasLiveSession=e.connected;value.LiveConnectionId=e.connected?e.attempt:0;if(e.connected){value.LiveCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LiveSource=String.IsNullOrEmpty(e.source)?"Direct":e.source;value.LiveRoute=String.IsNullOrEmpty(e.route)?"authenticated":e.route;value.LiveDirection=String.IsNullOrEmpty(e.detail)?"unknown":e.detail;}}}
             else if(e.kind==3&&value.SessionRevision==0){value.HasLiveSession=true;value.LiveConnectionId=e.attempt;value.LiveCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LiveSource=String.IsNullOrEmpty(e.source)?"Direct":e.source;value.LiveRoute=String.IsNullOrEmpty(e.route)?"authenticated":e.route;value.LiveDirection=String.IsNullOrEmpty(e.detail)?"unknown":e.detail;}
             else if(e.kind==4&&value.SessionRevision==0&&value.HasLiveSession&&(e.attempt==0||e.attempt==value.LiveConnectionId)){value.HasLiveSession=false;}
-            bool failed=e.kind==8||e.kind==16;if(failed){value.LatestFailedAttemptId=e.attempt;value.LatestFailedCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LatestFailedSource=String.IsNullOrEmpty(e.source)?"Unknown":e.source;value.LatestFailedRoute=String.IsNullOrEmpty(e.route)?"Unknown":e.route;value.LatestFailure=String.IsNullOrEmpty(failure)?(e.text??"Connection attempt failed"):failure;}
+            if(e.kind==16)value.LatestProgress=String.IsNullOrEmpty(e.text)?"Connection lifecycle transition":e.text;
+            if(e.kind==8){value.LatestFailedAttemptId=e.attempt;value.LatestFailedCandidate=String.IsNullOrEmpty(e.candidate)?"Unknown":e.candidate;value.LatestFailedSource=String.IsNullOrEmpty(e.source)?"Unknown":e.source;value.LatestFailedRoute=String.IsNullOrEmpty(e.route)?"Unknown":e.route;value.LatestFailure=String.IsNullOrEmpty(failure)?(e.text??"Connection attempt failed"):failure;}
             if(!value.HasLiveSession){if(e.attempt>0)value.AttemptId=e.attempt;if(e.kind==14)value.PresentedPeer="";if(!String.IsNullOrEmpty(e.candidate))value.Candidate=e.candidate;if(!String.IsNullOrEmpty(e.source))value.Source=e.source;if(!String.IsNullOrEmpty(e.route))value.Route=e.route;}
         }
         if(acceptState&&!value.HasLiveSession){if(!String.IsNullOrEmpty(transport))value.TransportState=transport;if(!String.IsNullOrEmpty(trust))value.TrustState=trust;if(!String.IsNullOrEmpty(failure))value.Failure=failure;}Project(value);return value;

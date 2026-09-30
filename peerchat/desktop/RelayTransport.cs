@@ -13,10 +13,10 @@ namespace PeerChatDesktop {
 // framed opaque bytes; the native core still performs the authoritative peer TLS.
 public sealed class RelayTransport : IDisposable {
     const int MaximumPayload=64*1024;
-    readonly DiscoveryClient discovery;readonly CoreAdapter core;readonly ulong attempt;readonly string localPeer,targetPeer;readonly long targetAccount;readonly Action<ulong> completed;
+    readonly DiscoveryClient discovery;readonly CoreAdapter core;readonly ulong attempt;readonly string localPeer,targetPeer,groupId;readonly long targetAccount,rosterGeneration;readonly Action<ulong> completed;
     readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=16*1024};
     Thread worker;TcpClient tcp;volatile bool stopping;
-    public RelayTransport(DiscoveryClient discovery,CoreAdapter core,ulong attempt,string localPeer,long targetAccount,string targetPeer,Action<ulong> completed){this.discovery=discovery;this.core=core;this.attempt=attempt;this.localPeer=localPeer;this.targetAccount=targetAccount;this.targetPeer=targetPeer;this.completed=completed;}
+    public RelayTransport(DiscoveryClient discovery,CoreAdapter core,ulong attempt,string localPeer,long targetAccount,string targetPeer,Action<ulong> completed,string groupId=null,long rosterGeneration=0){this.discovery=discovery;this.core=core;this.attempt=attempt;this.localPeer=localPeer;this.targetAccount=targetAccount;this.targetPeer=targetPeer;this.completed=completed;this.groupId=groupId;this.rosterGeneration=rosterGeneration;}
     public void Start(){worker=new Thread(Run){IsBackground=true,Name="PeerChat opaque relay"};worker.Start();}
     static bool ValidSession(string value){if(String.IsNullOrEmpty(value)||value.Length!=43)return false;foreach(char c in value)if(!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))return false;return true;}
     void Run(){string failure="Relay closed";SslStream tls=null;Thread writer=null;try{
@@ -26,10 +26,13 @@ public sealed class RelayTransport : IDisposable {
         // unbounded read during profile shutdown; writes retain their bounded timeout.
         tls=discovery.OpenAuthenticatedStream(out tcp,true);
         var request=new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",discovery.SessionToken??""},{"publicIdentity",localPeer},{"targetAccountId",targetAccount.ToString()},{"targetPublicIdentity",targetPeer}};
+        if(!String.IsNullOrEmpty(groupId)){if(rosterGeneration<=0)throw new InvalidOperationException("Group-control roster generation is unavailable.");request["purpose"]="group_key";request["groupId"]=groupId;request["rosterGeneration"]=rosterGeneration.ToString();}
         DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(request)));
         var response=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(tls)));object ok,error,sessionValue,incomingValue;
         if(!response.TryGetValue("ok",out ok)||!(bool)ok){response.TryGetValue("error",out error);throw new InvalidOperationException("Relay: "+(error??"request_failed"));}
         if(!response.TryGetValue("sessionId",out sessionValue)||!ValidSession(sessionValue as string)||!response.TryGetValue("incoming",out incomingValue))throw new InvalidDataException("Relay pairing response was invalid.");
+        object purposeValue,groupValue,generationValue;
+        if(!String.IsNullOrEmpty(groupId)&&(!response.TryGetValue("purpose",out purposeValue)||!String.Equals(Convert.ToString(purposeValue),"group_key",StringComparison.Ordinal)||!response.TryGetValue("groupId",out groupValue)||!String.Equals(Convert.ToString(groupValue),groupId,StringComparison.Ordinal)||!response.TryGetValue("rosterGeneration",out generationValue)||Convert.ToInt64(generationValue)!=rosterGeneration))throw new InvalidDataException("Group-control relay scope changed during rendezvous.");
         string sessionId=(string)sessionValue;bool incoming=Convert.ToBoolean(incomingValue);if(!core.RelayReady(attempt,incoming))throw new InvalidOperationException("Relay attempt is no longer current.");
         writer=new Thread(()=>WriteLoop(tls,sessionId)){IsBackground=true,Name="PeerChat relay writer"};writer.Start();byte[] session=Encoding.ASCII.GetBytes(sessionId);
         while(!stopping){byte[] frame=DiscoveryClient.ReadFrame(tls,session.Length+MaximumPayload);if(frame.Length<=session.Length)throw new InvalidDataException("Relay frame was empty.");for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])throw new InvalidDataException("Relay session binding changed.");int count=frame.Length-session.Length;var payload=new byte[count];Buffer.BlockCopy(frame,session.Length,payload,0,count);if(!core.RelayReceive(attempt,payload,count))throw new InvalidOperationException("Relay attempt was superseded.");}

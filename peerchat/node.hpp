@@ -3,6 +3,7 @@
 #include "group.hpp"
 #include "media_telemetry.hpp"
 #include "media_ice_configuration.hpp"
+#include "group_key_manager.hpp"
 #include <memory>
 
 namespace peerchat {
@@ -26,6 +27,9 @@ struct NodeEvent {
     std::wstring route;
     std::uint16_t port=0;
     std::uint64_t attemptId=0;
+    std::string authorizationGroupId;
+    std::uint64_t authorizationRosterGeneration=0;
+    std::uint64_t authorizationTargetAccountId=0;
     std::uint64_t sessionEpoch=0;
     std::uint64_t sessionRevision=0;
     std::uint64_t networkGeneration=0;
@@ -98,7 +102,13 @@ public:
     bool eraseHistory(const std::string& peerId);
     void setName(const std::wstring& name);
     void setGroupAccount(std::uint64_t accountId,const std::wstring& accountName);
+    bool setAuthenticatedGroupRoster(std::uint64_t localAccountId,std::uint64_t discoveryGeneration,group_keys::RosterSnapshot roster);
+    void clearAuthenticatedGroupRosters();
+    bool beginGroupControl(const std::string& serverGroupId,std::uint64_t targetAccountId,const std::string& targetPeerId,std::uint64_t discoveryGeneration);
     std::string createGroup(const std::wstring& name);
+    // Returns only the already-signed content-free Create event for an owner
+    // migration claim. It never exports history or group key material.
+    std::wstring groupCreationProof(const std::string& groupId);
     bool renameGroup(const std::string& groupId,const std::wstring& name);
     bool inviteToGroup(const std::string& groupId,std::uint64_t accountId,const std::string& peerId,const std::wstring& name);
     bool respondToGroupInvite(const std::string& groupId,bool accept);

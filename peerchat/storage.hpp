@@ -8,6 +8,13 @@ namespace peerchat {
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
+// Sensitive group-key handoffs are persisted only in the sender's DPAPI-protected
+// profile store and travel only inside an authenticated peer-TLS control stream.
+struct GroupKeyHandoff {
+    std::string id,groupId,serverGroupId,distributorPeerId,recipientPeerId;
+    std::uint64_t rosterGeneration=0,keyGeneration=0;
+    Blob contentKey;
+};
 struct Profile {
     std::string peerId;
     std::wstring name = L"You";
@@ -67,6 +74,14 @@ public:
     void queueGroupDelivery(const std::string& eventId,const std::string& peerId);
     void acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId);
     std::vector<GroupEvent> pendingGroupEvents(const std::string& peerId,int limit=64);
+    void saveGroupKey(const std::string& groupId,std::uint64_t generation,const Blob& key);
+    Blob groupKey(const std::string& groupId,std::uint64_t generation);
+    void queueGroupKeyHandoff(const GroupKeyHandoff& handoff);
+    std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& recipientPeerId,int limit=64);
+    void acknowledgeGroupKeyHandoff(const std::string& id,const std::string& recipientPeerId);
+    bool hasGroupKeyReceipt(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId);
+    bool hasPendingGroupKeyHandoff(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId);
+    void cancelGroupKeyHandoffsFor(const std::string& groupId,const std::string& recipientPeerId);
     static std::string newMessageId();
     static std::string publicKeyId(const Blob& publicKey);
 private:

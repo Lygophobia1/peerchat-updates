@@ -156,7 +156,10 @@ struct Storage::Impl {
                     "CREATE TABLE IF NOT EXISTS group_events(event_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,logical_order INTEGER NOT NULL,b BLOB NOT NULL);"
                     "CREATE INDEX IF NOT EXISTS group_event_order ON group_events(group_id,logical_order,event_id);"
                     "CREATE TABLE IF NOT EXISTS group_outbox(event_id TEXT NOT NULL REFERENCES group_events(event_id) ON DELETE CASCADE,peer_id TEXT NOT NULL,PRIMARY KEY(event_id,peer_id));"
-                    "CREATE INDEX IF NOT EXISTS group_outbox_peer ON group_outbox(peer_id,event_id);");
+                    "CREATE INDEX IF NOT EXISTS group_outbox_peer ON group_outbox(peer_id,event_id);"
+                    "CREATE TABLE IF NOT EXISTS group_key_outbox(id TEXT PRIMARY KEY,group_id TEXT NOT NULL,key_generation INTEGER NOT NULL,recipient_peer TEXT NOT NULL,b BLOB NOT NULL);"
+                    "CREATE INDEX IF NOT EXISTS group_key_outbox_recipient ON group_key_outbox(recipient_peer,id);"
+                    "CREATE TABLE IF NOT EXISTS group_key_receipts(group_id TEXT NOT NULL,key_generation INTEGER NOT NULL,recipient_peer TEXT NOT NULL,PRIMARY KEY(group_id,key_generation,recipient_peer));");
         }catch(...){sql.close(db);db=nullptr;throw;}
     }
     ~Impl(){if(db)sql.close(db);}
@@ -305,4 +308,58 @@ void Storage::saveGroupAccount(const GroupAccount& account){require(account.acco
 void Storage::queueGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery identity");Statement statement(impl_->sql,impl_->db,"INSERT OR IGNORE INTO group_outbox(event_id,peer_id) VALUES(?,?)");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
 void Storage::acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery acknowledgement");Statement statement(impl_->sql,impl_->db,"DELETE FROM group_outbox WHERE event_id=? AND peer_id=?");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
 std::vector<GroupEvent> Storage::pendingGroupEvents(const std::string& peerId,int limit){require(identifier(peerId)&&limit>0&&limit<=256,"Invalid group outbox request");Statement statement(impl_->sql,impl_->db,"SELECT e.event_id,e.group_id,e.b FROM group_outbox o JOIN group_events e ON e.event_id=o.event_id WHERE o.peer_id=? ORDER BY e.logical_order,e.event_id LIMIT ?");statement.text(1,peerId);statement.number(2,limit);std::vector<GroupEvent> events;while(statement.row()){auto eventId=statement.text(0),groupId=statement.text(1);Secret plain{protect(statement.bytes(2),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Group outbox identity mismatch");events.push_back(std::move(event));}return events;}
+void Storage::saveGroupKey(const std::string& groupId,std::uint64_t generation,const Blob& key){
+    require(identifier(groupId,32)&&generation>0&&generation<=INT64_MAX&&key.size()==32,"Invalid group key identity");
+    std::string record="group-key/"+groupId+"/"+std::to_string(generation);
+    Secret saved{impl_->get(record)};
+    if(!saved.data.empty()){require(saved.data==key,"Conflicting group key generation");return;}
+    impl_->put(record,key);
+}
+Blob Storage::groupKey(const std::string& groupId,std::uint64_t generation){
+    require(identifier(groupId,32)&&generation>0&&generation<=INT64_MAX,"Invalid group key request");
+    Blob key=impl_->get("group-key/"+groupId+"/"+std::to_string(generation));
+    require(key.empty()||key.size()==32,"Invalid protected group key");return key;
+}
+void Storage::queueGroupKeyHandoff(const GroupKeyHandoff& handoff){
+    require(identifier(handoff.id,32)&&identifier(handoff.groupId,32)&&identifier(handoff.serverGroupId,32)&&identifier(handoff.distributorPeerId)&&identifier(handoff.recipientPeerId)&&handoff.distributorPeerId!=handoff.recipientPeerId&&handoff.rosterGeneration>0&&handoff.keyGeneration==handoff.rosterGeneration&&handoff.keyGeneration<=INT64_MAX&&handoff.contentKey.size()==32,"Invalid group key handoff");
+    Writer writer;writer.string(handoff.id);writer.string(handoff.groupId);writer.string(handoff.serverGroupId);writer.string(handoff.distributorPeerId);writer.string(handoff.recipientPeerId);writer.number(handoff.rosterGeneration);writer.number(handoff.keyGeneration);writer.bytes(handoff.contentKey);
+    std::string context="PeerChat.v1/group-key-handoff/"+handoff.id+"/"+handoff.recipientPeerId;
+    Transaction transaction(impl_->sql,impl_->db);
+    Statement previous(impl_->sql,impl_->db,"SELECT group_id,recipient_peer,b FROM group_key_outbox WHERE id=?");previous.text(1,handoff.id);
+    if(previous.row()){require(previous.text(0)==handoff.groupId&&previous.text(1)==handoff.recipientPeerId,"Group key handoff ID reused for another destination");Secret saved{protect(previous.bytes(2),context,false)};require(saved.data==writer.data,"Conflicting group key handoff ID");transaction.commit();return;}
+    Blob protectedRecord=protect(writer.data,context,true);
+    Statement insert(impl_->sql,impl_->db,"INSERT INTO group_key_outbox(id,group_id,key_generation,recipient_peer,b) VALUES(?,?,?,?,?)");insert.text(1,handoff.id);insert.text(2,handoff.groupId);insert.number(3,static_cast<std::int64_t>(handoff.keyGeneration));insert.text(4,handoff.recipientPeerId);insert.blob(5,protectedRecord);insert.row();transaction.commit();
+}
+std::vector<GroupKeyHandoff> Storage::pendingGroupKeyHandoffs(const std::string& recipientPeerId,int limit){
+    require(identifier(recipientPeerId)&&limit>0&&limit<=256,"Invalid group key outbox request");
+    Statement statement(impl_->sql,impl_->db,"SELECT id,b FROM group_key_outbox WHERE recipient_peer=? ORDER BY rowid LIMIT ?");statement.text(1,recipientPeerId);statement.number(2,limit);
+    std::vector<GroupKeyHandoff> pending;
+    while(statement.row()){std::string id=statement.text(0);Secret plain{protect(statement.bytes(1),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};Reader reader(plain.data);GroupKeyHandoff offer;offer.id=reader.string();offer.groupId=reader.string();offer.serverGroupId=reader.string();offer.distributorPeerId=reader.string();offer.recipientPeerId=reader.string();offer.rosterGeneration=reader.number();offer.keyGeneration=reader.number();offer.contentKey=reader.bytes();reader.end();require(offer.id==id&&offer.recipientPeerId==recipientPeerId&&identifier(offer.groupId,32)&&identifier(offer.serverGroupId,32)&&identifier(offer.distributorPeerId)&&offer.contentKey.size()==32,"Stored group key handoff identity mismatch");pending.push_back(std::move(offer));}
+    return pending;
+}
+void Storage::acknowledgeGroupKeyHandoff(const std::string& id,const std::string& recipientPeerId){
+    require(identifier(id,32)&&identifier(recipientPeerId),"Invalid group key acknowledgement");
+    Transaction transaction(impl_->sql,impl_->db);
+    Statement found(impl_->sql,impl_->db,"SELECT b FROM group_key_outbox WHERE id=? AND recipient_peer=?");found.text(1,id);found.text(2,recipientPeerId);
+    require(found.row(),"Group key acknowledgement has no pending handoff");
+    Secret plain{protect(found.bytes(0),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};
+    Reader reader(plain.data);require(reader.string()==id,"Stored group key handoff ID mismatch");
+    std::string group=reader.string();reader.string();reader.string();require(reader.string()==recipientPeerId,"Stored group key recipient mismatch");
+    reader.number();std::uint64_t generation=reader.number();Secret key{reader.bytes()};reader.end();
+    require(identifier(group,32)&&generation>0&&generation<=INT64_MAX,"Invalid stored group key generation");
+    Statement receipt(impl_->sql,impl_->db,"INSERT OR IGNORE INTO group_key_receipts(group_id,key_generation,recipient_peer) VALUES(?,?,?)");receipt.text(1,group);receipt.number(2,static_cast<std::int64_t>(generation));receipt.text(3,recipientPeerId);receipt.row();
+    Statement removal(impl_->sql,impl_->db,"DELETE FROM group_key_outbox WHERE id=? AND recipient_peer=?");removal.text(1,id);removal.text(2,recipientPeerId);removal.row();transaction.commit();
+}
+bool Storage::hasGroupKeyReceipt(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId){
+    require(identifier(groupId,32)&&generation>0&&generation<=INT64_MAX&&identifier(recipientPeerId),"Invalid group key receipt request");
+    Statement statement(impl_->sql,impl_->db,"SELECT 1 FROM group_key_receipts WHERE group_id=? AND key_generation=? AND recipient_peer=?");statement.text(1,groupId);statement.number(2,static_cast<std::int64_t>(generation));statement.text(3,recipientPeerId);return statement.row();
+}
+bool Storage::hasPendingGroupKeyHandoff(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId){
+    require(identifier(groupId,32)&&generation>0&&generation<=INT64_MAX&&identifier(recipientPeerId),"Invalid pending group key request");
+    Statement statement(impl_->sql,impl_->db,"SELECT 1 FROM group_key_outbox WHERE group_id=? AND key_generation=? AND recipient_peer=?");statement.text(1,groupId);statement.number(2,static_cast<std::int64_t>(generation));statement.text(3,recipientPeerId);return statement.row();
+}
+void Storage::cancelGroupKeyHandoffsFor(const std::string& groupId,const std::string& recipientPeerId){
+    require(identifier(groupId,32)&&identifier(recipientPeerId),"Invalid group key handoff cancellation");
+    Statement statement(impl_->sql,impl_->db,"DELETE FROM group_key_outbox WHERE group_id=? AND recipient_peer=?");statement.text(1,groupId);statement.text(2,recipientPeerId);statement.row();
+}
 }

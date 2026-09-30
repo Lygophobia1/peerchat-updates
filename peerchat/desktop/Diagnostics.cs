@@ -17,6 +17,37 @@ public sealed class DiagnosticsSnapshot {
     public string Profile {get;set;}
     public string Status {get;set;}
     public List<DiagnosticsSection> Sections {get;set;}
+    public List<GroupDiagnosticsData> Groups {get;set;}
+}
+// A frozen projection of the signed group ledger and any separately authorized
+// server roster state. No key bytes, chat content, or route endpoints belong here.
+public sealed class GroupDiagnosticsData {
+    public string GroupId {get;set;}
+    public string ServerGroupId {get;set;}
+    public string Name {get;set;}
+    public string LocalRole {get;set;}
+    public string RosterState {get;set;}
+    public string GroupControlState {get;set;}
+    public string E2eeState {get;set;}
+    public string DeliveryState {get;set;}
+    public string KeyHandoffState {get;set;}
+    public string LastKeyOfferResult {get;set;}
+    public string LastKeyAckResult {get;set;}
+    public long RosterGeneration {get;set;}
+    public long KeyGeneration {get;set;}
+    public int PendingInvites {get;set;}
+    public int KnownOnlineMembers {get;set;}
+    public int MembersWithKnownPresence {get;set;}
+    public List<GroupDiagnosticsMember> Members {get;set;}
+}
+public sealed class GroupDiagnosticsMember {
+    public long AccountId {get;set;}
+    public string Name {get;set;}
+    public string PeerId {get;set;}
+    public string Role {get;set;}
+    public string Relationship {get;set;}
+    public string GroupControlState {get;set;}
+    public string KeyHandoffState {get;set;}
 }
 // Stable logical ownership for a diagnostics projection.  This deliberately has
 // no endpoint, ICE candidate, allocation, or transport-generation fields: those
@@ -73,6 +104,7 @@ public sealed class DiagnosticsSources {
     public Func<string> Status {get;set;}
     public Func<string> Build {get;set;}
     public Func<string> Profile {get;set;}
+    public Func<IList<GroupDiagnosticsData>> Groups {get;set;}
 }
 public sealed class VoiceDiagnosticsData {
     public string Native,CallId,PeerId,VerifiedPeerId,CallState,MediaRoute,InputDevice,OutputDevice,StartedUtc,ConnectedUtc,EndedUtc,LatestAudioError;
@@ -91,8 +123,9 @@ public sealed class DiagnosticsService {
         Add(sections,"Security",Read(sources.Security));
         var voice=ReadVoice();Add(sections,"Voice",String.IsNullOrWhiteSpace(voice)?Read(sources.Voice):voice);
         Add(sections,"Screen share",Read(sources.ScreenShare));Add(sections,"Local",Read(sources.Local));
-        return new DiagnosticsSnapshot{SnapshotId=Guid.NewGuid().ToString("N"),TimestampUtc=DateTime.UtcNow.ToString("O"),Build=Read(sources.Build),Profile=Read(sources.Profile),Status=Read(sources.Status),Sections=sections};
+        return new DiagnosticsSnapshot{SnapshotId=Guid.NewGuid().ToString("N"),TimestampUtc=DateTime.UtcNow.ToString("O"),Build=Read(sources.Build),Profile=Read(sources.Profile),Status=Read(sources.Status),Sections=sections,Groups=ReadGroups()};
     }
+    List<GroupDiagnosticsData> ReadGroups(){try{return CloneGroups(sources.Groups==null?null:sources.Groups());}catch{return new List<GroupDiagnosticsData>();}}
     string ReadVoice(){try{if(sources.VoiceData==null)return "";return FormatVoice(sources.VoiceData());}catch(Exception error){return "Unavailable: "+error.GetType().Name;}}
     static string FormatVoice(VoiceDiagnosticsData v){
         if(v==null)return "";return "call_id="+(v.CallId??"none")+"\ncall_lifetime="+v.Lifetime+"\ncall_type=voice\nexpected_peer_id="+(v.PeerId??"none")+"\nverified_peer_id="+(v.VerifiedPeerId??"not verified/available")+"\ncall_state="+(v.CallState??"Idle")+"\nmedia_generation="+v.MediaGeneration+"\nmedia_state="+v.MediaState+"\nmedia_route="+(v.MediaRoute??"Unavailable")+"\ncontrol_available="+v.ControlAvailable+"\ninput_device="+(v.InputDevice??"none")+"\noutput_device="+(v.OutputDevice??"none")+"\nmuted="+v.Muted+"\ndeafened="+v.Deafened+"\nstarted_utc="+(v.StartedUtc??"unknown")+"\nconnected_utc="+(v.ConnectedUtc??"unknown")+"\nended_utc="+(v.EndedUtc??"unknown")+"\n"+(v.Native??"media_state=unavailable")+"\nlatest_persistent_audio_error="+(v.LatestAudioError??"None");
@@ -101,14 +134,18 @@ public sealed class DiagnosticsService {
         return new FailureSnapshot{Id=Guid.NewGuid().ToString("N"),TimestampUtc=DateTime.UtcNow.ToString("O"),Title=DiagnosticsPrivacyFilter.Redact(Safe(title,160)),OperationType=Safe(operationType,64),OperationId=DiagnosticsPrivacyFilter.Redact(Safe(operationId,160)),FailureDomain=Safe(domain,96),Reason=DiagnosticsPrivacyFilter.Redact(Safe(reason,512)),Stage=DiagnosticsPrivacyFilter.Redact(Safe(stage,256)),Generation=generation,Diagnostics=Clone(snapshot)};
     }
     public static DiagnosticsSnapshot Clone(DiagnosticsSnapshot value){
-        if(value==null)return null;return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=(value.Sections??new List<DiagnosticsSection>()).Select(s=>new DiagnosticsSection{Name=s.Name,Details=s.Details}).ToList()};
+        if(value==null)return null;return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=(value.Sections??new List<DiagnosticsSection>()).Select(s=>new DiagnosticsSection{Name=s.Name,Details=s.Details}).ToList(),Groups=CloneGroups(value.Groups)};
     }
+    static List<GroupDiagnosticsData> CloneGroups(IEnumerable<GroupDiagnosticsData> groups){return (groups??Enumerable.Empty<GroupDiagnosticsData>()).Where(g=>g!=null).Take(128).Select(g=>new GroupDiagnosticsData{GroupId=g.GroupId,ServerGroupId=g.ServerGroupId,Name=g.Name,LocalRole=g.LocalRole,RosterState=g.RosterState,GroupControlState=g.GroupControlState,E2eeState=g.E2eeState,DeliveryState=g.DeliveryState,KeyHandoffState=g.KeyHandoffState,LastKeyOfferResult=g.LastKeyOfferResult,LastKeyAckResult=g.LastKeyAckResult,RosterGeneration=g.RosterGeneration,KeyGeneration=g.KeyGeneration,PendingInvites=g.PendingInvites,KnownOnlineMembers=g.KnownOnlineMembers,MembersWithKnownPresence=g.MembersWithKnownPresence,Members=(g.Members??new List<GroupDiagnosticsMember>()).Where(m=>m!=null).Take(256).Select(m=>new GroupDiagnosticsMember{AccountId=m.AccountId,Name=m.Name,PeerId=m.PeerId,Role=m.Role,Relationship=m.Relationship,GroupControlState=m.GroupControlState,KeyHandoffState=m.KeyHandoffState}).ToList()}).ToList();}
     public static string FormatSummary(DiagnosticsSnapshot value){return FormatSummary(value,null,null);}
     public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName){return FormatSummary(value,accountDisplayName,null);}
     public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){
         if(value==null)return "PeerChat diagnostics unavailable.";
-        var text=new System.Text.StringBuilder("PeerChat diagnostics\nBuild: "+Safe(value.Build,160)+"\nProfile: "+Safe(value.Profile,160)+"\nStatus: "+Safe(value.Status,320)+"\nCaptured UTC: "+Safe(value.TimestampUtc,64));var connection=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(s=>s.Name=="Connection");if(connection!=null){string details=PresentIdentity(connection.Details,accountDisplayName);foreach(string key in new[]{"Account:","Conversation:","Account ID:","Conversation ID:","Friend presence:","Winning route:","TCP/TLS state:","Latest failed reason:"}){string line=(details??"").Replace("\r","").Split('\n').FirstOrDefault(item=>item.StartsWith(key,StringComparison.OrdinalIgnoreCase));if(line!=null)text.AppendLine().Append(line.Trim());}}
+        var text=new System.Text.StringBuilder("PeerChat diagnostics\nBuild: "+Safe(value.Build,160)+"\nProfile: "+Safe(value.Profile,160)+"\nStatus: "+Safe(value.Status,320)+"\nCaptured UTC: "+Safe(value.TimestampUtc,64));var connection=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(s=>s.Name=="Connection");if(connection!=null){string details=PresentIdentity(connection.Details,accountDisplayName);foreach(string key in new[]{"Account:","Conversation:","Account ID:","Conversation ID:","Friend presence:","Winning route:","TCP/TLS state:","Latest progress/status:","Latest failed reason:"}){string line=(details??"").Replace("\r","").Split('\n').FirstOrDefault(item=>item.StartsWith(key,StringComparison.OrdinalIgnoreCase));if(line!=null)text.AppendLine().Append(line.Trim());}}
         foreach(string sectionName in new[]{"Voice","Screen share"}){var section=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(item=>item.Name==sectionName);string label=section==null?"":ResolvePeerDisplayLabel(section.Details,peerDisplayName);if(!String.IsNullOrEmpty(label))text.AppendLine().Append(sectionName).Append(" peer: ").Append(label);}
+        if((value.Sections??new List<DiagnosticsSection>()).Any(s=>s.Name.StartsWith("Group ",StringComparison.Ordinal))&&(value.Groups??new List<GroupDiagnosticsData>()).Count==1){var group=value.Groups[0];text.AppendLine().Append("Type: Group").AppendLine().Append("Group name: ").Append(Safe(group.Name,160)).AppendLine().Append("Group ID: ").Append(Safe(group.GroupId,64));}
+        var groupOverview=(value.Sections??new List<DiagnosticsSection>()).FirstOrDefault(s=>s.Name=="Group overview");
+        if(groupOverview!=null)foreach(string line in Lines(groupOverview.Details).Take(12))text.AppendLine().Append(Safe(line,320));
         return DiagnosticsPrivacyFilter.Redact(text.ToString());
     }
     public static string FormatFailureSummary(FailureSnapshot value){return FormatFailureSummary(value,null,null);}
@@ -123,6 +160,7 @@ public sealed class DiagnosticsService {
         if(value==null)return "PeerChat diagnostics unavailable.";var text=new System.Text.StringBuilder(4096);
         text.AppendLine("PeerChat full diagnostics");text.AppendLine("snapshot_utc="+Safe(value.TimestampUtc,64));text.AppendLine("build="+Safe(value.Build,160));text.AppendLine("profile="+Safe(value.Profile,160));text.AppendLine("status="+Safe(value.Status,320));
         foreach(var section in value.Sections??new List<DiagnosticsSection>()){text.AppendLine();text.AppendLine("=== "+Safe(section.Name,80)+" ===");string label=(section.Name=="Voice"||section.Name=="Screen share")?ResolvePeerDisplayLabel(section.Details,peerDisplayName):"";if(!String.IsNullOrEmpty(label))text.AppendLine("logical_peer="+label);text.AppendLine(PresentIdentity(section.Details,accountDisplayName)??"Unavailable");if(text.Length>65536){text.Length=65520;text.AppendLine("[diagnostics truncated]");break;}}
+        if(!(value.Sections??new List<DiagnosticsSection>()).Any(s=>s.Name.StartsWith("Group ",StringComparison.Ordinal)))foreach(var group in GroupScopes(value)){text.AppendLine();text.AppendLine("=== Group: "+Safe(group.GroupId,64)+" ===");text.AppendLine(GroupOverview(group));if(text.Length>65536){text.Length=65520;text.AppendLine("[diagnostics truncated]");break;}}
         return DiagnosticsPrivacyFilter.Redact(text.ToString());
     }
     // The sources remain authoritative.  These helpers only project one frozen
@@ -159,6 +197,38 @@ public sealed class DiagnosticsService {
         if(selected.Count==0)Add(selected,"Overview","No current subsystem state is available for this logical connection.");
         return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=selected};
     }
+    public static IList<GroupDiagnosticsData> GroupScopes(DiagnosticsSnapshot value){return CloneGroups(value==null?null:value.Groups).OrderBy(g=>g.Name??"",StringComparer.OrdinalIgnoreCase).ThenBy(g=>g.GroupId??"",StringComparer.Ordinal).ToList();}
+    public static DiagnosticsSnapshot ProjectGroup(DiagnosticsSnapshot value,string groupId,string component){
+        if(value==null)return null;
+        var group=(value.Groups??new List<GroupDiagnosticsData>()).FirstOrDefault(g=>g!=null&&String.Equals(g.GroupId,groupId,StringComparison.Ordinal));
+        if(group==null)return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=new List<DiagnosticsSection>{new DiagnosticsSection{Name="Group",Details="Group diagnostics are unavailable for this snapshot."}}};
+        var sections=new List<DiagnosticsSection>();string part=component??"Overview";
+        if(part=="Overview")Add(sections,"Group overview",GroupOverview(group));
+        else if(part=="Connection")Add(sections,"Group connection",GroupConnection(value,group));
+        else if(part=="Voice")Add(sections,"Group voice","Voice room: Not implemented / Inactive\nLocal participation: Unavailable\nParticipant count: Unavailable\nJoining a future room will be voluntary; a one-person room is valid.\nNo one-to-one VoiceMedia state is attributed to this group.");
+        else if(part=="Screen Share")Add(sections,"Group screen share","Screen share: Not implemented / Inactive\nActive sharer: Unavailable\nViewer count: Unavailable\nLocal viewing state: Unavailable\nViewing a future group share will be voluntary and independent of voice.\nNo one-to-one ScreenShareManager state is attributed to this group.");
+        return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=sections,Groups=new List<GroupDiagnosticsData>{CloneGroups(new[]{group})[0]}};
+    }
+    static string GroupOverview(GroupDiagnosticsData group){
+        int count=(group.Members??new List<GroupDiagnosticsMember>()).Count;
+        string online=group.MembersWithKnownPresence==count?group.KnownOnlineMembers.ToString():"Unavailable (presence not known for every member)";
+        return "Type: Group\nGroup name: "+Safe(group.Name,160)+"\nGroup ID: "+Safe(group.GroupId,64)+"\nMember count: "+count+"\nOnline members: "+online+"\nLocal role: "+Safe(group.LocalRole,32)+"\nRoster generation: "+Generation(group.RosterGeneration)+"\nCurrent key generation: "+Generation(group.KeyGeneration)+"\nE2EE state: "+Safe(group.E2eeState,160)+"\nPending invites: "+group.PendingInvites+"\nGroupControl: "+Safe(group.GroupControlState,120)+"\nKey handoff: "+Safe(group.KeyHandoffState,120)+"\nDelivery/health: "+Safe(group.DeliveryState,160);
+    }
+    static string GroupConnection(DiagnosticsSnapshot snapshot,GroupDiagnosticsData group){
+        var text=new System.Text.StringBuilder();text.Append("Type: Group\nGroup name: ").Append(Safe(group.Name,160)).Append("\nGroup ID: ").Append(Safe(group.GroupId,64)).Append("\nServer roster ID: ").Append(String.IsNullOrEmpty(group.ServerGroupId)?"Unavailable":Safe(group.ServerGroupId,64)).Append("\nServer group roster: ").Append(Safe(group.RosterState,120)).Append("\nGroupControl: ").Append(Safe(group.GroupControlState,120)).Append("\nRoster generation: ").Append(Generation(group.RosterGeneration)).Append("\nCurrent key generation: ").Append(Generation(group.KeyGeneration)).Append("\nKey handoff: ").Append(Safe(group.KeyHandoffState,120)).Append("\nLast key-offer result: ").Append(Safe(group.LastKeyOfferResult,160)).Append("\nLast key-ACK result: ").Append(Safe(group.LastKeyAckResult,160)).Append("\nFanout: Not implemented (Stage 1C)");
+        var scopes=ConnectionScopes(snapshot);
+        foreach(var member in group.Members??new List<GroupDiagnosticsMember>()){
+            if(member==null)continue;
+            var peer=scopes.FirstOrDefault(s=>String.Equals(s.RemotePeerId,member.PeerId,StringComparison.OrdinalIgnoreCase));
+            text.Append("\n\nMember: ").Append(Safe(member.Name,120)).Append(" (account ").Append(member.AccountId).Append(")\nRole: ").Append(Safe(member.Role,32)).Append("\nAuthorized remote device: ").Append(Safe(member.PeerId,80)).Append("\nRelationship state: ").Append(Safe(member.Relationship,32));
+            text.Append("\nIndependent peer diagnostics: ").Append(peer==null?"No peer snapshot":"Available under direct conversation; not proof of GroupControl");
+            text.Append("\nAuthorization scope: ").Append(String.IsNullOrEmpty(group.ServerGroupId)?"None":"GroupControl")
+                .Append("\nDM permitted on this session: No\nGroup-control permitted: ").Append(String.IsNullOrEmpty(group.ServerGroupId)?"No":"Yes")
+                .Append("\nGroupControl state: ").Append(Safe(member.GroupControlState,120)).Append("\nKey handoff: ").Append(Safe(member.KeyHandoffState,120));
+        }
+        return text.ToString();
+    }
+    static string Generation(long value){return value>0?value.ToString():"Unavailable";}
     static void AddScope(Dictionary<string,DiagnosticsConnectionScope> values,DiagnosticsConnectionScope scope){
         if(scope==null||String.IsNullOrEmpty(scope.RemotePeerId)&&String.IsNullOrEmpty(scope.ConversationId)&&String.IsNullOrEmpty(scope.AccountId))return;
         // Media state has a Peer ID but not a conversation/account. Fold it into

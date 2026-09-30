@@ -65,7 +65,25 @@ UI_API int ui_remove(void* handle,const wchar_t* peer){try{auto& bridge=*static_
 UI_API int ui_history(void* handle,const wchar_t* peer,long long before){try{static_cast<UiBridge*>(handle)->node.loadHistory(identity(peer),before);return 1;}catch(...){return 0;}}
 UI_API int ui_erase_history(void* handle,const wchar_t* peer){try{return static_cast<UiBridge*>(handle)->node.eraseHistory(identity(peer))?1:0;}catch(...){return 0;}}
 UI_API int ui_group_account(void* handle,unsigned long long account,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.setGroupAccount(account,name?name:L"");return account&&name&&*name;}catch(...){return 0;}}
+UI_API int ui_authenticated_group_roster(void* handle,unsigned long long account,unsigned long long discoveryGeneration,const wchar_t* group,const wchar_t* legacy,unsigned long long rosterGeneration,const wchar_t* distributor,const wchar_t* encodedMembers){try{
+    if(!handle||!group||!legacy||!distributor||!encodedMembers)return 0;
+    peerchat::group_keys::RosterSnapshot roster;roster.serverGroupId=identity(group);roster.legacyGroupId=identity(legacy);roster.distributorPeerId=identity(distributor);roster.generation=rosterGeneration;
+    std::wstringstream rows(encodedMembers);std::wstring row;
+    while(std::getline(rows,row,L'\n')){
+        if(row.empty())continue;
+        std::vector<std::wstring> fields;std::wstringstream columns(row);std::wstring field;while(std::getline(columns,field,L'|'))fields.push_back(field);
+        if(fields.size()!=4)return 0;
+        peerchat::group_keys::RosterDevice member;member.accountId=std::stoull(fields[0]);member.peerId=identity(fields[1].c_str());
+        if(fields[2]==L"owner")member.role=peerchat::GroupRole::Owner;else if(fields[2]==L"admin")member.role=peerchat::GroupRole::Admin;else if(fields[2]==L"member")member.role=peerchat::GroupRole::Member;else return 0;
+        if(fields[3]!=L"member"&&fields[3]!=L"invited")return 0;
+        member.invited=fields[3]==L"invited";roster.devices.push_back(std::move(member));
+    }
+    return static_cast<UiBridge*>(handle)->node.setAuthenticatedGroupRoster(account,discoveryGeneration,std::move(roster))?1:0;
+}catch(...){return 0;}}
+UI_API void ui_clear_authenticated_group_rosters(void* handle){try{if(handle)static_cast<UiBridge*>(handle)->node.clearAuthenticatedGroupRosters();}catch(...){}}
+UI_API int ui_begin_group_control(void* handle,const wchar_t* group,unsigned long long targetAccount,const wchar_t* targetPeer,unsigned long long discoveryGeneration){try{return handle&&group&&targetPeer&&static_cast<UiBridge*>(handle)->node.beginGroupControl(identity(group),targetAccount,identity(targetPeer),discoveryGeneration)?1:0;}catch(...){return 0;}}
 UI_API const wchar_t* ui_group_create(void* handle,const wchar_t* name){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=widen(bridge.node.createGroup(name?name:L""));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
+UI_API const wchar_t* ui_group_create_proof(void* handle,const wchar_t* group){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=bridge.node.groupCreationProof(identity(group));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API int ui_group_rename(void* handle,const wchar_t* group,const wchar_t* name){try{return static_cast<UiBridge*>(handle)->node.renameGroup(identity(group),name?name:L"");}catch(...){return 0;}}
 UI_API int ui_group_invite(void* handle,const wchar_t* group,unsigned long long account,const wchar_t* peer,const wchar_t* name){try{return static_cast<UiBridge*>(handle)->node.inviteToGroup(identity(group),account,identity(peer),name?name:L"");}catch(...){return 0;}}
 UI_API int ui_group_respond(void* handle,const wchar_t* group,int accepted){try{return static_cast<UiBridge*>(handle)->node.respondToGroupInvite(identity(group),accepted!=0);}catch(...){return 0;}}
@@ -121,6 +139,6 @@ UI_API const wchar_t* ui_poll(void* handle){auto& bridge=*static_cast<UiBridge*>
             out<<L"{\"id\":"<<quote(widen(group.groupId))<<L",\"name\":"<<quote(group.name)<<L",\"owner\":"<<group.ownerAccountId<<L",\"members\":[";bool firstMember=true;for(const auto& member:group.members){if(!firstMember)out<<L',';firstMember=false;out<<L"{\"account\":"<<member.first<<L",\"peer\":"<<quote(widen(member.second.peerId))<<L",\"name\":"<<quote(member.second.name)<<L",\"role\":"<<int(member.second.role)<<L'}';}out<<L"],\"invites\":[";bool firstInvite=true;for(const auto& invitation:group.invitations){if(!firstInvite)out<<L',';firstInvite=false;out<<L"{\"account\":"<<invitation.first<<L",\"peer\":"<<quote(widen(invitation.second.peerId))<<L",\"name\":"<<quote(invitation.second.name)<<L",\"role\":1}";}out<<L"]}";
         }
         out<<L"],\"groupEvents\":[";bool firstGroupEvent=true;for(const auto& groupEvent:event.groupEvents){if(!firstGroupEvent)out<<L',';firstGroupEvent=false;out<<L"{\"id\":"<<quote(widen(groupEvent.eventId))<<L",\"group\":"<<quote(widen(groupEvent.groupId))<<L",\"account\":"<<groupEvent.actorAccountId<<L",\"sender\":"<<quote(widen(groupEvent.actorPeerId))<<L",\"text\":"<<quote(groupEvent.message)<<L",\"time\":"<<groupEvent.createdMilliseconds<<L",\"logical\":"<<groupEvent.logicalOrder<<L'}';}
-        out<<L"]}";
+        out<<L"],\"authorizationGroupId\":"<<quote(widen(event.authorizationGroupId))<<L",\"authorizationRosterGeneration\":"<<event.authorizationRosterGeneration<<L",\"authorizationTargetAccountId\":"<<event.authorizationTargetAccountId<<L'}';
     }out<<L']';bridge.output=out.str();
 }catch(...){bridge.output=L"[{\"kind\":8,\"text\":\"Could not read core events.\"}]";}return bridge.output.c_str();}

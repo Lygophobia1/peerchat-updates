@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <wincrypt.h>
 #include <bcrypt.h>
 #include "node.hpp"
 #include "delivery_manager.hpp"
@@ -59,12 +60,14 @@ struct Connection {
     bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false,mediaRecovery=false,screenShare=false,identityMismatch=false;
     std::wstring host,name,source,route,closeReason;std::uint16_t port=0;std::uint64_t attemptId=0;
     std::string expected,peerId;
+    session::ReliableAuthorization authorization;
     bool directHandoff=false,relay=false;
     std::shared_ptr<RelayPipe> relayPipe;
     std::unique_ptr<TlsSession> tls;
     Blob output,input;size_t sent=0;
     Clock::time_point began=Clock::now(),lastProgress=Clock::now();
     std::optional<session::DirectTransportAdapter> directTransport;
+    std::set<std::string> sentGroupRosterEvents;
     ~Connection(){if(socket!=INVALID_SOCKET)closesocket(socket);}
 };
 struct Resolver {
@@ -79,8 +82,8 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,GroupCreate,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;std::shared_ptr<std::promise<std::wstring>> response;};
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
@@ -91,6 +94,8 @@ struct Node::Impl {
     std::map<std::string,AuthenticatedFriendState> authenticatedFriends;
     std::map<std::string,GroupLedger> groups;
     GroupAccount groupAccount;
+    std::unique_ptr<group_keys::GroupKeyManager> groupKeys;
+    std::uint64_t groupRosterDiscoveryGeneration=0;
     std::vector<std::unique_ptr<Connection>> connections;
     std::vector<std::unique_ptr<Resolver>> resolvers;
     std::mutex relayMutex;std::map<std::uint64_t,std::shared_ptr<RelayPipe>> relayPipes;
@@ -221,7 +226,7 @@ struct Node::Impl {
         if(!sessionTransports||!connection.directTransport)return;
         try{sessionTransports->observeTransport(event,nowMilliseconds());}catch(...){}
     }
-    NodeEvent connectionEvent(NodeEvent::Kind kind,const std::wstring& text,const Connection& connection,const std::string& peer={}){NodeEvent event;event.kind=kind;event.text=text;event.detail=(connection.incoming?L"inbound":L"outbound")+std::wstring(connection.relay?L" relay":L" direct");event.peerId=peer.empty()?connection.expected:peer;event.expectedPeerId=connection.expected;event.candidate=connection.relay?L"PeerChat server relay":endpoint(connection.host,connection.port);event.candidateSource=connection.source;event.route=connection.route;event.attemptId=connection.attemptId;return event;}
+    NodeEvent connectionEvent(NodeEvent::Kind kind,const std::wstring& text,const Connection& connection,const std::string& peer={}){NodeEvent event;event.kind=kind;event.text=text;event.detail=(connection.incoming?L"inbound":L"outbound")+std::wstring(connection.relay?L" relay":L" direct");event.peerId=peer.empty()?connection.expected:peer;event.expectedPeerId=connection.expected;event.candidate=connection.relay?L"PeerChat server relay":endpoint(connection.host,connection.port);event.candidateSource=connection.source;event.route=connection.route;event.attemptId=connection.attemptId;if(connection.authorization.scope==session::ReliableAuthorizationScope::GroupControl){event.authorizationGroupId=connection.authorization.groupId;event.authorizationRosterGeneration=connection.authorization.rosterGeneration;}return event;}
 #ifdef PEERCHAT_TEST_SHORT_RECONNECT_BACKOFF
     static constexpr std::uint64_t ReconnectBaseMilliseconds=80,ReconnectCapMilliseconds=800;
 #else
@@ -232,6 +237,12 @@ struct Node::Impl {
         if(!sessionTransports||peer.empty())return;
         auto snapshot=sessionTransports->snapshot(peer);if(!snapshot)return;
         NodeEvent event;event.kind=NodeEvent::Kind::SessionSnapshot;event.peerId=event.expectedPeerId=peer;event.sessionEpoch=snapshot->epoch.value;event.sessionRevision=snapshot->revision;event.networkGeneration=snapshot->networkRevision;event.sessionConnected=snapshot->connected;event.attemptId=snapshot->activeTransport.value;event.retryDelayMilliseconds=snapshot->retryDelayMilliseconds;event.reliableRoute=static_cast<std::uint32_t>(snapshot->activeRoute.routeClass);event.p2pAvailability=static_cast<std::uint32_t>(snapshot->p2pAvailability);
+        constexpr char GroupPrefix[]="group-control:";
+        if(peer.compare(0,sizeof(GroupPrefix)-1,GroupPrefix)==0&&peer.size()==sizeof(GroupPrefix)-1+32+1+64&&peer[sizeof(GroupPrefix)-1+32]==':'){
+            event.authorizationGroupId=peer.substr(sizeof(GroupPrefix)-1,32);
+            event.peerId=event.expectedPeerId=peer.substr(sizeof(GroupPrefix)-1+33);
+            if(groupKeys){const auto* roster=groupKeys->roster(event.authorizationGroupId);if(roster)event.authorizationRosterGeneration=roster->generation;}
+        }
         if(snapshot->connected){event.text=L"Ready";event.candidate=widenUtf8(snapshot->activeRoute.endpointUtf8);event.candidateSource=widenUtf8(snapshot->activeRoute.sourceUtf8);event.route=widenUtf8(snapshot->activeRoute.routeUtf8);event.detail=snapshot->activeRoute.incoming?L"inbound":L"outbound";}
         else if(snapshot->retrySuspended)event.text=L"Identity verification required";
         else if(snapshot->retryScheduled)event.text=L"Retrying with backoff";
@@ -252,16 +263,16 @@ struct Node::Impl {
     void voiceEvent(calls::State state,const std::wstring& reason={}){auto active=calls.active();NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.callState=static_cast<std::uint32_t>(state);if(active){event.peerId=calls.peer();event.detail=std::wstring(active->id.value.begin(),active->id.value.end());event.callLifetime=active->lifetime;event.callType=static_cast<std::uint32_t>(active->type);event.callMuted=active->muted;event.callDeafened=active->deafened;event.mediaState=static_cast<std::uint32_t>(active->mediaState);event.mediaGeneration=active->mediaGeneration;event.mediaRoute=static_cast<std::uint32_t>(active->mediaRoute);event.callControlAvailable=active->controlAvailable;}event.text=voiceStateName(state);if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
     Connection* voiceConnection(const std::string& peer){
         std::uint64_t winner=0;if(sessionTransports){auto snapshot=sessionTransports->snapshot(peer);if(snapshot&&snapshot->connected)winner=snapshot->activeTransport.value;}
-        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
-        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls)return connection.get();
+        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls&&connection->authorization.permitsDirectMessage())return connection.get();
+        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls&&connection->authorization.permitsDirectMessage())return connection.get();
         return nullptr;
     }
     Connection* screenConnection(const std::string& peer){
         std::uint64_t winner=0;
         if(sessionTransports){auto snapshot=sessionTransports->snapshot(peer);if(snapshot&&snapshot->connected)winner=snapshot->activeTransport.value;}
-        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare)return connection.get();
+        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare&&connection->authorization.permitsDirectMessage())return connection.get();
         if(sessionTransports)return nullptr;
-        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare)return connection.get();
+        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->screenShare&&connection->authorization.permitsDirectMessage())return connection.get();
         return nullptr;
     }
     std::wstring screenDiagnosticsSnapshot(){
@@ -501,7 +512,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         }
     }
     void outbox(Connection& c){
-        if(!c.online||c.dead||!deliveries||!sessionTransports->active({c.attemptId}))return;
+        if(!c.online||c.dead||!c.authorization.permitsDirectMessage()||!deliveries||!sessionTransports->active({c.attemptId}))return;
         session::TransportInstanceId transport{c.attemptId};
         for(const auto& m:deliveries->pendingMessages(c.peerId,100)) {
             if(deliveries->wasSubmittedMessage(c.peerId,m.id,transport))continue;
@@ -515,13 +526,57 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
     void queueGroupEvent(const GroupEvent& event,const std::set<std::string>& peers){for(const auto& peer:peers)if(protocol::id(peer)&&peer!=profile.peerId)store->queueGroupDelivery(event.eventId,peer);}
     void queueGroupSync(const GroupLedger& ledger,const std::string& peer){for(const auto& event:ledger.events())if(ledger.accepted(event.eventId))store->queueGroupDelivery(event.eventId,peer);}
     void groupOutbox(Connection& connection){
-        if(!connection.online||connection.dead||!connection.signedGroups||!deliveries||!sessionTransports->active({connection.attemptId}))return;
+        if(!connection.online||connection.dead||!connection.authorization.permitsDirectMessage()||!connection.signedGroups||!deliveries||!sessionTransports->active({connection.attemptId}))return;
         session::TransportInstanceId transport{connection.attemptId};
         for(const auto& event:deliveries->pendingGroupEvents(connection.peerId,64)){
+            if(event.kind==GroupEventKind::Message||(groupKeys&&groupKeys->isAuthoritativeGroup(event.groupId)))continue;
             if(deliveries->wasSubmittedGroupEvent(connection.peerId,event.eventId,transport))continue;
             if(deliveries->inFlightCount(transport)>=16||connection.output.size()-connection.sent>MaxQueue/2)break;
             packet(connection,encodeGroupEvent(event));
             if(!deliveries->submittedGroupEvent(connection.peerId,event.eventId,transport))throw std::runtime_error("Could not record authenticated group submission");
+        }
+    }
+    void reconcileSignedGroupRoster(Connection& c){
+        if(!c.online||c.dead||c.authorization.scope!=session::ReliableAuthorizationScope::GroupControl||!groupKeys)return;
+        const auto* roster=groupKeys->roster(c.authorization.groupId);
+        if(!roster||roster->generation!=c.authorization.rosterGeneration)return;
+        auto found=groups.find(roster->legacyGroupId);
+        if(found==groups.end()||!found->second.state().created)return;
+        auto& ledger=found->second;
+        if(roster->distributorPeerId==profile.peerId){
+            // A server account invitation is not a signed ledger invitation.
+            // Bind the newly accepted device key learned from peer TLS before
+            // creating that signed event; never invent a key from discovery.
+            for(const auto& member:roster->devices){
+                if(member.invited||member.peerId!=c.peerId||member.accountId==groupAccount.accountId)continue;
+                if(!ledger.state().members.count(member.accountId)&&!ledger.state().invitations.count(member.accountId)){
+                    GroupEvent invite=localGroupEvent(ledger,GroupEventKind::Invite);
+                    invite.subjectAccountId=member.accountId;invite.subjectPeerId=member.peerId;
+                    invite.subjectPublicKey=c.tls->remotePublicKey();
+                    invite.subjectName=std::to_wstring(member.accountId);
+                    signGroupEvent(invite,profile);
+                    protocol::check(ledger.append(invite));persistAccepted(ledger);publishGroups();
+                }
+            }
+        }
+        // Control events are signed and content-free. Resend the accepted
+        // ledger prefix on every new scoped TLS connection; event IDs make
+        // reconnect and duplicate delivery idempotent without a second queue.
+        for(const auto& event:ledger.events()){
+            if(!ledger.accepted(event.eventId)||event.kind==GroupEventKind::Message||!event.message.empty()||
+               (roster->distributorPeerId!=profile.peerId&&event.actorPeerId!=profile.peerId)||
+               !c.sentGroupRosterEvents.insert(event.eventId).second)continue;
+            protocol::Writer control(protocol::GroupRosterEvent);control.bytes(encodeGroupEvent(event));packet(c,control);
+        }
+        if(roster->distributorPeerId!=profile.peerId||!groupKeys->ensureCurrentKey(roster->serverGroupId,ledger.state()))return;
+        for(const auto& offer:deliveries->pendingGroupKeyHandoffs(c.peerId,64)){
+            if(!groupKeys->maySend(offer,c.peerId)||offer.serverGroupId!=roster->serverGroupId||
+               deliveries->wasSubmittedGroupKeyHandoff(c.peerId,offer.id,{c.attemptId}))continue;
+            if(deliveries->inFlightCount({c.attemptId})>=16||c.output.size()-c.sent>MaxQueue/2)break;
+            packet(c,group_keys::offerPacket(offer));
+            if(!deliveries->submittedGroupKeyHandoff(c.peerId,offer.id,{c.attemptId}))
+                throw std::runtime_error("Could not record authenticated group key offer");
+            emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Group key offer sent; awaiting ACK",c,c.peerId));
         }
     }
     void online(Connection& c){
@@ -544,6 +599,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         if(!decision.activated()){
             c.closeReason=widenUtf8(decision.reasonUtf8);c.dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,c.closeReason,c,c.peerId));emitSessionSnapshot(c.peerId);return;
         }
+        if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
+            // Group-control may use the existing peer-TLS relay, but it must
+            // never authorize the ordinary DM/group-message outbox or media.
+            for(auto loser:decision.retire)for(auto& other:connections)if(other->attemptId==loser.value&&!other->dead){other->closeReason=L"superseded group-control relay";other->dead=true;}
+            if(!deliveries||!deliveries->authorizeTransport({c.attemptId},c.peerId))throw std::runtime_error("Could not bind group-key delivery to the authenticated device");
+            c.online=true;
+            emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Authenticated group-control relay ready",c,c.peerId));
+            emitSessionSnapshot(c.authorization.continuityKey());
+            reconcileSignedGroupRoster(c);
+            return;
+        }
         for(auto loser:decision.retire)for(auto& other:connections)if(other->attemptId==loser.value&&!other->dead){if(deliveries)deliveries->beginDraining(loser);other->closeReason=widenUtf8(decision.reasonUtf8);other->dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,other->closeReason,*other,other->peerId));}
         c.online=true;if(!deliveries||!deliveries->authorizeTransport({c.attemptId},c.peerId))throw std::runtime_error("Could not bind delivery transport to authenticated peer");if(c.directTransport)project(c,c.directTransport->activated());emit(connectionEvent(NodeEvent::Kind::Connected,c.name,c,c.peerId));emitSessionSnapshot(c.peerId);if(auto active=calls.active())if(calls.peer()==c.peerId&&!active->controlAvailable){calls.observeControl(true);voiceEvent(active->state,active->mediaState==calls::MediaState::Connected?L"Call control restored":L"Call control restored · Reconnecting voice");}
         if(c.directHandoff)handoffEffects(sessionTransports->attachHandoff(sessionEpoch,{c.attemptId},Storage::newMessageId(),nowMilliseconds()));
@@ -556,11 +622,24 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         protocol::Reader r(frame);
         if(!c.hello){
             protocol::check(r.type()==protocol::Hello);auto capabilities=r.number();auto port=r.number();c.name=r.text();r.end();
-            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port>0&&port<=65535&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.screenShare=(capabilities&protocol::CapabilityScreenShare)!=0;c.hello=true;
+            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port<=65535&&(c.relay||port>0)&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.screenShare=(capabilities&protocol::CapabilityScreenShare)!=0;c.hello=true;
             c.directHandoff=(capabilities&protocol::CapabilityDirectHandoff)!=0;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty()&&!c.relay)c.host=observedAddress(c.socket);
             if(c.directTransport){c.directTransport->updateRoute(routeObservation(c,c.directTransport->routeRevision()));project(c,c.directTransport->identityPresented(c.peerId,capabilities));}
+            if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
+                protocol::check(c.relay&&(capabilities&protocol::CapabilityGroupKeyHandoff)!=0&&c.authorization.valid()&&c.peerId==c.authorization.expectedRemoteDeviceId);
+                const auto* roster=groupKeys?groupKeys->roster(c.authorization.groupId):nullptr;
+                protocol::check(roster&&roster->generation==c.authorization.rosterGeneration&&
+                    group_keys::GroupKeyManager::currentMember(*roster,groupAccount.accountId,profile.peerId)&&
+                    std::any_of(roster->devices.begin(),roster->devices.end(),[&](const auto& member){return !member.invited&&member.peerId==c.peerId;}));
+                // TLS has already proved the presented public key hashes to this
+                // expected Peer ID. A historical friend pin, if any, still wins;
+                // group membership must never replace or create ordinary trust.
+                auto pinned=contacts.find(c.peerId);
+                protocol::check(pinned==contacts.end()||!pinned->second.verified||pinned->second.publicKey==c.tls->remotePublicKey());
+                approve(c);return;
+            }
             // A changed identity is a security-relevant verification event, not a silent
             // transport rejection. The UI must show the expected and presented public IDs and
             // require an explicit decision. No private key, password, or message content is
@@ -585,6 +664,63 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         }
         if(r.type()==protocol::Accepted){r.end();protocol::check(!c.remoteApproved);c.remoteApproved=true;if(sessionTransports)sessionTransports->markRemoteAccepted(sessionEpoch,{c.attemptId});online(c);return;}
         protocol::check(c.online);
+        if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
+            protocol::check(groupKeys&&c.relay&&c.peerId==c.authorization.expectedRemoteDeviceId);
+            const auto* roster=groupKeys->roster(c.authorization.groupId);
+            protocol::check(roster&&roster->generation==c.authorization.rosterGeneration&&
+                group_keys::GroupKeyManager::currentMember(*roster,groupAccount.accountId,profile.peerId));
+            if(r.type()==protocol::GroupRosterEvent){
+                Blob signedFrame=r.bytes();r.end();
+                GroupEvent event=decodeGroupEvent(signedFrame);
+                protocol::check(event.groupId==roster->legacyGroupId&&event.kind!=GroupEventKind::Message&&event.message.empty());
+                // Only the current distributor may replay another device's
+                // signed control event. A non-distributor may submit its own.
+                protocol::check(c.peerId==roster->distributorPeerId||event.actorPeerId==c.peerId);
+                auto found=groups.find(event.groupId);
+                if(found==groups.end()){
+                    protocol::check(event.kind==GroupEventKind::Create&&c.peerId==roster->distributorPeerId&&
+                        std::any_of(roster->devices.begin(),roster->devices.end(),[&](const auto& member){return member.accountId==event.actorAccountId&&member.peerId==event.actorPeerId&&member.role==GroupRole::Owner&&!member.invited;}));
+                    found=groups.emplace(event.groupId,GroupLedger{}).first;
+                }
+                auto& ledger=found->second;
+                protocol::check(ledger.append(event));persistAccepted(ledger);
+                if(event.kind==GroupEventKind::Invite&&event.subjectAccountId==groupAccount.accountId&&
+                   event.subjectPeerId==profile.peerId&&
+                   group_keys::GroupKeyManager::currentMember(*roster,groupAccount.accountId,profile.peerId)&&
+                   ledger.state().invitations.count(groupAccount.accountId)){
+                    protocol::check(event.subjectPublicKey==profile.publicKey);
+                    GroupEvent accepted=localGroupEvent(ledger,GroupEventKind::Accept);
+                    accepted.subjectAccountId=groupAccount.accountId;accepted.subjectPeerId=profile.peerId;
+                    signGroupEvent(accepted,profile);protocol::check(ledger.append(accepted));persistAccepted(ledger);
+                }
+                publishGroups();
+                for(auto& active:connections)if(active->online&&!active->dead&&
+                    active->authorization.scope==session::ReliableAuthorizationScope::GroupControl&&
+                    active->authorization.groupId==roster->serverGroupId)
+                    reconcileSignedGroupRoster(*active);
+                return;
+            }
+            if(r.type()==protocol::GroupKeyOffer){
+                auto offer=group_keys::readOffer(frame);
+                auto found=groups.find(roster->legacyGroupId);
+                protocol::check(found!=groups.end()&&groupKeys->accept(offer,c.peerId,found->second.state()));
+                group_keys::Ack ack{offer.id,offer.serverGroupId,offer.rosterGeneration,offer.keyGeneration};
+                packet(c,group_keys::ackPacket(ack));
+                emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Group key handoff acknowledged",c,c.peerId));
+                return;
+            }
+            if(r.type()==protocol::GroupKeyAck){
+                auto ack=group_keys::readAck(frame);
+                protocol::check(ack.serverGroupId==roster->serverGroupId&&ack.rosterGeneration==roster->generation&&
+                    ack.keyGeneration==roster->generation);
+                if(deliveries->acknowledgeGroupKeyHandoff(c.peerId,{c.attemptId},ack.handoffId)){
+                    emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Group key offer acknowledged by member",c,c.peerId));
+                    reconcileSignedGroupRoster(c);
+                }
+                return;
+            }
+            throw std::runtime_error("Group-control session rejected an unrelated payload");
+        }
         if(r.type()==protocol::ScreenOffer){
             auto id=r.string();auto generation=r.number();auto sdp=r.string();r.end();
             protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&!sdp.empty()&&sdp.size()<=32768);
@@ -673,6 +809,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(deliveries&&deliveries->acknowledgeMessage(c.peerId,{c.attemptId},id)){NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=c.peerId;StoredMessage m;m.id=id;m.delivery=Delivery::Delivered;e.messages.push_back(m);emit(std::move(e));outbox(c);}
         }else if(r.type()==protocol::GroupEvent){
             bool oversizedMessage=false;auto event=decodeGroupEvent(frame,true,&oversizedMessage);protocol::check(protocol::id(event.groupId,32)&&protocol::id(event.eventId));if(oversizedMessage){notice(NodeEvent::Kind::Error,L"Oversized group message rejected",c.peerId);return;}
+            if(event.kind==GroupEventKind::Message||(groupKeys&&groupKeys->isAuthoritativeGroup(event.groupId))){
+                notice(NodeEvent::Kind::Error,L"Legacy group payload rejected; encrypted group text is not yet available",c.peerId);return;
+            }
             auto found=groups.find(event.groupId);
             if(found==groups.end()){
                 // An unknown group enters local state only through its valid signed creation
@@ -701,13 +840,22 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // Voice capability describes authenticated call control. The media
             // path remains independent ICE/DTLS-SRTP and is never put on relay.
             capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
+            capabilities|=protocol::CapabilityGroupKeyHandoff;
             if(screenAvailable)capabilities|=protocol::CapabilityScreenShare;
             if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
             protocol::Writer hello(protocol::Hello);hello.number(capabilities);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
         auto plain=c.tls->takePlaintext();protocol::check(c.input.size()+plain.size()<=256*1024);c.input.insert(c.input.end(),plain.begin(),plain.end());
         while(c.input.size()>=4&&!c.dead){size_t length=(size_t(c.input[0])<<24)|(size_t(c.input[1])<<16)|(size_t(c.input[2])<<8)|c.input[3];protocol::check(length>=4&&length<=protocol::MaxPacket);if(c.input.size()<length+4)break;
-            Blob frame(c.input.begin()+4,c.input.begin()+4+length);c.input.erase(c.input.begin(),c.input.begin()+4+length);if(c.directTransport)project(c,c.directTransport->observedReceive(frame.size()));process(c,frame);}
+            Blob frame(c.input.begin()+4,c.input.begin()+4+length);c.input.erase(c.input.begin(),c.input.begin()+4+length);if(c.directTransport)project(c,c.directTransport->observedReceive(frame.size()));
+            try{process(c,frame);}catch(...){
+                if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl&&frame.size()>=4)
+                    emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,
+                        L"Group-control packet rejected: type "+std::to_wstring(frame[3])+
+                        (c.hello?L" after Hello":L" before Hello"),c,c.peerId.empty()?c.expected:c.peerId));
+                throw;
+            }
+        }
     }
     void receive(Connection& c){
         unsigned char buffer[8192];int n=recv(c.socket,reinterpret_cast<char*>(buffer),sizeof(buffer),0);
@@ -720,10 +868,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         GroupEvent event;event.groupId=ledger.state().groupId;event.kind=kind;event.logicalOrder=ledger.state().maxLogicalOrder+1;event.createdMilliseconds=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());event.actorAccountId=groupAccount.accountId;event.actorPeerId=profile.peerId;return event;
     }
     void commitLocalGroupEvent(GroupLedger& ledger,GroupEvent event,const std::set<std::string>& beforePeers,bool synchronizeInvite=false){
-        signGroupEvent(event,profile);if(!ledger.append(event))throw std::runtime_error("Group change is not authorized by the current signed state");persistAccepted(ledger);auto peers=beforePeers;auto after=groupPeers(ledger.state());peers.insert(after.begin(),after.end());queueGroupEvent(event,peers);
-        if(synchronizeInvite&&!event.subjectPeerId.empty())queueGroupSync(ledger,event.subjectPeerId);
+        const auto* authorized=groupKeys?groupKeys->rosterForLegacy(event.groupId):nullptr;
+        signGroupEvent(event,profile);if(!ledger.append(event))throw std::runtime_error("Group change is not authorized by the current signed state");persistAccepted(ledger);
+        if(!authorized){auto peers=beforePeers;auto after=groupPeers(ledger.state());peers.insert(after.begin(),after.end());queueGroupEvent(event,peers);}
+        if(!authorized&&synchronizeInvite&&!event.subjectPeerId.empty())queueGroupSync(ledger,event.subjectPeerId);
         if(event.kind==GroupEventKind::Message){NodeEvent message;message.kind=NodeEvent::Kind::GroupMessage;message.peerId=event.groupId;message.groupEvents.push_back(event);emit(std::move(message));}
-        publishGroups();for(auto& connection:connections)if(connection->online&&!connection->dead)groupOutbox(*connection);
+        publishGroups();
+        if(authorized){for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->authorization.groupId==authorized->serverGroupId)reconcileSignedGroupRoster(*connection);}
+        else {for(auto& connection:connections)if(connection->online&&!connection->dead)groupOutbox(*connection);}
     }
     void drain(){
         std::deque<Command> batch;{std::lock_guard<std::mutex> lock(commandMutex);batch.swap(commands);}
@@ -772,11 +924,12 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             else if(command.action==Action::RelayReady){
                 std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto found=relayPipes.find(command.accountId);if(found!=relayPipes.end())pipe=found->second;}
                 auto expected=sessionTransports->attachablePeer(sessionEpoch,{command.accountId});
-                if(!pipe||!expected){if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}continue;}
-                auto c=std::make_unique<Connection>();c->relay=true;c->relayPipe=pipe;c->incoming=command.accepted;c->expected=*expected;c->attemptId=command.accountId;c->host=L"relay";c->port=1;c->source=L"PeerChat server relay";c->route=L"end-to-end peer TLS over opaque relay";attachDirectTransport(*c);c->tls=std::make_unique<TlsSession>(*credentials,c->incoming);emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"relay rendezvous established; peer TLS begins",*c));collect(*c);connections.push_back(std::move(c));
+                auto authorization=sessionTransports->authorization(sessionEpoch,{command.accountId});
+                if(!pipe||!expected||!authorization){if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}continue;}
+                auto c=std::make_unique<Connection>();c->relay=true;c->relayPipe=pipe;c->incoming=command.accepted;c->expected=authorization->expectedRemoteDeviceId;c->authorization=*authorization;c->attemptId=command.accountId;c->host=L"relay";c->port=1;c->source=L"PeerChat server relay";c->route=L"end-to-end peer TLS over opaque relay";attachDirectTransport(*c);c->tls=std::make_unique<TlsSession>(*credentials,c->incoming);emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"relay rendezvous established; peer TLS begins",*c));collect(*c);connections.push_back(std::move(c));
             }
             else if(command.action==Action::RelayReceive){for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){try{receiveEncrypted(*c,command.bytes);}catch(const std::exception& error){c->dead=true;std::string detail=error.what();c->closeReason=L"TLS handshake failure: "+widenUtf8(detail);emit(connectionEvent(NodeEvent::Kind::Error,c->closeReason,*c,c->peerId.empty()?c->expected:c->peerId));}break;}}
-            else if(command.action==Action::RelayClosed){bool found=false;for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){c->closeReason=command.text.empty()?L"relay channel closed":command.text;c->dead=true;found=true;break;}if(!found){auto close=sessionTransports->closeTransport(sessionEpoch,{command.accountId},utf8(command.text),true);std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto item=relayPipes.find(command.accountId);if(item!=relayPipes.end()){pipe=item->second;relayPipes.erase(item);}}if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}if(!close.remoteDeviceId.empty()){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(close.remoteDeviceId,nowMilliseconds(),random);emitSessionSnapshot(close.remoteDeviceId);}}}
+            else if(command.action==Action::RelayClosed){bool found=false;for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){c->closeReason=command.text.empty()?L"relay channel closed":command.text;c->dead=true;found=true;break;}if(!found){auto authorization=sessionTransports->authorization(sessionEpoch,{command.accountId});auto close=sessionTransports->closeTransport(sessionEpoch,{command.accountId},utf8(command.text),true);std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto item=relayPipes.find(command.accountId);if(item!=relayPipes.end()){pipe=item->second;relayPipes.erase(item);}}if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}if(!close.remoteDeviceId.empty()&&(!authorization||authorization->scope==session::ReliableAuthorizationScope::Friend)){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(close.remoteDeviceId,nowMilliseconds(),random);emitSessionSnapshot(close.remoteDeviceId);}}}
             else if(command.action==Action::InvalidateRoute){
                 if(command.peer.empty())continue;
                 auto decision=sessionTransports->cancelRoutes(sessionEpoch,command.peer,utf8(endpoint(command.text,command.port)),command.accepted,command.accountId);
@@ -921,9 +1074,57 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
             else if(command.action==Action::Name){profile.name=command.text;store->saveProfile(profile);}
             else if(command.action==Action::GroupAccount){if(command.accountId==0||command.name.empty()||command.name.size()>64)throw std::runtime_error("Invalid group account binding");if(groupAccount.accountId&&groupAccount.accountId!=command.accountId)throw std::runtime_error("This profile is already bound to another group account");groupAccount={command.accountId,command.name};store->saveGroupAccount(groupAccount);publishGroups();}
+            else if(command.action==Action::AuthenticatedGroupRoster){
+                if(!groupAccount.accountId||command.accountId!=groupAccount.accountId||!command.generation||command.generation<groupRosterDiscoveryGeneration)
+                    throw std::runtime_error("Authenticated group roster belongs to a stale account session");
+                if(!groupKeys)groupKeys=std::make_unique<group_keys::GroupKeyManager>(*store,groupAccount.accountId,profile.peerId);
+                groupKeys->apply(std::move(command.roster));groupRosterDiscoveryGeneration=command.generation;
+                const auto* current=groupKeys->roster(command.group);
+                if(current){
+                    auto retired=sessionTransports->invalidateGroupControl(sessionEpoch,command.group,current->generation);
+                    for(auto& connection:connections)for(auto id:retired)if(connection->attemptId==id.value){connection->closeReason=L"group roster generation superseded";connection->dead=true;}
+                    auto ledger=groups.find(current->legacyGroupId);
+                    if(ledger!=groups.end()&&current->distributorPeerId==profile.peerId&&
+                       groupKeys->ensureCurrentKey(current->serverGroupId,ledger->second.state())){
+                        NodeEvent keyReady;keyReady.kind=NodeEvent::Kind::ConnectionLifecycle;
+                        keyReady.peerId=profile.peerId;keyReady.authorizationGroupId=current->serverGroupId;
+                        keyReady.authorizationRosterGeneration=current->generation;
+                        keyReady.text=L"Current group key generation ready locally";emit(std::move(keyReady));
+                    }
+                }
+            }
+            else if(command.action==Action::ClearGroupRosters){
+                for(auto& connection:connections)if(connection->authorization.scope==session::ReliableAuthorizationScope::GroupControl){connection->closeReason=L"authenticated group authorization cleared";connection->dead=true;}
+                groupKeys.reset();groupRosterDiscoveryGeneration=0;
+            }
+            else if(command.action==Action::BeginGroupControl){
+                const auto* roster=groupKeys?groupKeys->roster(command.group):nullptr;
+                if(!roster||command.generation!=groupRosterDiscoveryGeneration||!groupAccount.accountId||
+                   !group_keys::GroupKeyManager::currentMember(*roster,groupAccount.accountId,profile.peerId)||
+                   !group_keys::GroupKeyManager::currentMember(*roster,command.accountId,command.peer)||
+                   command.peer==profile.peerId)throw std::runtime_error("Group-control relay is not authorized by the current roster");
+                session::ReliableAuthorization authorization{session::ReliableAuthorizationScope::GroupControl,command.group,roster->generation,command.peer};
+                const auto attempt=nextAttemptId++;
+                session::RouteObservation route{{nextRouteRevision++},"relay:"+authorization.continuityKey(),"PeerChat server relay","group key control over peer TLS",false,networkGeneration,session::TransportKind::Relay,session::RouteClass::ServerRelay};
+                if(!sessionTransports->registerGroupControlAttempt(sessionEpoch,{attempt},authorization,route,nowMilliseconds()))throw std::runtime_error("Group-control relay registration was rejected");
+                auto pipe=std::make_shared<RelayPipe>();{std::lock_guard<std::mutex> lock(relayMutex);relayPipes[attempt]=pipe;}
+                NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=command.peer;request.attemptId=attempt;request.networkGeneration=networkGeneration;request.authorizationGroupId=command.group;request.authorizationRosterGeneration=roster->generation;request.authorizationTargetAccountId=command.accountId;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated group roster";request.route=L"group key control over end-to-end peer TLS";request.text=L"Group-control relay requested";emit(std::move(request));emitSessionSnapshot(authorization.continuityKey());
+            }
             else if(command.action==Action::GroupCreate){
                 if(!groupAccount.accountId||command.group.empty()||command.text.empty()||command.text.size()>80)throw std::runtime_error("Invalid group creation");
                 GroupEvent event;event.groupId=command.group;event.kind=GroupEventKind::Create;event.logicalOrder=1;event.createdMilliseconds=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());event.actorAccountId=event.subjectAccountId=groupAccount.accountId;event.actorPeerId=event.subjectPeerId=profile.peerId;event.subjectName=groupAccount.name;event.subjectPublicKey=profile.publicKey;event.value=command.text;auto& ledger=groups[event.groupId];commitLocalGroupEvent(ledger,std::move(event),{});
+            }else if(command.action==Action::GroupCreationProof){
+                std::wstring encoded;auto found=groups.find(command.group);
+                if(found!=groups.end()&&found->second.state().ownerAccountId==groupAccount.accountId){
+                    for(const auto& event:found->second.events())if(event.kind==GroupEventKind::Create&&event.actorAccountId==groupAccount.accountId&&event.actorPeerId==profile.peerId&&found->second.accepted(event.eventId)){
+                        Blob frame=encodeGroupEvent(event);DWORD length=0;
+                        if(CryptBinaryToStringW(frame.data(),static_cast<DWORD>(frame.size()),CRYPT_STRING_BASE64|CRYPT_STRING_NOCRLF,nullptr,&length)&&length){
+                            std::wstring buffer(length,L'\0');if(CryptBinaryToStringW(frame.data(),static_cast<DWORD>(frame.size()),CRYPT_STRING_BASE64|CRYPT_STRING_NOCRLF,&buffer[0],&length)){buffer.resize(wcslen(buffer.c_str()));encoded=std::move(buffer);}
+                        }
+                        break;
+                    }
+                }
+                if(command.response)command.response->set_value(std::move(encoded));
             }else if(command.action==Action::Groups){publishGroups();
             }else if(command.action==Action::GroupHistoryPage){emitGroupHistoryPage(command.group,command.before);
             }
@@ -935,7 +1136,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 else if(command.action==Action::GroupLeave){event=localGroupEvent(ledger,GroupEventKind::Leave);}
                 else if(command.action==Action::GroupRemove){event=localGroupEvent(ledger,GroupEventKind::Remove);event.subjectAccountId=command.accountId;}
                 else if(command.action==Action::GroupRole){event=localGroupEvent(ledger,GroupEventKind::SetRole);event.subjectAccountId=command.accountId;event.value=command.accepted?L"admin":L"member";}
-                else if(command.action==Action::GroupSend){event=localGroupEvent(ledger,GroupEventKind::Message);event.message=command.text;}
+                else if(command.action==Action::GroupSend)throw std::runtime_error("Group messages require the next encrypted-envelope protocol stage");
                 else throw std::runtime_error("Unsupported group action");
                 commitLocalGroupEvent(ledger,std::move(event),peers,command.action==Action::GroupInvite);
             }
@@ -944,6 +1145,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
     void reapDeadConnections(){
         for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
             auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch,wasRelay=connection.relay;
+            bool groupControl=connection.authorization.scope==session::ReliableAuthorizationScope::GroupControl;
+            std::string groupScopeKey=groupControl?connection.authorization.continuityKey():std::string{};
             std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;
             std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;
             if(connection.directTransport)connection.directTransport->closed(utf8(reason),!connection.online);
@@ -956,10 +1159,12 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(!id.empty()&&!close.hasActiveWinner&&!close.hasPendingAttempt){
                 auto activeCall=calls.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeCall&&calls.peer()==id){calls.observeControl(false,nowMilliseconds()+MediaRecoveryWindowMilliseconds);voiceEvent(activeCall->state,L"Call control unavailable · waiting to reconnect");}
                 auto activeShare=screenShares.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeShare&&activeShare->peer==id){activeShare->controlAvailable=false;screenEvent(L"Share control unavailable · waiting to reconnect");}
-                emit(std::move(disconnected));
-                if(wasRelay){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
+                if(!groupControl)emit(std::move(disconnected));
+                if(wasRelay&&!groupControl){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
+                else if(groupControl)emitSessionSnapshot(groupScopeKey);
                 else scheduleReconnect(id,host,port,source,route,mismatch);
-            }else if(!id.empty())emitSessionSnapshot(id);
+            }else if(groupControl)emitSessionSnapshot(groupScopeKey);
+            else if(!id.empty())emitSessionSnapshot(id);
         }else ++it;
     }
     void run(const std::wstring& directory,std::uint16_t listeningPortOverride,const std::wstring& displayNameOverride,bool startDirectListener){
@@ -982,7 +1187,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
-            groupAccount=store->groupAccount();groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
+            groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
             startupDirectListener=startDirectListener;
             if(startupDirectListener)ensureDirectListener("explicit-direct-only",listeningPortOverride);
@@ -1036,7 +1241,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -1068,7 +1273,11 @@ void Node::loadHistory(const std::string& peer,std::int64_t before){Impl::Comman
 bool Node::eraseHistory(const std::string& peer){if(!protocol::id(peer))return false;Impl::Command c{};c.action=Impl::Action::EraseHistory;c.peer=peer;return impl_->command(std::move(c));}
 void Node::setName(const std::wstring& name){if(name.empty()||name.size()>64)return;Impl::Command c{};c.action=Impl::Action::Name;c.text=name;impl_->command(std::move(c));}
 void Node::setGroupAccount(std::uint64_t accountId,const std::wstring& accountName){if(!accountId||accountName.empty()||accountName.size()>64)return;Impl::Command c{};c.action=Impl::Action::GroupAccount;c.accountId=accountId;c.name=accountName;impl_->command(std::move(c));}
+bool Node::setAuthenticatedGroupRoster(std::uint64_t localAccountId,std::uint64_t discoveryGeneration,group_keys::RosterSnapshot roster){if(!localAccountId||!discoveryGeneration||!protocol::id(roster.serverGroupId,32)||!protocol::id(roster.legacyGroupId,32))return false;Impl::Command c{};c.action=Impl::Action::AuthenticatedGroupRoster;c.accountId=localAccountId;c.generation=discoveryGeneration;c.group=roster.serverGroupId;c.roster=std::move(roster);return impl_->command(std::move(c));}
+void Node::clearAuthenticatedGroupRosters(){Impl::Command c{};c.action=Impl::Action::ClearGroupRosters;impl_->command(std::move(c));}
+bool Node::beginGroupControl(const std::string& serverGroupId,std::uint64_t targetAccountId,const std::string& targetPeerId,std::uint64_t discoveryGeneration){if(!protocol::id(serverGroupId,32)||!targetAccountId||!protocol::id(targetPeerId)||!discoveryGeneration)return false;Impl::Command c{};c.action=Impl::Action::BeginGroupControl;c.group=serverGroupId;c.accountId=targetAccountId;c.peer=targetPeerId;c.generation=discoveryGeneration;return impl_->command(std::move(c));}
 std::string Node::createGroup(const std::wstring& name){if(name.empty()||name.size()>80)return {};Impl::Command c{};c.action=Impl::Action::GroupCreate;c.group=newGroupId();c.text=name;auto id=c.group;return impl_->command(std::move(c))?id:std::string{};}
+std::wstring Node::groupCreationProof(const std::string& groupId){if(!protocol::id(groupId,32))return {};auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();Impl::Command c{};c.action=Impl::Action::GroupCreationProof;c.group=groupId;c.response=response;if(!impl_->command(std::move(c))||result.wait_for(std::chrono::seconds(2))!=std::future_status::ready)return {};return result.get();}
 bool Node::renameGroup(const std::string& groupId,const std::wstring& name){if(!protocol::id(groupId,32)||name.empty()||name.size()>80)return false;Impl::Command c{};c.action=Impl::Action::GroupRename;c.group=groupId;c.text=name;return impl_->command(std::move(c));}
 bool Node::inviteToGroup(const std::string& groupId,std::uint64_t accountId,const std::string& peerId,const std::wstring& name){if(!protocol::id(groupId,32)||!accountId||!protocol::id(peerId)||name.empty()||name.size()>64)return false;Impl::Command c{};c.action=Impl::Action::GroupInvite;c.group=groupId;c.accountId=accountId;c.peer=peerId;c.name=name;return impl_->command(std::move(c));}
 bool Node::respondToGroupInvite(const std::string& groupId,bool accept){if(!protocol::id(groupId,32))return false;Impl::Command c{};c.action=Impl::Action::GroupRespond;c.group=groupId;c.accepted=accept;return impl_->command(std::move(c));}

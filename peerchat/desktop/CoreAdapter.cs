@@ -45,7 +45,11 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_history(IntPtr handle,string peer,long before);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_erase_history(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_account(IntPtr handle,ulong account,string name);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_clear_authenticated_group_rosters(IntPtr handle);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_begin_group_control(IntPtr handle,string group,ulong targetAccount,string targetPeer,ulong discoveryGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create_proof(IntPtr handle,string group);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_rename(IntPtr handle,string group,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_invite(IntPtr handle,string group,ulong account,string peer,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_respond(IntPtr handle,string group,int accepted);
@@ -126,7 +130,15 @@ public sealed class CoreAdapter : IDisposable {
     public void History(string peer,long before){ui_history(handle,peer,before);}
     public bool EraseHistory(string peer){return ui_erase_history(handle,peer)!=0;}
     public bool SetGroupAccount(long account,string name){return account>0&&ui_group_account(handle,(ulong)account,name)!=0;}
+    public bool SetAuthenticatedGroupRoster(long localAccount,ulong discoveryGeneration,ServerGroupRoster roster){
+        if(localAccount<=0||discoveryGeneration==0||roster==null)return false;
+        var rows=new List<string>();foreach(var member in roster.Members){if(member.AccountId<=0||String.IsNullOrEmpty(member.PeerId)||String.IsNullOrEmpty(member.Role)||String.IsNullOrEmpty(member.State)||member.PeerId.IndexOfAny(new[]{'|','\r','\n'})>=0)return false;rows.Add(member.AccountId+"|"+member.PeerId+"|"+member.Role+"|"+member.State);}
+        return ui_authenticated_group_roster(handle,(ulong)localAccount,discoveryGeneration,roster.GroupId,roster.LegacyGroupId,(ulong)roster.RosterGeneration,roster.DistributorPeerId,String.Join("\n",rows))!=0;
+    }
+    public void ClearAuthenticatedGroupRosters(){ui_clear_authenticated_group_rosters(handle);}
+    public bool BeginGroupControl(string serverGroupId,long targetAccount,string targetPeer,ulong discoveryGeneration){return targetAccount>0&&ui_begin_group_control(handle,serverGroupId,(ulong)targetAccount,targetPeer,discoveryGeneration)!=0;}
     public string CreateGroup(string name){return Marshal.PtrToStringUni(ui_group_create(handle,name));}
+    public string GroupCreationProof(string group){return Marshal.PtrToStringUni(ui_group_create_proof(handle,group))??"";}
     public bool RenameGroup(string group,string name){return ui_group_rename(handle,group,name)!=0;}
     public bool InviteToGroup(string group,long account,string peer,string name){return account>0&&ui_group_invite(handle,group,(ulong)account,peer,name)!=0;}
     public bool RespondToGroupInvite(string group,bool accepted){return ui_group_respond(handle,group,accepted?1:0)!=0;}
@@ -174,7 +186,7 @@ public sealed class CoreAdapter : IDisposable {
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
     public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
 }
-public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails,screenFailureDomain,screenFailureReason,screenRecoveryTrigger; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration,screenRecoveryGenerationFrom,screenRecoveryGenerationTo; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight,screenFps; public double screenBitrateMbps; public bool connected,callMuted,callDeafened,callControlAvailable,screenMediaFailed; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
+public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails,screenFailureDomain,screenFailureReason,screenRecoveryTrigger,authorizationGroupId; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration,screenRecoveryGenerationFrom,screenRecoveryGenerationTo,authorizationRosterGeneration,authorizationTargetAccountId; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight,screenFps; public double screenBitrateMbps; public bool connected,callMuted,callDeafened,callControlAvailable,screenMediaFailed; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
 public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }

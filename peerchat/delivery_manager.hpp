@@ -62,6 +62,11 @@ public:
         return storage_.pendingGroupEvents(destination, limit);
     }
 
+    std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& destination,
+                                                         int limit = 64) {
+        return storage_.pendingGroupKeyHandoffs(destination, limit);
+    }
+
     bool submittedMessage(const std::string& destination, const std::string& messageId,
                           session::TransportInstanceId instance) {
         return submitted(Kind::Message, destination, messageId, instance);
@@ -72,6 +77,11 @@ public:
         return submitted(Kind::GroupEvent, destination, eventId, instance);
     }
 
+    bool submittedGroupKeyHandoff(const std::string& destination, const std::string& handoffId,
+                                  session::TransportInstanceId instance) {
+        return submitted(Kind::GroupKey, destination, handoffId, instance);
+    }
+
     bool wasSubmittedMessage(const std::string& destination, const std::string& messageId,
                              session::TransportInstanceId instance) const {
         return wasSubmitted(Kind::Message, destination, messageId, instance);
@@ -80,6 +90,11 @@ public:
     bool wasSubmittedGroupEvent(const std::string& destination, const std::string& eventId,
                                 session::TransportInstanceId instance) const {
         return wasSubmitted(Kind::GroupEvent, destination, eventId, instance);
+    }
+
+    bool wasSubmittedGroupKeyHandoff(const std::string& destination, const std::string& handoffId,
+                                     session::TransportInstanceId instance) const {
+        return wasSubmitted(Kind::GroupKey, destination, handoffId, instance);
     }
 
     bool acknowledgeMessage(const std::string& authenticatedDestination,
@@ -102,6 +117,16 @@ public:
         return true;
     }
 
+    bool acknowledgeGroupKeyHandoff(const std::string& authenticatedDestination,
+                                    session::TransportInstanceId instance,
+                                    const std::string& handoffId) {
+        if (!acknowledges(Kind::GroupKey, authenticatedDestination, handoffId, instance))
+            return false;
+        storage_.acknowledgeGroupKeyHandoff(handoffId, authenticatedDestination);
+        submissions_.erase(Key{Kind::GroupKey, authenticatedDestination, handoffId});
+        return true;
+    }
+
     // Returns false for an identical replay and lets Storage reject conflicting ID reuse.
     bool acceptIncomingMessage(const std::string& authenticatedSource,
                                const StoredMessage& message) {
@@ -119,7 +144,7 @@ public:
     }
 
 private:
-    enum class Kind : unsigned char { Message, GroupEvent };
+    enum class Kind : unsigned char { Message, GroupEvent, GroupKey };
 
     struct Key {
         Kind kind;
