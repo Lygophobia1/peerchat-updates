@@ -104,6 +104,8 @@ extern "C" int __cdecl pc_screen_query_capabilities(pc_screen_capabilities* valu
         const auto decoder = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER;
         if (transform_available(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_H264, hardware))
             result.hardware_encoder_codecs |= PC_SCREEN_H264;
+        if (transform_available(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_H264, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER))
+            result.software_encoder_codecs |= PC_SCREEN_H264;
         if (transform_available(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_HEVC, hardware))
             result.hardware_encoder_codecs |= PC_SCREEN_HEVC;
         if (transform_available(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_AV1, hardware))

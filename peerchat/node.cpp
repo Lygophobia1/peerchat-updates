@@ -82,8 +82,8 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
-    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;};
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0;screen::Backend screenBackend=screen::Backend::NativeWindows;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
@@ -112,6 +112,7 @@ struct Node::Impl {
     std::atomic<std::uint64_t> screenStopStageSince{0};
     bool screenAvailable=false;
     ScreenShareMedia::Options screenOptions{};
+    screen::Backend configuredScreenBackend=screen::Backend::NativeWindows;
     std::uint64_t screenMediaLifetime=0,screenMediaGeneration=0,screenNetworkGeneration=0;
     std::uint64_t screenRetryAt=0;
     std::uint64_t screenLastRestartAt=0;
@@ -290,6 +291,8 @@ struct Node::Impl {
         if(screenMedia){auto stats=screenMedia->statistics();sent+=stats.encodedBytesSubmitted;received+=stats.mediaBytesReceived;out<<L"\n"<<screenMedia->diagnostics();}
         else if(!lastScreenStartupDiagnostics.empty())out<<L"\n"<<lastScreenStartupDiagnostics;
         out<<L"\nlogical_share_encoded_bytes_submitted="<<sent<<L"\nlogical_share_rtp_bytes_received="<<received;
+        out<<L"\nconfigured_backend="<<(configuredScreenBackend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows")
+           <<L"\nactive_backend="<<(active?(active->backend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows"):L"none");
         return out.str();
     }
     void screenEvent(const std::wstring& reason={}){
@@ -325,7 +328,7 @@ struct Node::Impl {
         auto active=screenShares.active();if(!active)return false;
         if(!mediaIce||!mediaIce->valid(static_cast<std::int64_t>(std::time(nullptr))))return false;
         const bool recovering=active->state==screen::State::Recovering;
-        stopScreenMedia();screenStopStage=0;screenStopStageSince=0;screenOptions.ice=*mediaIce;screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
+        stopScreenMedia();screenStopStage=0;screenStopStageSince=0;screenOptions.ice=*mediaIce;screenOptions.backend=active->backend;screenMedia=std::make_unique<ScreenShareMedia>(screenOptions);
         screenMediaLifetime=active->lifetime;screenMediaGeneration=active->generation;
         screenNetworkGeneration=networkGeneration;screenTelemetryAt=0;screenMediaFailed=false;lastScreenStartupDiagnostics.clear();
         // Keep the reason that created this replacement generation visible to
@@ -1015,13 +1018,15 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
             else if(command.action==Action::EraseHistory){store->eraseHistory(command.peer);NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.text=L"history_cleared";emit(std::move(e));}
+            else if(command.action==Action::ScreenBackend){configuredScreenBackend=command.screenBackend;}
             else if(command.action==Action::ScreenStart){
                 if(screenShares.active())throw std::runtime_error("A screen share is already active");
                 lastScreenFailureDiagnostics.clear();
                 auto contact=contacts.find(command.peer);
                 if(contact==contacts.end()||!contact->second.verified||!screenConnection(command.peer))throw std::runtime_error("A verified screen-share capable peer is required");
                 if(command.sourceKind!=PC_SCREEN_MONITOR&&command.sourceKind!=PC_SCREEN_WINDOW)throw std::runtime_error("Invalid screen source");
-                if(!screenShares.start(command.id,command.peer,true,screen::State::Offering,nowMilliseconds()+30000))throw std::runtime_error("Could not start screen share");
+                configuredScreenBackend=command.screenBackend;
+                if(!screenShares.start(command.id,command.peer,true,screen::State::Offering,nowMilliseconds()+30000,command.screenBackend))throw std::runtime_error("Could not start screen share");
                 screenPriorSentBytes=screenPriorReceivedBytes=0;
                 screenOptions={};screenOptions.sender=true;screenOptions.sourceKind=command.sourceKind;screenOptions.sourceHandle=command.sourceHandle;
                 screenOptions.fps=command.fps;screenOptions.bitrate=command.bitrate;screenOptions.captureCursor=command.accepted;
@@ -1029,6 +1034,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(!screenMedia->startOffer(error)){clearScreen(widenUtf8(error));continue;}screenEvent(L"Starting screen share");
             }else if(command.action==Action::ScreenAnswer){
                 auto active=screenShares.active();if(!active||active->id!=command.id||active->state!=screen::State::Incoming)continue;
+                configuredScreenBackend=command.screenBackend;active->backend=command.screenBackend;
                 if(!screenConnection(active->peer)){clearScreen(L"Peer unavailable for screen-share control");continue;}
                 screenOptions={};screenOptions.sender=false;screenOptions.presentationWindow=command.sourceHandle;
                 screenOptions.width=1280;screenOptions.height=720;screenOptions.fps=60;
@@ -1288,12 +1294,13 @@ bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!pr
 void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
 void Node::loadGroupHistory(const std::string& group,std::int64_t before){if(!protocol::id(group,32))return;Impl::Command c{};c.action=Impl::Action::GroupHistoryPage;c.group=group;c.before=before;impl_->command(std::move(c));}
 std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(peerId))return {};Impl::Command command{};command.action=Impl::Action::VoiceStart;command.peer=peerId;command.id=Storage::newMessageId();auto id=command.id;return impl_->command(std::move(command))?id:std::string{};}
-std::string Node::startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor){
+std::string Node::startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor,screen::Backend backend){
     if(!protocol::id(peerId)||!sourceHandle||(sourceKind!=PC_SCREEN_MONITOR&&sourceKind!=PC_SCREEN_WINDOW)||fps<5||fps>60||bitrate<250000||bitrate>50000000)return {};
-    Impl::Command command{};command.action=Impl::Action::ScreenStart;command.peer=peerId;command.id=Storage::newMessageId();command.sourceKind=sourceKind;command.sourceHandle=sourceHandle;command.fps=fps;command.bitrate=bitrate;command.accepted=captureCursor;
+    Impl::Command command{};command.action=Impl::Action::ScreenStart;command.peer=peerId;command.id=Storage::newMessageId();command.sourceKind=sourceKind;command.sourceHandle=sourceHandle;command.fps=fps;command.bitrate=bitrate;command.accepted=captureCursor;command.screenBackend=backend;
     auto id=command.id;return impl_->command(std::move(command))?id:std::string{};
 }
-bool Node::answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow){if(!protocol::id(shareId,32)||!presentationWindow)return false;Impl::Command command{};command.action=Impl::Action::ScreenAnswer;command.id=shareId;command.sourceHandle=presentationWindow;return impl_->command(std::move(command));}
+bool Node::setScreenShareBackend(screen::Backend backend){if(backend!=screen::Backend::NativeWindows&&backend!=screen::Backend::WebRtcCompatibility)return false;Impl::Command command{};command.action=Impl::Action::ScreenBackend;command.screenBackend=backend;return impl_->command(std::move(command));}
+bool Node::answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow,screen::Backend backend){if(!protocol::id(shareId,32)||!presentationWindow)return false;Impl::Command command{};command.action=Impl::Action::ScreenAnswer;command.id=shareId;command.sourceHandle=presentationWindow;command.screenBackend=backend;return impl_->command(std::move(command));}
 bool Node::declineScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenDecline;command.id=shareId;return impl_->command(std::move(command));}
 bool Node::endScreenShare(const std::string& shareId){if(!protocol::id(shareId,32))return false;Impl::Command command{};command.action=Impl::Action::ScreenEnd;command.id=shareId;return impl_->command(std::move(command));}
 std::wstring Node::screenShareDiagnostics(){

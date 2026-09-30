@@ -60,14 +60,15 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_groups(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_history(IntPtr handle,string group,long before);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_voice_call(IntPtr handle,string peer);
-    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_screen_start(IntPtr handle,string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,int cursor);
-    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_answer(IntPtr handle,string id,ulong viewer);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_screen_start(IntPtr handle,string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,int cursor,uint backend);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_screen_backend(IntPtr handle,uint backend);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_answer(IntPtr handle,string id,ulong viewer,uint backend);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_decline(IntPtr handle,string id);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_screen_end(IntPtr handle,string id);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_screen_diagnostics(IntPtr handle);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void ScreenSourceCallback(IntPtr context,uint kind,ulong source,IntPtr name,uint width,uint height,uint refreshNumerator,uint refreshDenominator);
     [DllImport("PeerChat.ScreenMedia.dll",CallingConvention=CallingConvention.Cdecl)] static extern uint pc_screen_enumerate_sources(ScreenSourceCallback callback,IntPtr context);
-    [StructLayout(LayoutKind.Sequential)] struct ScreenCapabilities {public uint size,capture,encoders,decoders,d3d11;}
+    [StructLayout(LayoutKind.Sequential)] struct ScreenCapabilities {public uint size,capture,encoders,decoders,d3d11,softwareEncoders;}
     [DllImport("PeerChat.ScreenMedia.dll",CallingConvention=CallingConvention.Cdecl)] static extern int pc_screen_query_capabilities(ref ScreenCapabilities capabilities);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_answer(IntPtr handle,string call);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_voice_decline(IntPtr handle,string call);
@@ -149,8 +150,9 @@ public sealed class CoreAdapter : IDisposable {
     public void LoadGroups(){ui_groups(handle);}
     public void GroupHistory(string group,long before){ui_group_history(handle,group,before);}
     public string StartVoiceCall(string peer){return Marshal.PtrToStringUni(ui_voice_call(handle,peer));}
-    public string StartScreenShare(string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,bool cursor){return Marshal.PtrToStringUni(ui_screen_start(handle,peer,sourceKind,sourceHandle,fps,bitrate,cursor?1:0));}
-    public bool AnswerScreenShare(string id,ulong viewer){return ui_screen_answer(handle,id,viewer)!=0;}
+    public string StartScreenShare(string peer,uint sourceKind,ulong sourceHandle,uint fps,uint bitrate,bool cursor,string backend){return Marshal.PtrToStringUni(ui_screen_start(handle,peer,sourceKind,sourceHandle,fps,bitrate,cursor?1:0,backend=="WebRTC Compatibility"?1u:0u));}
+    public bool SetScreenShareBackend(string backend){return ui_screen_backend(handle,backend=="WebRTC Compatibility"?1u:0u)!=0;}
+    public bool AnswerScreenShare(string id,ulong viewer,string backend){return ui_screen_answer(handle,id,viewer,backend=="WebRTC Compatibility"?1u:0u)!=0;}
     public bool DeclineScreenShare(string id){return ui_screen_decline(handle,id)!=0;}
     public bool EndScreenShare(string id){return ui_screen_end(handle,id)!=0;}
     public string ScreenShareDiagnostics(){return Marshal.PtrToStringUni(ui_screen_diagnostics(handle));}
@@ -169,7 +171,7 @@ public sealed class CoreAdapter : IDisposable {
         ScreenSourceCallback callback=(context,kind,source,name,width,height,numerator,denominator)=>sources.Add(new ScreenSource{kind=kind,handle=source,name=Marshal.PtrToStringUni(name)??"Screen",width=width,height=height});
         pc_screen_enumerate_sources(callback,IntPtr.Zero);GC.KeepAlive(callback);return sources.ToArray();
     }
-    public bool ScreenH264Available(){EnsureScreenMediaLoaded();var capabilities=new ScreenCapabilities{size=(uint)Marshal.SizeOf(typeof(ScreenCapabilities))};return pc_screen_query_capabilities(ref capabilities)!=0&&capabilities.capture!=0&&(capabilities.encoders&1)!=0&&(capabilities.decoders&1)!=0&&capabilities.d3d11!=0;}
+    public bool ScreenH264Available(string backend){EnsureScreenMediaLoaded();var capabilities=new ScreenCapabilities{size=(uint)Marshal.SizeOf(typeof(ScreenCapabilities))};return pc_screen_query_capabilities(ref capabilities)!=0&&capabilities.capture!=0&&((backend=="WebRTC Compatibility"?capabilities.softwareEncoders:capabilities.encoders)&1)!=0&&(capabilities.decoders&1)!=0&&capabilities.d3d11!=0;}
     public bool AnswerVoiceCall(string call){return ui_voice_answer(handle,call)!=0;}
     public bool DeclineVoiceCall(string call){return ui_voice_decline(handle,call)!=0;}
     public bool EndVoiceCall(string call){return ui_voice_end(handle,call)!=0;}

@@ -18,9 +18,12 @@ class VoiceUiSmoke {
     static FrameworkElement FindNamedControl(DependencyObject root,string name){for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);var element=child as FrameworkElement;if(element!=null&&AutomationProperties.GetName(element)==name)return element;var nested=FindNamedControl(child,name);if(nested!=null)return nested;}return null;}
     [STAThread] static int Main(string[] args){
         var screenPreferences=new ScreenSharePreferenceStore(args[0]);
-        screenPreferences.Save(new ScreenSharePreferenceData{FramesPerSecond=60,BitrateBitsPerSecond=16000000,CaptureCursor=false});
+        Require(screenPreferences.Load().Backend=="Native Windows","New profiles must default to Native Windows screen sharing");
+        File.WriteAllText(Path.Combine(args[0],"screen-share-preferences.json"),"{\"Version\":1,\"FramesPerSecond\":30,\"BitrateBitsPerSecond\":8000000,\"CaptureCursor\":true}");
+        Require(screenPreferences.Load().Backend=="Native Windows","Existing screen preferences must migrate to Native Windows without changing quality");
+        screenPreferences.Save(new ScreenSharePreferenceData{FramesPerSecond=60,BitrateBitsPerSecond=16000000,CaptureCursor=false,Backend="WebRTC Compatibility"});
         var loadedScreenPreferences=screenPreferences.Load();
-        Require(loadedScreenPreferences.FramesPerSecond==60&&loadedScreenPreferences.BitrateBitsPerSecond==16000000&&!loadedScreenPreferences.CaptureCursor,"Profile-scoped screen preferences did not survive reload");
+        Require(loadedScreenPreferences.FramesPerSecond==60&&loadedScreenPreferences.BitrateBitsPerSecond==16000000&&!loadedScreenPreferences.CaptureCursor&&loadedScreenPreferences.Backend=="WebRTC Compatibility","Profile-scoped screen preferences did not survive reload");
         int result=0;var app=new Application();var desktop=new DesktopApplication(args[0],UInt16.Parse(args[1]));
         var window=(Window)typeof(DesktopApplication).GetField("window",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(desktop);
         window.ShowInTaskbar=false;window.ShowActivated=false;window.WindowStartupLocation=WindowStartupLocation.Manual;window.Left=-20000;

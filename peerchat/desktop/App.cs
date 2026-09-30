@@ -308,6 +308,7 @@ public class DesktopApplication {
             firewallConfiguredPort=0;
             startupTask=Task.Run(()=>core.Start(directory,port,name));
             await startupTask;
+            core.SetScreenShareBackend(screenPreferences.Backend);
             core.SetNetworkContext(networkGeneration,networkFingerprint);
             // A replacement is healthy only after its local native profile/core initialization succeeds.
             if(!String.IsNullOrWhiteSpace(updateHealthToken)){
@@ -2756,6 +2757,10 @@ public class DesktopApplication {
 		settingsPages.Add("Video", createInfoPage("Video", "Video is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
 		StackPanel screenSettings=createInfoPage("Screen Sharing", "Profile-specific preferences for secure one-to-one screen sharing. Source selection remains per share; no source/window handle is saved.");
 		var screenControls=new StackPanel();
+		screenControls.Children.Add(new TextBlock{Text="Screen Share Backend",Foreground=Brush("#AAB7C4")});
+		var screenBackend=new ComboBox{ItemsSource=new[]{"Native Windows","WebRTC Compatibility"},SelectedItem=screenPreferences.Backend,Margin=new Thickness(0,5,0,12)};
+		AutomationProperties.SetName(screenBackend,"Screen share backend");
+		screenControls.Children.Add(screenBackend);
 		screenControls.Children.Add(new TextBlock{Text="Frame rate",Foreground=Brush("#AAB7C4")});
 		var screenFps=new ComboBox{ItemsSource=new int[]{15,30,60},SelectedItem=screenPreferences.FramesPerSecond,Margin=new Thickness(0,5,0,12)};
 		AutomationProperties.SetName(screenFps,"Screen share frame rate");
@@ -2768,9 +2773,9 @@ public class DesktopApplication {
 		var screenCursor=new CheckBox{Content="Include cursor",IsChecked=screenPreferences.CaptureCursor,Margin=new Thickness(0,2,0,4)};
 		AutomationProperties.SetName(screenCursor,"Screen share cursor");
 		screenControls.Children.Add(screenCursor);
-		Action saveScreenSettings=delegate{if(screenFps.SelectedItem==null||screenBitrate.SelectedValue==null)return;screenPreferences.FramesPerSecond=(int)screenFps.SelectedItem;screenPreferences.BitrateBitsPerSecond=(int)screenBitrate.SelectedValue;screenPreferences.CaptureCursor=screenCursor.IsChecked==true;screenPreferenceStore.Save(screenPreferences);};
-		screenFps.SelectionChanged+=delegate{saveScreenSettings();};screenBitrate.SelectionChanged+=delegate{saveScreenSettings();};screenCursor.Checked+=delegate{saveScreenSettings();};screenCursor.Unchecked+=delegate{saveScreenSettings();};
-		screenSettings.Children.Add(SettingsCard("Capture quality", "H.264 hardware encoding; effective resolution follows the selected source and available device capability. Settings take effect on the next share.",screenControls));
+		Action saveScreenSettings=delegate{if(screenBackend.SelectedItem==null||screenFps.SelectedItem==null||screenBitrate.SelectedValue==null)return;screenPreferences.Backend=(string)screenBackend.SelectedItem;screenPreferences.FramesPerSecond=(int)screenFps.SelectedItem;screenPreferences.BitrateBitsPerSecond=(int)screenBitrate.SelectedValue;screenPreferences.CaptureCursor=screenCursor.IsChecked==true;screenPreferenceStore.Save(screenPreferences);core.SetScreenShareBackend(screenPreferences.Backend);};
+		screenBackend.SelectionChanged+=delegate{saveScreenSettings();};screenFps.SelectionChanged+=delegate{saveScreenSettings();};screenBitrate.SelectionChanged+=delegate{saveScreenSettings();};screenCursor.Checked+=delegate{saveScreenSettings();};screenCursor.Unchecked+=delegate{saveScreenSettings();};
+		screenSettings.Children.Add(SettingsCard("Capture quality", "Native Windows uses hardware H.264; WebRTC Compatibility uses software H.264 on the existing WebRTC-compatible media track. Settings take effect on the next share.",screenControls));
 		settingsPages.Add("Screen Sharing",screenSettings);
 		var networkSettings=new StackPanel();networkSettings.Children.Add(new TextBlock{Text="Reliable connection",FontSize=24,FontWeight=FontWeights.SemiBold});networkSettings.Children.Add(new TextBlock{Text="Server Relay — default\nPeerChat uses the server relay for reliable messaging and control. Voice and screen sharing may still use their existing ICE media paths.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,18)});var allowP2p=new CheckBox{Content="Allow direct P2P connections",IsChecked=connectionPreferences.AllowDirectP2p,Foreground=Brush("#EDF1F5")};allowP2p.Checked+=(s,e)=>{connectionPreferences.AllowDirectP2p=true;connectionPreferenceStore.Save(connectionPreferences);};allowP2p.Unchecked+=(s,e)=>{connectionPreferences.AllowDirectP2p=false;connectionPreferenceStore.Save(connectionPreferences);ClearScopedP2p(true);};networkSettings.Children.Add(allowP2p);networkSettings.Children.Add(new TextBlock{Text="Direct P2P can reduce server usage and latency, but it may reveal your IP address to the other person. It is off by default and requires mutual consent for each friend.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,0)});settingsPages.Add("Network",networkSettings);
 		showSettingsPage = delegate(string page)
@@ -3682,7 +3687,7 @@ public class DesktopApplication {
         string peer=model.Selected.Contact.peer;
         ScreenSource[] sources;
         try{
-            bool available=await Task.Run(()=>core.ScreenH264Available());
+            bool available=await Task.Run(()=>core.ScreenH264Available(screenPreferences.Backend));
             if(!available){Notify("This PC does not have the required Windows capture and H.264 path.");return;}
             sources=await Task.Run(()=>core.ScreenSources());
         }catch(Exception error){Notify("Screen sharing is unavailable: "+error.Message);return;}
@@ -3702,7 +3707,7 @@ public class DesktopApplication {
         if(activeScreenState!=0||model.Groups||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||!model.Selected.Online){Notify("That conversation is no longer ready for sharing.");return;}
         if(!await EnsureMediaIceConfigurationAsync()){Notify("Screen-share media relay is unavailable. Messaging remains connected.");return;}
         if(activeScreenState!=0||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer)return;
-        string id=core.StartScreenShare(peer,chosen.kind,chosen.handle,(uint)screenPreferences.FramesPerSecond,(uint)screenPreferences.BitrateBitsPerSecond,cursor.IsChecked==true);
+        string id=core.StartScreenShare(peer,chosen.kind,chosen.handle,(uint)screenPreferences.FramesPerSecond,(uint)screenPreferences.BitrateBitsPerSecond,cursor.IsChecked==true,screenPreferences.Backend);
         if(String.IsNullOrEmpty(id))Notify("Could not queue screen sharing for this peer.");
     }
     void ShowIncomingScreenShare(){
@@ -3735,7 +3740,7 @@ public class DesktopApplication {
     }
     async void AnswerIncomingScreenShare(Window viewer){
         string id=activeScreenId;
-        if(screenViewerChild==IntPtr.Zero||!await EnsureMediaIceConfigurationAsync()||id!=activeScreenId||activeScreenState!=2||!core.AnswerScreenShare(id,(ulong)screenViewerChild.ToInt64())){Notify("Could not open the secure screen viewer.");if(!String.IsNullOrEmpty(id))core.DeclineScreenShare(id);closingScreenViewer=true;viewer.Close();closingScreenViewer=false;}
+        if(screenViewerChild==IntPtr.Zero||!await EnsureMediaIceConfigurationAsync()||id!=activeScreenId||activeScreenState!=2||!core.AnswerScreenShare(id,(ulong)screenViewerChild.ToInt64(),screenPreferences.Backend)){Notify("Could not open the secure screen viewer.");if(!String.IsNullOrEmpty(id))core.DeclineScreenShare(id);closingScreenViewer=true;viewer.Close();closingScreenViewer=false;}
     }
     void UpdateScreenViewerTitle(CoreEvent e){
         if(screenViewerWindow==null)return;

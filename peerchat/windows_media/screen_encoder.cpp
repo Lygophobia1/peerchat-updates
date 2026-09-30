@@ -317,8 +317,9 @@ private:
         MFT_REGISTER_TYPE_INFO outputType{MFMediaType_Video, MFVideoFormat_H264};
         IMFActivate** activations = nullptr;
         UINT32 count = 0;
+        const bool compatibility = options_.backend == PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY;
         const HRESULT enumeration = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-                MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                (compatibility ? MFT_ENUM_FLAG_SYNCMFT : MFT_ENUM_FLAG_HARDWARE) | MFT_ENUM_FLAG_SORTANDFILTER,
                 nullptr, &outputType, &activations, &count);
         if (FAILED(enumeration) || !count) return rejected(FAILED(enumeration) ? enumeration : MF_E_TOPO_CODEC_NOT_FOUND,
             PC_SCREEN_ENCODER_FAILURE_ENUMERATE_MFT);
@@ -353,19 +354,23 @@ private:
         ComPtr<IMFAttributes> attributes;
         const HRESULT encoderAttributes = encoder_->GetAttributes(&attributes);
         if (FAILED(encoderAttributes)) return rejected(encoderAttributes, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
-        const HRESULT asynchronous = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-        if (FAILED(asynchronous)) return rejected(asynchronous, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        if (!compatibility) {
+            const HRESULT asynchronous = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+            if (FAILED(asynchronous)) return rejected(asynchronous, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        }
         lowLatencyControlSupported_ = true;
         const HRESULT lowLatency = attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
         lowLatencyControlApplied_ = SUCCEEDED(lowLatency);
-        UINT token = 0;
-        const HRESULT manager = MFCreateDXGIDeviceManager(&token, &deviceManager_);
-        if (FAILED(manager)) return rejected(manager, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
-        const HRESULT reset = deviceManager_->ResetDevice(d3d_.Get(), token);
-        if (FAILED(reset)) return rejected(reset, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
-        const HRESULT managerMessage = encoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
-            reinterpret_cast<ULONG_PTR>(deviceManager_.Get()));
-        if (FAILED(managerMessage)) return rejected(managerMessage, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+        if (!compatibility) {
+            UINT token = 0;
+            const HRESULT manager = MFCreateDXGIDeviceManager(&token, &deviceManager_);
+            if (FAILED(manager)) return rejected(manager, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+            const HRESULT reset = deviceManager_->ResetDevice(d3d_.Get(), token);
+            if (FAILED(reset)) return rejected(reset, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+            const HRESULT managerMessage = encoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                reinterpret_cast<ULONG_PTR>(deviceManager_.Get()));
+            if (FAILED(managerMessage)) return rejected(managerMessage, PC_SCREEN_ENCODER_FAILURE_DXGI_MANAGER);
+        }
 
         ComPtr<IMFMediaType> mediaOutput;
         if (FAILED(MFCreateMediaType(&mediaOutput)) ||
@@ -389,9 +394,11 @@ private:
                 options_.frames_per_second, 1)) ||
             FAILED(MFSetAttributeRatio(mediaInput.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)) ||
             FAILED(mediaInput->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive)) ||
-            FAILED(encoder_->SetInputType(0, mediaInput.Get(), 0)) ||
-            FAILED(encoder_.As(&events_))) return rejected(E_FAIL, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE);
-        eventSink_.Attach(new EventSink(weak_from_this()));
+            FAILED(encoder_->SetInputType(0, mediaInput.Get(), 0))) return rejected(E_FAIL, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE);
+        if (!compatibility) {
+            if (FAILED(encoder_.As(&events_))) return rejected(E_FAIL, PC_SCREEN_ENCODER_FAILURE_MEDIA_TYPE);
+            eventSink_.Attach(new EventSink(weak_from_this()));
+        }
 
         pool_ = Direct3D11CaptureFramePool::CreateFreeThreaded(
             winrtDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
@@ -409,8 +416,10 @@ private:
         if (FAILED(begin)) return rejected(begin, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
         const HRESULT start = encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
         if (FAILED(start)) return rejected(start, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
-        const HRESULT event = events_->BeginGetEvent(eventSink_.Get(), nullptr);
-        if (FAILED(event)) return rejected(event, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        if (!compatibility) {
+            const HRESULT event = events_->BeginGetEvent(eventSink_.Get(), nullptr);
+            if (FAILED(event)) return rejected(event, PC_SCREEN_ENCODER_FAILURE_PROCESS_MESSAGE);
+        }
         session_.StartCapture();
         setStartupStage(PC_SCREEN_START_CAPTURE_STARTED);
         return true;
@@ -495,7 +504,31 @@ private:
                 videoProcessor_.Get(), output.Get(), 0, 1, &stream))) return false;
         setWorkerStage(PC_SCREEN_ENCODER_CREATE_SAMPLE);
         ComPtr<IMFMediaBuffer> surface;
-        if (FAILED(MFCreateDXGISurfaceBuffer(
+        if (options_.backend == PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY) {
+            D3D11_TEXTURE2D_DESC stagingDesc = nv12Desc;
+            stagingDesc.Usage = D3D11_USAGE_STAGING;
+            stagingDesc.BindFlags = 0;
+            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Texture2D> staging;
+            if (FAILED(d3d_->CreateTexture2D(&stagingDesc, nullptr, &staging))) return false;
+            d3dContext_->CopyResource(staging.Get(), nv12.Get());
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(d3dContext_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+            const DWORD length = width_ * height_ * 3 / 2;
+            const HRESULT allocation = MFCreateMemoryBuffer(length, &surface);
+            if (FAILED(allocation)) { d3dContext_->Unmap(staging.Get(), 0); return false; }
+            BYTE* destination = nullptr;
+            const HRESULT locked = surface->Lock(&destination, nullptr, nullptr);
+            if (FAILED(locked)) { d3dContext_->Unmap(staging.Get(), 0); return false; }
+            for (UINT32 row = 0; row < height_; ++row)
+                std::memcpy(destination + row * width_, static_cast<const BYTE*>(mapped.pData) + row * mapped.RowPitch, width_);
+            for (UINT32 row = 0; row < height_ / 2; ++row)
+                std::memcpy(destination + width_ * height_ + row * width_,
+                    static_cast<const BYTE*>(mapped.pData) + (height_ + row) * mapped.RowPitch, width_);
+            surface->Unlock();
+            surface->SetCurrentLength(length);
+            d3dContext_->Unmap(staging.Get(), 0);
+        } else if (FAILED(MFCreateDXGISurfaceBuffer(
                 __uuidof(ID3D11Texture2D), nv12.Get(), 0, FALSE, &surface))) return false;
         ComPtr<IMFSample> sample;
         if (FAILED(MFCreateSample(&sample)) || FAILED(sample->AddBuffer(surface.Get()))) return false;
@@ -682,7 +715,23 @@ private:
                     initialized_ = true;
                 }
                 condition_.notify_all();
-                while (running_) {
+                if (options_.backend == PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY) {
+                    while (running_) {
+                        CapturedFrame frame;
+                        {
+                            std::unique_lock lock(mutex_);
+                            condition_.wait(lock, [this] { return !running_ || pending_.frame; });
+                            if (!running_) break;
+                            frame = std::move(pending_);
+                        }
+                        if (!submit(std::move(frame))) { fail(); break; }
+                        // A synchronous MFT can produce more than one output per input.
+                        for (unsigned attempt = 0; attempt < 16 && running_; ++attempt) {
+                            if (!collect()) { fail(); break; }
+                            if (processOutputHresult_ == static_cast<int32_t>(MF_E_TRANSFORM_NEED_MORE_INPUT)) break;
+                        }
+                    }
+                } else while (running_) {
                     setWorkerStage(PC_SCREEN_ENCODER_WAITING);
                     MediaEventType event{};
                     CapturedFrame frame;
@@ -715,6 +764,16 @@ private:
         if (pool_) pool_.FrameArrived(frameToken_);
         if (session_) session_.Close();
         if (pool_) pool_.Close();
+        if (options_.backend == PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY) {
+            // WGC frames and capture objects were created on this apartment.
+            // Do not leave a pending frame to be released by the caller's thread
+            // after this worker has torn down its WinRT apartment.
+            std::lock_guard lock(mutex_);
+            pending_ = {};
+            session_ = nullptr;
+            pool_ = nullptr;
+            item_ = nullptr;
+        }
         {
             std::lock_guard lock(mutex_);
             events_.Reset();
@@ -794,7 +853,7 @@ extern "C" pc_screen_encoder* __cdecl pc_screen_encoder_open(
     const pc_screen_encoder_options* options) {
     if (!options || options->structure_size != sizeof(*options) ||
         (options->source_kind != PC_SCREEN_MONITOR && options->source_kind != PC_SCREEN_WINDOW) ||
-        !options->source_handle || options->frames_per_second < 1 ||
+        !options->source_handle || options->backend > PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY || options->frames_per_second < 1 ||
         options->frames_per_second > 240 || options->bitrate_bits_per_second < 100000 ||
         options->bitrate_bits_per_second > 500000000) return nullptr;
     try {

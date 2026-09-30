@@ -22,6 +22,10 @@ std::uint64_t counter(const std::wstring& text,const std::wstring& name){
 int main(){
     using namespace peerchat;
     using Clock=std::chrono::steady_clock;
+    const auto backend=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_BACKEND",nullptr,0)>0?
+        screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
+    const auto nextBackend=backend==screen::Backend::NativeWindows?
+        screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
     std::array<Node,2> nodes;
     std::array<std::string,2> peers;
     std::array<bool,2> ready{},connected{};
@@ -101,7 +105,9 @@ int main(){
         SetWindowPos(source,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         for(size_t i=0;i<2;++i){auto path=(root/std::to_wstring(i)).wstring();
             {Storage storage(path);auto profile=storage.profile();profile.listenPort=static_cast<unsigned short>(base+i);storage.saveProfile(profile);}
-            nodes[i].start(path);
+            // This direct-only fixture uses explicit loopback ports. Production
+            // relay-only startup still has no reliable direct listener.
+            nodes[i].start(path,static_cast<unsigned short>(base+i));
         }
         wait([&]{return ready[0]&&ready[1];},"Screen peers did not start");
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
@@ -111,11 +117,11 @@ int main(){
         const auto captureHandle=reinterpret_cast<std::uint64_t>(realMonitor?
             static_cast<HANDLE>(monitor):static_cast<HANDLE>(source));
         auto id=nodes[0].startScreenShare(peers[1],captureKind,
-            captureHandle,fps,bitrate,true);
+            captureHandle,fps,bitrate,true,backend);
         require(!id.empty(),"Screen share start command was rejected");
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==id;},
             "Authenticated screen offer did not reach the verified peer");
-        require(nodes[1].answerScreenShare(id,reinterpret_cast<std::uint64_t>(viewer)),
+        require(nodes[1].answerScreenShare(id,reinterpret_cast<std::uint64_t>(viewer),backend),
             "Receiver rejected screen share answer command");
         wait([&]{
             if(shareState[0]!=static_cast<unsigned>(screen::State::Connected)||
@@ -130,6 +136,14 @@ int main(){
             "Rolling sender/receiver video telemetry was not surfaced");
         auto senderTelemetry=nodes[0].screenShareDiagnostics();
         auto receiverTelemetry=nodes[1].screenShareDiagnostics();
+        require(nodes[0].setScreenShareBackend(nextBackend)&&nodes[1].setScreenShareBackend(nextBackend),
+            "Changing the next-share backend was rejected");
+        wait([&]{return nodes[0].screenShareDiagnostics().find(
+            nextBackend==screen::Backend::NativeWindows?L"configured_backend=Native Windows":L"configured_backend=WebRTC Compatibility")!=std::wstring::npos;},
+            "Configured backend did not update");
+        require(nodes[0].screenShareDiagnostics().find(
+            backend==screen::Backend::NativeWindows?L"active_backend=Native Windows":L"active_backend=WebRTC Compatibility")!=std::wstring::npos,
+            "Changing the preference switched an active share");
         require(receiverTelemetry.find(L"decoder_worker_stage=")!=std::wstring::npos&&
             receiverTelemetry.find(L"decoder_queue_depth=")!=std::wstring::npos,
             "Decoder worker and queue diagnostics were not surfaced");
@@ -204,11 +218,11 @@ int main(){
         require(nodes[0].screenShareDiagnostics().find(L"screen_stop_stage=10")!=std::wstring::npos,
             "Completed sender teardown did not expose its stop stage");
         auto repeated=nodes[0].startScreenShare(peers[1],captureKind,
-            captureHandle,fps,bitrate,true);
+            captureHandle,fps,bitrate,true,nextBackend);
         require(!repeated.empty(),"A second active screen share could not start after teardown");
         wait([&]{return shareState[1]==static_cast<unsigned>(screen::State::Incoming)&&shareId[1]==repeated;},
             "Second active share did not reach the verified peer");
-        require(nodes[1].answerScreenShare(repeated,reinterpret_cast<std::uint64_t>(viewer)),
+        require(nodes[1].answerScreenShare(repeated,reinterpret_cast<std::uint64_t>(viewer),nextBackend),
             "Second active share answer was rejected");
         wait([&]{return shareState[0]==static_cast<unsigned>(screen::State::Connected)&&
             shareState[1]==static_cast<unsigned>(screen::State::Connected)&&

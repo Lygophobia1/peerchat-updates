@@ -41,6 +41,7 @@ public sealed class ScreenSharePreferenceData {
     public int FramesPerSecond=30;
     public int BitrateBitsPerSecond=8000000;
     public bool CaptureCursor=true;
+    public string Backend="Native Windows";
 }
 public sealed class ScreenSharePreferenceStore {
     readonly string path;
@@ -58,6 +59,7 @@ public sealed class ScreenSharePreferenceStore {
         if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
     }
     static bool Valid(ScreenSharePreferenceData value){return value!=null&&value.Version==1&&
+        (value.Backend=="Native Windows"||value.Backend=="WebRTC Compatibility")&&
         (value.FramesPerSecond==15||value.FramesPerSecond==30||value.FramesPerSecond==60)&&
         new[]{2000000,4000000,8000000,16000000,25000000}.Contains(value.BitrateBitsPerSecond);}
 }

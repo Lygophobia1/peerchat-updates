@@ -20,6 +20,7 @@ typedef void (__cdecl *pc_screen_source_callback)(void* context, uint32_t kind,
 
 enum { PC_SCREEN_MONITOR = 1, PC_SCREEN_WINDOW = 2 };
 enum { PC_SCREEN_H264 = 1, PC_SCREEN_HEVC = 2, PC_SCREEN_AV1 = 4 };
+enum { PC_SCREEN_BACKEND_NATIVE = 0, PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY = 1 };
 
 typedef struct pc_screen_capabilities {
     uint32_t structure_size;
@@ -27,6 +28,7 @@ typedef struct pc_screen_capabilities {
     uint32_t hardware_encoder_codecs;
     uint32_t decoder_codecs;
     uint32_t d3d11_supported;
+    uint32_t software_encoder_codecs;
 } pc_screen_capabilities;
 
 // Returns the number of sources reported. No capture, media session, or policy is started.
@@ -45,6 +47,7 @@ typedef struct pc_screen_encoder_options {
     uint32_t frames_per_second;
     uint32_t bitrate_bits_per_second;
     uint32_t capture_cursor;
+    uint32_t backend;
 } pc_screen_encoder_options;
 
 typedef struct pc_screen_encoded_frame {

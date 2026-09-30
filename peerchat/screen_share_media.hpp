@@ -4,6 +4,7 @@
 #include <rtc/rtc.h>
 #include "windows_media/peerchat_screen_media.h"
 #include "media_ice_configuration.hpp"
+#include "screen_share_manager.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -43,6 +44,7 @@ public:
         std::uint64_t presentationWindow = 0;
         std::uint32_t width = 0, height = 0, fps = 60, bitrate = 20000000;
         bool captureCursor = true;
+        screen::Backend backend = screen::Backend::NativeWindows;
         MediaIceConfiguration ice;
     };
     struct Statistics {
@@ -102,7 +104,7 @@ public:
         capability.structure_size = sizeof(capability);
         const bool okay = api.queryCapabilities(&capability) != 0 &&
             capability.capture_supported != 0 && capability.d3d11_supported != 0 &&
-            (capability.hardware_encoder_codecs & PC_SCREEN_H264) != 0 &&
+            ((capability.hardware_encoder_codecs | capability.software_encoder_codecs) & PC_SCREEN_H264) != 0 &&
             (capability.decoder_codecs & PC_SCREEN_H264) != 0;
         api.close();
         return okay;
@@ -464,7 +466,11 @@ public:
             << L"\neffective_received_mbps_rtp_callback=" << (data.ratesAvailable && !options_.sender ? std::to_wstring(data.incomingMbps) : L"Unavailable")
             << L"\ndecode_latency_average_ms=" << (data.decodeLatencyAvailable ? std::to_wstring(data.averageDecodeMs) : L"Unavailable")
             << L"\nencode_latency_ms=Unavailable"
-            << L"\nencoder=" << (options_.sender ? L"Windows Media Foundation hardware H.264 MFT" : L"Unavailable (receiver-only)")
+            << L"\nmedia_stack=libdatachannel WebRTC-compatible ICE / DTLS-SRTP / H.264 RTP"
+            << L"\nencoder=" << (options_.sender ?
+                (options_.backend == screen::Backend::WebRtcCompatibility ?
+                    L"Windows Media Foundation software H.264 MFT" :
+                    L"Windows Media Foundation hardware H.264 MFT") : L"Unavailable (receiver-only)")
             << L"\ndecoder=" << (!options_.sender ? L"Windows Media Foundation D3D11-aware MFT (hardware acceleration not confirmed)" : L"Unavailable (sender-only)")
             << L"\nrtp_transport_packets_sent=not exposed by pinned C API"
             << L"\nremote_rtp_callback_packets=" << data.rtpReceived
@@ -993,8 +999,12 @@ private:
             capture.frames_per_second = options_.fps;
             capture.bitrate_bits_per_second = options_.bitrate;
             capture.capture_cursor = options_.captureCursor ? 1u : 0u;
+            capture.backend = options_.backend == screen::Backend::WebRtcCompatibility ?
+                PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY : PC_SCREEN_BACKEND_NATIVE;
             encoder_ = api_.encoderOpen(&capture);
-            if (!encoder_) { error = "Windows screen capture or H.264 hardware encoding failed"; stop(); return false; }
+            if (!encoder_) { error = options_.backend == screen::Backend::WebRtcCompatibility ?
+                "Windows screen capture or software H.264 encoding failed" :
+                "Windows screen capture or H.264 hardware encoding failed"; stop(); return false; }
         } else {
             pc_screen_decoder_options viewer{};
             viewer.structure_size = sizeof(viewer);

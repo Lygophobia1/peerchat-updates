@@ -4,6 +4,7 @@
 #include "media_telemetry.hpp"
 #include "media_ice_configuration.hpp"
 #include "group_key_manager.hpp"
+#include "screen_share_manager.hpp"
 #include <memory>
 
 namespace peerchat {
@@ -128,9 +129,10 @@ public:
     bool setVoiceVolumes(int inputPercent, int outputPercent);
     bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain);
     bool setMediaIceConfiguration(MediaIceConfiguration configuration);
+    bool setScreenShareBackend(screen::Backend backend);
     std::wstring voiceDiagnostics();
-    std::string startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor);
-    bool answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow);
+    std::string startScreenShare(const std::string& peerId,std::uint32_t sourceKind,std::uint64_t sourceHandle,std::uint32_t fps,std::uint32_t bitrate,bool captureCursor,screen::Backend backend=screen::Backend::NativeWindows);
+    bool answerScreenShare(const std::string& shareId,std::uint64_t presentationWindow,screen::Backend backend=screen::Backend::NativeWindows);
     bool declineScreenShare(const std::string& shareId);
     bool endScreenShare(const std::string& shareId);
     std::wstring screenShareDiagnostics();

@@ -6,6 +6,7 @@
 
 namespace peerchat::screen {
 enum class State : std::uint32_t { Idle, Offering, Incoming, Connecting, Connected, Recovering };
+enum class Backend : std::uint32_t { NativeWindows, WebRtcCompatibility };
 
 // Profile-scoped logical share owner. A media engine is disposable and must
 // never determine whether the authenticated share itself still exists.
@@ -16,15 +17,16 @@ public:
         std::uint64_t lifetime = 0, generation = 1, deadline = 0;
         State state = State::Idle;
         bool sender = false, controlAvailable = true;
+        Backend backend = Backend::NativeWindows;
         std::vector<std::pair<std::string, std::string>> candidates;
     };
     const Share* active() const { return share_.state == State::Idle ? nullptr : &share_; }
     Share* active() { return share_.state == State::Idle ? nullptr : &share_; }
     bool start(const std::string& id, const std::string& peer, bool sender,
-               State state, std::uint64_t deadline) {
+               State state, std::uint64_t deadline, Backend backend = Backend::NativeWindows) {
         if (active() || id.empty() || peer.empty() ||
             (state != State::Offering && state != State::Incoming)) return false;
-        share_ = {id, peer, {}, ++lastLifetime_, 1, deadline, state, sender, true, {}};
+        share_ = {id, peer, {}, ++lastLifetime_, 1, deadline, state, sender, true, backend, {}};
         return true;
     }
     bool matches(const std::string& id, const std::string& peer) const {
