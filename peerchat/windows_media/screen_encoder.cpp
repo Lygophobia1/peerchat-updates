@@ -675,9 +675,12 @@ private:
         const bool bootstrap = h264_nals(frame.bytes, sps, pps, idr, nonIdr);
         frame.bootstrap = bootstrap;
         frame.info.keyframe = bootstrap ? 1u : 0u;
+        frame.info.idr = idr ? 1u : 0u;
+        frame.info.codec_configuration_only = (sps || pps) && !idr && !nonIdr ? 1u : 0u;
         {
             std::lock_guard lock(mutex_);
             ++encodedFrames_;
+            frame.info.encoded_sequence = encodedFrames_;
             spsNals_ += sps;
             ppsNals_ += pps;
             idrNals_ += idr;

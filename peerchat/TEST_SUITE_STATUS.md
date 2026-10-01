@@ -5,6 +5,8 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-h264-rtp.ps1` — deterministic screen RTP ordering/loss/FU-A and
+  reference recovery, plus pinned libdatachannel packetizer/RTCP PLI regression.
 - `tests/test-updater.ps1` — updater/package behavior.
 - `tests/test-desktop-ui.ps1` — WPF smoke test, including unique per-run result files
   and child exit/timeout reporting.

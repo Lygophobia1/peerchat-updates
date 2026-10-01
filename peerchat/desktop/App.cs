@@ -3837,6 +3837,9 @@ public class DesktopApplication {
         activeScreenId=e.detail??"";activeScreenPeer=e.peer??"";
         if(!String.IsNullOrWhiteSpace(e.screenDetails))lastScreenDiagnosticText=e.screenDetails;
         string diagnosticStage="share_state="+e.shareState+"; "+ExtractDiagnosticValue(e.screenDetails,"screen_start_stage_name",e.shareState==5?"recovering":e.shareState==4?"connected":"starting");
+        long decoderStageElapsed;
+        if(e.shareState==4&&Int64.TryParse(ExtractDiagnosticValue(e.screenDetails,"decoder_worker_stage_elapsed_ms","0"),out decoderStageElapsed)&&decoderStageElapsed>=500)
+            diagnosticStage+="; decoder_worker_stage="+ExtractDiagnosticValue(e.screenDetails,"decoder_worker_stage","unknown")+"; decoder_last_completed_stage="+ExtractDiagnosticValue(e.screenDetails,"decoder_last_completed_stage","unknown");
         if(e.shareState!=0&&diagnosticsRetention!=null&&!String.IsNullOrEmpty(e.detail)){
             activeScreenDiagnosticId=e.detail;activeScreenDiagnosticStage=diagnosticStage;
             try{diagnosticsRetention.UpdateOperation(new ActiveDiagnosticOperation{OperationType="ScreenShare",OperationId=e.detail,Stage=diagnosticStage,Generation=e.shareGeneration,Module="PeerChat.ScreenMedia.dll",Diagnostics=diagnosticsService.Capture()});}catch(Exception error){TraceUi("screen diagnostic checkpoint unavailable: "+error.GetType().Name);}

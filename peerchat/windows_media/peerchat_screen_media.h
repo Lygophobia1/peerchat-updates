@@ -57,6 +57,10 @@ typedef struct pc_screen_encoded_frame {
     uint32_t height;
     uint64_t timestamp_100ns;
     uint32_t keyframe;
+    // Monotonic encoded-output ordinal, assigned before bounded queue dropping.
+    uint64_t encoded_sequence;
+    uint32_t idr;
+    uint32_t codec_configuration_only;
 } pc_screen_encoded_frame;
 
 // Returns null on unsupported source/encoder or failed capture initialization.
@@ -209,6 +213,11 @@ typedef struct pc_screen_decoder_status {
     uint64_t stream_change_count;
     uint64_t need_more_input_count;
     uint64_t output_success_count;
+    uint32_t d3d11_multithread_protected;
+    uint32_t last_completed_stage;
+    int32_t last_presentation_hresult;
+    uint64_t last_decoded_timestamp;
+    uint32_t last_decoded_timestamp_valid;
 } pc_screen_decoder_status;
 
 // A snapshot of the decoder worker, not a separate recovery or lifecycle owner.
@@ -221,7 +230,12 @@ enum {
     PC_SCREEN_DECODER_PRESENT_BLT = 6,
     PC_SCREEN_DECODER_PRESENT_SWAP = 7,
     PC_SCREEN_DECODER_STOPPING = 8,
-    PC_SCREEN_DECODER_STOPPED = 9
+    PC_SCREEN_DECODER_STOPPED = 9,
+    PC_SCREEN_DECODER_DEST_RECT = 10,
+    PC_SCREEN_DECODER_SURFACE_ACQUIRED = 11,
+    PC_SCREEN_DECODER_FRAME_CREATED = 12,
+    PC_SCREEN_DECODER_PRESENT_RETURNED = 13,
+    PC_SCREEN_DECODER_NEXT_ITERATION = 14
 };
 
 // Copies one complete Annex-B access unit into a bounded decoder queue. A full

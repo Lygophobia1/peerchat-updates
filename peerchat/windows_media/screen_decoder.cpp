@@ -2,6 +2,7 @@
 
 #define NOMINMAX
 #include <windows.h>
+#include <d3d10_1.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
@@ -78,7 +79,9 @@ public:
             static_cast<uint32_t>(queue_.size()), workerStage_.load(),
             since && now >= since ? now - since : 0, largestAccessUnitBytes_,
             lastProcessInput_, lastProcessOutput_, processInputFailures_, processOutputFailures_,
-            streamChangeCount_, needMoreInputCount_, outputSuccessCount_};
+            streamChangeCount_, needMoreInputCount_, outputSuccessCount_,
+            d3d11MultithreadProtected_ ? 1u : 0u, lastCompletedStage_.load(),
+            lastPresentationHresult_.load(), lastDecodedTimestamp_, lastDecodedTimestampValid_ ? 1u : 0u};
         return 1;
     }
 
@@ -87,6 +90,7 @@ private:
         workerStageSince_ = GetTickCount64();
         workerStage_ = stage;
     }
+    void completeStage(uint32_t stage) { lastCompletedStage_ = stage; }
     void fail() {
         {
             std::lock_guard lock(mutex_);
@@ -102,6 +106,14 @@ private:
         if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 nullptr, 0, D3D11_SDK_VERSION, &d3d_, nullptr, &context_))) return false;
+        // The decoder MFT uses this device through the DXGI device manager while
+        // presentation uses its immediate video context on our worker. Protect
+        // that shared context before handing the device to Media Foundation.
+        ComPtr<ID3D10Multithread> multithread;
+        if (FAILED(d3d_.As(&multithread))) return false;
+        multithread->SetMultithreadProtected(TRUE);
+        d3d11MultithreadProtected_ = multithread->GetMultithreadProtected() != FALSE;
+        if (!d3d11MultithreadProtected_) return false;
         if (FAILED(d3d_.As(&videoDevice_)) || FAILED(context_.As(&videoContext_))) return false;
         UINT token = 0;
         if (FAILED(MFCreateDXGIDeviceManager(&token, &deviceManager_)) ||
@@ -194,6 +206,7 @@ private:
             FAILED(buffer.As(&surface)) ||
             FAILED(surface->GetResource(IID_PPV_ARGS(&texture))) ||
             FAILED(surface->GetSubresourceIndex(&slice))) return false;
+        completeStage(PC_SCREEN_DECODER_SURFACE_ACQUIRED);
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
         if (desc.Format != DXGI_FORMAT_NV12 || !updatePresentationSize()) return false;
@@ -223,6 +236,7 @@ private:
         ComPtr<ID3D11VideoProcessorOutputView> output;
         if (FAILED(videoDevice_->CreateVideoProcessorOutputView(
             backBuffer.Get(), enumerator.Get(), &outputDesc, &output))) return false;
+        completeStage(PC_SCREEN_DECODER_FRAME_CREATED);
         const double factor = std::min(double(presentationWidth_) / desc.Width,
             double(presentationHeight_) / desc.Height);
         const auto fittedWidth = static_cast<LONG>(desc.Width * factor);
@@ -232,15 +246,23 @@ private:
             (static_cast<LONG>(presentationHeight_) - fittedHeight) / 2,
             (static_cast<LONG>(presentationWidth_) + fittedWidth) / 2,
             (static_cast<LONG>(presentationHeight_) + fittedHeight) / 2};
+        setStage(PC_SCREEN_DECODER_DEST_RECT);
         videoContext_->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &destination);
+        completeStage(PC_SCREEN_DECODER_DEST_RECT);
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = input.Get();
         setStage(PC_SCREEN_DECODER_PRESENT_BLT);
-        if (FAILED(videoContext_->VideoProcessorBlt(
-                processor.Get(), output.Get(), 0, 1, &stream))) return false;
+        const HRESULT blt = videoContext_->VideoProcessorBlt(
+            processor.Get(), output.Get(), 0, 1, &stream);
+        lastPresentationHresult_ = blt;
+        if (FAILED(blt)) return false;
+        completeStage(PC_SCREEN_DECODER_PRESENT_BLT);
         setStage(PC_SCREEN_DECODER_PRESENT_SWAP);
-        const bool displayed = SUCCEEDED(swap_->Present(1, 0));
+        const HRESULT presentResult = swap_->Present(1, 0);
+        lastPresentationHresult_ = presentResult;
+        const bool displayed = SUCCEEDED(presentResult);
+        if (displayed) completeStage(PC_SCREEN_DECODER_PRESENT_RETURNED);
         if(displayed){std::lock_guard lock(mutex_);decodedWidth_=desc.Width;decodedHeight_=desc.Height;}
         return displayed;
     }
@@ -282,16 +304,24 @@ private:
             sample.Attach(result.pSample);
             if (result.pEvents) result.pEvents->Release();
             if (!sample) return false;
+            LONGLONG outputTimestamp = 0;
+            const bool timestampValid = SUCCEEDED(sample->GetSampleTime(&outputTimestamp)) && outputTimestamp >= 0;
             {
                 std::lock_guard lock(mutex_);
                 ++decoded_;
                 ++outputSuccessCount_;
+                lastDecodedTimestamp_ = static_cast<uint64_t>(outputTimestamp);
+                lastDecodedTimestampValid_ = timestampValid;
             }
             if (!present(sample.Get())) return false;
             {
                 std::lock_guard lock(mutex_);
                 ++presented_;
             }
+            // The sample and its DXGI surface remain owned until this scope ends.
+            sample.Reset();
+            setStage(PC_SCREEN_DECODER_NEXT_ITERATION);
+            completeStage(PC_SCREEN_DECODER_NEXT_ITERATION);
         }
     }
 
@@ -386,6 +416,11 @@ private:
     int32_t lastProcessInput_ = 0, lastProcessOutput_ = 0;
     uint64_t processInputFailures_ = 0, processOutputFailures_ = 0;
     uint64_t streamChangeCount_ = 0, needMoreInputCount_ = 0, outputSuccessCount_ = 0;
+    bool d3d11MultithreadProtected_ = false;
+    std::atomic<uint32_t> lastCompletedStage_{0};
+    std::atomic<int32_t> lastPresentationHresult_{0};
+    uint64_t lastDecodedTimestamp_ = 0;
+    bool lastDecodedTimestampValid_ = false;
     std::atomic<uint32_t> workerStage_{PC_SCREEN_DECODER_INITIALIZING};
     std::atomic<uint64_t> workerStageSince_{0};
     UINT presentationWidth_ = 0, presentationHeight_ = 0;

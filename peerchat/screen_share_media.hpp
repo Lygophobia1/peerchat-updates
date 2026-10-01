@@ -5,6 +5,7 @@
 #include "windows_media/peerchat_screen_media.h"
 #include "media_ice_configuration.hpp"
 #include "screen_share_manager.hpp"
+#include "h264_rtp_receiver.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -54,6 +55,12 @@ public:
         std::uint64_t rtpSequenceGap = 0, rtpOutOfOrder = 0, rtpDuplicate = 0;
         std::uint64_t rtpTimestampChangeBeforeMarker = 0, rtpIncompleteFuA = 0;
         std::uint64_t rtpAbandonedAccessUnit = 0, rtpStaleGenerationPacket = 0;
+        std::uint64_t rtpReorderedRecovered = 0, rtpLate = 0, corruptAuPrevented = 0;
+        std::uint64_t recoveryKeyframeRequests = 0, recoveryAccepted = 0;
+        std::uint64_t recoveryCompleted = 0;
+        std::uint64_t decoderQueueRefused = 0;
+        std::uint64_t senderContinuityDropped = 0;
+        bool awaitingRecoveryIdr = true;
         std::uint64_t decoded = 0, presented = 0;
         std::uint64_t captured = 0, encoderSubmitted = 0, encoded = 0;
         std::uint64_t droppedBeforeEncode = 0, droppedEncodedQueue = 0, droppedDecodeQueue = 0;
@@ -79,6 +86,9 @@ public:
         std::wstring encoderName, adapterName, encoderOutputTypeName;
         std::uint64_t adapterDriverVersion = 0;
         std::uint32_t decoderQueueDepth = 0, decoderWorkerStage = 0;
+        std::uint32_t decoderLastCompletedStage = 0;
+        bool decoderD3d11MultithreadProtected = false;
+        std::int32_t decoderLastPresentationHresult = 0;
         std::uint64_t decoderWorkerStageElapsedMs = 0;
         std::uint32_t largestDecoderAccessUnitBytes = 0;
         std::int32_t decoderLastProcessInput = 0, decoderLastProcessOutput = 0;
@@ -150,6 +160,21 @@ public:
 
     std::vector<Event> poll() {
         std::vector<Event> result;
+        if (!options_.sender && !stopping_) {
+            std::lock_guard lock(mutex_);
+            if (decoder_ && !stopping_) {
+                const auto now = monotonicMs();
+                rtpReceiver_.tick(now,
+                    [this](const H264RtpReceiver::AccessUnit& au) { return submitAccessUnit(au); });
+                requestRecoveryKeyframe(now);
+            }
+        }
+        if (options_.sender && pendingPli_ && !stopping_ &&
+            monotonicMs() >= nextSenderRecoveryRequestMs_) {
+            pendingPli_ = false;
+            nextSenderRecoveryRequestMs_ = monotonicMs() + 500;
+            requestEncoderKeyframe();
+        }
         {
             std::lock_guard lock(mutex_);
             while (!events_.empty()) {
@@ -158,6 +183,11 @@ public:
             }
         }
         if (options_.sender && encoder_ && trackOpen_ && !stopping_) {
+            const auto now = monotonicMs();
+            if (senderContinuity_.waiting() && now >= nextSenderRecoveryRequestMs_) {
+                nextSenderRecoveryRequestMs_ = now + 500;
+                requestEncoderKeyframe();
+            }
             if (encodedScratch_.empty()) encodedScratch_.resize(1024 * 1024);
             for (unsigned count = 0; count < 4; ++count) {
                 pc_screen_encoded_frame info{};
@@ -178,8 +208,16 @@ public:
                     }
                     break;
                 }
+                // The ordinal travels with the AU; it cannot race an encoder
+                // status snapshot when that worker drops a queued reference.
+                if (!senderContinuity_.allow(info.encoded_sequence, info.idr != 0,
+                        info.codec_configuration_only != 0)) {
+                    ++senderContinuityDropped_; continue;
+                }
                 if (rtcSendMessage(track_, reinterpret_cast<const char*>(encodedScratch_.data()),
-                        static_cast<int>(info.length)) < 0) break;
+                        static_cast<int>(info.length)) < 0) {
+                    senderContinuity_.sendFailed(); break;
+                }
                 ++encodedSubmitted_;
                 encodedBytesSubmitted_ += info.length;
                 encodedWidth_ = info.width;
@@ -193,7 +231,18 @@ public:
         if (!options_.sender && decoder_ && !localFailureReported_) {
             pc_screen_decoder_status status{};
             status.structure_size = sizeof(status);
-            if (api_.decoderStatus(decoder_, &status) && status.failed) {
+            const bool haveStatus = api_.decoderStatus(decoder_, &status) != 0;
+            if (haveStatus && status.last_decoded_timestamp_valid) {
+                std::lock_guard lock(mutex_);
+                // Match an actual decoder output to the admitted recovery IDR,
+                // allowing later pictures from that same clean reference state.
+                if (recoveryOutputPending_ && !rtpReceiver_.needsKeyframe() &&
+                    status.last_decoded_timestamp >= recoveryTimestamp_ &&
+                    status.last_decoded_timestamp - recoveryTimestamp_ < 10000000ull * 60) {
+                    ++recoveryCompleted_; recoveryOutputPending_ = false;
+                }
+            }
+            if (haveStatus && status.failed) {
                 failed_ = true;
                 localFailureReported_ = true;
                 const auto domain = status.worker_stage >= PC_SCREEN_DECODER_PRESENT_SETUP
@@ -223,14 +272,29 @@ public:
         value.rawRtpCallbacks = rawRtpCallbacks_;
         value.rtpParseFailures = rtpParseFailures_;
         value.remoteTrackCallbacks = remoteTrackCallbacks_;
+        value.senderContinuityDropped = senderContinuityDropped_;
         value.accessUnitsDelivered = accessUnitsDelivered_;
-        value.lostPackets = lostPackets_;
-        value.rtpSequenceGap = rtpSequenceGap_;
-        value.rtpOutOfOrder = rtpOutOfOrder_;
-        value.rtpDuplicate = rtpDuplicate_;
-        value.rtpTimestampChangeBeforeMarker = rtpTimestampChangeBeforeMarker_;
-        value.rtpIncompleteFuA = rtpIncompleteFuA_;
-        value.rtpAbandonedAccessUnit = rtpAbandonedAccessUnit_;
+        {
+            std::lock_guard lock(mutex_);
+            const auto& rtp = rtpReceiver_.stats();
+            value.lostPackets = rtp.incompleteAu;
+            value.rtpSequenceGap = rtp.sequenceLoss;
+            value.rtpOutOfOrder = rtp.outOfOrder;
+            value.rtpDuplicate = rtp.duplicate;
+            value.rtpTimestampChangeBeforeMarker = rtp.timestampBeforeMarker;
+            value.rtpIncompleteFuA = rtp.incompleteFu;
+            value.rtpAbandonedAccessUnit = rtp.incompleteAu;
+            value.rtpReorderedRecovered = rtp.reorderedRecovered;
+            value.rtpLate = rtp.late;
+            value.corruptAuPrevented = rtp.prevented;
+            value.recoveryKeyframeRequests = recoveryKeyframeRequests_;
+            value.recoveryAccepted = rtp.recoveryAccepted;
+            value.recoveryCompleted = recoveryCompleted_;
+            value.decoderQueueRefused = rtp.decoderQueueRefused;
+            value.awaitingRecoveryIdr = rtpReceiver_.needsKeyframe();
+            value.receiverSps = rtp.sps; value.receiverPps = rtp.pps;
+            value.receiverIdr = rtp.idr; value.receiverNonIdr = rtp.nonIdr;
+        }
         value.rtpStaleGenerationPacket = rtpStaleGenerationPacket_;
         value.encodedBytesSubmitted = encodedBytesSubmitted_;
         value.mediaBytesReceived = mediaBytesReceived_;
@@ -301,6 +365,9 @@ public:
                 value.droppedDecodeQueue = status.dropped_decode_queue;
                 value.decoderQueueDepth = status.queue_depth;
                 value.decoderWorkerStage = status.worker_stage;
+                value.decoderLastCompletedStage = status.last_completed_stage;
+                value.decoderD3d11MultithreadProtected = status.d3d11_multithread_protected != 0;
+                value.decoderLastPresentationHresult = status.last_presentation_hresult;
                 value.decoderWorkerStageElapsedMs = status.worker_stage_elapsed_ms;
                 value.largestDecoderAccessUnitBytes = status.largest_access_unit_bytes;
                 value.decoderLastProcessInput = status.last_process_input_hresult;
@@ -317,7 +384,6 @@ public:
                 }
             }
         }
-        value.receiverSps=receiverSps_;value.receiverPps=receiverPps_;value.receiverIdr=receiverIdr_;value.receiverNonIdr=receiverNonIdr_;
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard sampleLock(sampleMutex_);
         if (samples_.empty() || now - samples_.back().time >= std::chrono::milliseconds(500)) {
@@ -476,6 +542,10 @@ public:
             << L"\ndropped_decode_queue=" << data.droppedDecodeQueue
             << L"\ndecoder_queue_depth=" << data.decoderQueueDepth
             << L"\ndecoder_worker_stage=" << data.decoderWorkerStage
+            << L"\ndecoder_last_completed_stage=" << data.decoderLastCompletedStage
+            << L"\ndecoder_d3d11_multithread_protected=" << (data.decoderD3d11MultithreadProtected ? L"true" : L"false")
+            << L"\ndecoder_last_presentation_hresult=0x" << std::hex
+            << static_cast<std::uint32_t>(data.decoderLastPresentationHresult) << std::dec
             << L"\ndecoder_worker_stage_elapsed_ms=" << data.decoderWorkerStageElapsedMs
             << L"\nlargest_decoder_access_unit_bytes=" << data.largestDecoderAccessUnitBytes
             << L"\ndecoder_process_input_hresult=0x" << std::hex << static_cast<std::uint32_t>(data.decoderLastProcessInput)
@@ -518,6 +588,21 @@ public:
             << L"\nrtp_duplicate=" << data.rtpDuplicate
             << L"\nrtp_timestamp_change_before_marker=" << data.rtpTimestampChangeBeforeMarker
             << L"\nrtp_incomplete_fu_a=" << data.rtpIncompleteFuA
+            << L"\nrtp_reordered_packets_recovered=" << data.rtpReorderedRecovered
+            << L"\nrtp_late_packets_rejected=" << data.rtpLate
+            << L"\nrtp_true_sequence_loss=" << data.rtpSequenceGap
+            << L"\nrtp_incomplete_au_dropped=" << data.rtpAbandonedAccessUnit
+            << L"\ncorrupt_au_prevented_from_decoder=" << data.corruptAuPrevented
+            << L"\nrecovery_keyframe_requests=" << data.recoveryKeyframeRequests
+            << L"\nrecovery_idr_received=" << data.receiverIdr
+            << L"\ndecoder_recovery_clean_points_accepted=" << data.recoveryAccepted
+            << L"\ndecoder_recovery_completed=" << data.recoveryCompleted
+            << L"\ndecoder_recovery_semantics=complete SPS/PPS/IDR accepted into decoder queue; output verified by decoded/presented counters"
+            << L"\ndecoder_reference_recovery=IDR resets reference pictures; no cross-thread MFT flush"
+            << L"\ndecoder_queue_au_refused=" << data.decoderQueueRefused
+            << L"\nsender_reference_continuity_au_withheld=" << data.senderContinuityDropped
+            << L"\nawaiting_recovery_idr=" << (data.awaitingRecoveryIdr ? L"true" : L"false")
+            << L"\nrtp_reorder_window_ms=20\nrtp_reorder_window_packets=32"
             << L"\nrtp_abandoned_access_unit=" << data.rtpAbandonedAccessUnit
             << L"\nrtp_stale_generation_packet=" << data.rtpStaleGenerationPacket
             << L"\ndecoded_frames=" << data.decoded
@@ -599,8 +684,7 @@ public:
         {
             std::lock_guard lock(mutex_);
             events_.clear();
-            rtpFrame_.clear();
-            rtpActive_ = false;
+            // Preserve final reassembly counters for retained teardown diagnostics.
         }
         connected_ = false;
         stage(10);
@@ -706,6 +790,12 @@ private:
     static void closed(int, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->trackOpen_ = false;
     }
+    static void pli(int, void* context) {
+        if (context) {
+            auto& self = *static_cast<ScreenShareMedia*>(context);
+            if (!self.stopping_) self.pendingPli_ = true;
+        }
+    }
     static void remoteTrack(int, int track, void* context) {
         if (!context || track < 0) return;
         auto& self = *static_cast<ScreenShareMedia*>(context);
@@ -725,7 +815,7 @@ private:
         size_t& length, std::uint16_t& sequence, std::uint32_t& timestamp, bool& marker) {
         if (!packet || size < 12) return false;
         auto* bytes = reinterpret_cast<const std::uint8_t*>(packet);
-        if ((bytes[0] >> 6) != 2) return false;
+        if ((bytes[0] >> 6) != 2 || (bytes[1] & 127) != 102) return false;
         size_t offset = 12 + 4 * (bytes[0] & 15);
         if (offset > static_cast<size_t>(size)) return false;
         if (bytes[0] & 16) {
@@ -749,172 +839,39 @@ private:
         return true;
     }
 
-    bool appendNal(const std::uint8_t* data, size_t length) {
-        if (!length || rtpFrame_.size() + length + 4 > 8 * 1024 * 1024) return false;
-        const auto type = data[0] & 31;
-        currentAuNalTypes_.push_back(type);
-        switch (type) {
-        case 7: ++receiverSps_; ++currentAuSps_; break;
-        case 8: ++receiverPps_; ++currentAuPps_; break;
-        case 5: ++receiverIdr_; ++currentAuIdr_; break;
-        case 1: ++receiverNonIdr_; ++currentAuNonIdr_; break;
-        default: break;
-        }
-        rtpFrame_.insert(rtpFrame_.end(), {0, 0, 0, 1});
-        rtpFrame_.insert(rtpFrame_.end(), data, data + length);
-        return true;
+    using ReceivedRtpPacket = H264RtpReceiver::Packet;
+    static std::uint64_t monotonicMs() {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
     }
-
-    struct ReceivedRtpPacket {
-        std::uint16_t sequence = 0;
-        std::uint32_t timestamp = 0;
-        bool marker = false;
-        std::vector<std::uint8_t> payload;
-    };
-
-    static std::int16_t sequenceDistance(std::uint16_t value, std::uint16_t expected) {
-        return static_cast<std::int16_t>(value - expected);
-    }
-
-    void resetCurrentAccessUnit(bool abandoned) {
-        if (abandoned && !rtpFrame_.empty()) {
-            ++lostPackets_;
-            ++rtpAbandonedAccessUnit_;
-            if (rtpFragmented_) ++rtpIncompleteFuA_;
+    bool submitAccessUnit(const H264RtpReceiver::AccessUnit& au) {
+        if (firstAccessUnitNals_.size() < 32) {
+            std::ostringstream details;
+            details << "timestamp=" << au.timestamp << ";first_sequence=" << au.first
+                << ";last_sequence=" << au.last << ";marker=1;nal_types=";
+            for (auto type : au.types) details << unsigned(type) << ',';
+            details << ";bytes=" << au.bytes.size() << ";single_timestamp=true"
+                << ";recovery=" << (au.recovery ? "true" : "false");
+            firstAccessUnitNals_.push_back(details.str());
         }
-        rtpFrame_.clear();
-        rtpFragmented_ = false;
-        rtpActive_ = false;
-        currentAuSps_ = currentAuPps_ = currentAuIdr_ = currentAuNonIdr_ = 0;
-        currentAuNalTypes_.clear();
-        currentAuFirstSequence_ = currentAuLastSequence_ = 0;
-    }
-
-    void completeCurrentAccessUnit(const ReceivedRtpPacket& packet) {
-        if (!rtpFrame_.empty() && firstAccessUnitNals_.size() < 32) {
-            std::ostringstream types;
-            for (size_t index = 0; index < currentAuNalTypes_.size(); ++index) {
-                if (index) types << ',';
-                types << currentAuNalTypes_[index];
-            }
-            const auto vcl = std::count_if(currentAuNalTypes_.begin(), currentAuNalTypes_.end(),
-                [](std::uint8_t type) { return type == 1 || type == 5; });
-            firstAccessUnitNals_.push_back("timestamp=" + std::to_string(rtpTimestamp_) +
-                ";first_sequence=" + std::to_string(currentAuFirstSequence_) +
-                ";last_sequence=" + std::to_string(currentAuLastSequence_) +
-                ";marker=" + (packet.marker ? "1" : "0") +
-                ";nal_types=" + types.str() + ";bytes=" + std::to_string(rtpFrame_.size()) +
-                ";vcl=" + std::to_string(vcl) + ";idr_and_non_idr=" +
-                ((currentAuIdr_ && currentAuNonIdr_) ? "true" : "false") +
-                ";single_timestamp=true");
-        }
-        if (!rtpFrame_.empty() && !rtpFragmented_ &&
-            api_.decoderPush(decoder_, rtpFrame_.data(),
-                static_cast<std::uint32_t>(rtpFrame_.size()),
-                static_cast<std::uint64_t>(rtpTimestamp_) * 10000000ull / 90000ull) == 1)
+        const bool accepted = api_.decoderPush(decoder_, au.bytes.data(),
+            static_cast<std::uint32_t>(au.bytes.size()),
+            static_cast<std::uint64_t>(au.timestamp) * 10000000ull / 90000ull) == 1;
+        if (accepted) {
             ++accessUnitsDelivered_;
-        resetCurrentAccessUnit(false);
-    }
-
-    void processReceivedPacket(const ReceivedRtpPacket& packet) {
-        if (!rtpActive_) {
-            rtpActive_ = true;
-            rtpTimestamp_ = packet.timestamp;
-            currentAuFirstSequence_ = packet.sequence;
-        } else if (packet.timestamp != rtpTimestamp_) {
-            // A timestamp change before the previous marker is a real AU boundary
-            // failure, never an invitation to combine pictures in one decoder sample.
-            ++rtpTimestampChangeBeforeMarker_;
-            resetCurrentAccessUnit(true);
-            rtpActive_ = true;
-            rtpTimestamp_ = packet.timestamp;
-            currentAuFirstSequence_ = packet.sequence;
-        }
-        currentAuLastSequence_ = packet.sequence;
-        const auto* payload = packet.payload.data();
-        const auto length = packet.payload.size();
-        const auto nalType = payload[0] & 31;
-        bool valid = true;
-        if (nalType >= 1 && nalType <= 23) {
-            valid = appendNal(payload, length);
-        } else if (nalType == 24) {
-            size_t cursor = 1;
-            while (valid && cursor + 2 <= length) {
-                const size_t nalSize = (size_t(payload[cursor]) << 8) | payload[cursor + 1];
-                cursor += 2;
-                valid = nalSize > 0 && cursor + nalSize <= length &&
-                    appendNal(payload + cursor, nalSize);
-                cursor += nalSize;
+            if (au.recovery) {
+                recoveryOutputPending_ = true;
+                recoveryTimestamp_ = static_cast<std::uint64_t>(au.timestamp) * 10000000ull / 90000ull;
             }
-            valid = valid && cursor == length;
-        } else if (nalType == 28 && length >= 3) {
-            const bool start = (payload[1] & 128) != 0;
-            const bool end = (payload[1] & 64) != 0;
-            if (start) {
-                const std::uint8_t header = (payload[0] & 224) | (payload[1] & 31);
-                valid = appendNal(&header, 1);
-                rtpFragmented_ = valid;
-            } else valid = rtpFragmented_;
-            if (valid && rtpFrame_.size() + length - 2 <= 8 * 1024 * 1024)
-                rtpFrame_.insert(rtpFrame_.end(), payload + 2, payload + length);
-            else valid = false;
-            if (end) rtpFragmented_ = false;
-        } else valid = false;
-        if (!valid) {
-            resetCurrentAccessUnit(true);
-            return;
         }
-        if (packet.marker) completeCurrentAccessUnit(packet);
+        return accepted;
     }
-
-    void drainReceivedPackets() {
-        while (sequenceInitialized_) {
-            auto next = pendingRtpPackets_.find(expectedSequence_);
-            if (next == pendingRtpPackets_.end()) break;
-            ReceivedRtpPacket packet = std::move(next->second);
-            pendingRtpPackets_.erase(next);
-            processReceivedPacket(packet);
-            ++expectedSequence_;
-        }
+    void requestRecoveryKeyframe(std::uint64_t now) {
+        if (!rtpReceiver_.needsKeyframe() || now < nextRecoveryRequestMs_ || !trackOpen_) return;
+        nextRecoveryRequestMs_ = now + 500;
+        const int track = receiveTrack_ >= 0 ? receiveTrack_ : track_;
+        if (track >= 0 && rtcRequestKeyframe(track) >= 0) ++recoveryKeyframeRequests_;
     }
-
-    void queueReceivedPacket(ReceivedRtpPacket packet) {
-        if (!sequenceInitialized_) {
-            sequenceInitialized_ = true;
-            expectedSequence_ = packet.sequence;
-        }
-        const auto distance = sequenceDistance(packet.sequence, expectedSequence_);
-        if (distance < 0) {
-            // A packet that has already passed the bounded reorder window is stale;
-            // retain it as evidence without damaging the current access unit.
-            ++rtpOutOfOrder_;
-            return;
-        }
-        if (distance > kRtpReorderWindow) {
-            // The missing span exceeded the bounded window. Drop only the incomplete
-            // current AU, then resume at this newer packet.
-            rtpSequenceGap_ += static_cast<std::uint16_t>(distance);
-            resetCurrentAccessUnit(true);
-            pendingRtpPackets_.clear();
-            expectedSequence_ = packet.sequence;
-        } else if (distance > 0) {
-            auto [_, inserted] = pendingRtpPackets_.emplace(packet.sequence, std::move(packet));
-            if (!inserted) ++rtpDuplicate_;
-            else ++rtpOutOfOrder_;
-            if (!inserted || pendingRtpPackets_.size() < kRtpReorderWindow) return;
-            // Do not wait without bound for one missing RTP packet. This bounded
-            // skip is the point at which a gap becomes permanent.
-            const auto first = pendingRtpPackets_.begin()->first;
-            rtpSequenceGap_ += static_cast<std::uint16_t>(sequenceDistance(first, expectedSequence_));
-            resetCurrentAccessUnit(true);
-            expectedSequence_ = first;
-            drainReceivedPackets();
-            return;
-        }
-        pendingRtpPackets_.emplace(packet.sequence, std::move(packet));
-        drainReceivedPackets();
-    }
-
     void received(const char* packet, int size) {
         ++rawRtpCallbacks_;
         if (stopping_) { ++rtpStaleGenerationPacket_; return; }
@@ -931,12 +888,19 @@ private:
         mediaBytesReceived_ += static_cast<std::uint64_t>(size);
         std::lock_guard lock(mutex_);
         if (stopping_ || !decoder_) { ++rtpStaleGenerationPacket_; return; }
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet);
+        const auto ssrc = (std::uint32_t(bytes[8]) << 24) | (std::uint32_t(bytes[9]) << 16) |
+            (std::uint32_t(bytes[10]) << 8) | bytes[11];
+        if (haveReceiveSsrc_ && ssrc != receiveSsrc_) { ++rtpStaleGenerationPacket_; return; }
+        receiveSsrc_ = ssrc; haveReceiveSsrc_ = true;
         ReceivedRtpPacket copied;
         copied.sequence = sequence;
         copied.timestamp = timestamp;
         copied.marker = marker;
         copied.payload.assign(payload, payload + length);
-        queueReceivedPacket(std::move(copied));
+        const auto now = monotonicMs();
+        rtpReceiver_.receive(std::move(copied), now,
+            [this](const H264RtpReceiver::AccessUnit& au) { return submitAccessUnit(au); });
     }
     static void message(int, const char* packet, int size, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->received(packet, size);
@@ -1009,25 +973,18 @@ private:
         localFailureReported_ = false;
         startupWatchdogFailed_ = false;
         startupDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
-        encodedSubmitted_ = rtpReceived_ = accessUnitsDelivered_ = lostPackets_ = 0;
+        encodedSubmitted_ = rtpReceived_ = accessUnitsDelivered_ = 0;
         rawRtpCallbacks_ = rtpParseFailures_ = remoteTrackCallbacks_ = 0;
-        rtpSequenceGap_ = rtpOutOfOrder_ = rtpDuplicate_ = 0;
-        rtpTimestampChangeBeforeMarker_ = rtpIncompleteFuA_ = rtpAbandonedAccessUnit_ = 0;
         rtpStaleGenerationPacket_ = 0;
         encodedBytesSubmitted_ = mediaBytesReceived_ = 0;
-        receiverSps_ = receiverPps_ = receiverIdr_ = receiverNonIdr_ = 0;
         senderKeyframeRequests_ = 0;
+        senderContinuity_ = {}; senderContinuityDropped_ = 0; nextSenderRecoveryRequestMs_ = 0;
         {
             std::lock_guard lock(mutex_);
-            rtpFrame_.clear();
-            rtpActive_ = rtpFragmented_ = false;
-            rtpTimestamp_ = 0;
-            expectedSequence_ = 0;
-            sequenceInitialized_ = false;
-            pendingRtpPackets_.clear();
-            currentAuSps_ = currentAuPps_ = currentAuIdr_ = currentAuNonIdr_ = 0;
-            currentAuNalTypes_.clear();
-            currentAuFirstSequence_ = currentAuLastSequence_ = 0;
+            rtpReceiver_.reset();
+            nextRecoveryRequestMs_ = recoveryKeyframeRequests_ = 0;
+            recoveryTimestamp_ = recoveryCompleted_ = 0; recoveryOutputPending_ = false;
+            haveReceiveSsrc_ = false; receiveSsrc_ = 0; pendingPli_ = false;
             firstAccessUnitNals_.clear();
         }
         { std::lock_guard sampleLock(sampleMutex_); samples_.clear(); }
@@ -1105,7 +1062,7 @@ private:
             packetizer.maxFragmentSize = 1200;
             packetizer.nalSeparator = RTC_NAL_SEPARATOR_START_SEQUENCE;
             if (rtcSetH264Packetizer(track_, &packetizer) < 0 ||
-                rtcChainRtcpSrReporter(track_) < 0) {
+                rtcChainRtcpSrReporter(track_) < 0 || rtcChainPliHandler(track_, &ScreenShareMedia::pli) < 0) {
                 error = "Could not configure H.264 RTP packetization";
                 stop();
                 return false;
@@ -1126,31 +1083,28 @@ private:
     mutable std::mutex mutex_;
     std::mutex callbackRegistrationMutex_;
     std::deque<Event> events_;
-    std::vector<std::uint8_t> rtpFrame_;
     std::vector<std::uint8_t> encodedScratch_;
-    static constexpr std::int16_t kRtpReorderWindow = 32;
-    std::map<std::uint16_t, ReceivedRtpPacket> pendingRtpPackets_;
-    std::uint16_t expectedSequence_ = 0;
-    std::uint32_t rtpTimestamp_ = 0;
-    bool sequenceInitialized_ = false, rtpActive_ = false, rtpFragmented_ = false;
-    std::uint64_t currentAuSps_ = 0, currentAuPps_ = 0, currentAuIdr_ = 0, currentAuNonIdr_ = 0;
-    std::vector<std::uint8_t> currentAuNalTypes_;
-    std::uint16_t currentAuFirstSequence_ = 0, currentAuLastSequence_ = 0;
+    H264RtpReceiver rtpReceiver_;
+    std::uint64_t nextRecoveryRequestMs_ = 0, recoveryKeyframeRequests_ = 0;
+    std::uint64_t recoveryTimestamp_ = 0, recoveryCompleted_ = 0;
+    bool recoveryOutputPending_ = false;
+    std::uint32_t receiveSsrc_ = 0;
+    bool haveReceiveSsrc_ = false;
     std::deque<std::string> firstAccessUnitNals_;
     std::atomic<bool> stopping_{true}, trackOpen_{false}, connected_{false}, failed_{false};
+    std::atomic<bool> pendingPli_{false};
     bool localFailureReported_ = false;
     std::atomic<bool> startupWatchdogFailed_{false};
     std::chrono::steady_clock::time_point startupDeadline_{};
     std::atomic<std::uint64_t> encodedSubmitted_{0}, rtpReceived_{0};
     std::atomic<std::uint64_t> rawRtpCallbacks_{0}, rtpParseFailures_{0}, remoteTrackCallbacks_{0};
     std::atomic<std::uint32_t> encodedWidth_{0}, encodedHeight_{0};
-    std::atomic<std::uint64_t> accessUnitsDelivered_{0}, lostPackets_{0};
-    std::atomic<std::uint64_t> rtpSequenceGap_{0}, rtpOutOfOrder_{0}, rtpDuplicate_{0};
-    std::atomic<std::uint64_t> rtpTimestampChangeBeforeMarker_{0}, rtpIncompleteFuA_{0};
-    std::atomic<std::uint64_t> rtpAbandonedAccessUnit_{0}, rtpStaleGenerationPacket_{0};
+    std::atomic<std::uint64_t> accessUnitsDelivered_{0}, rtpStaleGenerationPacket_{0};
     std::atomic<std::uint64_t> encodedBytesSubmitted_{0}, mediaBytesReceived_{0};
-    std::atomic<std::uint64_t> receiverSps_{0}, receiverPps_{0}, receiverIdr_{0}, receiverNonIdr_{0};
     std::atomic<std::uint64_t> senderKeyframeRequests_{0};
+    H264SenderContinuity senderContinuity_;
+    std::atomic<std::uint64_t> senderContinuityDropped_{0};
+    std::uint64_t nextSenderRecoveryRequestMs_ = 0;
     struct RateSample {
         std::chrono::steady_clock::time_point time;
         std::uint64_t captured, encoded, submitted, received, presented, sentBytes, receivedBytes;
