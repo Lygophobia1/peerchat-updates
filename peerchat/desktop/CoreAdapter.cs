@@ -171,7 +171,7 @@ public sealed class CoreAdapter : IDisposable {
         ScreenSourceCallback callback=(context,kind,source,name,width,height,numerator,denominator)=>sources.Add(new ScreenSource{kind=kind,handle=source,name=Marshal.PtrToStringUni(name)??"Screen",width=width,height=height});
         pc_screen_enumerate_sources(callback,IntPtr.Zero);GC.KeepAlive(callback);return sources.ToArray();
     }
-    public bool ScreenH264Available(string backend){EnsureScreenMediaLoaded();var capabilities=new ScreenCapabilities{size=(uint)Marshal.SizeOf(typeof(ScreenCapabilities))};return pc_screen_query_capabilities(ref capabilities)!=0&&capabilities.capture!=0&&((backend=="WebRTC Compatibility"?capabilities.softwareEncoders:capabilities.encoders)&1)!=0&&(capabilities.decoders&1)!=0&&capabilities.d3d11!=0;}
+    public bool ScreenH264Available(string backend){EnsureScreenMediaLoaded();var capabilities=new ScreenCapabilities{size=(uint)Marshal.SizeOf(typeof(ScreenCapabilities))};return pc_screen_query_capabilities(ref capabilities)!=0&&capabilities.capture!=0&&((backend=="WebRTC Compatibility"?capabilities.softwareEncoders:(capabilities.encoders|capabilities.softwareEncoders))&1)!=0&&(capabilities.decoders&1)!=0&&capabilities.d3d11!=0;}
     public bool AnswerVoiceCall(string call){return ui_voice_answer(handle,call)!=0;}
     public bool DeclineVoiceCall(string call){return ui_voice_decline(handle,call)!=0;}
     public bool EndVoiceCall(string call){return ui_voice_end(handle,call)!=0;}

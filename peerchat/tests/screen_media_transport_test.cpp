@@ -15,7 +15,11 @@ void require(bool condition, const char* message) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const bool compatibility = argc == 2 &&
+        (std::string(argv[1]) == "--compat" || std::string(argv[1]) == "--mixed");
+    const bool mixed = argc == 2 && std::string(argv[1]) == "--mixed";
+    if (argc > 2 || (argc == 2 && !compatibility)) return 2;
     HWND source = nullptr, viewer = nullptr, sourceContent = nullptr;
     try {
         peerchat::screen::ScreenShareManager share;
@@ -89,9 +93,12 @@ int main() {
         senderOptions.height = 480;
         senderOptions.fps = 60;
         senderOptions.bitrate = 4000000;
+        senderOptions.backend = compatibility ? peerchat::screen::Backend::WebRtcCompatibility :
+            peerchat::screen::Backend::NativeWindows;
         senderOptions.ice = peerchat::MediaIceConfiguration::directForTests();
         peerchat::ScreenShareMedia::Options receiverOptions = senderOptions;
         receiverOptions.sender = false;
+        if (mixed) receiverOptions.backend = peerchat::screen::Backend::NativeWindows;
         receiverOptions.sourceHandle = 0;
         receiverOptions.presentationWindow = reinterpret_cast<std::uint64_t>(viewer);
         peerchat::ScreenShareMedia sender(senderOptions), receiver(receiverOptions);

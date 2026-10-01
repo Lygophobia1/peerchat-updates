@@ -7,6 +7,12 @@
 namespace peerchat::screen {
 enum class State : std::uint32_t { Idle, Offering, Incoming, Connecting, Connected, Recovering };
 enum class Backend : std::uint32_t { NativeWindows, WebRtcCompatibility };
+// A compatibility selection is a requirement for this endpoint, not a
+// preference that may override the other endpoint's requirement.
+inline Backend negotiateBackend(Backend local, Backend remote) {
+    return local == Backend::WebRtcCompatibility || remote == Backend::WebRtcCompatibility
+        ? Backend::WebRtcCompatibility : Backend::NativeWindows;
+}
 
 // Profile-scoped logical share owner. A media engine is disposable and must
 // never determine whether the authenticated share itself still exists.
@@ -19,6 +25,9 @@ public:
         bool sender = false, controlAvailable = true;
         Backend backend = Backend::NativeWindows;
         std::vector<std::pair<std::string, std::string>> candidates;
+        Backend localRequirement = Backend::NativeWindows;
+        Backend peerRequirement = Backend::NativeWindows;
+        bool backendNegotiated = false;
     };
     const Share* active() const { return share_.state == State::Idle ? nullptr : &share_; }
     Share* active() { return share_.state == State::Idle ? nullptr : &share_; }
@@ -27,6 +36,7 @@ public:
         if (active() || id.empty() || peer.empty() ||
             (state != State::Offering && state != State::Incoming)) return false;
         share_ = {id, peer, {}, ++lastLifetime_, 1, deadline, state, sender, true, backend, {}};
+        share_.localRequirement = backend;
         return true;
     }
     bool matches(const std::string& id, const std::string& peer) const {

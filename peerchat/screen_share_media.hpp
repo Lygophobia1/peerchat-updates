@@ -49,6 +49,7 @@ public:
     };
     struct Statistics {
         std::uint64_t encodedSubmitted = 0, rtpReceived = 0;
+        std::uint64_t rawRtpCallbacks = 0, rtpParseFailures = 0, remoteTrackCallbacks = 0;
         std::uint64_t accessUnitsDelivered = 0, lostPackets = 0;
         std::uint64_t rtpSequenceGap = 0, rtpOutOfOrder = 0, rtpDuplicate = 0;
         std::uint64_t rtpTimestampChangeBeforeMarker = 0, rtpIncompleteFuA = 0;
@@ -108,6 +109,19 @@ public:
             (capability.decoder_codecs & PC_SCREEN_H264) != 0;
         api.close();
         return okay;
+    }
+    static bool supportsBackend(screen::Backend backend, bool sender) {
+        Api api;
+        if (!api.open()) return false;
+        pc_screen_capabilities capability{};
+        capability.structure_size = sizeof(capability);
+        const bool queried = api.queryCapabilities(&capability) != 0;
+        api.close();
+        if (!queried || !capability.d3d11_supported || !(capability.decoder_codecs & PC_SCREEN_H264)) return false;
+        if (!sender) return true;
+        return capability.capture_supported &&
+            ((backend == screen::Backend::WebRtcCompatibility ?
+                capability.software_encoder_codecs : capability.hardware_encoder_codecs) & PC_SCREEN_H264) != 0;
     }
 
     bool startOffer(std::string& error) {
@@ -206,6 +220,9 @@ public:
         Statistics value;
         value.encodedSubmitted = encodedSubmitted_;
         value.rtpReceived = rtpReceived_;
+        value.rawRtpCallbacks = rawRtpCallbacks_;
+        value.rtpParseFailures = rtpParseFailures_;
+        value.remoteTrackCallbacks = remoteTrackCallbacks_;
         value.accessUnitsDelivered = accessUnitsDelivered_;
         value.lostPackets = lostPackets_;
         value.rtpSequenceGap = rtpSequenceGap_;
@@ -348,10 +365,25 @@ public:
                 remote, sizeof(remote)) >= 0)
             pair = std::wstring(local, local + std::strlen(local)) + L" -> " +
                    std::wstring(remote, remote + std::strlen(remote));
+        rtcDirection direction = RTC_DIRECTION_UNKNOWN;
+        if (track_ >= 0) rtcGetTrackDirection(track_, &direction);
+        char trackMid[64]{}, remoteMid[64]{};
+        if (track_ >= 0) rtcGetTrackMid(track_, trackMid, sizeof(trackMid));
+        if (receiveTrack_ >= 0) rtcGetTrackMid(receiveTrack_, remoteMid, sizeof(remoteMid));
         std::wostringstream out;
         out << std::fixed << std::setprecision(2)
             << L"media_connected=" << (data.connected ? L"true" : L"false")
             << L"\ntrack_open=" << (data.trackOpen ? L"true" : L"false")
+            << L"\nlocal_track_direction=" <<
+                (direction == RTC_DIRECTION_SENDONLY ? L"sendonly" :
+                 direction == RTC_DIRECTION_RECVONLY ? L"recvonly" :
+                 direction == RTC_DIRECTION_SENDRECV ? L"sendrecv" :
+                 direction == RTC_DIRECTION_INACTIVE ? L"inactive" : L"unknown")
+            << L"\nlocal_track_mid=" << (trackMid[0] ? trackMid : "unavailable")
+            << L"\nremote_track_mid=" << (remoteMid[0] ? remoteMid : "unavailable")
+            << L"\nreceiver_callback_owner=" << (options_.sender ? L"sender" :
+                receiveTrack_ >= 0 ? L"remote track" : L"precreated recvonly track")
+            << L"\nconfigured_h264_payload_type=102"
             << L"\ncodec=H.264\nsecurity=DTLS-SRTP"
             << L"\nselected_ice_pair=" << pair
             << L"\nrequested_fps=" << (options_.sender ? std::to_wstring(options_.fps) : L"Unavailable (sender-only)")
@@ -473,7 +505,12 @@ public:
                     L"Windows Media Foundation hardware H.264 MFT") : L"Unavailable (receiver-only)")
             << L"\ndecoder=" << (!options_.sender ? L"Windows Media Foundation D3D11-aware MFT (hardware acceleration not confirmed)" : L"Unavailable (sender-only)")
             << L"\nrtp_transport_packets_sent=not exposed by pinned C API"
-            << L"\nremote_rtp_callback_packets=" << data.rtpReceived
+            << L"\nremote_track_callback_count=" << data.remoteTrackCallbacks
+            << L"\nremote_rtp_callback_packets=" << data.rawRtpCallbacks
+            << L"\nvalid_rtp_packets_received=" << data.rtpReceived
+            << L"\nrtp_parse_failures=" << data.rtpParseFailures
+            << L"\nrtp_packetized=" << L"Unavailable (pinned C API)"
+            << L"\nrtp_handed_to_transport=" << L"Unavailable (pinned C API)"
             << L"\ncomplete_access_units_delivered=" << data.accessUnitsDelivered
             << L"\nrtp_reassembly_discontinuities=" << data.lostPackets
             << L"\nrtp_sequence_gap=" << data.rtpSequenceGap
@@ -674,6 +711,7 @@ private:
         auto& self = *static_cast<ScreenShareMedia*>(context);
         std::lock_guard callbacks(self.callbackRegistrationMutex_);
         if(self.stopping_ || (self.receiveTrack_>=0 && self.receiveTrack_!=track))return;
+        ++self.remoteTrackCallbacks_;
         self.receiveTrack_ = track;
         if (track == self.track_) return;
         rtcSetUserPointer(track, context);
@@ -878,6 +916,7 @@ private:
     }
 
     void received(const char* packet, int size) {
+        ++rawRtpCallbacks_;
         if (stopping_) { ++rtpStaleGenerationPacket_; return; }
         if (options_.sender || !decoder_) return;
         const std::uint8_t* payload = nullptr;
@@ -885,7 +924,9 @@ private:
         std::uint16_t sequence = 0;
         std::uint32_t timestamp = 0;
         bool marker = false;
-        if (!parseRtp(packet, size, payload, length, sequence, timestamp, marker)) return;
+        if (!parseRtp(packet, size, payload, length, sequence, timestamp, marker)) {
+            ++rtpParseFailures_;return;
+        }
         ++rtpReceived_;
         mediaBytesReceived_ += static_cast<std::uint64_t>(size);
         std::lock_guard lock(mutex_);
@@ -969,6 +1010,7 @@ private:
         startupWatchdogFailed_ = false;
         startupDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
         encodedSubmitted_ = rtpReceived_ = accessUnitsDelivered_ = lostPackets_ = 0;
+        rawRtpCallbacks_ = rtpParseFailures_ = remoteTrackCallbacks_ = 0;
         rtpSequenceGap_ = rtpOutOfOrder_ = rtpDuplicate_ = 0;
         rtpTimestampChangeBeforeMarker_ = rtpIncompleteFuA_ = rtpAbandonedAccessUnit_ = 0;
         rtpStaleGenerationPacket_ = 0;
@@ -1100,6 +1142,7 @@ private:
     std::atomic<bool> startupWatchdogFailed_{false};
     std::chrono::steady_clock::time_point startupDeadline_{};
     std::atomic<std::uint64_t> encodedSubmitted_{0}, rtpReceived_{0};
+    std::atomic<std::uint64_t> rawRtpCallbacks_{0}, rtpParseFailures_{0}, remoteTrackCallbacks_{0};
     std::atomic<std::uint32_t> encodedWidth_{0}, encodedHeight_{0};
     std::atomic<std::uint64_t> accessUnitsDelivered_{0}, lostPackets_{0};
     std::atomic<std::uint64_t> rtpSequenceGap_{0}, rtpOutOfOrder_{0}, rtpDuplicate_{0};

@@ -57,7 +57,7 @@ constexpr std::uint64_t MediaRecoveryWindowMilliseconds=30000,MediaRecoveryRetry
 struct RelayPipe {std::mutex mutex;std::condition_variable changed;std::deque<Blob> output;size_t queued=0;bool closed=false;};
 struct Connection {
     SOCKET socket=INVALID_SOCKET;
-    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false,mediaRecovery=false,screenShare=false,identityMismatch=false;
+    bool incoming=false,connecting=false,dead=false,hello=false,approved=false,remoteApproved=false,online=false,logicalOrdering=false,signedGroups=false,voiceCalls=false,mediaRecovery=false,screenShare=false,screenBackendNegotiation=false,identityMismatch=false;
     std::wstring host,name,source,route,closeReason;std::uint16_t port=0;std::uint64_t attemptId=0;
     std::string expected,peerId;
     session::ReliableAuthorization authorization;
@@ -292,7 +292,9 @@ struct Node::Impl {
         else if(!lastScreenStartupDiagnostics.empty())out<<L"\n"<<lastScreenStartupDiagnostics;
         out<<L"\nlogical_share_encoded_bytes_submitted="<<sent<<L"\nlogical_share_rtp_bytes_received="<<received;
         out<<L"\nconfigured_backend="<<(configuredScreenBackend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows")
-           <<L"\nactive_backend="<<(active?(active->backend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows"):L"none");
+           <<L"\npeer_backend_requirement="<<(active&&active->backendNegotiated?(active->peerRequirement==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows"):L"Unknown")
+           <<L"\nnegotiated_backend="<<(active&&active->backendNegotiated?(active->backend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows"):L"Not negotiated")
+           <<L"\nactive_backend="<<(active&&active->backendNegotiated&&screenMedia?(active->backend==screen::Backend::WebRtcCompatibility?L"WebRTC Compatibility":L"Native Windows"):L"none");
         return out.str();
     }
     void screenEvent(const std::wstring& reason={}){
@@ -625,7 +627,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         protocol::Reader r(frame);
         if(!c.hello){
             protocol::check(r.type()==protocol::Hello);auto capabilities=r.number();auto port=r.number();c.name=r.text();r.end();
-            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port<=65535&&(c.relay||port>0)&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.screenShare=(capabilities&protocol::CapabilityScreenShare)!=0;c.hello=true;
+            protocol::check((capabilities&protocol::CapabilityMutualTls)!=0&&port<=65535&&(c.relay||port>0)&&c.name.size()<=64);c.logicalOrdering=(capabilities&protocol::CapabilityLogicalOrdering)!=0;c.signedGroups=(capabilities&protocol::CapabilitySignedGroups)!=0;c.voiceCalls=(capabilities&protocol::CapabilityVoiceCalls)!=0;c.mediaRecovery=(capabilities&protocol::CapabilityMediaRecovery)!=0;c.screenShare=(capabilities&protocol::CapabilityScreenShare)!=0;c.screenBackendNegotiation=(capabilities&protocol::CapabilityScreenBackendNegotiation)!=0;c.hello=true;
             c.directHandoff=(capabilities&protocol::CapabilityDirectHandoff)!=0;
             c.peerId=Storage::publicKeyId(c.tls->remotePublicKey());protocol::check(c.peerId!=profile.peerId);
             c.port=static_cast<std::uint16_t>(port);if(c.host.empty()&&!c.relay)c.host=observedAddress(c.socket);
@@ -724,12 +726,54 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
             throw std::runtime_error("Group-control session rejected an unrelated payload");
         }
+        if(r.type()==protocol::ScreenBackendRequest){
+            const auto id=r.string();const auto generation=r.number(),rawRequirement=r.number();r.end();
+            protocol::check(c.screenShare&&c.screenBackendNegotiation&&protocol::id(id,32)&&generation==1&&rawRequirement<=1);
+            const auto remoteRequirement=static_cast<screen::Backend>(rawRequirement);
+            auto active=screenShares.active();
+            const auto localRequirement=active&&!active->sender&&screenShares.matches(id,c.peerId)
+                ? active->localRequirement : configuredScreenBackend;
+            const auto selected=screen::negotiateBackend(localRequirement,remoteRequirement);
+            bool accepted=ScreenShareMedia::supportsBackend(selected,false)&&
+                (!active||(!active->sender&&screenShares.matches(id,c.peerId)&&active->backendNegotiated&&active->backend==selected));
+            if(accepted&&!active){
+                accepted=screenShares.start(id,c.peerId,false,screen::State::Incoming,nowMilliseconds()+30000,localRequirement);
+                if(accepted){auto share=screenShares.active();share->peerRequirement=remoteRequirement;share->backend=selected;share->backendNegotiated=true;}
+            }
+            protocol::Writer response(protocol::ScreenBackendSelection);response.string(id);response.number(generation);
+            response.number(static_cast<std::uint64_t>(localRequirement));
+            response.number(accepted?static_cast<std::uint64_t>(selected):2);packet(c,response);
+            return;
+        }
+        if(r.type()==protocol::ScreenBackendSelection){
+            const auto id=r.string();const auto generation=r.number(),rawRequirement=r.number(),rawSelected=r.number();r.end();
+            protocol::check(c.screenShare&&c.screenBackendNegotiation&&protocol::id(id,32)&&generation==1&&rawRequirement<=1&&rawSelected<=2);
+            auto active=screenShares.active();
+            if(!active||!active->sender||!screenShares.matchesMedia(active->lifetime,id,c.peerId,generation)||active->backendNegotiated)return;
+            const auto peerRequirement=static_cast<screen::Backend>(rawRequirement);
+            const auto selected=screen::negotiateBackend(active->localRequirement,peerRequirement);
+            if(rawSelected==2||rawSelected!=static_cast<std::uint64_t>(selected)||!ScreenShareMedia::supportsBackend(selected,true)){
+                if(rawSelected!=2){protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);}
+                clearScreen(L"No common supported screen-share backend");return;
+            }
+            active->peerRequirement=peerRequirement;active->backend=selected;active->backendNegotiated=true;
+            if(!configureScreenMedia()){protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);clearScreen(L"TURN media credentials are unavailable or expiring. Messaging remains connected.");return;}
+            std::string error;if(!screenMedia->startOffer(error)){protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);clearScreen(widenUtf8(error));return;}
+            screenEvent(L"Starting screen share");return;
+        }
         if(r.type()==protocol::ScreenOffer){
             auto id=r.string();auto generation=r.number();auto sdp=r.string();r.end();
             protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&!sdp.empty()&&sdp.size()<=32768);
             auto active=screenShares.active();
             if(active&&screenShares.matches(id,c.peerId)){
-                if(generation==active->generation)return;
+                if(!active->backendNegotiated)return;
+                if(generation==active->generation){
+                    if(!active->sender&&active->state==screen::State::Incoming&&active->remoteOffer.empty()){
+                        active->remoteOffer=std::move(sdp);screenPriorSentBytes=screenPriorReceivedBytes=0;
+                        screenEvent(L"Incoming screen share");
+                    }
+                    return;
+                }
                 if(!active->sender&&active->state!=screen::State::Incoming&&screenShares.acceptGeneration(generation,nowMilliseconds()+MediaRecoveryWindowMilliseconds)){
                     stopScreenMedia();if(!configureScreenMedia()){interruptScreen(L"TURN media credentials are unavailable · waiting to recover");return;}std::string error;
                     if(!screenMedia->startAnswer(sdp,error))interruptScreen(L"Could not restart secure screen media");
@@ -737,17 +781,15 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 return;
             }
-            if(active){protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);return;}
-            if(generation!=1)return;
-            if(!screenShares.start(id,c.peerId,false,screen::State::Incoming,nowMilliseconds()+30000))return;
-            screenPriorSentBytes=screenPriorReceivedBytes=0;
-            screenShares.active()->remoteOffer=std::move(sdp);screenEvent(L"Incoming screen share");return;
+            // An offer without a completed backend selection cannot start media.
+            protocol::Writer decline(protocol::ScreenDecline);decline.string(id);packet(c,decline);return;
         }
         if(r.type()==protocol::ScreenAnswer){
             auto id=r.string();auto generation=r.number();auto sdp=r.string();r.end();
             protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&!sdp.empty()&&sdp.size()<=32768);
             auto active=screenShares.active();
             if(active&&active->sender&&screenShares.matches(id,c.peerId)&&active->generation==generation&&screenMedia){
+                if(!active->backendNegotiated)return;
                 if(!screenMedia->setAnswer(sdp))interruptScreen(L"Could not accept secure screen answer");
                 else{screenShares.transition(screen::State::Connecting,nowMilliseconds()+20000);screenEvent(L"Connecting screen media");}
             }return;
@@ -757,6 +799,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             protocol::check(c.screenShare&&protocol::id(id,32)&&generation>=1&&generation<=1000000&&candidate.size()<=4096&&mid.size()<=64);
             auto active=screenShares.active();
             if(active&&screenShares.matches(id,c.peerId)&&active->generation==generation){
+                if(!active->backendNegotiated)return;
                 if(screenMedia)screenMedia->addCandidate(candidate,mid);
                 else screenShares.queueCandidate(std::move(candidate),std::move(mid));
             }return;
@@ -844,7 +887,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // path remains independent ICE/DTLS-SRTP and is never put on relay.
             capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
             capabilities|=protocol::CapabilityGroupKeyHandoff;
-            if(screenAvailable)capabilities|=protocol::CapabilityScreenShare;
+            if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
             if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
             protocol::Writer hello(protocol::Hello);hello.number(capabilities);hello.number(profile.listenPort);hello.text(profile.name);packet(c,hello);
         }
@@ -1023,18 +1066,23 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(screenShares.active())throw std::runtime_error("A screen share is already active");
                 lastScreenFailureDiagnostics.clear();
                 auto contact=contacts.find(command.peer);
-                if(contact==contacts.end()||!contact->second.verified||!screenConnection(command.peer))throw std::runtime_error("A verified screen-share capable peer is required");
+                auto connection=screenConnection(command.peer);
+                if(contact==contacts.end()||!contact->second.verified||!connection)throw std::runtime_error("A verified screen-share capable peer is required");
+                if(!connection->screenBackendNegotiation)throw std::runtime_error("The peer must update before screen-share backend negotiation is available");
                 if(command.sourceKind!=PC_SCREEN_MONITOR&&command.sourceKind!=PC_SCREEN_WINDOW)throw std::runtime_error("Invalid screen source");
                 configuredScreenBackend=command.screenBackend;
                 if(!screenShares.start(command.id,command.peer,true,screen::State::Offering,nowMilliseconds()+30000,command.screenBackend))throw std::runtime_error("Could not start screen share");
                 screenPriorSentBytes=screenPriorReceivedBytes=0;
                 screenOptions={};screenOptions.sender=true;screenOptions.sourceKind=command.sourceKind;screenOptions.sourceHandle=command.sourceHandle;
                 screenOptions.fps=command.fps;screenOptions.bitrate=command.bitrate;screenOptions.captureCursor=command.accepted;
-                if(!configureScreenMedia()){clearScreen(L"TURN media credentials are unavailable or expiring. Messaging remains connected.");continue;}std::string error;
-                if(!screenMedia->startOffer(error)){clearScreen(widenUtf8(error));continue;}screenEvent(L"Starting screen share");
+                protocol::Writer request(protocol::ScreenBackendRequest);request.string(command.id);request.number(1);
+                request.number(static_cast<std::uint64_t>(command.screenBackend));packet(*connection,request);
+                screenEvent(L"Negotiating screen-share backend");
             }else if(command.action==Action::ScreenAnswer){
                 auto active=screenShares.active();if(!active||active->id!=command.id||active->state!=screen::State::Incoming)continue;
-                configuredScreenBackend=command.screenBackend;active->backend=command.screenBackend;
+                if(!active->backendNegotiated||active->backend!=screen::negotiateBackend(active->peerRequirement,active->localRequirement)){
+                    clearScreen(L"Screen-share backend negotiation did not complete");continue;
+                }
                 if(!screenConnection(active->peer)){clearScreen(L"Peer unavailable for screen-share control");continue;}
                 screenOptions={};screenOptions.sender=false;screenOptions.presentationWindow=command.sourceHandle;
                 screenOptions.width=1280;screenOptions.height=720;screenOptions.fps=60;

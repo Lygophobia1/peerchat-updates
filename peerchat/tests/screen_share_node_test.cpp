@@ -26,6 +26,8 @@ int main(){
         screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
     const auto nextBackend=backend==screen::Backend::NativeWindows?
         screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
+    const auto receiverRequirement=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_RECEIVER_REQUIREMENT",nullptr,0)>0?
+        screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
     std::array<Node,2> nodes;
     std::array<std::string,2> peers;
     std::array<bool,2> ready{},connected{};
@@ -113,6 +115,8 @@ int main(){
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
         nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
+        require(nodes[1].setScreenShareBackend(receiverRequirement),
+            "Receiver backend requirement could not be configured");
         const auto captureKind=realMonitor?PC_SCREEN_MONITOR:PC_SCREEN_WINDOW;
         const auto captureHandle=reinterpret_cast<std::uint64_t>(realMonitor?
             static_cast<HANDLE>(monitor):static_cast<HANDLE>(source));
@@ -136,13 +140,22 @@ int main(){
             "Rolling sender/receiver video telemetry was not surfaced");
         auto senderTelemetry=nodes[0].screenShareDiagnostics();
         auto receiverTelemetry=nodes[1].screenShareDiagnostics();
+        const auto expectedBackend=screen::negotiateBackend(backend,receiverRequirement);
+        const auto expectedLabel=expectedBackend==screen::Backend::WebRtcCompatibility?
+            L"negotiated_backend=WebRTC Compatibility":L"negotiated_backend=Native Windows";
+        require(senderTelemetry.find(expectedLabel)!=std::wstring::npos&&
+            receiverTelemetry.find(expectedLabel)!=std::wstring::npos,
+            "Peers did not retain the same negotiated backend");
+        require(counter(receiverTelemetry,L"remote_rtp_callback_packets")>0&&
+            counter(receiverTelemetry,L"valid_rtp_packets_received")>0,
+            "Receiver did not observe raw and valid RTP callbacks");
         require(nodes[0].setScreenShareBackend(nextBackend)&&nodes[1].setScreenShareBackend(nextBackend),
             "Changing the next-share backend was rejected");
         wait([&]{return nodes[0].screenShareDiagnostics().find(
             nextBackend==screen::Backend::NativeWindows?L"configured_backend=Native Windows":L"configured_backend=WebRTC Compatibility")!=std::wstring::npos;},
             "Configured backend did not update");
         require(nodes[0].screenShareDiagnostics().find(
-            backend==screen::Backend::NativeWindows?L"active_backend=Native Windows":L"active_backend=WebRTC Compatibility")!=std::wstring::npos,
+            expectedBackend==screen::Backend::NativeWindows?L"active_backend=Native Windows":L"active_backend=WebRTC Compatibility")!=std::wstring::npos,
             "Changing the preference switched an active share");
         require(receiverTelemetry.find(L"decoder_worker_stage=")!=std::wstring::npos&&
             receiverTelemetry.find(L"decoder_queue_depth=")!=std::wstring::npos,

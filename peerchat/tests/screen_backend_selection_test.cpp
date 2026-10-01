@@ -7,6 +7,10 @@
 
 int main(int argc, char** argv) {
     using namespace peerchat::screen;
+    assert(negotiateBackend(Backend::NativeWindows,Backend::NativeWindows)==Backend::NativeWindows);
+    assert(negotiateBackend(Backend::NativeWindows,Backend::WebRtcCompatibility)==Backend::WebRtcCompatibility);
+    assert(negotiateBackend(Backend::WebRtcCompatibility,Backend::NativeWindows)==Backend::WebRtcCompatibility);
+    assert(negotiateBackend(Backend::WebRtcCompatibility,Backend::WebRtcCompatibility)==Backend::WebRtcCompatibility);
     ScreenShareManager manager;
     assert(manager.start("first", "peer", true, State::Offering, 100));
     assert(manager.active()->backend == Backend::NativeWindows);
@@ -16,6 +20,8 @@ int main(int argc, char** argv) {
     assert(manager.start("second", "peer", true, State::Offering, 100,
                          Backend::WebRtcCompatibility));
     assert(manager.active()->backend == Backend::WebRtcCompatibility);
+    assert(manager.active()->localRequirement == Backend::WebRtcCompatibility);
+    assert(!manager.active()->backendNegotiated);
     manager.restart(200);
     assert(manager.active()->backend == Backend::WebRtcCompatibility);
     manager.clear();
