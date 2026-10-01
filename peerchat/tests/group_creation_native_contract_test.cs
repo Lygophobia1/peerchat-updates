@@ -14,6 +14,16 @@ internal static class GroupCreationNativeContractTest {
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create_proof(IntPtr handle,string group);
     static void Require(bool value,string message){if(!value)throw new Exception(message);}
+    static void CreatePreDistributorRosterDatabase(string path){
+        IntPtr database,error;
+        Require(Sqlite.sqlite3_open16(path,out database)==0,"Old-schema test database could not open.");
+        try{
+            const string schema="CREATE TABLE group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);";
+            int result=Sqlite.sqlite3_exec(database,schema,IntPtr.Zero,IntPtr.Zero,out error);
+            if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error);
+            Require(result==0,"Old-schema test database could not initialize.");
+        }finally{Sqlite.sqlite3_close(database);}
+    }
     public static int Main(){
         string profile=Path.Combine(Path.GetTempPath(),"PeerChat-group-proof-"+Guid.NewGuid().ToString("N"));IntPtr handle=IntPtr.Zero;
         try{
@@ -25,13 +35,17 @@ internal static class GroupCreationNativeContractTest {
             Require(encoded.Length>0,"Native owner Create event yielded no signed proof.");
             GroupRosterProof proof=GroupRosterProof.Parse(encoded);
             Require(proof.LegacyGroupId==group&&proof.OwnerAccountId==1&&proof.OwnerIdentity.Length==64&&proof.ServerGroupId.Length==32,"Server did not accept the actual native owner Create proof.");
-            using(var database=new AccountDatabase(Path.Combine(profile,"roster-test.sqlite"))){
+            string databasePath=Path.Combine(profile,"roster-test.sqlite");
+            CreatePreDistributorRosterDatabase(databasePath);
+            using(var database=new AccountDatabase(databasePath)){
                 Require(database.CreateAccountWithDevice("owner",new byte[16],new byte[32],proof.OwnerIdentity)==1,"Server test owner account was not created.");
                 var roster=database.RegisterGroup(1,proof.OwnerIdentity,proof);
                 Require(roster!=null&&Convert.ToInt64(roster["rosterGeneration"])==1,"Native group was not registered with an initialized server roster.");
+                Require(Convert.ToString(roster["distributorIdentity"])==proof.OwnerIdentity,"Old-schema migration did not initialize the owner distributor.");
                 Require(database.GroupRostersForDevice(1,proof.OwnerIdentity).Count==1,"Registered owner cannot retrieve the authoritative group roster.");
             }
-            Console.WriteLine("PASS: real native group Create proof registers an owner-only authoritative server roster at generation 1.");return 0;
+            using(var database=new AccountDatabase(databasePath))Require(database.GroupRostersForDevice(1,proof.OwnerIdentity).Count==1,"Restart lost the migrated owner roster.");
+            Console.WriteLine("PASS: real native group Create proof registers an owner-only authoritative server roster at generation 1, including migration of the earlier roster schema.");return 0;
         }catch(Exception error){Console.Error.WriteLine("FAIL: "+error.GetType().Name+": "+error.Message);return 1;}
         finally{if(handle!=IntPtr.Zero)ui_destroy(handle);try{if(Directory.Exists(profile))Directory.Delete(profile,true);}catch{}}
     }

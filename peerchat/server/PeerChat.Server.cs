@@ -65,6 +65,11 @@ namespace PeerChat.Server {
             try { Execute("ALTER TABLE presence ADD COLUMN public_candidate_source TEXT;"); } catch { }
             try { Execute("ALTER TABLE presence ADD COLUMN observed_classification TEXT;"); } catch { }
             try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_event_id TEXT NOT NULL DEFAULT '';"); } catch { }
+            // Early group-roster databases predate the distributor field. CREATE TABLE IF NOT
+            // EXISTS does not upgrade them; registration would otherwise fail on its first INSERT.
+            try { Execute("ALTER TABLE group_rosters ADD COLUMN distributor_identity TEXT NOT NULL DEFAULT '';"); }
+            catch(InvalidOperationException error) { if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw; }
+            Execute("UPDATE group_rosters SET distributor_identity=owner_identity WHERE distributor_identity='';");
         }
         public void Execute(string sql) { lock (gate) { IntPtr error; if (Sqlite.sqlite3_exec(database, sql, IntPtr.Zero, IntPtr.Zero, out error) != 0) { string message=error==IntPtr.Zero?"SQLite error":Marshal.PtrToStringAnsi(error); if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error); throw new InvalidOperationException(message); } } }
         // Parameter values are hex/base64url or validated identifiers, never interpolated raw user input.
@@ -335,7 +340,10 @@ namespace PeerChat.Server {
             if(type=="friend_state")return Ok(accounts.FriendState(accountId));
             if(type=="group_register"){
                 GroupRosterProof proof;try{proof=GroupRosterProof.Parse(Text(request,"createProof"));}catch{return Error("invalid_group_proof");}
-                var roster=accounts.RegisterGroup(accountId,identity,proof);return roster==null?Error("group_registration_denied"):Ok(roster);
+                if(proof.OwnerAccountId!=accountId)return Error("group_owner_account_mismatch");
+                if(proof.OwnerIdentity!=identity||!accounts.OwnsDevice(accountId,identity))return Error("group_owner_device_mismatch");
+                try { var roster=accounts.RegisterGroup(accountId,identity,proof);return roster==null?Error("group_registration_conflict"):Ok(roster); }
+                catch(InvalidOperationException) { Log("WARNING","Group registration database operation failed.");return Error("group_database_error"); }
             }
             if(type=="group_roster"){
                 var roster=accounts.GroupRoster(Text(request,"groupId"),accountId,identity);return roster==null?Error("group_not_authorized"):Ok(roster);
