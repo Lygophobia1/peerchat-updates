@@ -5,6 +5,11 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-audio-receive.ps1` — isolated pinned WebRTC NetEq/Opus/mixer
+  proof, MinGW C ABI/restricted-PATH load, RTP timing/disorder/loss/FEC/PLC,
+  independent sources, lifecycle/teardown and synthetic performance/memory runs.
+  Not integrated into accepted live voice. See `docs/AUDIO_RECEIVE_PROOF.md`.
+
 - `tests/test-group-media-rooms.ps1` — deterministic room lifecycle, scope,
   roster/device admission, atomic moves, immutable/stale revisions and revocation,
   plus three real TLS event sessions for convergence and disconnect/reconnect.

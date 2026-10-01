@@ -1,0 +1,16 @@
+import("//webrtc.gni")
+shared_library("peerchat_audio_receive") {
+ output_name = "PeerChat.AudioReceive"
+ sources = [ "peerchat_audio_receive.cpp" ]
+ defines = [ "PC_RECEIVE_BUILD" ]
+ configs -= [ "//build/config/compiler:no_exceptions" ]
+ configs += [ "//build/config/compiler:exceptions" ]
+ deps = [
+  "//api/neteq:default_neteq_factory",
+  "//api/audio_codecs/opus:audio_decoder_opus",
+  "//api/environment:environment_factory",
+  "//api:make_ref_counted",
+  "//modules/audio_mixer:audio_mixer_impl",
+  "//system_wrappers",
+ ]
+}
