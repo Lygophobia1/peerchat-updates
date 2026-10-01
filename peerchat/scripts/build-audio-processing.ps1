@@ -1,16 +1,21 @@
 [CmdletBinding()]
 param(
-    [switch]$CleanOutput
+    [switch]$CleanOutput,
+    [string]$DependencyRoot,
+    [string]$ToolRoot,
+    [string]$OutputRoot
 )
 
 $ErrorActionPreference = 'Stop'
 
 $expectedRevision = '6cf6bcb585b31414aac02377df2bc8fec770d0e8'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$webRtcRoot = Join-Path $repoRoot 'build\deps\webrtc-complete-src\src'
-$gn = Join-Path $repoRoot 'build\tools\webrtc-gn\gn.exe'
-$depotToolsRoot = Join-Path $repoRoot 'build\tools\depot_tools'
-$pythonDirectory = Join-Path $repoRoot 'build\tools\depot_tools\.cipd_bin\3.11\bin'
+$DependencyRoot = if ($DependencyRoot) { $DependencyRoot } elseif ($env:PEERCHAT_DEPENDENCY_ROOT) { $env:PEERCHAT_DEPENDENCY_ROOT } else { 'C:\Peerchatdep\deps' }
+$ToolRoot = if ($ToolRoot) { $ToolRoot } elseif ($env:PEERCHAT_WEBRTC_TOOLS_ROOT) { $env:PEERCHAT_WEBRTC_TOOLS_ROOT } else { Join-Path $repoRoot 'build\tools' }
+$webRtcRoot = Join-Path $DependencyRoot 'webrtc-complete-src\src'
+$gn = Join-Path $ToolRoot 'webrtc-gn\gn.exe'
+$depotToolsRoot = Join-Path $ToolRoot 'depot_tools'
+$pythonDirectory = Join-Path $depotToolsRoot '.cipd_bin\3.11\bin'
 $ninjaCommand = Get-Command ninja.exe -ErrorAction SilentlyContinue
 $ninja = if ($null -ne $ninjaCommand) {
     $ninjaCommand.Source
@@ -19,13 +24,14 @@ $ninja = if ($null -ne $ninjaCommand) {
 }
 $sourceRoot = Join-Path $repoRoot 'audio_processing'
 $targetRoot = Join-Path $webRtcRoot 'peerchat_audio_processing'
-$outputRoot = Join-Path $repoRoot 'build\audio-processing\webrtc-6cf6bcb\x64'
+$OutputRoot = if ($OutputRoot) { $OutputRoot } elseif ($env:PEERCHAT_APM_OUTPUT_ROOT) { $env:PEERCHAT_APM_OUTPUT_ROOT } else { 'C:\Peerchatdep\build\apm\webrtc-6cf6bcb-presets\x64' }
+$outputRoot = $OutputRoot
 
 if (-not (Test-Path -LiteralPath $webRtcRoot)) {
-    throw "Clean pinned WebRTC checkout is missing: $webRtcRoot"
+    throw "Pinned shared WebRTC source is missing: $webRtcRoot"
 }
 if (-not (Test-Path -LiteralPath $gn)) {
-    throw "Pinned GN tool is missing: $gn"
+    throw "Pinned GN tool is missing under ToolRoot '$ToolRoot': $gn"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $pythonDirectory 'python3.exe'))) {
     throw "Pinned WebRTC Python runtime is missing: $pythonDirectory"
@@ -44,8 +50,8 @@ if ($actualRevision -ne $expectedRevision) {
 # to the ignored pinned checkout; never patch WebRTC processing sources.
 function Set-ExactBuildAdaptation {
     param([string]$Path, [string]$Expected, [string]$Replacement)
-    $Expected = $Expected.Replace("`n", [Environment]::NewLine)
-    $Replacement = $Replacement.Replace("`n", [Environment]::NewLine)
+    $Expected = [regex]::Replace($Expected, "`r?`n", [System.Text.RegularExpressions.MatchEvaluator]{ param($match) [Environment]::NewLine })
+    $Replacement = [regex]::Replace($Replacement, "`r?`n", [System.Text.RegularExpressions.MatchEvaluator]{ param($match) [Environment]::NewLine })
     $content = Get-Content -LiteralPath $Path -Raw
     if ($content.Contains($Replacement)) { return }
     if (-not $content.Contains($Expected)) {
@@ -54,7 +60,9 @@ function Set-ExactBuildAdaptation {
     [System.IO.File]::WriteAllText($Path, $content.Replace($Expected, $Replacement), [System.Text.UTF8Encoding]::new($false))
 }
 
-Set-ExactBuildAdaptation (Join-Path $webRtcRoot 'BUILD.gn') @'
+ $rootBuild = Join-Path $webRtcRoot 'BUILD.gn'
+if (-not (Select-String -LiteralPath $rootBuild -Pattern '^group\("peerchat_audio_processing"\)' -Quiet)) {
+Set-ExactBuildAdaptation $rootBuild @'
 import("webrtc.gni")
 
 if (rtc_rust) {
@@ -74,6 +82,7 @@ group("peerchat_audio_processing_test") {
 
 if (rtc_rust) {
 '@
+}
 Set-ExactBuildAdaptation (Join-Path $webRtcRoot 'build\\config\\win\\BUILD.gn') 'NTDDI_VERSION=NTDDI_WIN11_BR' 'NTDDI_VERSION=0x0A000010'
 Set-ExactBuildAdaptation (Join-Path $webRtcRoot 'build\\config\\win\\visual_studio_version.gni') 'visual_studio_runtime_dirs = []' 'visual_studio_runtime_dirs = "C:/Windows/System32"'
 Set-ExactBuildAdaptation (Join-Path $webRtcRoot 'build\\toolchain\\win\\setup_toolchain.py') "SDK_VERSION = '10.0.28000.0'" "SDK_VERSION = '10.0.26100.0'"

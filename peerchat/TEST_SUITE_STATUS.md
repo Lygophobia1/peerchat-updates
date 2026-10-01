@@ -5,6 +5,13 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-audio-processing.ps1` — pinned standalone APM presets/lifecycle,
+  restricted-PATH processing and import audit.
+- `tests/test-voice-presets.ps1` — profile-local processing controls and preset
+  persistence, effective native configuration, media-generation isolation, raw
+  bypass and unchanged 20 ms Opus transport.
+- `tests/test-voice-settings-ui.ps1` — actual WPF On/Off switches, discrete
+  strength choices and disable/preserve/re-enable behavior, with isolated profiles.
 - `tests/test-h264-rtp.ps1` — deterministic screen RTP ordering/loss/FU-A and
   reference recovery, plus pinned libdatachannel packetizer/RTCP PLI regression.
 - `tests/test-updater.ps1` — updater/package behavior.

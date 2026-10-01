@@ -14,7 +14,8 @@ bool Check(bool condition, const char* message) {
   return condition;
 }
 
-pc_apm_config Config(bool ns, bool aec, bool agc) {
+pc_apm_config Config(bool ns, bool aec, bool agc, uint32_t nsStrength,
+                     uint32_t agcStrength) {
   pc_apm_config config{};
   config.struct_size = sizeof(config);
   config.sample_rate_hz = PC_APM_SAMPLE_RATE_HZ;
@@ -22,11 +23,14 @@ pc_apm_config Config(bool ns, bool aec, bool agc) {
   config.noise_suppression_enabled = ns;
   config.echo_cancellation_enabled = aec;
   config.automatic_gain_enabled = agc;
+  config.noise_suppression_strength = nsStrength;
+  config.automatic_gain_strength = agcStrength;
   return config;
 }
 
 bool RunLifecycle() {
-  const auto config = Config(true, true, true);
+  const auto config = Config(true, false, true, PC_APM_NS_HIGH,
+                             PC_APM_AGC_GENTLE);
   pc_apm* apm = pc_apm_create(&config);
   if (!Check(apm != nullptr, "create")) {
     return false;
@@ -67,9 +71,26 @@ bool RunLifecycle() {
   ok &= Check(stats.reset_count == 1, "reset count");
   ok &= Check(stats.stream_delay_ms == 40, "stored stream delay");
   ok &= Check(stats.noise_suppression_enabled == 1 &&
-                  stats.echo_cancellation_enabled == 1 &&
-                  stats.automatic_gain_enabled == 1,
+                  stats.echo_cancellation_enabled == 0 &&
+                  stats.automatic_gain_enabled == 1 &&
+                  stats.noise_suppression_strength == PC_APM_NS_HIGH &&
+                  stats.automatic_gain_strength == PC_APM_AGC_GENTLE,
               "configuration diagnostics");
+
+  for (uint32_t nsStrength = PC_APM_NS_LOW; nsStrength <= PC_APM_NS_HIGH;
+       ++nsStrength) {
+    for (uint32_t agcStrength = PC_APM_AGC_GENTLE;
+         agcStrength <= PC_APM_AGC_STRONG; ++agcStrength) {
+      const auto preset = Config(true, false, true, nsStrength, agcStrength);
+      ok &= Check(pc_apm_configure(apm, &preset) == PC_APM_OK,
+                  "apply NS/AGC preset");
+      stats.struct_size = sizeof(stats);
+      ok &= Check(pc_apm_get_stats(apm, &stats) == PC_APM_OK &&
+                      stats.noise_suppression_strength == nsStrength &&
+                      stats.automatic_gain_strength == agcStrength,
+                  "effective preset diagnostics");
+    }
+  }
 
   ok &= Check(pc_apm_process_capture_10ms(apm, input.data(), output.data(),
                                            159) == PC_APM_INVALID_ARGUMENT,
@@ -88,9 +109,14 @@ bool RunLifecycle() {
 
 int main() {
   bool ok = true;
-  auto invalid = Config(false, false, false);
+  auto invalid = Config(false, false, false, PC_APM_NS_LOW,
+                        PC_APM_AGC_BALANCED);
   invalid.sample_rate_hz = 48000;
   ok &= Check(pc_apm_create(&invalid) == nullptr, "reject unsupported format");
+  invalid = Config(false, false, false, 3, PC_APM_AGC_BALANCED);
+  ok &= Check(pc_apm_create(&invalid) == nullptr, "reject invalid NS preset");
+  invalid = Config(false, false, false, PC_APM_NS_LOW, 3);
+  ok &= Check(pc_apm_create(&invalid) == nullptr, "reject invalid AGC preset");
 
   for (int iteration = 0; iteration < 25; ++iteration) {
     ok &= RunLifecycle();

@@ -23,6 +23,20 @@ enum {
     PC_APM_SAMPLES_PER_10MS = 160,
 };
 
+/* Stable UI preset identifiers. The WebRTC-specific values are selected in
+ * peerchat_audio_processing.cpp so labels and APM tuning stay decoupled. */
+typedef enum pc_apm_noise_suppression_strength {
+    PC_APM_NS_LOW = 0,
+    PC_APM_NS_MEDIUM = 1,
+    PC_APM_NS_HIGH = 2,
+} pc_apm_noise_suppression_strength;
+
+typedef enum pc_apm_automatic_gain_strength {
+    PC_APM_AGC_GENTLE = 0,
+    PC_APM_AGC_BALANCED = 1,
+    PC_APM_AGC_STRONG = 2,
+} pc_apm_automatic_gain_strength;
+
 typedef enum pc_apm_result {
     PC_APM_OK = 0,
     PC_APM_INVALID_ARGUMENT = 1,
@@ -38,6 +52,8 @@ typedef struct pc_apm_config {
     uint32_t noise_suppression_enabled;
     uint32_t echo_cancellation_enabled;
     uint32_t automatic_gain_enabled;
+    uint32_t noise_suppression_strength;
+    uint32_t automatic_gain_strength;
 } pc_apm_config;
 
 typedef struct pc_apm_stats {
@@ -48,6 +64,8 @@ typedef struct pc_apm_stats {
     uint32_t noise_suppression_enabled;
     uint32_t echo_cancellation_enabled;
     uint32_t automatic_gain_enabled;
+    uint32_t noise_suppression_strength;
+    uint32_t automatic_gain_strength;
     uint64_t capture_blocks_processed;
     uint64_t render_blocks_processed;
     uint64_t reset_count;

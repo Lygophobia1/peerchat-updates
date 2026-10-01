@@ -127,7 +127,9 @@ public:
     bool setVoiceDeafened(bool deafened);
     bool setVoiceDevices(int inputDevice, int outputDevice);
     bool setVoiceVolumes(int inputPercent, int outputPercent);
-    bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain);
+    bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain,
+                            std::uint32_t noiseSuppressionStrength,
+                            std::uint32_t automaticGainStrength);
     bool setMediaIceConfiguration(MediaIceConfiguration configuration);
     bool setScreenShareBackend(screen::Backend backend);
     std::wstring voiceDiagnostics();

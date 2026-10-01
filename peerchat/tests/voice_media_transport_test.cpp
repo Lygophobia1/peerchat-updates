@@ -77,6 +77,8 @@ int main(){
         if(cycle==1)processing.enabled=false;
         if(cycle==2)processing.automaticGain=false;
         if(cycle==3)processing.noiseSuppression=false;
+        processing.noiseSuppressionStrength=static_cast<peerchat::NoiseSuppressionStrength>(cycle%3);
+        processing.automaticGainStrength=static_cast<peerchat::AutomaticGainStrength>((cycle+2)%3);
         peerchat::VoiceMedia caller(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24",processing);
         peerchat::VoiceMedia answerer(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),"192.168.1.17/24");
         std::wstring error;
@@ -106,8 +108,13 @@ int main(){
         auto a=caller.diagnostics(),b=answerer.diagnostics();
         std::wcerr<<L"Caller diagnostics:\n"<<a<<L"\nAnswerer diagnostics:\n"<<b<<L'\n';
         require(countAtLeast(a,L"capture_frames=",12)&&countAtLeast(a,L"encoded_frames=",12)&&countAtLeast(a,L"opus_submitted=",12),"Caller did not capture/encode/submit injected PCM");
-        require(a.find(L"echo_cancellation=false")!=std::wstring::npos,"Echo cancellation must stay disabled");
-        if(processing.enabled)require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_enabled=true")!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression=")+(processing.noiseSuppression?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"automatic_gain_control=")+(processing.automaticGain?L"true":L"false"))!=std::wstring::npos&&countAtLeast(a,L"apm_level_frames=",12),"Capture-side APM configuration or two-block cadence did not match requested options");
+        require(a.find(L"aec_enabled=false")!=std::wstring::npos,"Echo cancellation must stay disabled");
+        const auto nsName=peerchat::noiseSuppressionStrengthName(processing.noiseSuppressionStrength);
+        const auto gainName=peerchat::automaticGainStrengthName(processing.automaticGainStrength);
+        require(a.find(L"input_volume=100")!=std::wstring::npos&&a.find(L"output_volume=100")!=std::wstring::npos&&a.find(L"aec_enabled=false")!=std::wstring::npos&&a.find(L"codec=Opus 16 kHz mono, 20 ms frames")!=std::wstring::npos,"Voice diagnostics changed volume, AEC or 20 ms Opus packet configuration");
+        // Real device capture may add frames concurrently with the 12 injected
+        // frames. Exact two-block cadence is tested in voice_apm_capture_test.
+        if(processing.enabled)require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_enabled=true")!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_enabled=")+(processing.noiseSuppression?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_strength=")+nsName)!=std::wstring::npos&&a.find(std::wstring(L"agc_enabled=")+(processing.automaticGain?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"agc_strength=")+gainName)!=std::wstring::npos&&countAtLeast(a,L"apm_level_frames=",12),"Capture-side APM configuration or cadence did not match requested generation options");
         else require(a.find(L"apm_enabled=false")!=std::wstring::npos&&countAtLeast(a,L"apm_raw_bypass_frames=",12)&&a.find(L"apm_capture_10ms_calls=0")!=std::wstring::npos,"Disabled processing did not preserve raw 20 ms PCM-to-Opus path");
         require(countAtLeast(b,L"capture_frames=",12)&&countAtLeast(b,L"encoded_frames=",12)&&countAtLeast(b,L"opus_submitted=",12),"Answerer did not capture/encode/submit injected PCM");
         require(countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"decoded_frames=",12)&&countAtLeast(a,L"playback_frames=",12),"Caller did not receive/decode/queue answerer Opus");

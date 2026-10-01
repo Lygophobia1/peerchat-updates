@@ -6,6 +6,7 @@
 #include <vector>
 #include "media_telemetry.hpp"
 #include "media_ice_configuration.hpp"
+#include "voice_processing_presets.hpp"
 
 namespace peerchat {
 
@@ -18,6 +19,8 @@ public:
         bool enabled = true;
         bool noiseSuppression = true;
         bool automaticGain = true;
+        NoiseSuppressionStrength noiseSuppressionStrength = NoiseSuppressionStrength::Medium;
+        AutomaticGainStrength automaticGainStrength = AutomaticGainStrength::Balanced;
     };
     enum class Route { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
     enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError, AudioProcessingError };

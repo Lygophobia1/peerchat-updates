@@ -3,10 +3,10 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-& (Join-Path $repoRoot 'scripts\build-audio-processing.ps1')
+& (Join-Path $repoRoot 'scripts\build-audio-processing.ps1') -DependencyRoot $env:PEERCHAT_DEPENDENCY_ROOT -ToolRoot $env:PEERCHAT_WEBRTC_TOOLS_ROOT -OutputRoot $env:PEERCHAT_APM_OUTPUT_ROOT
 if ($LASTEXITCODE -ne 0) { throw 'Standalone audio-processing build failed.' }
 
-$outputRoot = Join-Path $repoRoot 'build\audio-processing\webrtc-6cf6bcb\x64'
+$outputRoot = if ($env:PEERCHAT_APM_OUTPUT_ROOT) { $env:PEERCHAT_APM_OUTPUT_ROOT } else { 'C:\Peerchatdep\build\apm\webrtc-6cf6bcb-presets\x64' }
 $test = Join-Path $outputRoot 'peerchat_audio_processing_test.exe'
 if (-not (Test-Path -LiteralPath $test)) { throw "Lifecycle test missing: $test" }
 

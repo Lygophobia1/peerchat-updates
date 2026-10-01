@@ -282,7 +282,7 @@ public class DesktopApplication {
         // Profile selection and any legacy migration finish before the native owner exists.
         core=new CoreAdapter();
         window.SourceInitialized+=(s,e)=>{int enabled=1;var handle=new System.Windows.Interop.WindowInteropHelper(window).Handle;try{if(DwmSetWindowAttribute(handle,20,ref enabled,4)!=0)DwmSetWindowAttribute(handle,19,ref enabled,4);}catch(EntryPointNotFoundException){}};
-        BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
+        BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
         window.Loaded+=(s,e)=>{if(startupUncleanOperations.Count>0)window.Dispatcher.BeginInvoke((Action)(()=>ShowFailureNotification(startupUncleanOperations[0])));};
         window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>{if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
@@ -1989,6 +1989,54 @@ public class DesktopApplication {
 		}
 	}
 
+	private CheckBox VoiceProcessingSwitch(string label, bool enabled)
+	{
+		var control = new CheckBox { Content = label, IsChecked = enabled, Margin = new Thickness(0,0,0,8), HorizontalContentAlignment = HorizontalAlignment.Stretch };
+		var template = new ControlTemplate(typeof(CheckBox));
+		var row = new FrameworkElementFactory(typeof(DockPanel));
+		row.Name = "SwitchRow";
+		var track = new FrameworkElementFactory(typeof(Border));
+		track.Name = "SwitchTrack";
+		track.SetValue(DockPanel.DockProperty, Dock.Right);
+		track.SetValue(FrameworkElement.WidthProperty, 68.0);
+		track.SetValue(FrameworkElement.HeightProperty, 26.0);
+		track.SetValue(Border.CornerRadiusProperty, new CornerRadius(13));
+		track.SetValue(Border.BackgroundProperty, Brush("#3B4652"));
+		track.SetValue(FrameworkElement.MarginProperty, new Thickness(12,0,0,0));
+		var face = new FrameworkElementFactory(typeof(Grid));
+		var state = new FrameworkElementFactory(typeof(TextBlock));
+		state.Name = "SwitchState";
+		state.SetValue(TextBlock.TextProperty, "OFF");
+		state.SetValue(TextBlock.FontSizeProperty, 10.0);
+		state.SetValue(TextBlock.ForegroundProperty, Brushes.White);
+		state.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+		state.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+		state.SetValue(FrameworkElement.MarginProperty, new Thickness(9,0,9,0));
+		face.AppendChild(state);
+		var thumb = new FrameworkElementFactory(typeof(Ellipse));
+		thumb.Name = "SwitchThumb";
+		thumb.SetValue(FrameworkElement.WidthProperty, 20.0);
+		thumb.SetValue(FrameworkElement.HeightProperty, 20.0);
+		thumb.SetValue(Ellipse.FillProperty, Brushes.White);
+		thumb.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+		thumb.SetValue(FrameworkElement.MarginProperty, new Thickness(3));
+		face.AppendChild(thumb);track.AppendChild(face);row.AppendChild(track);
+		var content = new FrameworkElementFactory(typeof(ContentPresenter));
+		content.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
+		content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+		row.AppendChild(content);template.VisualTree = row;
+		var on = new Trigger { Property = CheckBox.IsCheckedProperty, Value = true };
+		on.Setters.Add(new Setter(Border.BackgroundProperty, Brush("#275DB0"), "SwitchTrack"));
+		on.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right, "SwitchThumb"));
+		on.Setters.Add(new Setter(TextBlock.TextProperty, "ON", "SwitchState"));
+		on.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left, "SwitchState"));
+		template.Triggers.Add(on);
+		var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+		disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.45, "SwitchRow"));template.Triggers.Add(disabled);
+		control.Template = template;
+		return control;
+	}
+
 	private Border SettingsCard(string title, string description, FrameworkElement body)
 	{
 		StackPanel stackPanel = new StackPanel();
@@ -2816,14 +2864,17 @@ public class DesktopApplication {
 		voiceSettings.Children.Add(SettingsCard("Levels", "These controls apply real software gain in the native capture and playback path. Mute and Deafen remain immediate call controls.", levelsPanel));
 		StackPanel processingPanel = new StackPanel();
 		CheckBox processingEnabled = new CheckBox { Content = "Enable Audio Processing", IsChecked = voicePreferences.AudioProcessingEnabled, Margin = new Thickness(0,0,0,8) };
-		CheckBox noiseSuppression = new CheckBox { Content = "Noise Suppression", IsChecked = voicePreferences.NoiseSuppressionEnabled, Margin = new Thickness(0,0,0,8) };
-		CheckBox automaticGain = new CheckBox { Content = "Automatic Gain Control", IsChecked = voicePreferences.AutomaticGainEnabled, Margin = new Thickness(0,0,0,8) };
+		CheckBox noiseSuppression = VoiceProcessingSwitch("Noise Suppression", voicePreferences.NoiseSuppressionEnabled);
+		CheckBox automaticGain = VoiceProcessingSwitch("Automatic Gain Control", voicePreferences.AutomaticGainEnabled);
+		var noiseStrength=new ComboBox{ItemsSource=VoiceProcessingPresets.NoiseSuppressionNames,SelectedIndex=voicePreferences.NoiseSuppressionStrength,Margin=new Thickness(18,0,0,14)};
+		var gainStrength=new ComboBox{ItemsSource=VoiceProcessingPresets.AutomaticGainNames,SelectedIndex=voicePreferences.AutomaticGainStrength,Margin=new Thickness(18,0,0,14)};
 		CheckBox echoCancellation = new CheckBox { Content = "Echo Cancellation (not available yet)", IsChecked = false, IsEnabled = false };
-		AutomationProperties.SetName(processingEnabled,"Enable Audio Processing");AutomationProperties.SetName(noiseSuppression,"Noise Suppression");AutomationProperties.SetName(automaticGain,"Automatic Gain Control");AutomationProperties.SetName(echoCancellation,"Echo Cancellation unavailable");
-		Action saveProcessing = delegate { voicePreferences.AudioProcessingEnabled = processingEnabled.IsChecked == true;voicePreferences.NoiseSuppressionEnabled = noiseSuppression.IsChecked == true;voicePreferences.AutomaticGainEnabled = automaticGain.IsChecked == true;voicePreferenceStore.Save(voicePreferences);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled);noiseSuppression.IsEnabled=processingEnabled.IsChecked==true;automaticGain.IsEnabled=processingEnabled.IsChecked==true; };
-		processingEnabled.Checked += delegate { saveProcessing(); };processingEnabled.Unchecked += delegate { saveProcessing(); };noiseSuppression.Checked += delegate { saveProcessing(); };noiseSuppression.Unchecked += delegate { saveProcessing(); };automaticGain.Checked += delegate { saveProcessing(); };automaticGain.Unchecked += delegate { saveProcessing(); };
-		noiseSuppression.IsEnabled=voicePreferences.AudioProcessingEnabled;automaticGain.IsEnabled=voicePreferences.AudioProcessingEnabled;
-		processingPanel.Children.Add(processingEnabled);processingPanel.Children.Add(noiseSuppression);processingPanel.Children.Add(automaticGain);processingPanel.Children.Add(echoCancellation);
+		AutomationProperties.SetName(processingEnabled,"Enable Audio Processing");AutomationProperties.SetName(noiseSuppression,"Noise Suppression enabled");AutomationProperties.SetName(automaticGain,"Automatic Gain Control enabled");AutomationProperties.SetName(noiseStrength,"Noise Suppression strength");AutomationProperties.SetName(gainStrength,"Automatic Gain Control strength");AutomationProperties.SetName(echoCancellation,"Echo Cancellation unavailable");
+		Action updateProcessingControls=delegate{bool enabled=processingEnabled.IsChecked==true;noiseSuppression.IsEnabled=enabled;automaticGain.IsEnabled=enabled;noiseStrength.IsEnabled=enabled&&noiseSuppression.IsChecked==true;gainStrength.IsEnabled=enabled&&automaticGain.IsChecked==true;noiseStrength.Opacity=noiseStrength.IsEnabled?1.0:0.45;gainStrength.Opacity=gainStrength.IsEnabled?1.0:0.45;};
+		Action saveProcessing = delegate { voicePreferences.AudioProcessingEnabled = processingEnabled.IsChecked == true;voicePreferences.NoiseSuppressionEnabled = noiseSuppression.IsChecked == true;voicePreferences.AutomaticGainEnabled = automaticGain.IsChecked == true;if(noiseStrength.SelectedIndex>=0)voicePreferences.NoiseSuppressionStrength=noiseStrength.SelectedIndex;if(gainStrength.SelectedIndex>=0)voicePreferences.AutomaticGainStrength=gainStrength.SelectedIndex;voicePreferenceStore.Save(voicePreferences);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength);updateProcessingControls(); };
+		processingEnabled.Checked += delegate { saveProcessing(); };processingEnabled.Unchecked += delegate { saveProcessing(); };noiseSuppression.Checked += delegate { saveProcessing(); };noiseSuppression.Unchecked += delegate { saveProcessing(); };automaticGain.Checked += delegate { saveProcessing(); };automaticGain.Unchecked += delegate { saveProcessing(); };noiseStrength.SelectionChanged+=delegate{saveProcessing();};gainStrength.SelectionChanged+=delegate{saveProcessing();};
+		updateProcessingControls();
+		processingPanel.Children.Add(processingEnabled);processingPanel.Children.Add(noiseSuppression);processingPanel.Children.Add(noiseStrength);processingPanel.Children.Add(automaticGain);processingPanel.Children.Add(gainStrength);processingPanel.Children.Add(echoCancellation);
 		voiceSettings.Children.Add(SettingsCard("Audio processing", "Changes apply to the next call or media generation. Echo cancellation needs a speaker reference and is not available yet.", processingPanel));
 		settingsPages.Add("Voice", voiceSettings);
 		settingsPages.Add("Video", createInfoPage("Video", "Video is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));

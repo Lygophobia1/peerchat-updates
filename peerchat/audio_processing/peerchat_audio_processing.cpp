@@ -13,25 +13,41 @@ namespace {
 constexpr char kWebRtcRevision[] =
     "6cf6bcb585b31414aac02377df2bc8fec770d0e8";
 constexpr uint32_t kMaximumStreamDelayMs = 2000;
+// Stable UI presets; Balanced is the prior default for both processors.
+constexpr webrtc::AudioProcessing::Config::NoiseSuppression::Level
+    kNoiseLevels[] = {
+        webrtc::AudioProcessing::Config::NoiseSuppression::kLow,
+        webrtc::AudioProcessing::Config::NoiseSuppression::kModerate,
+        webrtc::AudioProcessing::Config::NoiseSuppression::kHigh,
+    };
+constexpr int kGainCompressionDb[] = {6, 9, 12};
 
 bool IsValidConfig(const pc_apm_config* config) {
   return config != nullptr && config->struct_size == sizeof(pc_apm_config) &&
          config->sample_rate_hz == PC_APM_SAMPLE_RATE_HZ &&
-         config->channels == PC_APM_CHANNELS;
+         config->channels == PC_APM_CHANNELS &&
+         config->noise_suppression_strength <= PC_APM_NS_HIGH &&
+         config->automatic_gain_strength <= PC_APM_AGC_STRONG;
 }
 
 webrtc::AudioProcessing::Config ToWebRtcConfig(const pc_apm_config& config) {
   webrtc::AudioProcessing::Config result;
   result.high_pass_filter.enabled = true;
   result.noise_suppression.enabled = config.noise_suppression_enabled != 0;
+  // Friendly preset mapping is intentionally centralized here:
+  // Low/Balanced/High map to WebRTC kLow/kModerate/kHigh.
   result.noise_suppression.level =
-      webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
+      kNoiseLevels[config.noise_suppression_strength];
   result.echo_canceller.enabled = config.echo_cancellation_enabled != 0;
   result.gain_controller1.enabled = config.automatic_gain_enabled != 0;
   // PeerChat has no analogue gain-control bridge. Keep any requested AGC
   // entirely inside the processor until such a bridge exists.
   result.gain_controller1.mode =
       webrtc::AudioProcessing::Config::GainController1::kAdaptiveDigital;
+  // Gentle/Balanced/Strong map to 6/9/12 dB maximum digital compression.
+  // Keep target level and limiter at WebRTC's existing defaults.
+  result.gain_controller1.compression_gain_db =
+      kGainCompressionDb[config.automatic_gain_strength];
   return result;
 }
 
@@ -174,10 +190,20 @@ extern "C" PC_APM_API pc_apm_result pc_apm_get_stats(const pc_apm* instance,
   std::memcpy(stats->webrtc_revision, kWebRtcRevision, sizeof(kWebRtcRevision));
   stats->sample_rate_hz = PC_APM_SAMPLE_RATE_HZ;
   stats->channels = PC_APM_CHANNELS;
-  stats->noise_suppression_enabled = instance->config.noise_suppression_enabled;
-  stats->echo_cancellation_enabled =
-      instance->config.echo_cancellation_enabled;
-  stats->automatic_gain_enabled = instance->config.automatic_gain_enabled;
+  const auto effective = instance->processor->GetConfig();
+  stats->noise_suppression_enabled = effective.noise_suppression.enabled;
+  stats->echo_cancellation_enabled = effective.echo_canceller.enabled;
+  stats->automatic_gain_enabled = effective.gain_controller1.enabled;
+  // Report the effective processor mapping rather than echoing requested IDs.
+  // UINT32_MAX makes a mismatched mapping fail the caller's validation safely.
+  stats->noise_suppression_strength =
+      effective.noise_suppression.level ==
+              kNoiseLevels[instance->config.noise_suppression_strength]
+          ? instance->config.noise_suppression_strength : UINT32_MAX;
+  stats->automatic_gain_strength =
+      effective.gain_controller1.compression_gain_db ==
+              kGainCompressionDb[instance->config.automatic_gain_strength]
+          ? instance->config.automatic_gain_strength : UINT32_MAX;
   stats->capture_blocks_processed = instance->capture_blocks_processed;
   stats->render_blocks_processed = instance->render_blocks_processed;
   stats->reset_count = instance->reset_count;

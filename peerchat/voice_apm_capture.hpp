@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio_processing/peerchat_audio_processing.h"
+#include "voice_processing_presets.hpp"
 #include <windows.h>
 #include <array>
 #include <atomic>
@@ -20,7 +21,9 @@ public:
     VoiceApmCapture& operator=(const VoiceApmCapture&) = delete;
     ~VoiceApmCapture() { close(); }
 
-    bool open(bool noiseSuppression = true, bool automaticGain = true) {
+    bool open(bool noiseSuppression = true, bool automaticGain = true,
+              NoiseSuppressionStrength noiseStrength = NoiseSuppressionStrength::Medium,
+              AutomaticGainStrength gainStrength = AutomaticGainStrength::Balanced) {
         close();
         captureCalls_ = 0;
         processedFrames_ = 0;
@@ -30,6 +33,8 @@ public:
         preRms_ = prePeak_ = postRms_ = postPeak_ = 0.0f;
         noiseSuppression_ = noiseSuppression;
         automaticGain_ = automaticGain;
+        noiseStrength_ = noiseStrength;
+        gainStrength_ = gainStrength;
         module_ = LoadLibraryExW(L"PeerChat.AudioProcessing.dll", nullptr,
                                  LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (!module_) { failure_ = 1; return false; }
@@ -45,6 +50,8 @@ public:
         config.noise_suppression_enabled = noiseSuppression ? 1u : 0u;
         config.automatic_gain_enabled = automaticGain ? 1u : 0u;
         config.echo_cancellation_enabled = 0;
+        config.noise_suppression_strength = static_cast<std::uint32_t>(noiseStrength);
+        config.automatic_gain_strength = static_cast<std::uint32_t>(gainStrength);
         instance_ = create_(&config);
         if (!instance_) { failure_ = 3; close(); return false; }
         pc_apm_stats result{};
@@ -53,6 +60,8 @@ public:
             result.sample_rate_hz != 16000 || result.channels != 1 ||
             result.noise_suppression_enabled != config.noise_suppression_enabled ||
             result.automatic_gain_enabled != config.automatic_gain_enabled ||
+            result.noise_suppression_strength != config.noise_suppression_strength ||
+            result.automatic_gain_strength != config.automatic_gain_strength ||
             result.echo_cancellation_enabled != 0) {
             failure_ = 4;
             close();
@@ -104,6 +113,8 @@ public:
     float postPeak() const { return postPeak_; }
     bool noiseSuppression() const { return noiseSuppression_; }
     bool automaticGain() const { return automaticGain_; }
+    NoiseSuppressionStrength noiseStrength() const { return noiseStrength_; }
+    AutomaticGainStrength gainStrength() const { return gainStrength_; }
 
     void close() {
         if (instance_ && destroy_) destroy_(instance_);
@@ -151,6 +162,8 @@ private:
     std::atomic<std::uint64_t> measuredFrames_{0};
     std::atomic<float> preRms_{0.0f}, prePeak_{0.0f}, postRms_{0.0f}, postPeak_{0.0f};
     bool noiseSuppression_ = true, automaticGain_ = true;
+    NoiseSuppressionStrength noiseStrength_ = NoiseSuppressionStrength::Medium;
+    AutomaticGainStrength gainStrength_ = AutomaticGainStrength::Balanced;
 };
 
 } // namespace peerchat

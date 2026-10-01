@@ -8,7 +8,9 @@ int main() {
         peerchat::VoiceApmCapture apm;
         const bool ns = (generation & 1) != 0;
         const bool agc = (generation & 2) != 0;
-        if (!apm.open(ns, agc) || !apm.active() || apm.noiseSuppression() != ns || apm.automaticGain() != agc) return 1;
+        const auto nsStrength=static_cast<peerchat::NoiseSuppressionStrength>(generation%3);
+        const auto gainStrength=static_cast<peerchat::AutomaticGainStrength>((generation/3)%3);
+        if (!apm.open(ns, agc, nsStrength, gainStrength) || !apm.active() || apm.noiseSuppression() != ns || apm.automaticGain() != agc || apm.noiseStrength()!=nsStrength || apm.gainStrength()!=gainStrength) return 1;
         std::array<std::int16_t, 320> frame{};
         for (unsigned i = 0; i != frame.size(); ++i) frame[i] = static_cast<std::int16_t>(i * 13);
         const auto original = frame;
