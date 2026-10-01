@@ -38,4 +38,62 @@ public sealed class ProfileAccountStore {
     static bool Valid(ProfileAccountLink value){return value!=null&&value.Version==1&&value.AccountId>0&&!String.IsNullOrWhiteSpace(value.Username)&&!String.IsNullOrWhiteSpace(value.Host)&&value.Port>0&&value.Port<=65535;}
     void Save(ProfileAccountLink value){Directory.CreateDirectory(Path.GetDirectoryName(path));string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,protect(Encoding.UTF8.GetBytes(json.Serialize(value))));if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);}
 }
+
+// These IDs are only creation attempts made by this profile. They are not a
+// source of group authorization; the authenticated server roster is. Keeping
+// the marker across restarts prevents a failed new group from silently being
+// presented as an old, intentionally local-only group.
+public sealed class PendingGroupRegistrationStore {
+    readonly string path;
+    public PendingGroupRegistrationStore(string profileDirectory){path=Path.Combine(profileDirectory,"pending-group-registrations.txt");}
+    static bool Id(string value,int length){return value!=null&&value.Length==length&&System.Linq.Enumerable.All(value,c=>(c>='0'&&c<='9')||(c>='a'&&c<='f'));}
+    public string[] Load(long accountId,string peerId){
+        if(!File.Exists(path))return new string[0];
+        var ids=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach(string line in File.ReadAllLines(path,Encoding.UTF8)){
+            var fields=line.Split('|');
+            if(fields.Length==3&&fields[0]==accountId.ToString()&&fields[1]==peerId&&Id(fields[2],32))ids.Add(fields[2]);
+        }
+        return System.Linq.Enumerable.ToArray(ids);
+    }
+    public string[] AllIds(){
+        if(!File.Exists(path))return new string[0];
+        var ids=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach(string line in File.ReadAllLines(path,Encoding.UTF8)){
+            var fields=line.Split('|');if(fields.Length==3&&Id(fields[2],32))ids.Add(fields[2]);
+        }
+        return System.Linq.Enumerable.ToArray(ids);
+    }
+    public void Add(long accountId,string peerId,string groupId){
+        if(accountId<=0||!Id(peerId,64)||!Id(groupId,32))throw new InvalidOperationException("The new group identity is incomplete.");
+        var lines=File.Exists(path)?new System.Collections.Generic.List<string>(File.ReadAllLines(path,Encoding.UTF8)):new System.Collections.Generic.List<string>();
+        string record=accountId+"|"+peerId+"|"+groupId;if(!lines.Contains(record))lines.Add(record);Save(lines);
+    }
+    public void Remove(long accountId,string peerId,string groupId){
+        if(!File.Exists(path))return;
+        string record=accountId+"|"+peerId+"|"+groupId;
+        var lines=new System.Collections.Generic.List<string>(File.ReadAllLines(path,Encoding.UTF8));lines.RemoveAll(value=>value==record);Save(lines);
+    }
+    void Save(System.Collections.Generic.List<string> lines){
+        Directory.CreateDirectory(Path.GetDirectoryName(path));string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+        try{File.WriteAllLines(temporary,lines.ToArray(),new UTF8Encoding(false));if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);}
+        finally{if(File.Exists(temporary))File.Delete(temporary);}
+    }
+}
+
+public static class GroupRegistrationPolicy {
+    public static bool OwnerRosterReady(ServerGroupRoster roster,string localGroupId,long accountId,string peerId){
+        return roster!=null&&roster.LegacyGroupId==localGroupId&&roster.GroupId!=null&&roster.GroupId.Length==32&&
+            roster.RosterGeneration==1&&roster.Members!=null&&roster.Members.Count==1&&
+            roster.Members[0].AccountId==accountId&&roster.Members[0].PeerId==peerId&&
+            roster.Members[0].Role=="owner"&&roster.Members[0].State=="member";
+    }
+    public static bool CanInvite(ServerGroupRoster roster,long accountId,string peerId){
+        if(roster==null||roster.RosterGeneration<1||roster.Members==null)return false;
+        foreach(var member in roster.Members)
+            if(member.AccountId==accountId&&member.PeerId==peerId&&member.State=="member"&&
+               (member.Role=="owner"||member.Role=="admin"))return true;
+        return false;
+    }
+}
 }
