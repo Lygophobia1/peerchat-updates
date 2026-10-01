@@ -5,6 +5,10 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-group-message-envelope.ps1 -IncludeStage1A` — Stage 1B AES-GCM
+  envelope/signature, bounded tamper parsing, current roster/device/key checks,
+  durable replay and nonce reservation, protected history and Stage 1A scoped
+  peer-TLS key-handoff/removal regressions. No server fanout or group media.
 - `tests/test-audio-processing.ps1` — pinned standalone APM presets/lifecycle,
   restricted-PATH processing and import audit.
 - `tests/test-voice-presets.ps1` — profile-local processing controls and preset

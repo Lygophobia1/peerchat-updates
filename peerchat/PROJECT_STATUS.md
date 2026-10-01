@@ -1,5 +1,18 @@
 # PeerChat development status
 
+## Stage 1B — versioned E2EE group-message layer
+
+The accepted voice-settings baseline is `dba6310` / `4.0.1-dev.41`; accepted
+screen sharing remains `3bd80c7`. Neither media implementation is changed here.
+`group_message_envelope` creates/parses/validates device-signed AES-256-GCM
+envelopes against the current Stage 1A authoritative roster and content key.
+Authenticated history/dedupe and nonce reservations use the existing protected
+profile store. See `docs/GROUP_MESSAGE_ENVELOPE.md` for protocol and validation.
+Stage 1C server ciphertext fanout/delivery is not implemented; group send remains
+blocked rather than falling back to legacy plaintext. Group media and AEC remain
+out of scope. The older status entries below are historical checkpoints, not a
+replacement for this current group security boundary.
+
 > Documentation authority
 >
 > - Product goals and approved planned direction: `PEERCHAT_DEVELOPMENT_GOAL.md`

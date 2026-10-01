@@ -52,6 +52,9 @@ private:
 std::string newGroupId();
 void signGroupEvent(GroupEvent& event,const Profile& device);
 bool verifyGroupEventSignature(const GroupEvent& event,const Blob& publicKey);
+// Same persistent P-256 device identity as the signed roster; no new signing key.
+Blob signDevicePayload(const Blob& canonicalPayload,const Profile& device);
+bool verifyDevicePayload(const Blob& canonicalPayload,const Blob& signature,const Blob& publicKey);
 Blob encodeGroupEvent(const GroupEvent& event);
 GroupEvent decodeGroupEvent(const Blob& packet,bool enforceChatLimit=false,bool* oversizedMessage=nullptr);
 }

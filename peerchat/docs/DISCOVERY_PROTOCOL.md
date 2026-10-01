@@ -128,27 +128,30 @@ protocol, and established direct sessions are not closed when discovery disconne
 
 ## Group and relay authority boundary
 
-This discovery protocol has no authoritative group operations. It does not create or allocate Group
-IDs, names, metadata, memberships, roles, invitations, removals, leave state, or history. Friend and
-presence results may help a client locate a verified account/device before the client signs and sends
-a group invitation directly, but that lookup does not give the service authority over the group.
-Group invite eligibility, pending-state projection and signed-event validation remain client behavior
-documented in ARCHITECTURE.md; discovery results alone never authorize a group-state change.
+Stage 1A authenticated group operations create the authoritative owner-only server
+roster and govern invite/accept/removal, roles and account/device generation state.
+The local signed membership ledger is reconciled against that roster; legacy local
+groups are not silently promoted. GroupControl rendezvous authorizes only the
+specific group, current roster generation and remote device, even for non-friends.
+It does not grant ordinary Friend/DM, direct or media authorization.
 
-Group state is a client-owned signed event ledger replicated between members. Existing groups and
-their direct text transport continue when this service is unavailable. The implemented reliable
-relay may carry the same inner peer-TLS application stream for `Automatic — prefer P2P, relay
-fallback`; `Direct Only` remains available. Relay acceptance, ordering, storage, or availability
-does not turn the service into the source of truth or change the logical group.
+The server never receives group keys. Reliable offers/ACKs travel inside the
+authenticated end-to-end peer-TLS stream; protected client storage retains pending
+handoffs. Stage 1B defines the independently signed AES-GCM message envelope in
+`GROUP_MESSAGE_ENVELOPE.md`. Discovery/presence is not a group content transport.
+Server ciphertext fanout remains Stage 1C; no plaintext fallback or peer mesh is
+introduced by either stage.
 
 ## Opaque reliable relay channel
 
 `relay_attach` is sent as one ordinary framed JSON request on a dedicated certificate-pinned server
 TLS connection. It contains the authenticated `sessionToken`, the caller's registered
 `publicIdentity`, `targetAccountId`, and exact `targetPublicIdentity`. Authorization requires both
-device IDs to belong to their authenticated accounts and either an established friendship or one
-current pending friend request between the accounts. Pending authorization exists only so the inner
-peer TLS exchange can establish/verify Peer ID; server authorization itself grants no peer trust.
+device IDs to belong to their authenticated accounts and either an established friendship, one
+current pending friend request, or explicitly scoped current GroupControl roster authorization.
+Pending friend authorization exists only so the inner peer TLS exchange can establish/verify
+Peer ID; server authorization itself grants no peer trust. GroupControl additionally binds the
+group and roster generation and accepts only its bounded key/membership control purpose.
 
 Both exact account/device directions must attach reciprocally. The server rejects unrelated users,
 device/account mismatches, duplicate attachment and cross-profile reuse. Pairing expires after 15

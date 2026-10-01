@@ -233,7 +233,34 @@ later. The server refuses to attach a device Peer ID already owned by one accoun
 The current profile owns one durable account binding, one optional protected session, and one device
 identity; multi-device synchronization and automatic trust transfer are not implemented.
 
-## Client-owned group state
+## Authoritative groups and encrypted messages
+
+Current Stage 1A groups register an authenticated owner-only server roster from
+creation. Membership/invites and device-bound roster generations are server
+authoritative. The local signed `GroupLedger` supplies authenticated member
+public keys and must match that roster before the profile-scoped
+`GroupKeyManager` can distribute or use a key. Legacy local groups remain legacy;
+no owner-only Create event invents server membership for them.
+
+Non-friend key/control handoff uses an explicitly group/generation/device-bound
+GroupControl purpose on the existing peer-TLS relay/session path. It does not
+create Friend/DM trust, direct authorization, a group transport or a second
+session owner. The server has operational roster metadata but never content keys.
+Membership changes rotate both roster and key generation; protected handoff
+outboxes/receipts reuse the reliable-control ACK/retry/dedupe boundary.
+
+Stage 1B adds `group_messages::MessageLayer`: AES-256-GCM using Windows CNG,
+with canonical header AAD and the persistent P-256 device signature over header,
+ciphertext and tag. It borrows current roster/key/profile owners and commits
+fully authenticated plaintext only through existing DPAPI-protected storage.
+Current receive is strict-current-generation; historical local reads are separate.
+See `docs/GROUP_MESSAGE_ENVELOPE.md` for the bounded versioned wire contract.
+
+Group text fanout/delivery remains Stage 1C, not peer mesh or GroupControl chat.
+The UI send path and legacy plaintext message acceptance remain blocked. No
+group voice/screen sharing is implemented by this layer.
+
+### Legacy local ledger (not the current group-message wire format)
 
 The native `GroupLedger` is the authority for each local group replica. A random 128-bit Group ID is
 created on the owner client and never derived from a name or issued by the discovery service. Create,
@@ -250,23 +277,18 @@ event. Collections, fanout, storage, and the WPF member list do not encode a thr
 future practical size/rate policy must remain configurable resource policy rather than a protocol or
 schema assumption.
 
-Accepted events are stored in the selected profile's DPAPI-encrypted SQLite database. A per-peer
-group outbox survives disconnect/restart and sends signed group envelopes only over authenticated
-mutual-TLS peer connections that advertise the signed-groups capability. Inviting a verified friend
-queues the accepted ledger history to that device; later accepted events fan out across current
-members/invitees, so connected members can forward events to temporarily indirect peers. Pending
-causal events are reconsidered when predecessors arrive. Each process owns one profile/core/ledger
-set, and group keys, events, outboxes, and account binding are cleared with the rest of native state
-on a profile restart. Separate processes may own separate profiles.
+Accepted local ledger events remain in DPAPI-encrypted SQLite. Existing historical
+per-peer ledger/outbox code is not the new group-text transport; plaintext Message
+events are excluded from ordinary and GroupControl relay dispatch. Pending causal
+membership events are reconsidered when predecessors arrive. Each process owns one
+profile/core/ledger set; runtime replicas are cleared on profile restart while
+durable encrypted keys, events, receipts and history remain profile-local.
 
-The WPF layer invokes groups through the existing C ABI and renders replicated state, including
-pending invite count in the group list and named `Pending Invite` rows in group details; it does not
-become an authority. Discovery may help locate a friend's account/device endpoint for an invitation,
-but the server creates no Group ID, membership row, role, metadata, invite, removal, or history. If
-discovery disappears, persisted groups and direct group messaging continue. The Stage 5.5 reliable
-relay can carry the same inner peer-TLS stream in Automatic mode; Direct Only remains available and
-Relay / Privacy mode is still future work. Transport choice cannot change the logical group or its
-client authority.
+WPF invokes the existing application/C ABI and renders current server-authorized
+and legacy group state separately. It owns neither roster authorization nor keys.
+Server authorization and verified peer TLS remain distinct; transport route/IP
+never grants membership. Ordinary reliable operation is server-relay-first, and
+GroupControl stays purpose-scoped independent of optional friend P2P.
 
 Conversation history is retrieved for presentation in bounded newest-first pages (100 messages),
 not by materializing an encrypted DM history or a group's complete signed ledger into WPF. The

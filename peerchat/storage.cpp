@@ -320,6 +320,38 @@ Blob Storage::groupKey(const std::string& groupId,std::uint64_t generation){
     Blob key=impl_->get("group-key/"+groupId+"/"+std::to_string(generation));
     require(key.empty()||key.size()==32,"Invalid protected group key");return key;
 }
+bool Storage::appendAuthenticatedGroupMessage(const std::string& group,const std::string& id,const Blob& envelope,const Blob& plaintext){
+    require(identifier(group,32)&&identifier(id,32)&&envelope.size()>=240&&envelope.size()<=70000&&plaintext.size()<=65536,
+        "Invalid authenticated group message");
+    const std::string record="authenticated-group-message/"+group+"/"+id;
+    Transaction transaction(impl_->sql,impl_->db);Secret old{impl_->get(record)};
+    if(!old.data.empty()){
+        Reader reader(old.data);auto previous=reader.bytes();Secret previousText{reader.bytes()};reader.end();
+        require(previous==envelope&&previousText.data==plaintext,"Conflicting authenticated group message ID");
+        transaction.commit();return false;
+    }
+    Writer writer;writer.bytes(envelope);writer.bytes(plaintext);impl_->put(record,writer.data);
+    transaction.commit();return true;
+}
+AuthenticatedGroupMessage Storage::authenticatedGroupMessage(const std::string& group,const std::string& id){
+    require(identifier(group,32)&&identifier(id,32),"Invalid authenticated group history request");
+    Secret saved{impl_->get("authenticated-group-message/"+group+"/"+id)};
+    if(saved.data.empty())return {};
+    Reader reader(saved.data);AuthenticatedGroupMessage result;result.envelope=reader.bytes();result.plaintext=reader.bytes();reader.end();
+    require(result.envelope.size()<=70000&&result.plaintext.size()<=65536,"Invalid authenticated group history record");return result;
+}
+bool Storage::reserveGroupNonce(const std::string& fingerprint,const Blob& nonce){
+    require(identifier(fingerprint)&&nonce.size()==12,"Invalid group nonce reservation");
+    const std::string scope="group-nonce/"+fingerprint,record=scope+"/"+hex(nonce);
+    Transaction transaction(impl_->sql,impl_->db);Secret previous{impl_->get(record)};
+    if(!previous.data.empty()){transaction.commit();return false;}
+    Secret savedCount{impl_->get(scope+"/count")};std::uint64_t count=0;
+    if(!savedCount.data.empty()){Reader reader(savedCount.data);count=reader.number();reader.end();}
+    // Conservative per-device key usage ceiling for random 96-bit GCM nonces.
+    require(count<(1u<<24),"Group encryption key usage limit reached");
+    Writer writer;writer.number(count+1);impl_->put(scope+"/count",writer.data);impl_->put(record,Blob{1});
+    transaction.commit();return true;
+}
 void Storage::queueGroupKeyHandoff(const GroupKeyHandoff& handoff){
     require(identifier(handoff.id,32)&&identifier(handoff.groupId,32)&&identifier(handoff.serverGroupId,32)&&identifier(handoff.distributorPeerId)&&identifier(handoff.recipientPeerId)&&handoff.distributorPeerId!=handoff.recipientPeerId&&handoff.rosterGeneration>0&&handoff.keyGeneration==handoff.rosterGeneration&&handoff.keyGeneration<=INT64_MAX&&handoff.contentKey.size()==32,"Invalid group key handoff");
     Writer writer;writer.string(handoff.id);writer.string(handoff.groupId);writer.string(handoff.serverGroupId);writer.string(handoff.distributorPeerId);writer.string(handoff.recipientPeerId);writer.number(handoff.rosterGeneration);writer.number(handoff.keyGeneration);writer.bytes(handoff.contentKey);

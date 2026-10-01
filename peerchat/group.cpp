@@ -30,6 +30,24 @@ bool before(const GroupEvent& left,const GroupEvent& right){return left.logicalO
 
 std::string newGroupId(){return Storage::newMessageId();}
 
+Blob signDevicePayload(const Blob& payload,const Profile& device){
+    if(payload.size()>70000||Storage::publicKeyId(device.publicKey)!=device.peerId)
+        throw std::runtime_error("Invalid device signature input");
+    Blob digest=sha256(payload),signature(64);Key key=importKey(device.privateKey,true);ULONG bytes=0;
+    requireNt(BCryptSignHash(key.value,nullptr,digest.data(),32,signature.data(),64,&bytes,0));
+    if(bytes!=64||!verifyDevicePayload(payload,signature,device.publicKey))
+        throw std::runtime_error("Device signature key mismatch");
+    return signature;
+}
+bool verifyDevicePayload(const Blob& payload,const Blob& signature,const Blob& publicKey){
+    try{
+        if(payload.size()>70000||signature.size()!=64)return false;
+        Blob digest=sha256(payload);Key key=importKey(publicKey,false);
+        return BCryptVerifySignature(key.value,nullptr,digest.data(),32,
+            const_cast<PUCHAR>(signature.data()),64,0)>=0;
+    }catch(...){return false;}
+}
+
 void signGroupEvent(GroupEvent& event,const Profile& device){
     if(event.actorPeerId!=device.peerId||Storage::publicKeyId(device.publicKey)!=device.peerId)throw std::runtime_error("Group actor does not match this device");
     Blob digest=sha256(unsignedPayload(event));event.eventId=hex(digest);Key key=importKey(device.privateKey,true);ULONG bytes=0;requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),nullptr,0,&bytes,0));event.signature.resize(bytes);requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),event.signature.data(),bytes,&bytes,0));event.signature.resize(bytes);
