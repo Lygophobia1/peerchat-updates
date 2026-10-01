@@ -180,13 +180,13 @@ public class DesktopApplication {
             if(discovery!=service||discoverySessionGeneration!=session||profileSessionGeneration!=profileGeneration||groupStateRevision!=revision||closing)return;
             var incoming=rosters.Where(value=>value!=null&&!String.IsNullOrEmpty(value.LegacyGroupId)&&!String.IsNullOrEmpty(value.GroupId)).ToDictionary(value=>value.LegacyGroupId,value=>value,StringComparer.Ordinal);
             if(serverGroupRosters.Keys.Any(key=>!incoming.ContainsKey(key))){core.ClearAuthenticatedGroupRosters();groupControlRequested.Clear();}
-            serverGroupRosters.Clear();
+            serverGroupRosters.Clear();model.ClearGroupSenderNames();
             foreach(var pair in incoming){
                 if(!core.SetAuthenticatedGroupRoster(service.AccountId,session,pair.Value)){
                     if(pendingNewGroupRegistrations.Contains(pair.Key))FailNewGroupRegistration(pair.Key,"native roster binding","native_roster_bind_rejected");
                     continue;
                 }
-                serverGroupRosters[pair.Key]=pair.Value;
+                serverGroupRosters[pair.Key]=pair.Value;model.SetGroupSenderRoster(pair.Value);
                 if(pendingNewGroupRegistrations.Contains(pair.Key)&&GroupRegistrationPolicy.OwnerRosterReady(pair.Value,pair.Key,service.AccountId,localPeer)){
                     pendingNewGroupRegistrations.Remove(pair.Key);groupRegistrationStatus[pair.Key]="Authenticated server roster ready";
                     groupRegistrationStage[pair.Key]="ready";groupRegistrationFailure[pair.Key]="none";
@@ -236,7 +236,7 @@ public class DesktopApplication {
                 }
                 if(!core.SetAuthenticatedGroupRoster(service.AccountId,session,roster)){FailNewGroupRegistration(groupId,"native roster binding","native_roster_bind_rejected");return;}
                 try{pendingGroupStore.Remove(service.AccountId,localPeer,groupId);markedNewGroupIds.Remove(groupId);}catch(Exception error){TraceUi("group registration marker cleanup deferred: "+error.GetType().Name);}
-                serverGroupRosters[groupId]=roster;groupStateRevision++;groupRegistrationStatus[groupId]="Authenticated server roster ready";groupRegistrationStage[groupId]="ready";groupRegistrationFailure[groupId]="none";pendingNewGroupRegistrations.Remove(groupId);model.Status="Group registered with the authenticated server roster.";Refresh();groupStateRefreshTask=null;RefreshGroupState();
+                serverGroupRosters[groupId]=roster;model.SetGroupSenderRoster(roster);groupStateRevision++;groupRegistrationStatus[groupId]="Authenticated server roster ready";groupRegistrationStage[groupId]="ready";groupRegistrationFailure[groupId]="none";pendingNewGroupRegistrations.Remove(groupId);model.Status="Group registered with the authenticated server roster.";Refresh();groupStateRefreshTask=null;RefreshGroupState();
             })));
         }
     }
@@ -422,7 +422,7 @@ public class DesktopApplication {
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Server Relay":"Local profile ready · Sign in, create an account, or continue offline"):"@"+accountLink.Username+" signed out · Local history remains available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationsAttempted.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();foreach(string id in pendingGroupStore.Load(saved.AccountId,model.OwnId)){pendingNewGroupRegistrations.Add(id);groupRegistrationStatus[id]="New group registration pending; group is not active";groupRegistrationStage[id]="awaiting signed creation proof";groupRegistrationFailure[id]="none";}groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();RefreshGroupState();
+            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationsAttempted.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();foreach(string id in pendingGroupStore.Load(saved.AccountId,model.OwnId)){pendingNewGroupRegistrations.Add(id);groupRegistrationStatus[id]="New group registration pending; group is not active";groupRegistrationStage[id]="awaiting signed creation proof";groupRegistrationFailure[id]="none";}groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();RefreshGroupState();
         }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Server Relay · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
     }
     void Poll(){
@@ -1409,7 +1409,7 @@ public class DesktopApplication {
 			discovery = candidate;
 			discoverySessionGeneration++;
 			mediaTurnCredentials = null;
-            serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
+            serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
 			ApplyPresenceDiagnostics(presence);
 			core.SetGroupAccount(discovery.AccountId, discovery.Username);
 			core.LoadGroups();
@@ -1463,7 +1463,7 @@ public class DesktopApplication {
 			discovery = null;
 			discoverySessionGeneration++;
 			mediaTurnCredentials = null;
-            serverGroupRosters.Clear();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
+            serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
 		authenticatedFriendSnapshotGeneration++;
 		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
 		automaticInitialPinAttempts.Clear();

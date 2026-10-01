@@ -63,9 +63,13 @@ public class GroupModel : ObservableModel {
 public class MessageModel : ObservableModel {
     public MessageData Data;
     public bool Outgoing;
+    public long GroupSenderAccountId;
+    public bool IsGroupMessage;
+    string groupSenderName="";
+    public void SetGroupSenderName(string name){if(groupSenderName==name)return;groupSenderName=name;Changed("Text");Changed("Preview");}
     double bubbleWidth=400;
     public double BubbleWidth {get{return bubbleWidth;}set{bubbleWidth=value;Changed("BubbleWidth");}}
-    public string Text {get{return Data.text;}}
+    public string Text {get{return IsGroupMessage?groupSenderName+"\n"+Data.text:Data.text;}}
     public string Preview {get{string value=Text??"";if(value.Length<=160)return value;int length=160;if(Char.IsHighSurrogate(value[length-1])&&Char.IsLowSurrogate(value[length]))length--;return value.Substring(0,length)+"…";}}
     public HorizontalAlignment Alignment {get{return Outgoing?HorizontalAlignment.Right:HorizontalAlignment.Left;}}
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
@@ -81,6 +85,27 @@ public class ChatViewModel {
     public readonly Dictionary<string,ConversationModel> Conversations=new Dictionary<string,ConversationModel>();
     readonly Dictionary<string,ConversationModel> conversationsByPeer=new Dictionary<string,ConversationModel>(StringComparer.Ordinal);
     public readonly Dictionary<string,GroupModel> GroupChats=new Dictionary<string,GroupModel>();
+    // Display-only projection of authenticated server rosters. Never use ledger
+    // labels or message metadata as account identity, and never rewrite message IDs.
+    readonly Dictionary<string,Dictionary<long,Dictionary<string,string>>> groupSenderNames=new Dictionary<string,Dictionary<long,Dictionary<string,string>>>(StringComparer.Ordinal);
+    public void ClearGroupSenderNames(){groupSenderNames.Clear();RefreshGroupSenderNames();}
+    public void SetGroupSenderRoster(ServerGroupRoster roster){
+        if(roster==null||String.IsNullOrEmpty(roster.LegacyGroupId))return;
+        var accounts=new Dictionary<long,Dictionary<string,string>>();
+        foreach(var member in roster.Members.Where(value=>value.State=="member"&&value.AccountId>0&&!String.IsNullOrEmpty(value.PeerId))){
+            Dictionary<string,string> devices;
+            if(!accounts.TryGetValue(member.AccountId,out devices))accounts[member.AccountId]=devices=new Dictionary<string,string>(StringComparer.Ordinal);
+            devices[member.PeerId]=member.Username;
+        }
+        groupSenderNames[roster.LegacyGroupId]=accounts;
+        GroupModel group;if(GroupChats.TryGetValue(roster.LegacyGroupId,out group))RefreshGroupSenderNames(group);
+    }
+    string GroupSenderName(string groupId,long accountId,string peerId){
+        Dictionary<long,Dictionary<string,string>> accounts;Dictionary<string,string> devices;string name;
+        return groupSenderNames.TryGetValue(groupId,out accounts)&&accounts.TryGetValue(accountId,out devices)&&devices.TryGetValue(peerId??"",out name)&&!String.IsNullOrWhiteSpace(name)?name:"Account "+accountId;
+    }
+    void RefreshGroupSenderNames(GroupModel group){foreach(var message in group.Messages)if(message.IsGroupMessage)message.SetGroupSenderName(GroupSenderName(group.Id,message.GroupSenderAccountId,message.Data.sender));group.Refresh();}
+    void RefreshGroupSenderNames(){foreach(var group in GroupChats.Values)RefreshGroupSenderNames(group);}
     public string OwnId="",Name="You",Status="Opening your encrypted profile…";
     public ushort Port=7777;
     public bool Listening,Groups;
@@ -143,7 +168,7 @@ public class ChatViewModel {
         }
         if((e.kind==10||e.kind==11)&&e.groupEvents!=null){
             GroupModel group;
-            if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=(member!=null?member.name:"Account "+value.account)+"\n"+value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,sequence=value.sequence>0?value.sequence:value.logical,status=value.status,delivery=outgoing?0:2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
+            if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var data=new MessageData{id=value.id,sender=value.sender,text=value.text,time=value.time,logical=value.logical,sequence=value.sequence>0?value.sequence:value.logical,status=value.status,delivery=outgoing?0:2};var added=new MessageModel{Data=data,Outgoing=outgoing,IsGroupMessage=true,GroupSenderAccountId=value.account};added.SetGroupSenderName(GroupSenderName(group.Id,value.account,value.sender));group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
         }
         if(e.kind==12){GroupModel group;if(GroupChats.TryGetValue(e.peer,out group)){var message=group.Messages.FirstOrDefault(m=>m.Data.id==e.detail);if(message!=null)message.GroupStatus(e.text);group.Refresh();}}
         if(e.kind==13){if(e.callLifetime<VoiceCallLifetime||(e.callLifetime==VoiceCallLifetime&&e.mediaGeneration<VoiceMediaGeneration))return;VoiceCallLifetime=e.callLifetime;VoiceStateCode=e.callState;VoiceCallType=e.callType;VoiceMediaState=e.mediaState;VoiceMediaGeneration=e.mediaGeneration;VoiceMediaRoute=e.mediaRoute;VoiceControlAvailable=e.callControlAvailable;VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";VoiceMuted=e.callMuted;VoiceDeafened=e.callDeafened;}
