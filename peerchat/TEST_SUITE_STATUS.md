@@ -5,6 +5,10 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-group-media-rooms.ps1` — deterministic room lifecycle, scope,
+  roster/device admission, atomic moves, immutable/stale revisions and revocation,
+  plus three real TLS event sessions for convergence and disconnect/reconnect.
+
 - `tests/test-group-ciphertext-fanout.ps1` — Stage 1C real isolated TLS server,
   three authenticated non-friend event channels, byte-identical opaque routing,
   bounded requests, authorization, epoch/removal, duplicate/receipt semantics,

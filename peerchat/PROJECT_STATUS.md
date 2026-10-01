@@ -1,5 +1,13 @@
 # PeerChat development status
 
+## Group media room-state/signaling foundation
+
+Accepted group messaging baseline: `3ec05e3` / `4.0.1-dev.45`.
+The current checkpoint adds ephemeral multi-room state on existing authenticated
+event sessions, immutable client snapshots, safe diagnostics and a minimal
+state-only developer panel. No group microphone/screen media is started.
+See `docs/GROUP_MEDIA_ROOMS.md`; media attachment and final UI remain deferred.
+
 ## Stage 1C — online server ciphertext fanout candidate
 
 Current group text uses the unchanged Stage 1B device-signed AES-256-GCM envelope

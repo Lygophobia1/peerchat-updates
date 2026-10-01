@@ -194,6 +194,8 @@ public class DesktopApplication {
                 }
             }
             var authorizedRequests=new HashSet<string>(serverGroupRosters.Values.SelectMany(roster=>roster.Members.Where(value=>value.State=="member"&&value.PeerId!=localPeer).Select(value=>roster.GroupId+":"+roster.RosterGeneration+":"+value.PeerId)),StringComparer.Ordinal);
+            service.ReconcileGroupRoomTargets(serverGroupRosters.Values.Select(value=>value.GroupId));
+            foreach(var roster in serverGroupRosters.Values)service.QueueGroupRoom(roster.GroupId,"snapshot");
             groupControlRequested.RemoveWhere(value=>!authorizedRequests.Contains(value));
             foreach(var roster in serverGroupRosters.Values){
                 var local=roster.Members.FirstOrDefault(value=>value.AccountId==service.AccountId&&value.PeerId==localPeer&&value.State=="member");
@@ -321,7 +323,7 @@ public class DesktopApplication {
         Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
-        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
+        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ServerGroupRoster selectedRoster;if(discovery!=null&&serverGroupRosters.TryGetValue(selectedGroup.Id,out selectedRoster))discovery.QueueGroupRoom(selectedRoster.GroupId,"snapshot");ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
         Find<Expander>("VoiceAdvancedExpander").Expanded+=(s,e)=>RefreshVoiceDiagnosticsText();
         var removeMenu=new ContextMenu();var clearHistoryItem=new MenuItem{Header="Delete Conversation History"};var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(clearHistoryItem);removeMenu.Items.Add(new Separator());removeMenu.Items.Add(removeItem);clearHistoryItem.Click+=(s,e)=>DeleteSelectedConversationHistory();removeItem.Click+=(s,e)=>RemoveSelectedContact();
         var list=Find<ListBox>("ContactList");list.ContextMenu=removeMenu;list.PreviewMouseRightButtonDown+=(s,e)=>{var element=e.OriginalSource as DependencyObject;var item=ItemsControl.ContainerFromElement(list,element) as ListBoxItem;if(item!=null){item.IsSelected=true;item.Focus();}};
@@ -599,6 +601,7 @@ public class DesktopApplication {
                     if(mayRemove)panel.Children.Add(FlyoutAction("Remove "+label,()=>{CloseHeaderFlyout();RemoveServerGroupMember(group,target);},true));
                 }
             }else{
+                panel.Children.Add(FlyoutAction("Media Rooms (state only)",()=>{CloseHeaderFlyout();ShowGroupRoomState(authorizedRoster.GroupId);}));
                 panel.Children.Add(FlyoutText("Server Group ID\n"+authorizedRoster.GroupId,11,true));
                 panel.Children.Add(FlyoutText("The current roster controls GroupControl authorization. Content keys are exchanged only over authenticated peer TLS.",12,true));
             }
@@ -625,6 +628,40 @@ public class DesktopApplication {
         OpenHeaderFlyout(anchorName,panel);
     }
 
+    Action groupRoomUiRefresh;
+    void ShowGroupRoomState(string groupId){
+        var service=discovery;if(service==null)return;
+        var dialog=new Window{Owner=window,Title="Group Media Rooms — state only",Width=680,Height=600,Background=Brush("#111920"),Foreground=Brush("#E3EBF3")};
+        var panel=new StackPanel{Margin=new Thickness(18)};dialog.Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+        panel.Children.Add(new TextBlock{Text="Signaling foundation only — no microphone or screen media starts here.",TextWrapping=TextWrapping.Wrap});
+        var status=new TextBlock{Margin=new Thickness(0,12,0,10),TextWrapping=TextWrapping.Wrap};panel.Children.Add(status);
+        var list=new ListBox{Height=220,Background=Brush("#16212A"),Foreground=Brush("#E3EBF3")};panel.Children.Add(list);
+        var name=new TextBox{Text="General",Margin=new Thickness(0,10,0,10)};panel.Children.Add(name);
+        var actions=new WrapPanel();panel.Children.Add(actions);
+        Action<string,string> send=(operation,kind)=>{
+            if(discovery!=service){status.Text="Account session changed; reopen this view.";return;}
+            var selected=list.SelectedItem as ListBoxItem;var room=selected==null?null:selected.Tag as GroupRoom;
+            if(operation!="create"&&operation!="snapshot"&&room==null){status.Text="Select a room.";return;}
+            if(!service.QueueGroupRoom(groupId,operation,room==null?"":room.Id,kind,name.Text))status.Text="Channel unavailable or snapshot required.";
+            else status.Text="Pending: "+operation;
+        };
+        Action<string,string,string> button=(label,operation,kind)=>{var b=new Button{Content=label,Margin=new Thickness(3),Padding=new Thickness(8,5,8,5)};b.Click+=(s,e)=>send(operation,kind);actions.Children.Add(b);};
+        button("Refresh","snapshot","");button("Create voice room","create","voice");button("Create screen room","create","screen_share");
+        button("Rename","rename","");button("Join voice state","join_voice","");button("Leave voice state","leave_voice","");
+        button("Start sharer state","start_share","");button("Stop sharer state","stop_share","");
+        button("Join viewer state","join_viewer","");button("Leave viewer state","leave_viewer","");button("Close room","close","");
+        Action refresh=()=>{
+            if(discovery!=service){status.Text="Account session changed; reopen this view.";actions.IsEnabled=false;return;}
+            var selected=list.SelectedItem as ListBoxItem;string id=selected==null?"":((GroupRoom)selected.Tag).Id;
+            var state=service.GroupRooms(groupId);list.Items.Clear();status.Text=service.GroupRoomResult(groupId)+(state==null?"":" · revision "+state.Revision);
+            if(state==null)return;
+            foreach(var room in state.Rooms){
+                var item=new ListBoxItem{Tag=room,Content=room.Name+" · "+room.Kind+" · "+room.Members.Count+(room.Kind=="voice"?" participants":" viewers")+" · sharer "+(room.Sharer==null?"none":room.Sharer.Username),Foreground=Brush("#E3EBF3")};
+                list.Items.Add(item);if(room.Id==id)list.SelectedItem=item;
+            }
+        };
+        groupRoomUiRefresh=refresh;dialog.Closed+=(s,e)=>{if(groupRoomUiRefresh==refresh)groupRoomUiRefresh=null;};service.QueueGroupRoom(groupId,"snapshot");refresh();dialog.Show();
+    }
     private void ShowGroupInfoDialog()
 	{
 		GroupModel group = model.SelectedGroup;
@@ -1514,6 +1551,9 @@ public class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+                if(notification!=null&&(notification.Event=="group_room_snapshot"||notification.Event=="group_room_result")){
+                    if(groupRoomUiRefresh!=null)groupRoomUiRefresh();return;
+                }
 				if(notification!=null&&notification.Event=="group_message"){
                     try{var wire=Convert.FromBase64String(notification.Envelope??"");if(wire.Length>65790||!core.ReceiveGroupCiphertext(wire))discovery.QueueGroupAck(notification.GroupId,notification.MessageId,"rejected");}
                     catch{discovery.QueueGroupAck(notification.GroupId,notification.MessageId,"rejected");}
@@ -3969,6 +4009,11 @@ public class DesktopApplication {
             if(hasRoster)foreach(var member in rosterMembers){DiscoverySearchResult presence=null;bool known=member.PeerId==model.OwnId||friendDirectory.TryGetValue(member.AccountId,out presence);if(known){data.MembersWithKnownPresence++;if(member.PeerId==model.OwnId||presence!=null&&presence.Online)data.KnownOnlineMembers++;}var conversation=model.FindByPeer(member.PeerId);GroupControlViewState state;groupControlViews.TryGetValue(roster.GroupId+":"+member.PeerId,out state);if(state!=null&&state.RosterGeneration!=roster.RosterGeneration)state=null;data.Members.Add(new GroupDiagnosticsMember{AccountId=member.AccountId,PeerId=member.PeerId,Name=String.IsNullOrWhiteSpace(member.Username)?"Account "+member.AccountId:member.Username,Role=member.Role,Relationship=conversation!=null&&conversation.IsFriend?"Friend":"None",GroupControlState=state==null?"Not established":state.Connection,KeyHandoffState=state==null?"Not started":state.Handoff});}
             else foreach(var member in members){var conversation=model.FindByPeer(member.peer);data.Members.Add(new GroupDiagnosticsMember{AccountId=member.account,PeerId=member.peer,Name=member.name,Role=member.role==3?"Owner":member.role==2?"Admin":"Member",Relationship=conversation!=null&&conversation.IsFriend?"Friend":"None",GroupControlState="Not available",KeyHandoffState="Not started"});}
             result.Add(data);
+            if(hasRoster&&discovery!=null){
+                var rooms=discovery.GroupRooms(roster.GroupId);
+                data.RoomResult=discovery.GroupRoomDiagnostics(roster.GroupId);
+                if(rooms!=null){data.RoomVoiceState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"voice");data.RoomScreenState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"screen_share");}
+            }
         }
         return result;
     }

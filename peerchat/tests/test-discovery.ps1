@@ -1,4 +1,4 @@
-param([switch]$PhysicalTurn)
+param([switch]$PhysicalTurn,[string]$ServerDirectory)
 $ErrorActionPreference='Stop'
 # PowerShell hosts do not consistently preload the .NET Framework DPAPI type.
 # The isolated server fixture deliberately protects its temporary TURN test secret.
@@ -22,7 +22,12 @@ if($PhysicalTurn) {
 Push-Location $projectRoot
 try {
     $outputDirectory='build\tests\server'
-    & (Join-Path $projectRoot 'scripts\build-server.ps1') -OutputDirectory $outputDirectory
+    if($ServerDirectory){
+        New-Item -ItemType Directory -Force -Path $outputDirectory|Out-Null
+        $currentServer=Join-Path (Resolve-Path -LiteralPath $ServerDirectory).Path 'PeerChat.Server.exe'
+        if(-not(Test-Path -LiteralPath $currentServer)){throw 'Current-worktree Server executable missing.'}
+        Copy-Item -LiteralPath $currentServer -Destination (Join-Path $outputDirectory 'PeerChat.Server.exe') -Force
+    }else{& (Join-Path $projectRoot 'scripts\build-server.ps1') -OutputDirectory $outputDirectory}
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $references=@('System.dll','System.Core.dll','System.Xaml.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }
     & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\server\DiscoveryIntegrationTest.cs

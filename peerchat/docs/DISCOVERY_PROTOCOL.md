@@ -135,6 +135,13 @@ protocol, and established direct sessions are not closed when discovery disconne
 
 ## Group and relay authority boundary
 
+Group-media **room state**, not audio/video, uses bounded `group_room` requests,
+`group_room_result` replies and `group_room_snapshot` events on the existing
+authenticated event channel. Current roster account/device membership authorizes
+operations; room participation grants no Friend/DM or broader GroupControl scope.
+Full snapshots carry server epoch, monotonic per-group revision and roster
+generation. See `GROUP_MEDIA_ROOMS.md` for the wire fields, bounds and lifecycle.
+
 Stage 1A authenticated group operations create the authoritative owner-only server
 roster and govern invite/accept/removal, roles and account/device generation state.
 The local signed membership ledger is reconciled against that roster; legacy local

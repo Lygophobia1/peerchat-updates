@@ -30,22 +30,76 @@ public sealed class DiscoveryClient {
     readonly JavaScriptSerializer channelJson=new JavaScriptSerializer{MaxJsonLength=100000};
     readonly Queue<Dictionary<string,object>> groupChannelOutput=new Queue<Dictionary<string,object>>();
     readonly Dictionary<string,Dictionary<string,object>> groupChannelPending=new Dictionary<string,Dictionary<string,object>>(StringComparer.Ordinal);
+    readonly Queue<Dictionary<string,object>> roomOutput=new Queue<Dictionary<string,object>>();
+    readonly Dictionary<string,string> roomPending=new Dictionary<string,string>(StringComparer.Ordinal);
+    readonly HashSet<string> roomTargets=new HashSet<string>(StringComparer.Ordinal);
+    readonly Dictionary<string,GroupMediaState> roomStates=new Dictionary<string,GroupMediaState>(StringComparer.Ordinal);
+    readonly Dictionary<string,string> roomResults=new Dictionary<string,string>(StringComparer.Ordinal);
+    readonly Dictionary<string,string> roomMutations=new Dictionary<string,string>(StringComparer.Ordinal),roomRejections=new Dictionary<string,string>(StringComparer.Ordinal);
+    public string GroupRoomDiagnostics(string group){lock(eventGate){string mutation,rejection;roomMutations.TryGetValue(group,out mutation);roomRejections.TryGetValue(group,out rejection);return "Last room result: "+GroupRoomResult(group)+"\nLast room mutation: "+(mutation??"None")+"\nLast room rejection: "+(rejection??"None");}}
+    public GroupMediaState GroupRooms(string group){lock(eventGate){GroupMediaState state;return roomStates.TryGetValue(group,out state)?state:null;}}
+    public string GroupRoomResult(string group){lock(eventGate){string state;return roomResults.TryGetValue(group,out state)?state:"Not requested";}}
+    public void ReconcileGroupRoomTargets(IEnumerable<string> groups){lock(eventGate){var keep=new HashSet<string>(groups,StringComparer.Ordinal);foreach(string id in roomTargets.Where(id=>!keep.Contains(id)).ToArray()){roomTargets.Remove(id);roomStates.Remove(id);roomResults.Remove(id);roomMutations.Remove(id);roomRejections.Remove(id);}}}
+    public bool QueueGroupRoom(string group,string operation,string room="",string kind="",string name=""){
+        lock(eventGate){
+            if(eventStop||!EventChannelConnected||roomOutput.Count+roomPending.Count>=256||roomTargets.Count>=256&&!roomTargets.Contains(group))return false;
+            GroupMediaState state;roomStates.TryGetValue(group,out state);
+            if(operation!="snapshot"&&state==null)return false;
+            roomTargets.Add(group);string id=Guid.NewGuid().ToString("N");
+            var request=new Dictionary<string,object>{{"type","group_room"},{"requestId",id},{"groupId",group},{"operation",operation},{"roomId",room},{"kind",kind},{"name",name}};
+            if(state!=null){request["epoch"]=state.Epoch;request["revision"]=state.Revision;request["rosterGeneration"]=state.RosterGeneration;}
+            roomOutput.Enqueue(request);roomResults[group]="Pending: "+operation;return true;
+        }
+    }
+    void DrainRoomOutput(SslStream tls){for(int i=0;i<8;i++){
+        Dictionary<string,object> request;lock(eventGate){if(roomOutput.Count==0)return;request=roomOutput.Dequeue();roomPending[Text(request,"requestId")]=Text(request,"groupId");}
+        WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));
+    }}
+    void RoomChannelReady(){lock(eventGate){foreach(string group in roomTargets.ToArray())QueueGroupRoom(group,"snapshot");}}
+    void RoomChannelLost(){lock(eventGate){
+        foreach(string group in roomTargets)roomResults[group]="Disconnected; explicit rejoin required";
+        roomStates.Clear();roomOutput.Clear();roomPending.Clear();
+    }}
+    bool RoomNotification(Dictionary<string,object> response){
+        string type=Text(response,"type");if(type!="group_room_snapshot"&&type!="group_room_result")return false;
+        string group=Text(response,"groupId"),result=Text(response,"state");
+        GroupMediaState snapshot=null;object raw;
+        if(response.TryGetValue("snapshot",out raw))snapshot=GroupMediaState.Parse((Dictionary<string,object>)raw);
+        if(snapshot!=null)group=snapshot.GroupId;
+        lock(eventGate){
+            if(type=="group_room_result")roomPending.Remove(Text(response,"requestId"));
+            if(!roomTargets.Contains(group))return true;
+            if(type=="group_room_result"){roomPending.Remove(Text(response,"requestId"));roomResults[group]=result;if(result=="group_not_authorized")roomStates.Remove(group);}
+            if(type=="group_room_result"){
+                string operation=Text(response,"operation");
+                if(operation!="snapshot")roomMutations[group]=operation+": "+result;
+                if(result!="accepted"&&result!="snapshot")roomRejections[group]=result;
+            }
+            GroupMediaState current;
+            if(snapshot!=null&&(!roomStates.TryGetValue(group,out current)||current.Accepts(snapshot)))roomStates[group]=snapshot;
+        }
+        if(eventHandler!=null)eventHandler(new DiscoveryEvent{Event=type,GroupId=group,State=result});
+        return true;
+    }
     public bool QueueGroupMessage(string group,string message,long generation,string envelope){
         if(String.IsNullOrEmpty(group)||group.Length!=32||String.IsNullOrEmpty(message)||message.Length!=32||generation<=0||envelope==null||envelope.Length>87720)return false;
         lock(eventGate){if(eventStop||!EventChannelConnected||groupChannelOutput.Count+groupChannelPending.Count>=32)return false;groupChannelOutput.Enqueue(new Dictionary<string,object>{{"type","group_send"},{"groupId",group},{"messageId",message},{"rosterGeneration",generation.ToString(System.Globalization.CultureInfo.InvariantCulture)},{"envelope",envelope}});return true;}
     }
     public bool QueueGroupAck(string group,string message,string state){lock(eventGate){if(eventStop||!EventChannelConnected||groupChannelOutput.Count>=32)return false;groupChannelOutput.Enqueue(new Dictionary<string,object>{{"type","group_ack"},{"groupId",group},{"messageId",message},{"state",state}});return true;}}
     void DrainGroupOutput(SslStream tls){
+        DrainRoomOutput(tls);
         for(int i=0;i<8;i++){
             Dictionary<string,object> request;lock(eventGate){if(groupChannelOutput.Count==0)return;request=groupChannelOutput.Dequeue();if(Text(request,"type")=="group_send")groupChannelPending[Text(request,"messageId")]=request;}
             WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));
         }
     }
     void GroupChannelLost(){
+        RoomChannelLost();
         List<Dictionary<string,object>> lost;lock(eventGate){lost=groupChannelPending.Values.Concat(groupChannelOutput.Where(x=>Text(x,"type")=="group_send")).ToList();groupChannelPending.Clear();groupChannelOutput.Clear();}
         foreach(var request in lost)try{if(eventHandler!=null)eventHandler(new DiscoveryEvent{Event="group_delivery",GroupId=Text(request,"groupId"),MessageId=Text(request,"messageId"),State="delivery_unknown_after_disconnect"});}catch{}
     }
     bool GroupChannelNotification(Dictionary<string,object> response){
+        if(RoomNotification(response))return true;
         string type=Text(response,"type");if(type!="group_message"&&type!="group_delivery")return false;
         if(type=="group_delivery")lock(eventGate)groupChannelPending.Remove(Text(response,"messageId"));
         if(eventHandler!=null)eventHandler(new DiscoveryEvent{Event=type,GroupId=Text(response,"groupId"),MessageId=Text(response,"messageId"),Envelope=Text(response,"envelope"),State=Text(response,"state"),SessionCount=Number(response,"sessionCount"),AcceptedCount=Number(response,"acceptedCount"),DuplicateCount=Number(response,"duplicateCount"),RejectedCount=Number(response,"rejectedCount")});
@@ -157,7 +211,49 @@ public sealed class DiscoveryClient {
     public void StartEventChannel(string publicIdentity,Action<DiscoveryEvent> handler){if(handler==null||String.IsNullOrEmpty(SessionToken)||String.IsNullOrEmpty(publicIdentity))return;lock(eventGate){eventHandler=handler;eventPublicIdentity=publicIdentity;if(eventThread!=null&&eventThread.IsAlive)return;eventStop=false;eventStopSignal.Reset();eventThread=new Thread(EventLoop){IsBackground=true,Name="PeerChat discovery events"};eventThread.Start();}}
     public void StopEventChannel(){Thread current;lock(eventGate){eventStop=true;eventStopSignal.Set();current=eventThread;}if(current!=null&&current!=Thread.CurrentThread)current.Join(2000);}
     static string Text(Dictionary<string,object> value,string key){return value.ContainsKey(key)?value[key] as string??"":"";}static long Number(Dictionary<string,object> value,string key){return value.ContainsKey(key)?Convert.ToInt64(value[key]):0;}
-    void EventLoop(){bool everConnected=false;while(!eventStop){TcpClient tcp=null;SslStream tls=null;try{tcp=new TcpClient();tcp.ReceiveTimeout=1000;tcp.SendTimeout=10000;tcp.Connect(Host,Port);tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);var request=new Dictionary<string,object>{{"version",1},{"type","events"},{"sessionToken",SessionToken??""},{"publicIdentity",eventPublicIdentity??""},{"clientHeartbeats",true}};WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));var ready=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));object ok;if(!ready.TryGetValue("ok",out ok)||!(bool)ok){string reason=Text(ready,"error");if(reason=="event_session_superseded")eventStop=true;throw new InvalidOperationException("Discovery event subscription rejected: "+reason); }EventChannelConnected=true;eventConnectedUtc=DateTime.UtcNow;if(everConnected&&eventHandler!=null)eventHandler(new DiscoveryEvent{Event="channel_connected"});everConnected=true;long nextHeartbeat=0;while(!eventStop){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(now>=nextHeartbeat){WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(new Dictionary<string,object>{{"type","event_heartbeat"}})));nextHeartbeat=now+20;}DrainGroupOutput(tls);if(!tcp.Client.Poll(250000,SelectMode.SelectRead))continue;if(tcp.Available==0)throw new IOException("Discovery event channel closed.");var response=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));if(GroupChannelNotification(response))continue;object type;if(!response.TryGetValue("type",out type)||!String.Equals(type as string,"friend_event",StringComparison.Ordinal))continue;var notification=new DiscoveryEvent{Event=Text(response,"event"),AccountId=Number(response,"accountId"),PublicIdentity=Text(response,"publicIdentity"),TargetPublicIdentity=Text(response,"targetPublicIdentity"),RequestId=Text(response,"requestId"),PeerHost=Text(response,"peerHost"),PeerPublicIdentity=Text(response,"peerPublicIdentity"),PeerPort=(int)Number(response,"peerPort"),ExpiresUtc=Number(response,"expiresUtc"),EndpointHost=Text(response,"endpointHost"),EndpointPort=(int)Number(response,"endpointPort"),PublicEndpointHost=Text(response,"publicEndpointHost"),PublicEndpointPort=(int)Number(response,"publicEndpointPort")};try{if(eventHandler!=null)eventHandler(notification);}catch{}}}catch(Exception error){if(!eventStop){System.Diagnostics.Debug.WriteLine("Discovery event channel reconnect in "+eventReconnectDelayMs+" ms: "+error.GetType().Name);eventReconnectDelayMs=Math.Min(30000,eventReconnectDelayMs*2);}}finally{if(EventChannelConnected&&DateTime.UtcNow-eventConnectedUtc>TimeSpan.FromSeconds(15))eventReconnectDelayMs=1000;EventChannelConnected=false;GroupChannelLost();try{if(tls!=null)tls.Dispose();}catch{}try{if(tcp!=null)tcp.Close();}catch{}}if(!eventStop)eventStopSignal.WaitOne(eventReconnectDelayMs);}}
+    void EventLoop(){bool everConnected=false;while(!eventStop){TcpClient tcp=null;SslStream tls=null;try{tcp=new TcpClient();tcp.ReceiveTimeout=1000;tcp.SendTimeout=10000;tcp.Connect(Host,Port);tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);var request=new Dictionary<string,object>{{"version",1},{"type","events"},{"sessionToken",SessionToken??""},{"publicIdentity",eventPublicIdentity??""},{"clientHeartbeats",true}};WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));var ready=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));object ok;if(!ready.TryGetValue("ok",out ok)||!(bool)ok){string reason=Text(ready,"error");if(reason=="event_session_superseded")eventStop=true;throw new InvalidOperationException("Discovery event subscription rejected: "+reason); }EventChannelConnected=true;RoomChannelReady();eventConnectedUtc=DateTime.UtcNow;if(everConnected&&eventHandler!=null)eventHandler(new DiscoveryEvent{Event="channel_connected"});everConnected=true;long nextHeartbeat=0;while(!eventStop){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(now>=nextHeartbeat){WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(new Dictionary<string,object>{{"type","event_heartbeat"}})));nextHeartbeat=now+20;}DrainGroupOutput(tls);if(!tcp.Client.Poll(250000,SelectMode.SelectRead))continue;if(tcp.Available==0)throw new IOException("Discovery event channel closed.");var response=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));if(GroupChannelNotification(response))continue;object type;if(!response.TryGetValue("type",out type)||!String.Equals(type as string,"friend_event",StringComparison.Ordinal))continue;var notification=new DiscoveryEvent{Event=Text(response,"event"),AccountId=Number(response,"accountId"),PublicIdentity=Text(response,"publicIdentity"),TargetPublicIdentity=Text(response,"targetPublicIdentity"),RequestId=Text(response,"requestId"),PeerHost=Text(response,"peerHost"),PeerPublicIdentity=Text(response,"peerPublicIdentity"),PeerPort=(int)Number(response,"peerPort"),ExpiresUtc=Number(response,"expiresUtc"),EndpointHost=Text(response,"endpointHost"),EndpointPort=(int)Number(response,"endpointPort"),PublicEndpointHost=Text(response,"publicEndpointHost"),PublicEndpointPort=(int)Number(response,"publicEndpointPort")};try{if(eventHandler!=null)eventHandler(notification);}catch{}}}catch(Exception error){if(!eventStop){System.Diagnostics.Debug.WriteLine("Discovery event channel reconnect in "+eventReconnectDelayMs+" ms: "+error.GetType().Name);eventReconnectDelayMs=Math.Min(30000,eventReconnectDelayMs*2);}}finally{if(EventChannelConnected&&DateTime.UtcNow-eventConnectedUtc>TimeSpan.FromSeconds(15))eventReconnectDelayMs=1000;EventChannelConnected=false;GroupChannelLost();try{if(tls!=null)tls.Dispose();}catch{}try{if(tcp!=null)tcp.Close();}catch{}}if(!eventStop)eventStopSignal.WaitOne(eventReconnectDelayMs);}}
+}
+// Immutable server projections. No media objects, networking or local membership authority.
+public sealed class GroupRoomDevice {
+    public readonly long AccountId;
+    public readonly string PeerId,Username;
+    internal GroupRoomDevice(Dictionary<string,object> value){AccountId=Convert.ToInt64(value["accountId"]);PeerId=Convert.ToString(value["publicIdentity"]);Username=Convert.ToString(value["username"]);if(AccountId<=0||PeerId.Length!=64)throw new InvalidDataException("Invalid room device.");}
+}
+public sealed class GroupRoom {
+    public readonly string Id,Kind,Name,CreatorDevice;
+    public readonly long CreatorAccountId;
+    public readonly GroupRoomDevice Sharer;
+    public readonly System.Collections.ObjectModel.ReadOnlyCollection<GroupRoomDevice> Members;
+    internal GroupRoom(Dictionary<string,object> value){
+        Id=Convert.ToString(value["roomId"]);Kind=Convert.ToString(value["kind"]);Name=Convert.ToString(value["name"]);CreatorAccountId=Convert.ToInt64(value["creatorAccountId"]);CreatorDevice=Convert.ToString(value["creatorDevice"]);
+        if(Id.Length!=32||(Kind!="voice"&&Kind!="screen_share")||Name.Length>64)throw new InvalidDataException("Invalid room.");
+        if(value["sharer"]!=null)Sharer=new GroupRoomDevice((Dictionary<string,object>)value["sharer"]);
+        var members=new List<GroupRoomDevice>();foreach(object member in (IEnumerable)value["members"]){if(members.Count>=64)throw new InvalidDataException("Room member limit.");members.Add(new GroupRoomDevice((Dictionary<string,object>)member));}Members=members.AsReadOnly();
+    }
+}
+public sealed class GroupMediaState {
+    public readonly string GroupId,Epoch;
+    public readonly long Revision,RosterGeneration;
+    public readonly System.Collections.ObjectModel.ReadOnlyCollection<GroupRoom> Rooms;
+    GroupMediaState(Dictionary<string,object> value){
+        GroupId=Convert.ToString(value["groupId"]);Epoch=Convert.ToString(value["epoch"]);Revision=Convert.ToInt64(value["revision"]);RosterGeneration=Convert.ToInt64(value["rosterGeneration"]);
+        if(GroupId.Length!=32||Epoch.Length!=32||Revision<0||RosterGeneration<=0)throw new InvalidDataException("Invalid room snapshot.");
+        var rooms=new List<GroupRoom>();foreach(object room in (IEnumerable)value["rooms"]){if(rooms.Count>=16)throw new InvalidDataException("Room limit.");rooms.Add(new GroupRoom((Dictionary<string,object>)room));}Rooms=rooms.AsReadOnly();
+    }
+    public static GroupMediaState Parse(Dictionary<string,object> value){return new GroupMediaState(value);}
+    public bool Accepts(GroupMediaState next){return next!=null&&next.GroupId==GroupId&&next.Epoch==Epoch&&next.Revision>=Revision&&next.RosterGeneration>=RosterGeneration;}
+    public string Diagnostics(long localAccount,string localDevice,string kind=""){
+        var text=new StringBuilder();text.AppendLine("Group media: room state only; no audio/video");text.AppendLine("Group ID: "+GroupId);text.AppendLine("Room revision: "+Revision);text.AppendLine("Roster generation: "+RosterGeneration);
+        foreach(var room in Rooms.Where(r=>String.IsNullOrEmpty(kind)||r.Kind==kind)){
+            text.AppendLine("Room: "+room.Name+" | "+room.Id+" | "+room.Kind);
+            text.AppendLine((room.Kind=="voice"?"Participant count: ":"Viewer count: ")+room.Members.Count);
+            text.AppendLine("Local device membership: "+room.Members.Any(d=>d.AccountId==localAccount&&d.PeerId==localDevice));
+            text.AppendLine("Local device is sharer: "+(room.Sharer!=null&&room.Sharer.AccountId==localAccount&&room.Sharer.PeerId==localDevice));
+            text.AppendLine("Sharer: "+(room.Sharer==null?"None":room.Sharer.AccountId+" / "+room.Sharer.PeerId));
+            foreach(var device in room.Members)text.AppendLine("Member: "+device.AccountId+" / "+device.PeerId+" | "+device.Username);
+        }
+        return text.ToString();
+    }
 }
 public sealed class DiscoveryRequestException : InvalidOperationException { public string ErrorCode { get; private set; } public DiscoveryRequestException(string code):base("Discovery request was rejected."){ErrorCode=String.IsNullOrWhiteSpace(code)?"request_failed":code;} }
 public sealed class DiscoverySearchResult { public long AccountId,CandidateSeenUtc; public string Username,PublicIdentity,EndpointHost,PublicEndpointHost,PublicCandidateSource,ObservedAddressClassification; public int EndpointPort,PublicEndpointPort; public bool Online; }

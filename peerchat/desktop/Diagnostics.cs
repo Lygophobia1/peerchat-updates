@@ -32,6 +32,9 @@ public sealed class GroupDiagnosticsData {
     public string GroupControlState {get;set;}
     public string E2eeState {get;set;}
     public string DeliveryState {get;set;}
+    public string RoomVoiceState {get;set;}
+    public string RoomScreenState {get;set;}
+    public string RoomResult {get;set;}
     public string KeyHandoffState {get;set;}
     public string LastKeyOfferResult {get;set;}
     public string LastKeyAckResult {get;set;}
@@ -138,7 +141,7 @@ public sealed class DiagnosticsService {
     public static DiagnosticsSnapshot Clone(DiagnosticsSnapshot value){
         if(value==null)return null;return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=(value.Sections??new List<DiagnosticsSection>()).Select(s=>new DiagnosticsSection{Name=s.Name,Details=s.Details}).ToList(),Groups=CloneGroups(value.Groups)};
     }
-    static List<GroupDiagnosticsData> CloneGroups(IEnumerable<GroupDiagnosticsData> groups){return (groups??Enumerable.Empty<GroupDiagnosticsData>()).Where(g=>g!=null).Take(128).Select(g=>new GroupDiagnosticsData{GroupId=g.GroupId,ServerGroupId=g.ServerGroupId,Name=g.Name,LocalRole=g.LocalRole,RosterState=g.RosterState,RegistrationStage=g.RegistrationStage,RegistrationFailure=g.RegistrationFailure,GroupControlState=g.GroupControlState,E2eeState=g.E2eeState,DeliveryState=g.DeliveryState,KeyHandoffState=g.KeyHandoffState,LastKeyOfferResult=g.LastKeyOfferResult,LastKeyAckResult=g.LastKeyAckResult,RosterGeneration=g.RosterGeneration,KeyGeneration=g.KeyGeneration,PendingInvites=g.PendingInvites,KnownOnlineMembers=g.KnownOnlineMembers,MembersWithKnownPresence=g.MembersWithKnownPresence,Members=(g.Members??new List<GroupDiagnosticsMember>()).Where(m=>m!=null).Take(256).Select(m=>new GroupDiagnosticsMember{AccountId=m.AccountId,Name=m.Name,PeerId=m.PeerId,Role=m.Role,Relationship=m.Relationship,GroupControlState=m.GroupControlState,KeyHandoffState=m.KeyHandoffState}).ToList()}).ToList();}
+    static List<GroupDiagnosticsData> CloneGroups(IEnumerable<GroupDiagnosticsData> groups){return (groups??Enumerable.Empty<GroupDiagnosticsData>()).Where(g=>g!=null).Take(128).Select(g=>new GroupDiagnosticsData{GroupId=g.GroupId,ServerGroupId=g.ServerGroupId,Name=g.Name,LocalRole=g.LocalRole,RosterState=g.RosterState,RegistrationStage=g.RegistrationStage,RegistrationFailure=g.RegistrationFailure,GroupControlState=g.GroupControlState,E2eeState=g.E2eeState,DeliveryState=g.DeliveryState,KeyHandoffState=g.KeyHandoffState,LastKeyOfferResult=g.LastKeyOfferResult,LastKeyAckResult=g.LastKeyAckResult,RoomVoiceState=g.RoomVoiceState,RoomScreenState=g.RoomScreenState,RoomResult=g.RoomResult,RosterGeneration=g.RosterGeneration,KeyGeneration=g.KeyGeneration,PendingInvites=g.PendingInvites,KnownOnlineMembers=g.KnownOnlineMembers,MembersWithKnownPresence=g.MembersWithKnownPresence,Members=(g.Members??new List<GroupDiagnosticsMember>()).Where(m=>m!=null).Take(256).Select(m=>new GroupDiagnosticsMember{AccountId=m.AccountId,Name=m.Name,PeerId=m.PeerId,Role=m.Role,Relationship=m.Relationship,GroupControlState=m.GroupControlState,KeyHandoffState=m.KeyHandoffState}).ToList()}).ToList();}
     public static string FormatSummary(DiagnosticsSnapshot value){return FormatSummary(value,null,null);}
     public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName){return FormatSummary(value,accountDisplayName,null);}
     public static string FormatSummary(DiagnosticsSnapshot value,Func<string,string> accountDisplayName,Func<string,string> peerDisplayName){
@@ -207,8 +210,8 @@ public sealed class DiagnosticsService {
         var sections=new List<DiagnosticsSection>();string part=component??"Overview";
         if(part=="Overview")Add(sections,"Group overview",GroupOverview(group));
         else if(part=="Connection")Add(sections,"Group connection",GroupConnection(value,group));
-        else if(part=="Voice")Add(sections,"Group voice","Voice room: Not implemented / Inactive\nLocal participation: Unavailable\nParticipant count: Unavailable\nJoining a future room will be voluntary; a one-person room is valid.\nNo one-to-one VoiceMedia state is attributed to this group.");
-        else if(part=="Screen Share")Add(sections,"Group screen share","Screen share: Not implemented / Inactive\nActive sharer: Unavailable\nViewer count: Unavailable\nLocal viewing state: Unavailable\nViewing a future group share will be voluntary and independent of voice.\nNo one-to-one ScreenShareManager state is attributed to this group.");
+        else if(part=="Voice")Add(sections,"Group voice",(String.IsNullOrEmpty(group.RoomVoiceState)?"Voice room: Not implemented / Inactive\nNo authoritative room snapshot.":"Group voice media: Not implemented\n"+group.RoomVoiceState)+"\n"+(group.RoomResult??"Last room result: Not requested"));
+        else if(part=="Screen Share")Add(sections,"Group screen share",(String.IsNullOrEmpty(group.RoomScreenState)?"Screen share: Not implemented / Inactive\nNo authoritative room snapshot.":"Group screen media: Not implemented\n"+group.RoomScreenState)+"\n"+(group.RoomResult??"Last room result: Not requested"));
         return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=sections,Groups=new List<GroupDiagnosticsData>{CloneGroups(new[]{group})[0]}};
     }
     static string GroupOverview(GroupDiagnosticsData group){

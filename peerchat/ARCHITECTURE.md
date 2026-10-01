@@ -9,6 +9,13 @@
 
 ## Components and ownership
 
+Group media room state is now an ephemeral server application service on the
+existing authenticated discovery event channel. It authorizes against the current
+group roster, tracks multiple independent voice/screen rooms and live device
+participation, and publishes epoch/revision snapshots. No group audio/video,
+new transport/session owner, or changes to accepted one-to-one media are included.
+See `docs/GROUP_MEDIA_ROOMS.md` for lifecycle and synchronization rules.
+
 Stage 1C adds a bounded `GroupCiphertextFanout` application handler on the existing
 authenticated discovery event channel. `AccountDatabase` remains roster authority,
 and existing event sessions own sockets/lease/reconnect. No group transport or
