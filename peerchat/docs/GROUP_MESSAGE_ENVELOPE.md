@@ -1,9 +1,9 @@
 # Stage 1B: encrypted group-message envelope
 
-This is a client cryptographic/message layer, not a transport. Stage 1C server
-ciphertext fanout, network delivery/ACK integration, and group media are not
-implemented here. The existing UI group-send path remains blocked; it must not
-fall back to a signed plaintext ledger message or use GroupControl for chat.
+This is a client cryptographic/message layer, not a transport. Stage 1C now wires
+online ciphertext fanout and UI send/receive through the existing authenticated
+server event channel. See `GROUP_CIPHERTEXT_FANOUT.md`. Group media is not
+implemented. No signed-plaintext or GroupControl chat fallback is permitted.
 
 ## Owners and authorization
 

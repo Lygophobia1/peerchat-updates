@@ -1,5 +1,6 @@
 #pragma once
 #include "group_key_manager.hpp"
+#include <functional>
 
 namespace peerchat::group_messages {
 // Separate from the legacy signed-plaintext ledger event format. No network dispatch here.
@@ -13,7 +14,7 @@ enum class Result {
     StaleRosterGeneration, FutureRosterGeneration, StaleKeyGeneration, FutureKeyGeneration,
     MissingGroupKey, LocalNotMember, SenderNotMember, UnauthorizedSenderDevice,
     SignatureFailed, AeadAuthFailed, DuplicateMessage, ConflictingMessage,
-    CryptoFailed, StorageFailed
+    CryptoFailed, StorageFailed, InvalidMessageBody
 };
 const char* resultName(Result result)noexcept;
 struct Envelope {
@@ -42,7 +43,8 @@ public:
     MessageLayer(Storage& store,const group_keys::GroupKeyManager& keys,const Profile& device,std::uint64_t account)
         :store_(store),keys_(keys),device_(device),account_(account){}
     Creation create(const std::string& localGroupId,const GroupState& ledger,const Blob& plaintext);
-    Reception receive(const std::string& localGroupId,const GroupState& ledger,const Blob& wire);
+    Reception receive(const std::string& localGroupId,const GroupState& ledger,const Blob& wire,
+        const std::function<bool(const Blob&)>& validateBody={});
 private:
     Result context(const std::string& localGroupId,const GroupState& ledger,
         const group_keys::RosterSnapshot*& roster)const;

@@ -8,7 +8,7 @@ namespace peerchat {
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
-struct AuthenticatedGroupMessage { Blob envelope,plaintext; };
+struct AuthenticatedGroupMessage { Blob envelope,plaintext;std::int64_t sequence=0;std::string status; };
 // Sensitive group-key handoffs are persisted only in the sender's DPAPI-protected
 // profile store and travel only inside an authenticated peer-TLS control stream.
 struct GroupKeyHandoff {
@@ -80,8 +80,10 @@ public:
     // Stage 1B has no delivery queue. Commit only after complete message authentication.
     // Identical replay returns false; conflicting reuse of an ID throws.
     bool appendAuthenticatedGroupMessage(const std::string& serverGroupId,const std::string& messageId,
-        const Blob& envelope,const Blob& plaintext);
+        const Blob& envelope,const Blob& plaintext,const std::string& localGroupId={});
     AuthenticatedGroupMessage authenticatedGroupMessage(const std::string& serverGroupId,const std::string& messageId);
+    std::vector<AuthenticatedGroupMessage> authenticatedGroupHistory(const std::string& localGroupId,int limit=100,std::int64_t before=INT64_MAX);
+    bool setGroupMessageStatus(const std::string& groupId,const std::string& messageId,const std::string& status,std::uint32_t stage=0);
     // Durable local nonce reservation, scoped to the actual key fingerprint (not the group name).
     bool reserveGroupNonce(const std::string& keyFingerprint,const Blob& nonce);
     void queueGroupKeyHandoff(const GroupKeyHandoff& handoff);

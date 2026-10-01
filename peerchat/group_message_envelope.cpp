@@ -65,6 +65,7 @@ const char* resultName(Result value)noexcept{
     case Result::ConflictingMessage:return "conflicting_message";
     case Result::CryptoFailed:return "crypto_failed";
     case Result::StorageFailed:return "storage_failed";
+    case Result::InvalidMessageBody:return "invalid_message_body";
     }
     return "invalid_result";
 }
@@ -126,12 +127,12 @@ Creation MessageLayer::create(const std::string& local,const GroupState& ledger,
         e.signature=signDevicePayload(signingPayload(e),device_);auto wire=serialize(e);
         // Local authenticated history makes retry bytes durable without a second delivery owner.
         result.result=Result::StorageFailed;
-        if(!store_.appendAuthenticatedGroupMessage(e.groupId,e.messageId,wire,plaintext)){result.result=Result::ConflictingMessage;return result;}
+        if(!store_.appendAuthenticatedGroupMessage(e.groupId,e.messageId,wire,plaintext,local)){result.result=Result::ConflictingMessage;return result;}
         result.envelope=std::move(e);result.wire=std::move(wire);result.result=Result::Accepted;
     }catch(...){/* Bounded status only. Never expose provider inputs or message contents. */}
     return result;
 }
-Reception MessageLayer::receive(const std::string& local,const GroupState& ledger,const Blob& wire){
+Reception MessageLayer::receive(const std::string& local,const GroupState& ledger,const Blob& wire,const std::function<bool(const Blob&)>& validateBody){
     Reception result;result.result=parse(wire,result.envelope);if(result.result!=Result::Accepted)return result;
     try{
         const group_keys::RosterSnapshot* roster=nullptr;result.result=context(local,ledger,roster);
@@ -150,10 +151,11 @@ Reception MessageLayer::receive(const std::string& local,const GroupState& ledge
         if(key.bytes.empty()){result.result=Result::MissingGroupKey;return result;}
         Secret plaintext;auto tag=e.tag;result.result=Result::AeadAuthFailed;
         if(!gcm(false,key.bytes,associatedData(e),e.nonce,e.ciphertext,plaintext.bytes,tag))return result;
+        if(validateBody&&!validateBody(plaintext.bytes)){result.result=Result::InvalidMessageBody;return result;}
         // Dedupe happens after authentication. A failed packet cannot reserve an ID.
         result.result=Result::StorageFailed;
         try{
-            if(!store_.appendAuthenticatedGroupMessage(e.groupId,e.messageId,wire,plaintext.bytes)){result.result=Result::DuplicateMessage;return result;}
+            if(!store_.appendAuthenticatedGroupMessage(e.groupId,e.messageId,wire,plaintext.bytes,local)){result.result=Result::DuplicateMessage;return result;}
         }catch(const std::runtime_error& error){
             if(std::string(error.what())=="Conflicting authenticated group message ID")result.result=Result::ConflictingMessage;
             return result;

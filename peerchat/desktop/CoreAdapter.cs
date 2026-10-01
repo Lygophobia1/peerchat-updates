@@ -147,6 +147,10 @@ public sealed class CoreAdapter : IDisposable {
     public bool RemoveGroupMember(string group,long account){return account>0&&ui_group_remove_member(handle,group,(ulong)account)!=0;}
     public bool SetGroupAdmin(string group,long account,bool admin){return account>0&&ui_group_role(handle,group,(ulong)account,admin?1:0)!=0;}
     public bool SendGroup(string group,string text){return ui_group_send(handle,group,text)!=0;}
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_group_ciphertext(IntPtr handle,byte[] data,uint size);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_message_status(IntPtr handle,string group,string message,string status,uint stage);
+    public bool ReceiveGroupCiphertext(byte[] wire){return wire!=null&&wire.Length<=65790&&ui_group_ciphertext(handle,wire,(uint)wire.Length)!=0;}
+    public bool GroupMessageStatus(string group,string message,string status,uint stage=0){return ui_group_message_status(handle,group,message,status,stage)!=0;}
     public void LoadGroups(){ui_groups(handle);}
     public void GroupHistory(string group,long before){ui_group_history(handle,group,before);}
     public string StartVoiceCall(string peer){return Marshal.PtrToStringUni(ui_voice_call(handle,peer));}
@@ -190,10 +194,10 @@ public sealed class CoreAdapter : IDisposable {
 }
 public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails,screenFailureDomain,screenFailureReason,screenRecoveryTrigger,authorizationGroupId; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration,screenRecoveryGenerationFrom,screenRecoveryGenerationTo,authorizationRosterGeneration,authorizationTargetAccountId; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight,screenFps; public double screenBitrateMbps; public bool connected,callMuted,callDeafened,callControlAvailable,screenMediaFailed; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
-public class MessageData { public string id,sender,text; public long time,logical,sequence; public int delivery; }
+public class MessageData { public string id,sender,text,status; public long time,logical,sequence; public int delivery; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }
 public class GroupMemberData { public long account; public string peer,name; public int role; }
-public class GroupEventData { public string id,group,sender,text; public long account,time,logical; }
+public class GroupEventData { public string id,group,sender,text,status; public long account,time,logical,sequence; }
 public class VoiceDevices { public VoiceDevice[] inputs,outputs; }
 public class ScreenSource { public uint kind,width,height; public ulong handle; public string name; public override string ToString(){return (kind==1?"Monitor: ":"Window: ")+name+" ("+width+"×"+height+")";} }
 public class VoiceDevice { public int id; public string name; public override string ToString(){return name;} }

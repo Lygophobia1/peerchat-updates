@@ -18,6 +18,13 @@ precedes each request or response. Requests are limited to 4 KiB and responses t
 Development clients explicitly pin/confirm the service certificate; production is intended to use
 normal hostname and public-CA validation.
 
+Stage 1C established authenticated `events` streams additionally support bounded
+`group_send`, `group_message`, `group_ack`, and `group_delivery` application frames
+up to 100,000 bytes. Initial subscriptions and ordinary one-shot requests retain
+their existing limits. Envelope bytes stay opaque to the server; account/device
+authorization comes from the current authenticated event subscription and roster.
+See `GROUP_CIPHERTEXT_FANOUT.md` for fields, limits and online-only semantics.
+
 Each request contains `version: 1` and `type`. Every operation after register/login requires a
 valid `sessionToken`. Tokens are random, expire according to server configuration, and are stored
 only as SHA-256 hashes on the server. Passwords appear only in register/login TLS requests and are

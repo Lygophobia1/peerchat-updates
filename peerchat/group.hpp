@@ -13,6 +13,9 @@ struct GroupEvent {
     GroupEventKind kind=GroupEventKind::Create;
     std::wstring subjectName,value,message;
     Blob subjectPublicKey,signature;
+    // Local/UI message projection only; never encoded into signed roster events.
+    std::int64_t sequence=0;
+    std::string deliverySummary;
 };
 
 struct GroupMember {

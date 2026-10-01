@@ -5,10 +5,19 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-group-ciphertext-fanout.ps1` — Stage 1C real isolated TLS server,
+  three authenticated non-friend event channels, byte-identical opaque routing,
+  bounded requests, authorization, epoch/removal, duplicate/receipt semantics,
+  online-only disconnect/reconnect and sender recipient-list rejection.
+- `tests/test-group-text-ui.ps1 -ClientDirectory <current Client>` — compiled
+  group projection/sender/time/unread/history, logical group isolation and
+  honest server-admission versus E2E receipt wording.
+
 - `tests/test-group-message-envelope.ps1 -IncludeStage1A` — Stage 1B AES-GCM
   envelope/signature, bounded tamper parsing, current roster/device/key checks,
   durable replay and nonce reservation, protected history and Stage 1A scoped
-  peer-TLS key-handoff/removal regressions. No server fanout or group media.
+  peer-TLS key-handoff/removal plus three-device authenticated text/decrypt/history
+  regressions. Actual server fanout is tested separately above; no group media.
 - `tests/test-audio-processing.ps1` — pinned standalone APM presets/lifecycle,
   restricted-PATH processing and import audit.
 - `tests/test-voice-presets.ps1` — profile-local processing controls and preset

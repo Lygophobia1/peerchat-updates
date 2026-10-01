@@ -9,6 +9,17 @@
 
 ## Components and ownership
 
+Stage 1C adds a bounded `GroupCiphertextFanout` application handler on the existing
+authenticated discovery event channel. `AccountDatabase` remains roster authority,
+and existing event sessions own sockets/lease/reconnect. No group transport or
+peer mesh is created. Stage 1B `MessageLayer` remains crypto/receive authority;
+profile Storage atomically retains protected history/dedupe and an identifier-only
+pagination index. WPF forwards opaque native events to the existing DiscoveryClient
+and renders native authenticated messages/status. Fanout is current-session-only,
+with bounded in-memory dedupe/ACK summaries, not an offline queue. GroupControl
+peer TLS remains restricted to membership/key control. See
+`docs/GROUP_CIPHERTEXT_FANOUT.md` for current delivery/privacy bounds.
+
 Stage 8 has a separate `windows_media/PeerChat.ScreenMedia.dll` built with MSVC and a narrow C
 ABI. It enumerates monitors/windows and hardware codec capabilities, captures the selected source
 through WGC/D3D11, emits complete H.264 Annex-B access units from a bounded hardware-encoder
@@ -256,9 +267,10 @@ fully authenticated plaintext only through existing DPAPI-protected storage.
 Current receive is strict-current-generation; historical local reads are separate.
 See `docs/GROUP_MESSAGE_ENVELOPE.md` for the bounded versioned wire contract.
 
-Group text fanout/delivery remains Stage 1C, not peer mesh or GroupControl chat.
-The UI send path and legacy plaintext message acceptance remain blocked. No
-group voice/screen sharing is implemented by this layer.
+Stage 1C wires online ciphertext fanout on the authenticated server event channel,
+not peer mesh or GroupControl chat. The UI send path now uses Stage 1B exclusively;
+legacy plaintext message acceptance remains blocked. No group voice/screen sharing
+is implemented by this layer.
 
 ### Legacy local ledger (not the current group-message wire format)
 

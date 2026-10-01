@@ -71,8 +71,9 @@ public class MessageModel : ObservableModel {
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
-    public string Stamp {get{return LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(Data.delivery==2?"  ✓✓ Delivered":"  ◷ Queued"):"");}}
+    public string Stamp {get{return LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":"  ◷ Queued"):"");}}
     public void Delivered(){Data.delivery=2;Changed("Stamp");}
+    public void GroupStatus(string status){Data.status=status;Changed("Stamp");}
 }
 // Dispatcher-confined presentation state. Core events, never the GUI, determine
 // online/trust/delivery state. Switching views retains drafts and history.
@@ -142,8 +143,9 @@ public class ChatViewModel {
         }
         if((e.kind==10||e.kind==11)&&e.groupEvents!=null){
             GroupModel group;
-            if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=!outgoing&&member!=null?member.name+"\n"+value.text:value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,delivery=2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
+            if(GroupChats.TryGetValue(e.peer,out group)){foreach(var value in e.groupEvents){if(group.Messages.Any(existing=>existing.Data.id==value.id))continue;bool outgoing=value.sender==OwnId;var member=(group.Data.members??new GroupMemberData[0]).FirstOrDefault(item=>item.account==value.account);string text=(member!=null?member.name:"Account "+value.account)+"\n"+value.text;var data=new MessageData{id=value.id,sender=value.sender,text=text,time=value.time,logical=value.logical,sequence=value.sequence>0?value.sequence:value.logical,status=value.status,delivery=outgoing?0:2};var added=new MessageModel{Data=data,Outgoing=outgoing};group.Messages.Add(added);if(e.kind==10&&!added.Outgoing&&(SelectedGroup!=group||!Groups))group.Unread++;}if(e.kind==11){group.HistoryLoading=false;if(e.groupEvents.Length<100)group.HistoryExhausted=true;}OrderMessages(group.Messages);group.Refresh();}
         }
+        if(e.kind==12){GroupModel group;if(GroupChats.TryGetValue(e.peer,out group)){var message=group.Messages.FirstOrDefault(m=>m.Data.id==e.detail);if(message!=null)message.GroupStatus(e.text);group.Refresh();}}
         if(e.kind==13){if(e.callLifetime<VoiceCallLifetime||(e.callLifetime==VoiceCallLifetime&&e.mediaGeneration<VoiceMediaGeneration))return;VoiceCallLifetime=e.callLifetime;VoiceStateCode=e.callState;VoiceCallType=e.callType;VoiceMediaState=e.mediaState;VoiceMediaGeneration=e.mediaGeneration;VoiceMediaRoute=e.mediaRoute;VoiceControlAvailable=e.callControlAvailable;VoiceState=e.text??"Idle";VoiceCallId=e.detail??"";VoicePeerId=e.peer??"";VoiceMuted=e.callMuted;VoiceDeafened=e.callDeafened;}
         if(e.kind==17){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);bool newer=e.sessionEpoch>item.SessionEpoch||(e.sessionEpoch==item.SessionEpoch&&e.sessionRevision>item.SessionRevision);if(newer){item.SessionEpoch=e.sessionEpoch;item.SessionRevision=e.sessionRevision;item.Online=e.connected;item.WinningConnectionId=e.connected?e.attempt:0;item.ReliableRoute=e.connected?e.reliableRoute:0;item.P2pAvailability=e.p2pAvailability;item.ReliableEndpoint=e.connected?(e.candidate??""):"";item.ConnectionState=String.IsNullOrEmpty(e.text)?(e.connected?"Ready":"Offline"):e.text;item.Refresh();}}
     }

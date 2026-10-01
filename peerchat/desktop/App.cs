@@ -443,6 +443,11 @@ public class DesktopApplication {
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
+                if(e.kind==20){
+                    if(discovery==null||!discovery.QueueGroupMessage(e.expected,e.text,e.attempt,e.detail))core.GroupMessageStatus(e.expected,e.text,"Not sent: authenticated server channel unavailable");
+                    continue;
+                }
+                if(e.kind==21){if(discovery!=null)discovery.QueueGroupAck(e.expected,e.detail,e.text);continue;}
                 if(!String.IsNullOrEmpty(e.authorizationGroupId)){
                     ObserveGroupControl(e);
                     if(e.kind==18)StartRelay(e);
@@ -1077,7 +1082,7 @@ public class DesktopApplication {
 		Find<TextBlock>("HeaderStatus").Foreground = Brush((flag && model.Selected.ConnectionState == "Ready") ? "#36D873" : "#A1AEBB");
 		Find<StackPanel>("ChatEmpty").Visibility = ((!flag2) ? ((flag && model.Selected.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible) : ((model.SelectedGroup.Messages.Count != 0) ? Visibility.Collapsed : Visibility.Visible));
 		Find<TextBlock>("EmptyTitle").Text = ((!flag2) ? (model.Groups ? "A place for your people" : (flag ? "The start of your conversation" : "Good conversations start here.")) : (model.SelectedGroup.Invited ? "You’re invited" : "Start the group conversation"));
-		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a group with an authenticated server roster. Group text will be available after the encrypted-message stage." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Find friends to start a conversation. Messaging uses PeerChat Server Relay by default; optional direct P2P requires mutual consent.")) : (model.SelectedGroup.Invited ? "Open Requests to accept or decline the authenticated group invitation." : "Group key handoff is available now. Group text remains paused until the encrypted-message stage."));
+		Find<TextBlock>("EmptyDescription").Text = ((!flag2) ? (model.Groups ? "Create a group with an authenticated server roster to send encrypted messages." : (flag ? "Messages and history belong to this PC. Verify your friend to start chatting." : "Find friends to start a conversation. Messaging uses PeerChat Server Relay by default; optional direct P2P requires mutual consent.")) : (model.SelectedGroup.Invited ? "Open Requests to accept or decline the authenticated group invitation." : "Messages are end-to-end encrypted. Current online members receive through PeerChat Server Relay; offline delivery is not available."));
 		Find<Button>("EmptyAction").Content = (model.Groups ? "＋    Create Group" : "＋    Add Friend");
 		Find<Button>("EmptyAction").Visibility = ((flag || flag2) ? Visibility.Collapsed : Visibility.Visible);
 		Find<Button>("GroupNew").Visibility = ((!model.Groups) ? Visibility.Collapsed : Visibility.Visible);
@@ -1092,7 +1097,8 @@ public class DesktopApplication {
 		bool canLoadOlder = (!model.Groups && model.Selected != null && model.Selected.Messages.Count > 0 && !model.Selected.HistoryExhausted) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
 		Find<Button>("Older").Visibility = canLoadOlder ? Visibility.Visible : Visibility.Collapsed;
 		bool flag4 = flag && model.Listening && model.Selected.Contact.verified && !busy;
-		bool flag5 = false; // Stage 1A never sends the legacy plaintext group-message format.
+        ServerGroupRoster sendRoster;
+        bool flag5=flag2&&!model.SelectedGroup.Invited&&!busy&&discovery!=null&&discovery.EventChannelConnected&&serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out sendRoster)&&sendRoster.Members.Any(m=>m.State=="member"&&m.AccountId==discovery.AccountId&&m.PeerId==model.OwnId);
 		Find<Button>("Send").IsEnabled = flag4 || flag5;
 		TextBox textBox = Find<TextBox>("Composer");
 		textBox.IsEnabled = flag4 || flag5;
@@ -1508,6 +1514,19 @@ public class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+				if(notification!=null&&notification.Event=="group_message"){
+                    try{var wire=Convert.FromBase64String(notification.Envelope??"");if(wire.Length>65790||!core.ReceiveGroupCiphertext(wire))discovery.QueueGroupAck(notification.GroupId,notification.MessageId,"rejected");}
+                    catch{discovery.QueueGroupAck(notification.GroupId,notification.MessageId,"rejected");}
+                    return;
+                }
+                if(notification!=null&&notification.Event=="group_delivery"){
+                    string status=notification.State;
+                    if(status=="server_accepted_online_only"||status=="duplicate_server_request")status="Server accepted · "+notification.SessionCount+" online recipient sessions (not E2E delivery)";
+                    else if(status=="recipient_acknowledged")status="Recipients: "+notification.AcceptedCount+" accepted, "+notification.DuplicateCount+" duplicates, "+notification.RejectedCount+" rejected / "+notification.SessionCount+" sessions";
+                    uint stage=notification.State=="recipient_acknowledged"?2u:notification.State=="server_accepted_online_only"||notification.State=="duplicate_server_request"?1u:0u;
+                    if(!String.IsNullOrEmpty(notification.GroupId)&&!String.IsNullOrEmpty(notification.MessageId))core.GroupMessageStatus(notification.GroupId,notification.MessageId,status,stage);
+                    return;
+                }
 				if(notification!=null&&notification.Event=="group_roster_changed"){groupStateRevision++;RefreshGroupState();return;}
 				if(notification!=null&&notification.Event=="group_invite_changed"){RefreshFriendState();return;}
 				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
@@ -3942,7 +3961,7 @@ public class DesktopApplication {
             var localRoster=rosterMembers.FirstOrDefault(value=>discovery!=null&&value.AccountId==discovery.AccountId&&value.PeerId==model.OwnId);
             var stateRows=hasRoster?groupControlViews.Where(value=>value.Key.StartsWith(roster.GroupId+":",StringComparison.Ordinal)&&value.Value.RosterGeneration==roster.RosterGeneration).Select(value=>value.Value).ToArray():new GroupControlViewState[0];
             string registrationStage,registrationFailure;groupRegistrationStage.TryGetValue(group.Id,out registrationStage);groupRegistrationFailure.TryGetValue(group.Id,out registrationFailure);
-            var data=new GroupDiagnosticsData{GroupId=group.Id,ServerGroupId=hasRoster?roster.GroupId:null,Name=group.Name,LocalRole=hasRoster?(localRoster==null?"Unavailable":localRoster.Role):mine==null?(group.Invited?"Invited":"Unavailable"):mine.role==3?"Owner":mine.role==2?"Admin":"Member",PendingInvites=hasRoster?roster.Members.Count(value=>value.State=="invited"):group.PendingInviteCount,RosterState=hasRoster?"Authenticated server roster ready":String.IsNullOrEmpty(registration)?"Legacy/local group — not registered":registration,RegistrationStage=registrationStage??(hasRoster?"ready":"not applicable"),RegistrationFailure=registrationFailure??"none",RosterGeneration=hasRoster?roster.RosterGeneration:0,KeyGeneration=stateRows.Any(value=>value.KeyReady)?roster.RosterGeneration:0,GroupControlState=stateRows.Any(value=>value.Connection=="Authenticated peer TLS ready")?"Authenticated peer TLS ready":stateRows.Any(value=>value.Connection=="Scoped relay requested")?"Scoped relay requested":"Not established",E2eeState=hasRoster?"Group key control protected by peer TLS; encrypted group text pending Stage 1B":"Legacy signed group; not server-authorized",DeliveryState="Server ciphertext fanout not implemented (Stage 1C)",KeyHandoffState=stateRows.Any(value=>value.Handoff=="Acknowledged")?"Acknowledged":stateRows.Any(value=>value.Handoff=="Offered")?"Offered / awaiting ACK":stateRows.Any(value=>value.KeyReady)?"Current key ready locally":"Not started",LastKeyOfferResult=stateRows.Select(value=>value.LastOffer).FirstOrDefault(value=>value!="None")??"None",LastKeyAckResult=stateRows.Select(value=>value.LastAck).FirstOrDefault(value=>value!="None")??"None",Members=new List<GroupDiagnosticsMember>()};
+            var data=new GroupDiagnosticsData{GroupId=group.Id,ServerGroupId=hasRoster?roster.GroupId:null,Name=group.Name,LocalRole=hasRoster?(localRoster==null?"Unavailable":localRoster.Role):mine==null?(group.Invited?"Invited":"Unavailable"):mine.role==3?"Owner":mine.role==2?"Admin":"Member",PendingInvites=hasRoster?roster.Members.Count(value=>value.State=="invited"):group.PendingInviteCount,RosterState=hasRoster?"Authenticated server roster ready":String.IsNullOrEmpty(registration)?"Legacy/local group — not registered":registration,RegistrationStage=registrationStage??(hasRoster?"ready":"not applicable"),RegistrationFailure=registrationFailure??"none",RosterGeneration=hasRoster?roster.RosterGeneration:0,KeyGeneration=stateRows.Any(value=>value.KeyReady)?roster.RosterGeneration:0,GroupControlState=stateRows.Any(value=>value.Connection=="Authenticated peer TLS ready")?"Authenticated peer TLS ready":stateRows.Any(value=>value.Connection=="Scoped relay requested")?"Scoped relay requested":"Not established",E2eeState=hasRoster?"AES-256-GCM group text with device signatures; keys delivered over peer TLS":"Legacy signed group; not server-authorized",DeliveryState="Authenticated server ciphertext fanout; online sessions only; no offline queue",KeyHandoffState=stateRows.Any(value=>value.Handoff=="Acknowledged")?"Acknowledged":stateRows.Any(value=>value.Handoff=="Offered")?"Offered / awaiting ACK":stateRows.Any(value=>value.KeyReady)?"Current key ready locally":"Not started",LastKeyOfferResult=stateRows.Select(value=>value.LastOffer).FirstOrDefault(value=>value!="None")??"None",LastKeyAckResult=stateRows.Select(value=>value.LastAck).FirstOrDefault(value=>value!="None")??"None",Members=new List<GroupDiagnosticsMember>()};
             if(!hasRoster&&markedNewGroupIds.Contains(group.Id)){
                 data.RosterState=String.IsNullOrEmpty(registration)?"New group registration pending; not active":registration;
                 data.E2eeState="New group inactive until server roster registration succeeds";
@@ -4022,7 +4041,7 @@ public class DesktopApplication {
         var viewer=Find<ScrollViewer>("MessageScroll");
         if(model.Groups){
             var group=model.SelectedGroup;if(group==null||group.HistoryLoading||group.HistoryExhausted)return;
-            long before=group.Messages.Where(message=>message.Data.logical>0).Select(message=>message.Data.logical).DefaultIfEmpty(long.MaxValue).Min();
+            long before=group.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
             group.HistoryLoading=true;historyScrollKey="group:"+group.Id;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.GroupHistory(group.Id,before);return;
         }
         var conversation=model.Selected;if(conversation==null||conversation.HistoryLoading||conversation.HistoryExhausted)return;
@@ -4031,7 +4050,7 @@ public class DesktopApplication {
         long dmBefore=conversation.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
         conversation.HistoryLoading=true;conversation.LoadingHistoryPeer=peer;conversation.RequestedPeerHistory.Add(peer);historyScrollKey=conversation.ConversationId;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.History(peer,dmBefore);
     }
-    void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;if(model.Groups){Notify("Group text is paused until the encrypted group-message format is ready. No plaintext group message was sent.");return;}bool queued=model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
+    void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}bool queued=model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
     void Notify(string text){Notify(text,null);}
     void Notify(string text,Window owner){Dialog("PeerChat",new string[0],new string[0],"OK",text,false,owner);}
     bool Confirm(string title,string text,string accept){return Dialog(title,new string[0],new string[0],accept,text,true)!=null;}

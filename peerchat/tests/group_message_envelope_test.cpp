@@ -59,6 +59,10 @@ int main(int argc,char** argv){
         auto offers=ownerStore.pendingGroupKeyHandoffs(member.peerId);
         require(offers.size()==1&&memberKeys.accept(offers[0],owner.peerId,state),"Actual authorized key handoff failed");
         MessageLayer sender(ownerStore,ownerKeys,owner,1),receiver(memberStore,memberKeys,member,2);
+        auto invalidBody=sender.create(local,state,body("invalid text framing"));
+        require(invalidBody.result==Result::Accepted,"Invalid-body fixture encryption failed");
+        expect(receiver.receive(local,state,invalidBody.wire,[](const Blob&){return false;}),Result::InvalidMessageBody);
+        require(memberStore.authenticatedGroupMessage(server,invalidBody.envelope.messageId).envelope.empty(),"Invalid authenticated body reached history/dedupe");
         std::set<Blob> nonces;
         for(auto size:{std::size_t(0),std::size_t(1),std::size_t(128),MaxPlaintextBytes}){
             Blob plain(size);for(std::size_t i=0;i<size;++i)plain[i]=static_cast<unsigned char>(i%251);
@@ -70,6 +74,9 @@ int main(int argc,char** argv){
             require(memberStore.authenticatedGroupMessage(server,sent.envelope.messageId).plaintext==plain,"Authenticated local history missing");
         }
         auto original=sender.create(local,state,body("private-message-marker-DO-NOT-OUTPUT"));require(original.result==Result::Accepted,"Normal creation failed");
+        require(ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Recipient accepted",2),"Recipient receipt persistence failed");
+        require(!ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Server accepted",1)&&!ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Unknown after disconnect",0),"Late admission/disconnect overwrote a recipient receipt");
+        require(ownerStore.authenticatedGroupMessage(server,original.envelope.messageId).status=="Recipient accepted","Protected receipt did not survive readback");
         auto marker=body("private-message-marker-DO-NOT-OUTPUT");
         require(std::search(original.wire.begin(),original.wire.end(),marker.begin(),marker.end())==original.wire.end(),"Server-facing representation contains plaintext");
         auto test=[&](Envelope e,Result status){expect(receiver.receive(local,state,serialize(e)),status);};

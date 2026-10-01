@@ -1,4 +1,6 @@
 #include "../node.hpp"
+#include <wincrypt.h>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -20,6 +22,9 @@ int main(int argc,char** argv){
     std::array<std::uint64_t,2> ownerAttempts{},memberAttempts{};
     std::array<bool,2> attached{};
     std::set<std::string> acknowledged;
+    std::array<unsigned,Count> textMessages{};
+    unsigned messageReceipts=0,duplicateReceipts=0,historyMessages=0;
+    Blob lastCiphertext;
     std::uint64_t expectedGeneration=3;
     const auto root=std::filesystem::path(argv[1]);
     try{
@@ -46,6 +51,18 @@ int main(int argc,char** argv){
                     }
                 }else if(event.kind==NodeEvent::Kind::ConnectionLifecycle&&i==0&&
                          event.text==L"Group key offer acknowledged by member")acknowledged.insert(event.peerId);
+                else if(event.kind==NodeEvent::Kind::GroupCiphertext){
+                    DWORD length=0;require(CryptStringToBinaryW(event.detail.c_str(),static_cast<DWORD>(event.detail.size()),CRYPT_STRING_BASE64,nullptr,&length,nullptr,nullptr)!=FALSE,"Ciphertext base64 size failed");
+                    Blob wire(length);require(CryptStringToBinaryW(event.detail.c_str(),static_cast<DWORD>(event.detail.size()),CRYPT_STRING_BASE64,wire.data(),&length,nullptr,nullptr)!=FALSE,"Ciphertext base64 decode failed");wire.resize(length);lastCiphertext=wire;
+                    const std::string marker="Deterministic encrypted text";require(std::search(wire.begin(),wire.end(),marker.begin(),marker.end())==wire.end(),"Server-facing payload exposed the private text body");
+                    // Test application boundary only: server authorization and the actual
+                    // three-channel fanout are covered separately by the server regression.
+                    for(size_t recipient=0;recipient<Count;recipient++)if(recipient!=i)require(peers[recipient].receiveGroupCiphertext(wire),"Recipient rejected encrypted ingress command");
+                }else if(event.kind==NodeEvent::Kind::GroupCiphertextAck){
+                    if(event.text==L"accepted")messageReceipts++;else if(event.text==L"duplicate_message")duplicateReceipts++;else throw std::runtime_error("Recipient failed authenticated text validation");
+                }else if(event.kind==NodeEvent::Kind::GroupMessage){
+                    require(event.groupEvents.size()==1&&!event.groupEvents[0].message.empty()&&event.groupEvents[0].sequence>0,"Authenticated text projection/history cursor missing");textMessages[i]++;
+                }else if(event.kind==NodeEvent::Kind::GroupHistory){historyMessages=static_cast<unsigned>(event.groupEvents.size());}
                 else if(event.kind==NodeEvent::Kind::Error){
                     std::wcerr<<L"peer "<<i<<L": "<<event.text<<L'\n';
                     throw std::runtime_error("three-member authenticated group control failed");
@@ -83,6 +100,15 @@ int main(int argc,char** argv){
             attached[offset]=true;
         }
         wait([&]{return acknowledged.size()==2;},"one group member did not receive and ACK the current protected key");
+        for(size_t sender=0;sender<Count;sender++){
+            require(peers[sender].sendGroup(legacy,L"Deterministic encrypted text"),"Group composer command failed");
+            wait([&]{return messageReceipts==2*(sender+1);},"Encrypted text did not verify/decrypt/store/ACK at both recipients");
+        }
+        for(auto count:textMessages)require(count==3,"Three non-friend devices did not display each message once");
+        require(peers[0].receiveGroupCiphertext(lastCiphertext),"Duplicate ciphertext ingress failed");
+        wait([&]{return duplicateReceipts==1;},"Durable duplicate did not return an idempotent receipt");require(textMessages[0]==3,"Duplicate ciphertext was displayed twice");
+        peers[0].loadGroupHistory(legacy);
+        wait([&]{return historyMessages==3;},"Protected group history projection failed");
         // An explicit authorized server removal changes the authenticated
         // roster first; the same initiating device then signs the matching
         // local Remove. No absent legacy member is removed automatically.
@@ -101,6 +127,9 @@ int main(int argc,char** argv){
         wait([&]{return acknowledged.count(ids[1])>0;},"remaining member did not ACK the rotated group key");
         for(auto& peer:peers)peer.stop();
         Storage ownerStore(paths[0]);Blob expected=ownerStore.groupKey(legacy,3);
+        auto ownerHistory=ownerStore.authenticatedGroupHistory(legacy,100);require(ownerHistory.size()==3,"Encrypted local history did not survive reopening");
+        require(ownerStore.authenticatedGroupHistory(legacy,100,ownerHistory[1].sequence).size()==1,"History pagination did not use the durable local cursor");
+        for(auto& record:ownerHistory)SecureZeroMemory(record.plaintext.data(),record.plaintext.size());
         require(expected.size()==32,"owner did not retain the current group key");
         for(size_t i=1;i<Count;i++){
             Storage memberStore(paths[i]);
@@ -114,7 +143,7 @@ int main(int argc,char** argv){
         require(Storage(paths[1]).groupKey(legacy,4)==rotated,"remaining member did not receive the rotated key");
         require(Storage(paths[2]).groupKey(legacy,4).empty(),"removed member received the future key generation");
         require(!ownerStore.hasGroupKeyReceipt(legacy,4,ids[2]),"removed member received a future ACK receipt");
-        std::cout<<"PASS: three non-friend devices ACKed the group key without a mesh; explicit removal rotated the key for remaining members only.\n";
+        std::cout<<"PASS: three non-friend devices ACKed keys and authenticated encrypted text without a mesh; duplicate display prevented, protected history reload/pagination, and removal key rotation.\n";
         return 0;
     }catch(const std::exception& error){for(auto& peer:peers)peer.stop();std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

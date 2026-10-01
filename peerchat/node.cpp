@@ -8,6 +8,8 @@
 #include <wincrypt.h>
 #include <bcrypt.h>
 #include "node.hpp"
+#include "group_message_envelope.hpp"
+#include "group_text.hpp"
 #include "delivery_manager.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
@@ -82,7 +84,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0,noiseSuppressionStrength=1,automaticGainStrength=1;screen::Backend screenBackend=screen::Backend::NativeWindows;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;};
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
@@ -166,6 +168,12 @@ struct Node::Impl {
         auto found=groups.find(groupId);if(found==groups.end())throw std::runtime_error("Unknown Group ID");
         const auto& state=found->second.state();
         if(!groupAccount.accountId||(!state.members.count(groupAccount.accountId)&&!state.invitations.count(groupAccount.accountId)))return;
+        auto records=store->authenticatedGroupHistory(groupId,100,before);
+        if(!records.empty()||(groupKeys&&groupKeys->isAuthoritativeGroup(groupId))){
+            NodeEvent history;history.kind=NodeEvent::Kind::GroupHistory;history.peerId=groupId;
+            for(auto& record:records){history.groupEvents.push_back(groupMessageProjection(groupId,record));SecureZeroMemory(record.plaintext.data(),record.plaintext.size());}
+            emit(std::move(history));return;
+        }
         std::vector<const GroupEvent*> eligible;
         for(const auto& event:state.messages)if(event.logicalOrder<static_cast<std::uint64_t>(before))eligible.push_back(&event);
         std::sort(eligible.begin(),eligible.end(),[](const GroupEvent* left,const GroupEvent* right){return left->logicalOrder!=right->logicalOrder?left->logicalOrder<right->logicalOrder:left->eventId<right->eventId;});
@@ -174,6 +182,43 @@ struct Node::Impl {
         NodeEvent history;history.kind=NodeEvent::Kind::GroupHistory;history.peerId=groupId;
         for(const auto* event:eligible)history.groupEvents.push_back(*event);
         emit(std::move(history));
+    }
+    GroupEvent groupMessageProjection(const std::string& local,const AuthenticatedGroupMessage& record){
+        group_messages::Envelope envelope;protocol::check(group_messages::parse(record.envelope,envelope)==group_messages::Result::Accepted);
+        auto body=group_text::decode(record.plaintext);GroupEvent event;event.groupId=local;event.eventId=envelope.messageId;event.actorPeerId=envelope.senderDevice;event.actorAccountId=envelope.senderAccount;
+        event.kind=GroupEventKind::Message;event.message=std::move(body.text);event.createdMilliseconds=body.time;event.logicalOrder=body.order;event.sequence=record.sequence;event.deliverySummary=record.status;return event;
+    }
+    void receiveGroupMessage(const Blob& wire){
+        group_messages::Envelope envelope;auto status=group_messages::parse(wire,envelope);
+        if(status!=group_messages::Result::Accepted)return;
+        const auto* roster=groupKeys?groupKeys->roster(envelope.groupId):nullptr;
+        status=group_messages::Result::RosterUnavailable;
+        NodeEvent ack;ack.kind=NodeEvent::Kind::GroupCiphertextAck;ack.expectedPeerId=envelope.groupId;ack.detail=std::wstring(envelope.messageId.begin(),envelope.messageId.end());ack.text=L"rejected";
+        if(roster){
+            auto found=groups.find(roster->legacyGroupId);
+            if(found!=groups.end()){
+                group_messages::MessageLayer layer(*store,*groupKeys,profile,groupAccount.accountId);
+                auto received=layer.receive(roster->legacyGroupId,found->second.state(),wire,group_text::valid);status=received.result;
+                if(status==group_messages::Result::Accepted){
+                    auto body=group_text::decode(received.plaintext);store->observeLogicalOrder(body.order);
+                    auto record=store->authenticatedGroupMessage(envelope.groupId,envelope.messageId);NodeEvent message;message.kind=NodeEvent::Kind::GroupMessage;message.peerId=roster->legacyGroupId;
+                    auto projection=groupMessageProjection(roster->legacyGroupId,record);projection.deliverySummary="Authenticated group message";message.groupEvents.push_back(std::move(projection));emit(std::move(message));
+                    SecureZeroMemory(record.plaintext.data(),record.plaintext.size());SecureZeroMemory(received.plaintext.data(),received.plaintext.size());ack.text=L"accepted";
+                }else if(status==group_messages::Result::DuplicateMessage)ack.text=L"duplicate_message";
+            }
+        }
+        ack.peerId=roster?roster->legacyGroupId:"";ack.candidateSource=std::wstring(group_messages::resultName(status),group_messages::resultName(status)+std::strlen(group_messages::resultName(status)));emit(std::move(ack));
+    }
+    void sendGroupMessage(const std::string& local,const std::wstring& text){
+        auto found=groups.find(local);if(found==groups.end()||!groupKeys)throw std::runtime_error("Group roster unavailable; no message sent");
+        const auto* roster=groupKeys->rosterForLegacy(local);if(!roster)throw std::runtime_error("Group is not server-authorized; no message sent");
+        group_messages::MessageLayer layer(*store,*groupKeys,profile,groupAccount.accountId);
+        group_text::Body body;body.order=store->nextLogicalOrder();body.time=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());body.text=text;
+        Blob plain=group_text::encode(body);auto creation=layer.create(local,found->second.state(),plain);SecureZeroMemory(plain.data(),plain.size());
+        if(creation.result!=group_messages::Result::Accepted)throw std::runtime_error(std::string("Encrypted group send failed: ")+group_messages::resultName(creation.result));
+        store->setGroupMessageStatus(creation.envelope.groupId,creation.envelope.messageId,"Awaiting server acceptance (online recipients only)");
+        auto records=store->authenticatedGroupHistory(local,1);NodeEvent message;message.kind=NodeEvent::Kind::GroupMessage;message.peerId=local;message.groupEvents.push_back(groupMessageProjection(local,records.front()));emit(std::move(message));SecureZeroMemory(records.front().plaintext.data(),records.front().plaintext.size());
+        NodeEvent request;request.kind=NodeEvent::Kind::GroupCiphertext;request.peerId=local;request.expectedPeerId=creation.envelope.groupId;request.attemptId=creation.envelope.rosterGeneration;request.detail=group_text::base64(creation.wire);request.text=std::wstring(creation.envelope.messageId.begin(),creation.envelope.messageId.end());emit(std::move(request));
     }
     void notice(NodeEvent::Kind kind,const std::wstring& text,const std::string& peer={}){NodeEvent e;e.kind=kind;e.text=text;e.peerId=peer;emit(std::move(e));}
     static std::wstring endpoint(const std::wstring& host,std::uint16_t port){return host.empty()?L"":host+L":"+std::to_wstring(port);}
@@ -1180,6 +1225,15 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 if(command.response)command.response->set_value(std::move(encoded));
             }else if(command.action==Action::Groups){publishGroups();
+            }else if(command.action==Action::GroupReceiveCiphertext){receiveGroupMessage(command.bytes);
+            }else if(command.action==Action::GroupMessageStatus){
+                auto roster=groupKeys?groupKeys->roster(command.group):nullptr;
+                if(roster){
+                    auto record=store->authenticatedGroupMessage(command.group,command.id);group_messages::Envelope envelope;
+                    const bool own=group_messages::parse(record.envelope,envelope)==group_messages::Result::Accepted&&envelope.senderDevice==profile.peerId;
+                    SecureZeroMemory(record.plaintext.data(),record.plaintext.size());
+                    if(own&&store->setGroupMessageStatus(command.group,command.id,utf8(command.text),command.sourceKind)){NodeEvent event;event.kind=NodeEvent::Kind::GroupDelivered;event.peerId=roster->legacyGroupId;event.detail=std::wstring(command.id.begin(),command.id.end());event.text=command.text;emit(std::move(event));}
+                }
             }else if(command.action==Action::GroupHistoryPage){emitGroupHistoryPage(command.group,command.before);
             }
             else {
@@ -1190,7 +1244,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 else if(command.action==Action::GroupLeave){event=localGroupEvent(ledger,GroupEventKind::Leave);}
                 else if(command.action==Action::GroupRemove){event=localGroupEvent(ledger,GroupEventKind::Remove);event.subjectAccountId=command.accountId;}
                 else if(command.action==Action::GroupRole){event=localGroupEvent(ledger,GroupEventKind::SetRole);event.subjectAccountId=command.accountId;event.value=command.accepted?L"admin":L"member";}
-                else if(command.action==Action::GroupSend)throw std::runtime_error("Group messages require the next encrypted-envelope protocol stage");
+                else if(command.action==Action::GroupSend){sendGroupMessage(command.group,command.text);continue;}
                 else throw std::runtime_error("Unsupported group action");
                 commitLocalGroupEvent(ledger,std::move(event),peers,command.action==Action::GroupInvite);
             }
@@ -1339,6 +1393,8 @@ bool Node::leaveGroup(const std::string& groupId){if(!protocol::id(groupId,32))r
 bool Node::removeGroupMember(const std::string& groupId,std::uint64_t accountId){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRemove;c.group=groupId;c.accountId=accountId;return impl_->command(std::move(c));}
 bool Node::setGroupAdmin(const std::string& groupId,std::uint64_t accountId,bool admin){if(!protocol::id(groupId,32)||!accountId)return false;Impl::Command c{};c.action=Impl::Action::GroupRole;c.group=groupId;c.accountId=accountId;c.accepted=admin;return impl_->command(std::move(c));}
 bool Node::sendGroup(const std::string& groupId,const std::wstring& text){if(!protocol::id(groupId,32)||text.empty()||text.size()>protocol::MaxChatCharacters)return false;Impl::Command c{};c.action=Impl::Action::GroupSend;c.group=groupId;c.text=text;return impl_->command(std::move(c));}
+bool Node::receiveGroupCiphertext(const Blob& wire){if(wire.size()<254||wire.size()>group_messages::MaxEnvelopeBytes)return false;Impl::Command c{};c.action=Impl::Action::GroupReceiveCiphertext;c.bytes=wire;return impl_->command(std::move(c));}
+bool Node::groupMessageStatus(const std::string& group,const std::string& message,const std::wstring& status,std::uint32_t stage){if(!protocol::id(group,32)||!protocol::id(message,32)||status.empty()||status.size()>160||stage>2)return false;Impl::Command c{};c.action=Impl::Action::GroupMessageStatus;c.group=group;c.id=message;c.text=status;c.sourceKind=stage;return impl_->command(std::move(c));}
 void Node::loadGroups(){Impl::Command c{};c.action=Impl::Action::Groups;impl_->command(std::move(c));}
 void Node::loadGroupHistory(const std::string& group,std::int64_t before){if(!protocol::id(group,32))return;Impl::Command c{};c.action=Impl::Action::GroupHistoryPage;c.group=group;c.before=before;impl_->command(std::move(c));}
 std::string Node::startVoiceCall(const std::string& peerId){if(!protocol::id(peerId))return {};Impl::Command command{};command.action=Impl::Action::VoiceStart;command.peer=peerId;command.id=Storage::newMessageId();auto id=command.id;return impl_->command(std::move(command))?id:std::string{};}

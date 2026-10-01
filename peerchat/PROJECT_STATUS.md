@@ -1,5 +1,17 @@
 # PeerChat development status
 
+## Stage 1C — online server ciphertext fanout candidate
+
+Current group text uses the unchanged Stage 1B device-signed AES-256-GCM envelope
+on the existing authenticated server event channel. The server selects current
+roster-bound online devices and never receives keys/plaintext. Native clients
+validate/decrypt/dedupe, retain protected local history and project sender/time
+and separate server-admission/recipient-ACK state into the group composer/UI.
+Delivery is online-only; missed/offline messages are not queued or replayed.
+See `docs/GROUP_CIPHERTEXT_FANOUT.md` for bounds and exact semantics. Stage 1B
+`cd9487b` / dev.42 remains the accepted crypto baseline. Voice/screen implementations
+are unchanged. Physical three-PC acceptance remains pending; no group media/AEC.
+
 ## Stage 1B — versioned E2EE group-message layer
 
 The accepted voice-settings baseline is `dba6310` / `4.0.1-dev.41`; accepted
@@ -8,8 +20,8 @@ screen sharing remains `3bd80c7`. Neither media implementation is changed here.
 envelopes against the current Stage 1A authoritative roster and content key.
 Authenticated history/dedupe and nonce reservations use the existing protected
 profile store. See `docs/GROUP_MESSAGE_ENVELOPE.md` for protocol and validation.
-Stage 1C server ciphertext fanout/delivery is not implemented; group send remains
-blocked rather than falling back to legacy plaintext. Group media and AEC remain
+This Stage 1B description predates the Stage 1C online integration above. Group
+text never falls back to legacy plaintext. Group media and AEC remain
 out of scope. The older status entries below are historical checkpoints, not a
 replacement for this current group security boundary.
 

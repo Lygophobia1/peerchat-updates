@@ -17,7 +17,7 @@ struct AuthenticatedFriend {
     std::vector<std::string> knownPeerIds;
 };
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare, GroupCiphertext, GroupCiphertextAck };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -119,6 +119,8 @@ public:
     bool sendGroup(const std::string& groupId,const std::wstring& text);
     void loadGroups();
     void loadGroupHistory(const std::string& groupId,std::int64_t before=INT64_MAX);
+    bool receiveGroupCiphertext(const Blob& envelope);
+    bool groupMessageStatus(const std::string& group,const std::string& message,const std::wstring& status,std::uint32_t stage=0);
     std::string startVoiceCall(const std::string& peerId);
     bool answerVoiceCall(const std::string& callId);
     bool declineVoiceCall(const std::string& callId);
