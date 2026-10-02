@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<verification-metadata xmlns="https://schema.gradle.org/dependency-verification">
+  <configuration>
+    <verify-metadata>false</verify-metadata>
+    <verify-signatures>false</verify-signatures>
+    <!-- Preserve pre-existing dependency policy; checksum-pin the new TLS closure. -->
+    <trusted-artifacts><trust group="^(?!org\.bouncycastle$).*" regex="true" reason="Existing Android dependencies outside this TLS checkpoint"/></trusted-artifacts>
+  </configuration>
+  <components>
+    <!-- Existing AGP tooling only; not APK runtime dependencies. -->
+    <component group="org.bouncycastle" name="bcprov-jdk18on" version="1.77"><artifact name="bcprov-jdk18on-1.77.jar"><sha256 value="dabb98c24d72c9b9f585633d1df9c5cd58d9ad373d0cd681367e6a603a495d58" origin="Verified existing AGP tool artifact / Maven Central"/></artifact></component>
+    <component group="org.bouncycastle" name="bcutil-jdk18on" version="1.77"><artifact name="bcutil-jdk18on-1.77.jar"><sha256 value="947673bcbc5a8dde2d2fa688a5b7598d0ca6e2a74a7ea30cd93f04f6b3ad68f8" origin="Verified existing AGP tool artifact / Maven Central"/></artifact></component>
+    <component group="org.bouncycastle" name="bcpkix-jdk18on" version="1.77"><artifact name="bcpkix-jdk18on-1.77.jar"><sha256 value="1ac7fe8efd5b2f38cdc165be5a0675734fe44808dab92707201f03a535d6f1b8" origin="Verified existing AGP tool artifact / Maven Central"/></artifact></component>
+    <component group="org.bouncycastle" name="bcprov-jdk18on" version="1.86"><artifact name="bcprov-jdk18on-1.86.jar"><sha256 value="2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f" origin="Maven Central exact release"/></artifact></component>
+    <component group="org.bouncycastle" name="bcutil-jdk18on" version="1.86"><artifact name="bcutil-jdk18on-1.86.jar"><sha256 value="1c268e15f785aafb1e4670d8d6e5f856f69475e96c162dadcd1ff9b350e9139f" origin="Maven Central exact release"/></artifact></component>
+    <component group="org.bouncycastle" name="bcpkix-jdk18on" version="1.86"><artifact name="bcpkix-jdk18on-1.86.jar"><sha256 value="8d8b41a4b149bdae8d331f059a578870954d1e3ff29f8269a9eb3ee19a7e4ef7" origin="Maven Central exact release"/></artifact></component>
+    <component group="org.bouncycastle" name="bctls-jdk18on" version="1.86.1"><artifact name="bctls-jdk18on-1.86.1.jar"><sha256 value="5ac3270a777fc6ebbfa38be8ffba24b1b45bb0aafefe1213a5771fb7eb5ecae5" origin="Maven Central exact release"/></artifact></component>
+  </components>
+</verification-metadata>
