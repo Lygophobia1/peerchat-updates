@@ -237,6 +237,13 @@ approval blocker, not evidence of a PeerChat storage defect or a phone-only
 blocker. Native Android profile reopen, TLS, discovery/authentication, presence
 and real message delivery remain NOT IMPLEMENTED. No completed backend milestone
 is claimed from these preparatory tests.
+On the isolated `codex/android-ui-only` branch, the launcher is a mock Compose
+messaging UI, not the native/provider proof described below. See
+[ANDROID_UI.md](ANDROID_UI.md) for its build, host tests and integration contract.
+The native extraction branch/worktree is separate and unchanged by the UI work.
+Default UI builds exclude PeerChat native libraries; inherited provider/device
+tests must not be run against that APK without explicitly opting into the
+foundation build. Historical foundation validation below remains unchanged.
 
 This development worktree starts at `c87e380a6991330e83f24863efd302d4ca7c714f`.
 The Windows testing worktree and its physical-test packages remain unchanged.
