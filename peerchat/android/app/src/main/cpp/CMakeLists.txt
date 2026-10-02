@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22)
+project(PeerChatAndroidBinding LANGUAGES CXX)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../portable" portable)
+add_library(peerchat_jni SHARED peerchat_jni.cpp)
+target_compile_features(peerchat_jni PRIVATE cxx_std_17)
+target_link_libraries(peerchat_jni PRIVATE peerchat_messaging)
+set_target_properties(peerchat_jni PROPERTIES CXX_VISIBILITY_PRESET hidden)
