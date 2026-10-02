@@ -14,6 +14,6 @@ int main(int argc,char** argv){
     peerchat::Blob message(payload,payload+sizeof(payload)-1);
     if(!peerchat::verifyDevicePayload(message,signature,publicKey))return 4;
     message[0]^=1;if(peerchat::verifyDevicePayload(message,signature,publicKey))return 5;
-    std::cout<<"PASS: actual Android Keystore signature verified by unchanged Windows CNG; tamper rejected\n";
+    std::cout<<"PASS: supplied original-message signature verified by unchanged Windows CNG; tamper rejected (fixture provenance determined by caller)\n";
     return 0;
 }
