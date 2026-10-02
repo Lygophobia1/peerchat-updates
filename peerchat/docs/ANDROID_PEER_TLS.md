@@ -85,8 +85,12 @@ pin/certificate/time/provider rejection, and Windows Schannel interoperability.
 Test-only ephemeral host keys remain outside APK/source state. Public compatibility
 proof only is written under ignored build tests; no private fixture is persisted.
 
+`NativeTlsProof`: 100 actual native TlsSession/JNI/Java-TLS lifecycles with host
+test identities, synthetic byte echo, wrong-pin/provider failures and exact cleanup.
 `./tests/test-profile-jni-host.ps1`: JNI lifecycle/provider containment regression.
-`./tests/test-android-profile-artifacts.ps1`: ARM64 imports and release hook audit.
+`./tests/test-android-tls-artifacts.ps1`: ARM64 imports, release hook/contents audit
+and exact offline Java TLS runtime closure. The preexisting Compose graphics-path
+1.0.1 ARM64 artifact is pinned in the audit; no new native TLS component exists.
 `PeerTlsTest#existingIdentityNativeMutualTls`: compiled physical-device test, 100
 native TLS lifecycles reusing the ONE normal identity; no extra app/alias created.
 Must not be reported as passing until actually executed on the phone.

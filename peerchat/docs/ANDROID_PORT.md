@@ -1,12 +1,62 @@
 # Android messaging portability foundation
 
+## Current peer-TLS provider checkpoint — 2026-10-02
+
+The user approved host-only TLS preparation without waiting for the phone.
+The existing SHA256-only, non-exportable Keystore identity is preserved. Android
+now has a profile-bound native `TlsSession` byte-feed provider through
+`PeerTlsBridge`, using Bouncy Castle TLS **1.86.1** and support modules **1.86**.
+See [ANDROID_PEER_TLS.md](ANDROID_PEER_TLS.md) for exact artifact/source hashes,
+license, callback source evidence, limits and trust policy. No socket, discovery,
+login, presence or message transport is enabled. Windows remains on Schannel.
+
+Host/build gates: PASS — 1,000 original-message signatures + 100 concurrent;
+explicit raw-digest/double-hash rejection; unchanged Windows CNG verification;
+TLS1.2/1.3 mutual handshake and invalid pin/certificate/time/provider tests;
+100 real native/JNI/Java-TLS lifecycles under `-Xcheck:jni`; 1,000 native provider
+contract lifecycles; real TLS1.2 interoperability with unchanged Windows Schannel.
+Existing JNI/profile, seven Storage/DPAPI/identity/history/outbox/ACK/dedupe tests,
+group envelope and session-scope regressions pass. Existing Windows
+discovery/auth/account/device/presence/restart regressions pass. Full isolated
+Windows build/package audit passes at **4.0.1-dev.11**. Debug/instrumentation/release
+Android builds pass. ARM64 imports, exact Java TLS runtime closure, release hook
+isolation and absence of packaged TLS fixtures/credential files pass. The existing
+Compose graphics-path 1.0.1 ARM64 library is verified unchanged, not a TLS dependency.
+
+Host commands: `tests/test-peer-tls-host.ps1`, `tests/test-profile-jni-host.ps1`,
+`tests/test-portable-storage.ps1`, `tests/test-android-tls-artifacts.ps1`, plus the
+Android and Windows build commands below. TLS dependency/signing/native-binding
+checkpoints: `ea21ca6`, `5ed6a06`, `a55530a`.
+
+**Physical production Profile/Storage and Keystore-backed TLS remain untested.**
+Reconnect the same unlocked, USB-debugging-authorized moto g power (2025).
+Keep existing app/data and identity; use the existing replacement-install commands
+below. Run the full instrumentation suite, then force-stop and rerun
+`NativeProfileTest#existingNormalIdentityIsNotReplaced` and
+`PeerTlsTest#existingIdentityNativeMutualTls` in fresh instrumentation processes.
+The TLS test runs 100 lifecycles with the ONE existing normal identity, creates no
+extra alias/application, and tests synthetic byte traffic without a network.
+Do not claim Android/Windows network interoperability from this test.
+
+```powershell
+& $adb -s $serial shell am instrument -w -r -e class com.peerchat.android.PeerTlsTest com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+& $adb -s $serial shell am force-stop com.peerchat.android
+& $adb -s $serial shell am instrument -w -r -e class 'com.peerchat.android.NativeProfileTest#existingNormalIdentityIsNotReplaced,com.peerchat.android.PeerTlsTest#existingIdentityNativeMutualTls' com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Only this physical gate remains for the current provider milestone. After it,
+native Node socket/wait portability and server CA/hostname TLS/discovery adapters
+are separate next work. SessionTransportManager/DeliveryManager remain native;
+there is no parallel Kotlin engine or merge into the Windows/UI branches.
+
 ## Current production Profile/Storage boundary — 2026-10-02
 
 The isolated backend branch now binds actual native `Storage`, `Profile`,
 `SessionTransportManager` and `DeliveryManager` through `ProfileBridge` and
 `AndroidStoragePlatform`. Kotlin supplies SQLite execution, Keystore signing and
 PCR1 record protection only; native owners retain schema, transactions, ordering,
-history, outbox, ACK and dedupe policy. No network/TLS route is enabled.
+history, outbox, ACK and dedupe policy. No network route is enabled; the current
+byte-feed TLS provider is described above.
 
 `StoragePlatform` requires instance-owned SQL, record and identity providers.
 Android private keys never cross JNI; PCS1 stores the unchanged public identity
@@ -88,7 +138,8 @@ Run the persistence-only invocation in several fresh processes, verify the
 existing normal Peer ID, and inspect logcat for JNI/SQLite/Keystore/native faults.
 The public/signature-only native interoperability fixture must also verify with
 the unchanged Windows verifier. No raw record or private key is logged.
-Do not proceed to TLS until this physical production-path gate passes.
+TLS host preparation is now approved; do not claim the physical production-path
+gate passed until its instrumentation results are obtained.
 
 ## Storage integration checkpoints (host validation, phone disconnected)
 
@@ -505,8 +556,9 @@ conditional continuation authorizes secure TLS/discovery/DM interoperability,
 but does not authorize exporting this Keystore identity or duplicating the engine.
 Native profile binding has now isolated the raw-private-key assumption on Android.
 Windows still uses CNG/DPAPI/System32 SQLite; Android Profile/Storage use providers.
-TlsCredentials still imports the Windows blob into Schannel. The Android target
-links shared Storage but not Node/TlsSession. Adding only Java sockets
+Windows TlsCredentials still imports the Windows blob into Schannel. Android
+TlsSession now delegates to the opaque profile provider; Node is not yet ported.
+Adding only Java sockets
 would not prove existing SessionTransportManager/DeliveryManager, trust, ACK or
 dedupe behavior. After the production profile physical gate, the next boundary
 is Android TLS/certificate signing behind the existing byte-feed/TlsSession
@@ -514,8 +566,8 @@ contract and existing
 reliable-session path. Do not claim login, presence or real Android/Windows DM
 interoperability until those owners actually run on Android.
 
-Remaining messaging implementations: Schannel/certificate integration behind
-the existing `TlsSession` contract, remaining Windows CNG group-AEAD paths, and
+Remaining messaging implementations: physical validation of the Android peer-TLS
+provider, server CA/hostname TLS/discovery adapters, remaining Windows CNG group-AEAD paths, and
 Node socket/wait separation. Signing/hash/random/public verification and native
 profile/SQL/protected-record providers now have Android bindings; their physical
 production-path gate is pending. DeliveryManager and SessionTransportManager remain the owners; do
