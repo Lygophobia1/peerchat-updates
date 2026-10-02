@@ -181,6 +181,7 @@ using namespace storage_detail;
 struct Storage::Impl {
     std::shared_ptr<platform::SqlDatabase> database;
     std::shared_ptr<platform::RecordProtector> records;
+    std::shared_ptr<platform::IdentityProvider> identity;
     platform::SqlDatabase& sql;
     static platform::SqlDatabase& checked(const std::shared_ptr<platform::SqlDatabase>& value){
         require(value!=nullptr,"Storage database provider missing");return *value;
@@ -224,6 +225,11 @@ struct Storage::Impl {
 Storage::Storage(const std::wstring& directory):Storage(std::make_shared<WindowsSqlDatabase>(directory)){}
 Storage::Storage(std::shared_ptr<platform::SqlDatabase> database):Storage(std::move(database),std::make_shared<platform::WindowsRecordProtector>()){}
 Storage::Storage(std::shared_ptr<platform::SqlDatabase> database,std::shared_ptr<platform::RecordProtector> records):impl_(std::make_unique<Impl>(std::move(database),std::move(records))){}
+Storage::Storage(std::shared_ptr<platform::StoragePlatform> platform){
+    require(platform&&platform->database&&platform->records&&platform->identity,"Incomplete opaque storage platform");
+    impl_=std::make_unique<Impl>(platform->database,platform->records);
+    impl_->identity=platform->identity;
+}
 Storage::~Storage()=default;
 std::string Storage::newMessageId(){Blob id(16);crypto(BCryptGenRandom(nullptr,id.data(),16,BCRYPT_USE_SYSTEM_PREFERRED_RNG));id[6]=(id[6]&15)|64;id[8]=(id[8]&63)|128;return hex(id);}
 std::string Storage::publicKeyId(const Blob& key) {
@@ -237,18 +243,20 @@ Profile Storage::profile() {
     Transaction transaction(impl_->sql);
     Secret saved{impl_->get("profile")};Profile p;
     if(saved.data.empty()) {
+        if(impl_->identity){
+            p.identity=impl_->identity;p.publicKey=p.identity->publicKey();p.peerId=publicKeyId(p.publicKey);
+            saveProfile(p);transaction.commit();return p;
+        }
         Algorithm alg;Key key;crypto(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));
         crypto(BCryptGenerateKeyPair(alg.h,&key.h,256,0));crypto(BCryptFinalizeKeyPair(key.h,0));
         p.publicKey=exportKey(key.h,BCRYPT_ECCPUBLIC_BLOB);p.privateKey=exportKey(key.h,BCRYPT_ECCPRIVATE_BLOB);p.peerId=publicKeyId(p.publicKey);
         saveProfile(p);transaction.commit();return p;
     }
     Reader r(saved.data);p.peerId=r.string();p.name=r.text();auto port=r.number();require(port>0&&port<=65535,"Invalid stored listen port");p.listenPort=static_cast<std::uint16_t>(port);
-    p.publicKey=r.bytes();p.privateKey=r.bytes();r.end();validateProfile(p);transaction.commit();return p;
+    p.publicKey=r.bytes();p.privateKey=r.bytes();r.end();p.identity=impl_->identity;validateProfile(p);transaction.commit();return p;
 }
 void Storage::saveProfile(const Profile& p) {
-    // The legacy Windows store cannot reopen an opaque provider yet. Refuse
-    // persistence until the injected storage backend explicitly binds it.
-    require(!p.identity,"Opaque profile requires provider-backed storage");
+    require(p.identity==impl_->identity,"Profile identity provider does not belong to this store");
     validateProfile(p);Writer w;w.string(p.peerId);w.text(p.name);w.number(p.listenPort);w.bytes(p.publicKey);w.bytes(p.privateKey);impl_->put("profile",w.data);
 }
 void Storage::saveContact(const Contact& c) {

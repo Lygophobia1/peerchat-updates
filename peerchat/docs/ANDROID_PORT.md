@@ -2,6 +2,17 @@
 
 ## Storage integration checkpoints (host validation, phone disconnected)
 
+Step 4 (native host boundary): the explicit `StoragePlatform` constructor requires
+database, record and opaque identity providers. Profile create/reopen binds the
+same provider, persists the existing PCS1 record with an empty private-key field,
+and checks the stored public identity plus a signing proof. Wrong/missing/failing
+providers do not regenerate identity or fall back to a private blob. Default
+Windows CNG persistence remains unchanged. A host CNG signing control proves
+32 profile reopens, protected persistence, history/outbox/ACK/dedupe and absence
+of private material in the serialized opaque profile. Android binding/compilation
+of the actual Storage implementation is the remaining host-side prerequisite;
+existing foundation APK builds alone do not prove this new native path.
+
 Step 3 adds per-instance production `RecordProtector` injection. All object,
 message, history and outbox reads/writes use it; default Windows constructors
 still select unchanged DPAPI. Missing/empty/oversized provider results fail
