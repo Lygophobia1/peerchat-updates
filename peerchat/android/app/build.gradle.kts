@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+// This isolated milestone runs mock UI without loading or building the native engine.
+// Opt-in remains available for the inherited foundation tests; no native sources changed.
+val uiOnly = false
 android {
     namespace = "com.peerchat.android"
     compileSdk = 35
@@ -13,17 +16,19 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "Android dev.1"
+        versionName = "Android messaging integration.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        ndk { abiFilters += "arm64-v8a" }
-        externalNativeBuild { cmake { arguments += "-DPEERCHAT_PORTABLE_TESTS=OFF" } }
+        if (!uiOnly) {
+            ndk { abiFilters += "arm64-v8a" }
+            externalNativeBuild { cmake { arguments += "-DPEERCHAT_PORTABLE_TESTS=OFF" } }
+        }
     }
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" } }
     buildTypes {
         getByName("debug") { externalNativeBuild { cmake { arguments += "-DPEERCHAT_STORAGE_TEST_HOOKS=ON" } } }
         getByName("release") { externalNativeBuild { cmake { arguments += "-DPEERCHAT_STORAGE_TEST_HOOKS=OFF" } } }
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     // Java-version/OSGi manifests are not Android runtime resources. Base classes
     // are handled by D8; no provider/global registration is installed.
     packaging {
@@ -33,6 +38,11 @@ android {
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
+    testOptions { unitTests.isIncludeAndroidResources = true }
+    sourceSets {
+        getByName("test").java.srcDir("src/sharedUiTest/java")
+        getByName("androidTest").java.srcDir("src/sharedUiTest/java")
+    }
 }
 dependencies {
     // Pure Java TLS only. No JSSE provider registration/global provider changes.
@@ -42,9 +52,19 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    testImplementation("org.robolectric:robolectric:4.15.1")
+    testImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
-    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 configurations.configureEach {
     resolutionStrategy.force("org.bouncycastle:bctls-jdk18on:1.86.1", "org.bouncycastle:bcpkix-jdk18on:1.86",
