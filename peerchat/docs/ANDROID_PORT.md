@@ -2,6 +2,17 @@
 
 ## Storage integration checkpoints (host validation, phone disconnected)
 
+Android compilation now includes the actual shared `storage.cpp`/`group.cpp`.
+Windows-only opening, DPAPI, CNG generation and private-blob import remain under
+Windows guards. Android hashing/random/public-signature verification use the
+existing pinned MbedTLS 3.6.7 source (`068ff080b369adfac81509f9b57b2afabaf82dc5`),
+crypto dependency closure only. Missing providers throw; no portable software
+private-key fallback exists. Public key/signature representations remain CNG
+P-256/72-byte public and raw 64-byte r/s. A host build selecting portable crypto
+verified CNG signatures and the full opaque-profile persistence regression.
+ARM64 app/test APK compilation passes with the shared Storage code included.
+JNI SQLite/Keystore binding and physical execution are still pending.
+
 Step 4 (native host boundary): the explicit `StoragePlatform` constructor requires
 database, record and opaque identity providers. Profile create/reopen binds the
 same provider, persists the existing PCS1 record with an empty private-key field,

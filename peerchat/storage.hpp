@@ -47,8 +47,9 @@ struct StoredMessage {
 };
 
 // Thread-confined embedded SQLite store. Construct/use on a worker, not the GUI.
-// Every profile/contact/message payload is protected with current-user DPAPI
-// before binding it to SQLite. SQLite never receives plaintext message content.
+// Every profile/contact/message payload is protected before binding to SQLite:
+// current-user DPAPI on Windows, an explicit profile-bound provider elsewhere.
+// SQLite never receives plaintext message content.
 class Storage {
 public:
     explicit Storage(const std::wstring& directory);

@@ -5,10 +5,16 @@
 #include "group.hpp"
 #include "platform/identity_provider.hpp"
 #include "platform/storage_backend.hpp"
+#include "portable/utf8.hpp"
+#if defined(_WIN32)
 #include <windows.h>
 #include <wincrypt.h>
 #include "platform/windows_record_protection.hpp"
 #include <bcrypt.h>
+#endif
+#if !defined(_WIN32) || defined(PEERCHAT_PORTABLE_CRYPTO)
+#include "platform/portable_crypto.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -19,6 +25,7 @@ namespace peerchat {
 namespace storage_detail {
 constexpr int MaxRecord=1024*1024;
 void require(bool condition,const char* message) {if(!condition)throw std::runtime_error(message);}
+#if defined(_WIN32)
 void crypto(NTSTATUS status) {require(status>=0,"Windows cryptographic operation failed");}
 std::string utf8(const std::wstring& s) {
     require(s.size()<=32768,"Text field too long");if(s.empty())return {};
@@ -32,6 +39,17 @@ std::wstring wide(const std::string& s) {
     require(n>0,"Invalid stored Unicode text");std::wstring out(n,L'\0');
     MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),static_cast<int>(s.size()),out.data(),n);return out;
 }
+#else
+std::string utf8(const std::wstring& value){require(unicode::utf16Units(value)<=32768,"Text field too long");return unicode::encode(value);}
+std::wstring wide(const std::string& value){return unicode::decode(value);}
+#endif
+void wipe(void* value,size_t length){
+#if defined(_WIN32)
+    SecureZeroMemory(value,length);
+#else
+    platform::portable_crypto::wipe(value,length);
+#endif
+}
 std::string hex(const Blob& bytes) {
     constexpr char digits[]="0123456789abcdef";std::string s;
     for(auto b:bytes){s+=digits[b>>4];s+=digits[b&15];}return s;
@@ -41,7 +59,7 @@ bool identifier(const std::string& s,size_t size=64) {
 }
 struct Writer {
     Blob data{'P','C','S',1};
-    ~Writer(){SecureZeroMemory(data.data(),data.size());}
+    ~Writer(){wipe(data.data(),data.size());}
     void number(std::uint64_t v){for(int i=0;i<8;i++)data.push_back(static_cast<unsigned char>(v>>(8*i)));}
     void bytes(const Blob& b){require(b.size()<=MaxRecord,"Record field too large");number(b.size());data.insert(data.end(),b.begin(),b.end());}
     void string(const std::string& s){bytes(Blob(s.begin(),s.end()));}
@@ -59,8 +77,9 @@ struct Reader {
 };
 struct Secret {
     Blob data;
-    ~Secret(){SecureZeroMemory(data.data(),data.size());}
+    ~Secret(){wipe(data.data(),data.size());}
 };
+#if defined(_WIN32)
 Blob protect(const Blob& plain,const std::string& context,bool encrypt) {
     platform::WindowsRecordProtector provider;
     return encrypt?provider.protect(plain,context):provider.unprotect(plain,context);
@@ -71,6 +90,7 @@ Blob exportKey(BCRYPT_KEY_HANDLE key,LPCWSTR kind) {
     ULONG size=0;crypto(BCryptExportKey(key,nullptr,kind,nullptr,0,&size,0));Blob b(size);
     crypto(BCryptExportKey(key,nullptr,kind,b.data(),size,&size,0));return b;
 }
+#endif
 void validateProfile(const Profile& p) {
     require(!p.name.empty()&&p.name.size()<=64&&p.listenPort!=0,"Invalid profile settings");
     require(p.privateKey.size()<=1024&&p.publicKey.size()<=1024,"Invalid identity size");
@@ -80,11 +100,16 @@ void validateProfile(const Profile& p) {
         require(verifyDevicePayload(proof,p.identity->sign(proof),p.publicKey),"Opaque profile signing failed");
         return;
     }
+#if defined(_WIN32)
     Algorithm alg;Key key;crypto(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));
     crypto(BCryptImportKeyPair(alg.h,nullptr,BCRYPT_ECCPRIVATE_BLOB,&key.h,const_cast<PUCHAR>(p.privateKey.data()),static_cast<ULONG>(p.privateKey.size()),0));
     require(exportKey(key.h,BCRYPT_ECCPUBLIC_BLOB)==p.publicKey&&Storage::publicKeyId(p.publicKey)==p.peerId,"Identity key mismatch");
+#else
+    throw std::runtime_error("Opaque identity provider required");
+#endif
 }
 
+#if defined(_WIN32)
 // Windows ships the established SQLite implementation. Resolve only from System32
 // to avoid loading a DLL planted beside a downloaded app. ABI declarations below
 // cover the small stable public SQLite API subset used by this store.
@@ -160,6 +185,7 @@ struct WindowsSqlDatabase final : platform::SqlDatabase {
     void execute(const std::string& sql) override{require(api.exec(handle,sql.c_str(),nullptr,nullptr,nullptr)==0,"Local database operation failed");}
     std::unique_ptr<platform::SqlStatement> prepare(const std::string& sql) override{return std::make_unique<WindowsSqlStatement>(api,handle,sql);}
 };
+#endif
 struct Statement : platform::CheckedSqlStatement {
     using platform::CheckedSqlStatement::CheckedSqlStatement;
 };
@@ -222,8 +248,13 @@ struct Storage::Impl {
         Statement statement(sql,"DELETE FROM objects WHERE k=?");statement.text(1,key);statement.row();
     }
 };
+#if defined(_WIN32)
 Storage::Storage(const std::wstring& directory):Storage(std::make_shared<WindowsSqlDatabase>(directory)){}
 Storage::Storage(std::shared_ptr<platform::SqlDatabase> database):Storage(std::move(database),std::make_shared<platform::WindowsRecordProtector>()){}
+#else
+Storage::Storage(const std::wstring&){throw std::runtime_error("Storage platform providers required");}
+Storage::Storage(std::shared_ptr<platform::SqlDatabase>){throw std::runtime_error("Storage record provider required");}
+#endif
 Storage::Storage(std::shared_ptr<platform::SqlDatabase> database,std::shared_ptr<platform::RecordProtector> records):impl_(std::make_unique<Impl>(std::move(database),std::move(records))){}
 Storage::Storage(std::shared_ptr<platform::StoragePlatform> platform){
     require(platform&&platform->database&&platform->records&&platform->identity,"Incomplete opaque storage platform");
@@ -231,13 +262,24 @@ Storage::Storage(std::shared_ptr<platform::StoragePlatform> platform){
     impl_->identity=platform->identity;
 }
 Storage::~Storage()=default;
-std::string Storage::newMessageId(){Blob id(16);crypto(BCryptGenRandom(nullptr,id.data(),16,BCRYPT_USE_SYSTEM_PREFERRED_RNG));id[6]=(id[6]&15)|64;id[8]=(id[8]&63)|128;return hex(id);}
+std::string Storage::newMessageId(){
+#if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
+    Blob id(16);crypto(BCryptGenRandom(nullptr,id.data(),16,BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+#else
+    Blob id=platform::portable_crypto::random(16);
+#endif
+    id[6]=(id[6]&15)|64;id[8]=(id[8]&63)|128;return hex(id);
+}
 std::string Storage::publicKeyId(const Blob& key) {
+#if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
     Algorithm alg;crypto(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_SHA256_ALGORITHM,nullptr,0));
     BCRYPT_HASH_HANDLE hash{};crypto(BCryptCreateHash(alg.h,&hash,nullptr,0,nullptr,0,0));Blob digest(32);
     NTSTATUS status=BCryptHashData(hash,const_cast<PUCHAR>(key.data()),static_cast<ULONG>(key.size()),0);
     if(status>=0)status=BCryptFinishHash(hash,digest.data(),32,0);
     BCryptDestroyHash(hash);crypto(status);return hex(digest);
+#else
+    return hex(platform::portable_crypto::sha256(key));
+#endif
 }
 Profile Storage::profile() {
     Transaction transaction(impl_->sql);
@@ -247,10 +289,14 @@ Profile Storage::profile() {
             p.identity=impl_->identity;p.publicKey=p.identity->publicKey();p.peerId=publicKeyId(p.publicKey);
             saveProfile(p);transaction.commit();return p;
         }
+#if defined(_WIN32)
         Algorithm alg;Key key;crypto(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));
         crypto(BCryptGenerateKeyPair(alg.h,&key.h,256,0));crypto(BCryptFinalizeKeyPair(key.h,0));
         p.publicKey=exportKey(key.h,BCRYPT_ECCPUBLIC_BLOB);p.privateKey=exportKey(key.h,BCRYPT_ECCPRIVATE_BLOB);p.peerId=publicKeyId(p.publicKey);
         saveProfile(p);transaction.commit();return p;
+#else
+        throw std::runtime_error("Opaque identity provider required");
+#endif
     }
     Reader r(saved.data);p.peerId=r.string();p.name=r.text();auto port=r.number();require(port>0&&port<=65535,"Invalid stored listen port");p.listenPort=static_cast<std::uint16_t>(port);
     p.publicKey=r.bytes();p.privateKey=r.bytes();r.end();p.identity=impl_->identity;validateProfile(p);transaction.commit();return p;
