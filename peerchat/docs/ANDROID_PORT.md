@@ -2,6 +2,16 @@
 
 ## Storage integration checkpoints (host validation, phone disconnected)
 
+Step 3 adds per-instance production `RecordProtector` injection. All object,
+message, history and outbox reads/writes use it; default Windows constructors
+still select unchanged DPAPI. Missing/empty/oversized provider results fail
+closed with no plaintext/decode fallback. Host tests use observed DPAPI (not
+an Android Keystore simulation), covering 32 restarts, missing provider/key,
+corruption/truncation/tampering, default-provider cross-read and disk scan.
+Android PCR1 binding and device validation are still pending; these host tests
+do not claim to validate Android Keystore runtime behavior.
+Run `tests/test-portable-storage.ps1` for the consolidated host regression gate.
+
 Step 2 binds production SQL operations to `SqlDatabase`/`SqlStatement` and
 the checked cursor/transaction boundary. Windows opens the same System32 SQLite
 implementation; schema SQL and protected record formats are unchanged. An

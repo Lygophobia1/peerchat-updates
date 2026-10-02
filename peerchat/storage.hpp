@@ -5,7 +5,7 @@
 #include <vector>
 
 namespace peerchat {
-namespace platform { class IdentityProvider; class StoragePlatform; class SqlDatabase; }
+namespace platform { class IdentityProvider; class StoragePlatform; class SqlDatabase; class RecordProtector; }
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
@@ -53,6 +53,7 @@ class Storage {
 public:
     explicit Storage(const std::wstring& directory);
     explicit Storage(std::shared_ptr<platform::SqlDatabase> database);
+    Storage(std::shared_ptr<platform::SqlDatabase> database,std::shared_ptr<platform::RecordProtector> records);
     explicit Storage(std::shared_ptr<platform::StoragePlatform> platform);
     ~Storage();
     Storage(const Storage&)=delete;

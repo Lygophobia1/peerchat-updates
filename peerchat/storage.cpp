@@ -180,11 +180,13 @@ void encodeMessage(Writer& w,const StoredMessage& m){w.string(m.id);w.string(m.s
 using namespace storage_detail;
 struct Storage::Impl {
     std::shared_ptr<platform::SqlDatabase> database;
+    std::shared_ptr<platform::RecordProtector> records;
     platform::SqlDatabase& sql;
     static platform::SqlDatabase& checked(const std::shared_ptr<platform::SqlDatabase>& value){
         require(value!=nullptr,"Storage database provider missing");return *value;
     }
-    explicit Impl(std::shared_ptr<platform::SqlDatabase> value):database(std::move(value)),sql(checked(database)) {
+    explicit Impl(std::shared_ptr<platform::SqlDatabase> value,std::shared_ptr<platform::RecordProtector> protection):database(std::move(value)),records(std::move(protection)),sql(checked(database)) {
+            require(records!=nullptr,"Storage record provider missing");
             execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON;");
             execute("CREATE TABLE IF NOT EXISTS objects(k TEXT PRIMARY KEY,b BLOB NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS messages(id TEXT UNIQUE NOT NULL,peer TEXT NOT NULL,b BLOB NOT NULL);"
@@ -202,6 +204,11 @@ struct Storage::Impl {
                     "CREATE TABLE IF NOT EXISTS group_key_receipts(group_id TEXT NOT NULL,key_generation INTEGER NOT NULL,recipient_peer TEXT NOT NULL,PRIMARY KEY(group_id,key_generation,recipient_peer));");
     }
     void execute(const char* statement){sql.execute(statement);}
+    Blob protect(const Blob& value,const std::string& context,bool encrypt){
+        auto result=encrypt?records->protect(value,context):records->unprotect(value,context);
+        require(!result.empty()&&result.size()<=MaxRecord,"Invalid protected record provider result");
+        return result;
+    }
     Blob get(const std::string& key) {
         Statement s(sql,"SELECT b FROM objects WHERE k=?");s.text(1,key);if(!s.row())return {};
         return protect(s.bytes(0),"PeerChat.v1/"+key,false);
@@ -215,7 +222,8 @@ struct Storage::Impl {
     }
 };
 Storage::Storage(const std::wstring& directory):Storage(std::make_shared<WindowsSqlDatabase>(directory)){}
-Storage::Storage(std::shared_ptr<platform::SqlDatabase> database):impl_(std::make_unique<Impl>(std::move(database))){}
+Storage::Storage(std::shared_ptr<platform::SqlDatabase> database):Storage(std::move(database),std::make_shared<platform::WindowsRecordProtector>()){}
+Storage::Storage(std::shared_ptr<platform::SqlDatabase> database,std::shared_ptr<platform::RecordProtector> records):impl_(std::make_unique<Impl>(std::move(database),std::move(records))){}
 Storage::~Storage()=default;
 std::string Storage::newMessageId(){Blob id(16);crypto(BCryptGenRandom(nullptr,id.data(),16,BCRYPT_USE_SYSTEM_PREFERRED_RNG));id[6]=(id[6]&15)|64;id[8]=(id[8]&63)|128;return hex(id);}
 std::string Storage::publicKeyId(const Blob& key) {
@@ -256,7 +264,7 @@ void Storage::removeContact(const std::string& peerId) {
 std::vector<Contact> Storage::contacts() {
     Statement s(impl_->sql,"SELECT k,b FROM objects WHERE k LIKE 'contact/%' ORDER BY k");std::vector<Contact> result;
     while(s.row()) {
-        std::string key=s.text(0);Secret plain{protect(s.bytes(1),"PeerChat.v1/"+key,false)};Reader r(plain.data);Contact c;
+        std::string key=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/"+key,false)};Reader r(plain.data);Contact c;
         c.peerId=r.string();c.name=r.text();c.publicKey=r.bytes();auto trust=r.number(),count=r.number();
         require(trust<=1&&count<=128&&key=="contact/"+c.peerId&&(c.publicKey.empty()||publicKeyId(c.publicKey)==c.peerId),"Invalid contact record");c.verified=trust==1;
         for(std::uint64_t i=0;i<count;i++){Endpoint e;e.host=r.text();auto port=r.number();require(port>0&&port<=65535,"Invalid contact port");e.port=static_cast<std::uint16_t>(port);c.endpoints.push_back(std::move(e));}
@@ -271,10 +279,10 @@ bool Storage::append(const std::string& conversation,const StoredMessage& m) {
     Statement existing(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");existing.text(1,m.id);
     if(existing.row()) {
         require(existing.text(0)==conversation,"Message ID reused in another conversation");
-        Secret plain{protect(existing.bytes(1),"PeerChat.v1/message/"+m.id+"/"+conversation,false)};auto old=decodeMessage(plain.data);
+        Secret plain{impl_->protect(existing.bytes(1),"PeerChat.v1/message/"+m.id+"/"+conversation,false)};auto old=decodeMessage(plain.data);
         require(old.id==m.id&&old.sender==m.sender&&old.recipient==m.recipient&&old.text==m.text&&old.utcMilliseconds==m.utcMilliseconds,"Conflicting duplicate message ID");transaction.commit();return false;
     }
-    Writer plain;encodeMessage(plain,m);Blob encrypted=protect(plain.data,"PeerChat.v1/message/"+m.id+"/"+conversation,true);
+    Writer plain;encodeMessage(plain,m);Blob encrypted=impl_->protect(plain.data,"PeerChat.v1/message/"+m.id+"/"+conversation,true);
     Statement insert(impl_->sql,"INSERT INTO messages(id,peer,b) VALUES(?,?,?)");insert.text(1,m.id);insert.text(2,conversation);insert.blob(3,encrypted);insert.row();
     if(m.delivery!=Delivery::Delivered){Statement pending(impl_->sql,"INSERT INTO outbox(id,peer) VALUES(?,?)");pending.text(1,m.id);pending.text(2,conversation);pending.row();}
     transaction.commit();return true;
@@ -283,9 +291,9 @@ void Storage::acknowledge(const std::string& id,Delivery delivery) {
     require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=2,"Invalid delivery acknowledgement");
     Transaction transaction(impl_->sql);
     Statement s(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");s.text(1,id);if(!s.row()){transaction.commit();return;}
-    std::string peer=s.text(0);Secret plain{protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);
+    std::string peer=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);
     require(m.id==id,"Stored message ID mismatch");if(delivery<=m.delivery){transaction.commit();return;}m.delivery=delivery;
-    Writer writer;encodeMessage(writer,m);Blob encrypted=protect(writer.data,"PeerChat.v1/message/"+id+"/"+peer,true);
+    Writer writer;encodeMessage(writer,m);Blob encrypted=impl_->protect(writer.data,"PeerChat.v1/message/"+id+"/"+peer,true);
     Statement update(impl_->sql,"UPDATE messages SET b=? WHERE id=?");update.blob(1,encrypted);update.text(2,id);update.row();
     if(delivery==Delivery::Delivered){Statement remove(impl_->sql,"DELETE FROM outbox WHERE id=?");remove.text(1,id);remove.row();}
     transaction.commit();
@@ -308,7 +316,7 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
     Statement s(impl_->sql,"SELECT rowid,id,b FROM messages WHERE peer=? AND rowid<? ORDER BY rowid DESC LIMIT ?");
     s.text(1,conversation);s.number(2,beforeSequence);s.number(3,limit);std::vector<StoredMessage> result;
     while(s.row()) {
-        auto id=s.text(1);Secret plain{protect(s.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Stored message ID mismatch");m.sequence=s.number(0);result.push_back(std::move(m));
+        auto id=s.text(1);Secret plain{impl_->protect(s.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Stored message ID mismatch");m.sequence=s.number(0);result.push_back(std::move(m));
     }
     std::reverse(result.begin(),result.end());return result;
 }
@@ -323,7 +331,7 @@ std::vector<StoredMessage> Storage::pending(const std::string& conversation,int 
     require(identifier(conversation)&&limit>0&&limit<=1000,"Invalid outbox page request");
     Statement s(impl_->sql,"SELECT m.id,m.b FROM outbox o JOIN messages m ON o.id=m.id WHERE o.peer=? ORDER BY m.rowid LIMIT ?");s.text(1,conversation);s.number(2,limit);
     std::vector<StoredMessage> result;
-    while(s.row()){auto id=s.text(0);Secret plain{protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Outbox identity mismatch");result.push_back(std::move(m));}
+    while(s.row()){auto id=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Outbox identity mismatch");result.push_back(std::move(m));}
     return result;
 }
 bool Storage::appendGroupEvent(const GroupEvent& event) {
@@ -332,15 +340,15 @@ bool Storage::appendGroupEvent(const GroupEvent& event) {
     Statement existing(impl_->sql,"SELECT group_id,b FROM group_events WHERE event_id=?");existing.text(1,event.eventId);
     if(existing.row()){
         require(existing.text(0)==event.groupId,"Group event ID reused in another group");
-        Secret saved{protect(existing.bytes(1),"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,false)};
+        Secret saved{impl_->protect(existing.bytes(1),"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,false)};
         require(saved.data==plain,"Conflicting duplicate group event ID");transaction.commit();return false;
     }
-    Blob encrypted=protect(plain,"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,true);
+    Blob encrypted=impl_->protect(plain,"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,true);
     Statement insert(impl_->sql,"INSERT INTO group_events(event_id,group_id,logical_order,b) VALUES(?,?,?,?)");insert.text(1,event.eventId);insert.text(2,event.groupId);insert.number(3,static_cast<std::int64_t>(event.logicalOrder));insert.blob(4,encrypted);insert.row();transaction.commit();return true;
 }
 std::vector<GroupEvent> Storage::groupEvents(const std::string& groupId) {
     require(identifier(groupId,32),"Invalid Group ID");Statement statement(impl_->sql,"SELECT event_id,b FROM group_events WHERE group_id=? ORDER BY logical_order,event_id");statement.text(1,groupId);std::vector<GroupEvent> events;
-    while(statement.row()){std::string eventId=statement.text(0);Secret plain{protect(statement.bytes(1),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Stored group event identity mismatch");events.push_back(std::move(event));}return events;
+    while(statement.row()){std::string eventId=statement.text(0);Secret plain{impl_->protect(statement.bytes(1),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Stored group event identity mismatch");events.push_back(std::move(event));}return events;
 }
 std::vector<std::string> Storage::groupIds() {
     Statement statement(impl_->sql,"SELECT DISTINCT group_id FROM group_events ORDER BY group_id");std::vector<std::string> groups;while(statement.row()){auto id=statement.text(0);require(identifier(id,32),"Invalid stored Group ID");groups.push_back(std::move(id));}return groups;
@@ -349,7 +357,7 @@ GroupAccount Storage::groupAccount(){Blob saved=impl_->get("group-account");if(s
 void Storage::saveGroupAccount(const GroupAccount& account){require(account.accountId>0&&!account.name.empty()&&account.name.size()<=64,"Invalid group account binding");Writer writer;writer.number(account.accountId);writer.text(account.name);impl_->put("group-account",writer.data);}
 void Storage::queueGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery identity");Statement statement(impl_->sql,"INSERT OR IGNORE INTO group_outbox(event_id,peer_id) VALUES(?,?)");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
 void Storage::acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery acknowledgement");Statement statement(impl_->sql,"DELETE FROM group_outbox WHERE event_id=? AND peer_id=?");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
-std::vector<GroupEvent> Storage::pendingGroupEvents(const std::string& peerId,int limit){require(identifier(peerId)&&limit>0&&limit<=256,"Invalid group outbox request");Statement statement(impl_->sql,"SELECT e.event_id,e.group_id,e.b FROM group_outbox o JOIN group_events e ON e.event_id=o.event_id WHERE o.peer_id=? ORDER BY e.logical_order,e.event_id LIMIT ?");statement.text(1,peerId);statement.number(2,limit);std::vector<GroupEvent> events;while(statement.row()){auto eventId=statement.text(0),groupId=statement.text(1);Secret plain{protect(statement.bytes(2),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Group outbox identity mismatch");events.push_back(std::move(event));}return events;}
+std::vector<GroupEvent> Storage::pendingGroupEvents(const std::string& peerId,int limit){require(identifier(peerId)&&limit>0&&limit<=256,"Invalid group outbox request");Statement statement(impl_->sql,"SELECT e.event_id,e.group_id,e.b FROM group_outbox o JOIN group_events e ON e.event_id=o.event_id WHERE o.peer_id=? ORDER BY e.logical_order,e.event_id LIMIT ?");statement.text(1,peerId);statement.number(2,limit);std::vector<GroupEvent> events;while(statement.row()){auto eventId=statement.text(0),groupId=statement.text(1);Secret plain{impl_->protect(statement.bytes(2),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Group outbox identity mismatch");events.push_back(std::move(event));}return events;}
 void Storage::saveGroupKey(const std::string& groupId,std::uint64_t generation,const Blob& key){
     require(identifier(groupId,32)&&generation>0&&generation<=INT64_MAX&&key.size()==32,"Invalid group key identity");
     std::string record="group-key/"+groupId+"/"+std::to_string(generation);
@@ -426,15 +434,15 @@ void Storage::queueGroupKeyHandoff(const GroupKeyHandoff& handoff){
     std::string context="PeerChat.v1/group-key-handoff/"+handoff.id+"/"+handoff.recipientPeerId;
     Transaction transaction(impl_->sql);
     Statement previous(impl_->sql,"SELECT group_id,recipient_peer,b FROM group_key_outbox WHERE id=?");previous.text(1,handoff.id);
-    if(previous.row()){require(previous.text(0)==handoff.groupId&&previous.text(1)==handoff.recipientPeerId,"Group key handoff ID reused for another destination");Secret saved{protect(previous.bytes(2),context,false)};require(saved.data==writer.data,"Conflicting group key handoff ID");transaction.commit();return;}
-    Blob protectedRecord=protect(writer.data,context,true);
+    if(previous.row()){require(previous.text(0)==handoff.groupId&&previous.text(1)==handoff.recipientPeerId,"Group key handoff ID reused for another destination");Secret saved{impl_->protect(previous.bytes(2),context,false)};require(saved.data==writer.data,"Conflicting group key handoff ID");transaction.commit();return;}
+    Blob protectedRecord=impl_->protect(writer.data,context,true);
     Statement insert(impl_->sql,"INSERT INTO group_key_outbox(id,group_id,key_generation,recipient_peer,b) VALUES(?,?,?,?,?)");insert.text(1,handoff.id);insert.text(2,handoff.groupId);insert.number(3,static_cast<std::int64_t>(handoff.keyGeneration));insert.text(4,handoff.recipientPeerId);insert.blob(5,protectedRecord);insert.row();transaction.commit();
 }
 std::vector<GroupKeyHandoff> Storage::pendingGroupKeyHandoffs(const std::string& recipientPeerId,int limit){
     require(identifier(recipientPeerId)&&limit>0&&limit<=256,"Invalid group key outbox request");
     Statement statement(impl_->sql,"SELECT id,b FROM group_key_outbox WHERE recipient_peer=? ORDER BY rowid LIMIT ?");statement.text(1,recipientPeerId);statement.number(2,limit);
     std::vector<GroupKeyHandoff> pending;
-    while(statement.row()){std::string id=statement.text(0);Secret plain{protect(statement.bytes(1),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};Reader reader(plain.data);GroupKeyHandoff offer;offer.id=reader.string();offer.groupId=reader.string();offer.serverGroupId=reader.string();offer.distributorPeerId=reader.string();offer.recipientPeerId=reader.string();offer.rosterGeneration=reader.number();offer.keyGeneration=reader.number();offer.contentKey=reader.bytes();reader.end();require(offer.id==id&&offer.recipientPeerId==recipientPeerId&&identifier(offer.groupId,32)&&identifier(offer.serverGroupId,32)&&identifier(offer.distributorPeerId)&&offer.contentKey.size()==32,"Stored group key handoff identity mismatch");pending.push_back(std::move(offer));}
+    while(statement.row()){std::string id=statement.text(0);Secret plain{impl_->protect(statement.bytes(1),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};Reader reader(plain.data);GroupKeyHandoff offer;offer.id=reader.string();offer.groupId=reader.string();offer.serverGroupId=reader.string();offer.distributorPeerId=reader.string();offer.recipientPeerId=reader.string();offer.rosterGeneration=reader.number();offer.keyGeneration=reader.number();offer.contentKey=reader.bytes();reader.end();require(offer.id==id&&offer.recipientPeerId==recipientPeerId&&identifier(offer.groupId,32)&&identifier(offer.serverGroupId,32)&&identifier(offer.distributorPeerId)&&offer.contentKey.size()==32,"Stored group key handoff identity mismatch");pending.push_back(std::move(offer));}
     return pending;
 }
 void Storage::acknowledgeGroupKeyHandoff(const std::string& id,const std::string& recipientPeerId){
@@ -442,7 +450,7 @@ void Storage::acknowledgeGroupKeyHandoff(const std::string& id,const std::string
     Transaction transaction(impl_->sql);
     Statement found(impl_->sql,"SELECT b FROM group_key_outbox WHERE id=? AND recipient_peer=?");found.text(1,id);found.text(2,recipientPeerId);
     require(found.row(),"Group key acknowledgement has no pending handoff");
-    Secret plain{protect(found.bytes(0),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};
+    Secret plain{impl_->protect(found.bytes(0),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};
     Reader reader(plain.data);require(reader.string()==id,"Stored group key handoff ID mismatch");
     std::string group=reader.string();reader.string();reader.string();require(reader.string()==recipientPeerId,"Stored group key recipient mismatch");
     reader.number();std::uint64_t generation=reader.number();Secret key{reader.bytes()};reader.end();
