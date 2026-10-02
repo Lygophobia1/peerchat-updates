@@ -6,6 +6,7 @@
 #include "media_ice_configuration.hpp"
 #include "screen_share_manager.hpp"
 #include "h264_rtp_receiver.hpp"
+#include "screen_media_backend.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -162,10 +163,9 @@ public:
         std::vector<Event> result;
         if (!options_.sender && !stopping_) {
             std::lock_guard lock(mutex_);
-            if (decoder_ && !stopping_) {
+            if (receiveBackend_ && !stopping_) {
                 const auto now = monotonicMs();
-                rtpReceiver_.tick(now,
-                    [this](const H264RtpReceiver::AccessUnit& au) { return submitAccessUnit(au); });
+                receiveBackend_.tick(now);
                 requestRecoveryKeyframe(now);
             }
         }
@@ -182,25 +182,18 @@ public:
                 events_.pop_front();
             }
         }
-        if (options_.sender && encoder_ && trackOpen_ && !stopping_) {
+        if (options_.sender && captureBackend_ && trackOpen_ && !stopping_) {
             const auto now = monotonicMs();
             if (senderContinuity_.waiting() && now >= nextSenderRecoveryRequestMs_) {
                 nextSenderRecoveryRequestMs_ = now + 500;
                 requestEncoderKeyframe();
             }
-            if (encodedScratch_.empty()) encodedScratch_.resize(1024 * 1024);
             for (unsigned count = 0; count < 4; ++count) {
                 pc_screen_encoded_frame info{};
                 info.structure_size = sizeof(info);
-                int popped = api_.encoderPop(encoder_, encodedScratch_.data(),
-                    static_cast<std::uint32_t>(encodedScratch_.size()), &info);
-                if (popped == -1 && info.length <= 8 * 1024 * 1024) {
-                    encodedScratch_.resize(info.length);
-                    popped = api_.encoderPop(encoder_, encodedScratch_.data(),
-                        static_cast<std::uint32_t>(encodedScratch_.size()), &info);
-                }
+                const int popped = captureBackend_.pop(info);
                 if (popped == 0) break;
-                if (popped < 0 || info.length == 0 || info.length > encodedScratch_.size()) {
+                if (popped < 0) {
                     failed_ = true;
                     if (!localFailureReported_) {
                         localFailureReported_ = true;
@@ -214,7 +207,7 @@ public:
                         info.codec_configuration_only != 0)) {
                     ++senderContinuityDropped_; continue;
                 }
-                if (rtcSendMessage(track_, reinterpret_cast<const char*>(encodedScratch_.data()),
+                if (rtcSendMessage(track_, reinterpret_cast<const char*>(captureBackend_.data()),
                         static_cast<int>(info.length)) < 0) {
                     senderContinuity_.sendFailed(); break;
                 }
@@ -228,18 +221,18 @@ public:
                         static_cast<std::uint32_t>(90000u / options_.fps));
             }
         }
-        if (!options_.sender && decoder_ && !localFailureReported_) {
+        if (!options_.sender && receiveBackend_ && !localFailureReported_) {
             pc_screen_decoder_status status{};
             status.structure_size = sizeof(status);
-            const bool haveStatus = api_.decoderStatus(decoder_, &status) != 0;
+            const bool haveStatus = receiveBackend_.status(status) != 0;
             if (haveStatus && status.last_decoded_timestamp_valid) {
                 std::lock_guard lock(mutex_);
                 // Match an actual decoder output to the admitted recovery IDR,
                 // allowing later pictures from that same clean reference state.
-                if (recoveryOutputPending_ && !rtpReceiver_.needsKeyframe() &&
-                    status.last_decoded_timestamp >= recoveryTimestamp_ &&
-                    status.last_decoded_timestamp - recoveryTimestamp_ < 10000000ull * 60) {
-                    ++recoveryCompleted_; recoveryOutputPending_ = false;
+                if (receiveBackend_.recoveryOutputPending_ && !receiveBackend_.rtpReceiver_.needsKeyframe() &&
+                    status.last_decoded_timestamp >= receiveBackend_.recoveryTimestamp_ &&
+                    status.last_decoded_timestamp - receiveBackend_.recoveryTimestamp_ < 10000000ull * 60) {
+                    ++receiveBackend_.recoveryCompleted_; receiveBackend_.recoveryOutputPending_ = false;
                 }
             }
             if (haveStatus && status.failed) {
@@ -251,7 +244,7 @@ public:
                     ? "Windows screen presentation failed" : "Windows H.264 screen decoder failed", {}, domain);
             }
         }
-        if (options_.sender && encoder_ && !localFailureReported_ &&
+        if (options_.sender && captureBackend_ && !localFailureReported_ &&
             std::chrono::steady_clock::now() >= startupDeadline_) {
             const auto data = statistics();
             if (!data.captured && !data.encoderFailed) {
@@ -273,10 +266,10 @@ public:
         value.rtpParseFailures = rtpParseFailures_;
         value.remoteTrackCallbacks = remoteTrackCallbacks_;
         value.senderContinuityDropped = senderContinuityDropped_;
-        value.accessUnitsDelivered = accessUnitsDelivered_;
+        value.accessUnitsDelivered = receiveBackend_.accessUnitsDelivered_;
         {
             std::lock_guard lock(mutex_);
-            const auto& rtp = rtpReceiver_.stats();
+            const auto& rtp = receiveBackend_.rtpReceiver_.stats();
             value.lostPackets = rtp.incompleteAu;
             value.rtpSequenceGap = rtp.sequenceLoss;
             value.rtpOutOfOrder = rtp.outOfOrder;
@@ -289,9 +282,9 @@ public:
             value.corruptAuPrevented = rtp.prevented;
             value.recoveryKeyframeRequests = recoveryKeyframeRequests_;
             value.recoveryAccepted = rtp.recoveryAccepted;
-            value.recoveryCompleted = recoveryCompleted_;
+            value.recoveryCompleted = receiveBackend_.recoveryCompleted_;
             value.decoderQueueRefused = rtp.decoderQueueRefused;
-            value.awaitingRecoveryIdr = rtpReceiver_.needsKeyframe();
+            value.awaitingRecoveryIdr = receiveBackend_.rtpReceiver_.needsKeyframe();
             value.receiverSps = rtp.sps; value.receiverPps = rtp.pps;
             value.receiverIdr = rtp.idr; value.receiverNonIdr = rtp.nonIdr;
         }
@@ -303,10 +296,10 @@ public:
         value.trackOpen = trackOpen_;
         value.width = encodedWidth_;
         value.height = encodedHeight_;
-        if (encoder_) {
+        if (captureBackend_) {
             pc_screen_encoder_status status{};
             status.structure_size = sizeof(status);
-            if (api_.encoderStatus(encoder_, &status)) {
+            if (captureBackend_.status(status)) {
                 value.captured = status.captured_frames;
                 value.encoderSubmitted = status.submitted_to_encoder;
                 value.encoded = status.encoded_frames;
@@ -353,10 +346,10 @@ public:
                 value.failed = value.failed || value.encoderFailed;
             }
         }
-        if (decoder_) {
+        if (receiveBackend_) {
             pc_screen_decoder_status status{};
             status.structure_size = sizeof(status);
-            if (api_.decoderStatus(decoder_, &status)) {
+            if (receiveBackend_.status(status)) {
                 value.decoded = status.decoded_frames;
                 value.presented = status.presented_frames;
                 value.failed = value.failed || status.failed != 0;
@@ -416,11 +409,11 @@ public:
         std::wstring firstAccessUnits = L"none";
         {
             std::lock_guard lock(mutex_);
-            if (!firstAccessUnitNals_.empty()) {
+            if (!receiveBackend_.firstAccessUnitNals_.empty()) {
                 firstAccessUnits.clear();
-                for (size_t i = 0; i < firstAccessUnitNals_.size(); ++i) {
+                for (size_t i = 0; i < receiveBackend_.firstAccessUnitNals_.size(); ++i) {
                     if (i) firstAccessUnits += L" | ";
-                    const auto& item = firstAccessUnitNals_[i];
+                    const auto& item = receiveBackend_.firstAccessUnitNals_[i];
                     firstAccessUnits.append(item.begin(), item.end());
                 }
             }
@@ -670,9 +663,9 @@ public:
         stage(4); // Drain an already-entered RTP callback.
         { std::lock_guard callbackDrain(mutex_); }
         stage(5); // Wait for native capture/encoder teardown.
-        if (encoder_) { api_.encoderClose(encoder_); encoder_ = nullptr; }
+        captureBackend_.close();
         stage(6); // Wait for native decoder/presentation teardown.
-        if (decoder_) { api_.decoderClose(decoder_); decoder_ = nullptr; }
+        receiveBackend_.close();
         stage(7); // Delete detached tracks.
         if (retiredReceiveTrack >= 0 && retiredReceiveTrack != track_) rtcDeleteTrack(retiredReceiveTrack);
         if (track_ >= 0) rtcDeleteTrack(track_);
@@ -680,7 +673,6 @@ public:
         if (pc_ >= 0) { rtcClosePeerConnection(pc_); rtcDeletePeerConnection(pc_); }
         pc_ = track_ = receiveTrack_ = -1;
         stage(9); // Unload the Windows media adapter after all workers exit.
-        api_.close();
         {
             std::lock_guard lock(mutex_);
             events_.clear();
@@ -691,65 +683,7 @@ public:
     }
 
 private:
-    struct Api {
-        HMODULE module = nullptr;
-        decltype(&pc_screen_query_capabilities) queryCapabilities = nullptr;
-        decltype(&pc_screen_encoder_open) encoderOpen = nullptr;
-        decltype(&pc_screen_encoder_pop) encoderPop = nullptr;
-        decltype(&pc_screen_encoder_request_keyframe) encoderRequestKeyframe = nullptr;
-        decltype(&pc_screen_encoder_status_get) encoderStatus = nullptr;
-        decltype(&pc_screen_encoder_close) encoderClose = nullptr;
-        decltype(&pc_screen_decoder_open) decoderOpen = nullptr;
-        decltype(&pc_screen_decoder_push) decoderPush = nullptr;
-        decltype(&pc_screen_decoder_status_get) decoderStatus = nullptr;
-        decltype(&pc_screen_decoder_close) decoderClose = nullptr;
-        bool open() {
-            wchar_t path[32768]{};
-            const DWORD length = GetModuleFileNameW(nullptr, path, 32768);
-            if (!length || length >= 32768) return false;
-            std::wstring file(path, length);
-            const auto slash = file.find_last_of(L"\\/");
-            if (slash == std::wstring::npos) return false;
-            file.resize(slash + 1);
-            file += L"PeerChat.ScreenMedia.dll";
-            module = LoadLibraryExW(file.c_str(), nullptr,
-                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-            if (!module) return false;
-            wchar_t actual[32768]{};
-            const DWORD actualLength = GetModuleFileNameW(module, actual, 32768);
-            if (!actualLength || actualLength >= 32768 || _wcsicmp(actual, file.c_str()) != 0) {
-                close();
-                return false;
-            }
-#define PC_SCREEN_IMPORT(field, name) do { \
-            auto address = GetProcAddress(module, name); \
-            static_assert(sizeof(field) == sizeof(address), "Function pointer size mismatch"); \
-            if (!address) { close(); return false; } \
-            std::memcpy(&field, &address, sizeof(field)); \
-        } while (false);
-            PC_SCREEN_IMPORT(queryCapabilities, "pc_screen_query_capabilities")
-            PC_SCREEN_IMPORT(encoderOpen, "pc_screen_encoder_open")
-            PC_SCREEN_IMPORT(encoderPop, "pc_screen_encoder_pop")
-            PC_SCREEN_IMPORT(encoderRequestKeyframe, "pc_screen_encoder_request_keyframe")
-            PC_SCREEN_IMPORT(encoderStatus, "pc_screen_encoder_status_get")
-            PC_SCREEN_IMPORT(encoderClose, "pc_screen_encoder_close")
-            PC_SCREEN_IMPORT(decoderOpen, "pc_screen_decoder_open")
-            PC_SCREEN_IMPORT(decoderPush, "pc_screen_decoder_push")
-            PC_SCREEN_IMPORT(decoderStatus, "pc_screen_decoder_status_get")
-            PC_SCREEN_IMPORT(decoderClose, "pc_screen_decoder_close")
-#undef PC_SCREEN_IMPORT
-            return true;
-        }
-        void close() {
-            if (module) FreeLibrary(module);
-            module = nullptr;
-            queryCapabilities = nullptr;
-            encoderOpen = nullptr; encoderPop = nullptr; encoderRequestKeyframe = nullptr;
-            encoderStatus = nullptr; encoderClose = nullptr;
-            decoderOpen = nullptr; decoderPush = nullptr;
-            decoderStatus = nullptr; decoderClose = nullptr;
-        }
-    };
+    using Api = ScreenMediaApi;
 
     static void description(int, const char* sdp, const char* type, void* context) {
         if (context && sdp && type) static_cast<ScreenShareMedia*>(context)->push(
@@ -811,63 +745,14 @@ private:
         rtcSetClosedCallback(track, &ScreenShareMedia::closed);
     }
 
-    static bool parseRtp(const char* packet, int size, const std::uint8_t*& payload,
-        size_t& length, std::uint16_t& sequence, std::uint32_t& timestamp, bool& marker) {
-        if (!packet || size < 12) return false;
-        auto* bytes = reinterpret_cast<const std::uint8_t*>(packet);
-        if ((bytes[0] >> 6) != 2 || (bytes[1] & 127) != 102) return false;
-        size_t offset = 12 + 4 * (bytes[0] & 15);
-        if (offset > static_cast<size_t>(size)) return false;
-        if (bytes[0] & 16) {
-            if (offset + 4 > static_cast<size_t>(size)) return false;
-            offset += 4 + 4 * (static_cast<size_t>(bytes[offset + 2]) * 256 + bytes[offset + 3]);
-            if (offset > static_cast<size_t>(size)) return false;
-        }
-        size_t end = static_cast<size_t>(size);
-        if (bytes[0] & 32) {
-            const auto padding = bytes[end - 1];
-            if (!padding || padding > end - offset) return false;
-            end -= padding;
-        }
-        if (end <= offset) return false;
-        payload = bytes + offset;
-        length = end - offset;
-        marker = (bytes[1] & 128) != 0;
-        sequence = static_cast<std::uint16_t>((bytes[2] << 8) | bytes[3]);
-        timestamp = (std::uint32_t(bytes[4]) << 24) | (std::uint32_t(bytes[5]) << 16) |
-            (std::uint32_t(bytes[6]) << 8) | bytes[7];
-        return true;
-    }
-
     using ReceivedRtpPacket = H264RtpReceiver::Packet;
     static std::uint64_t monotonicMs() {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     }
-    bool submitAccessUnit(const H264RtpReceiver::AccessUnit& au) {
-        if (firstAccessUnitNals_.size() < 32) {
-            std::ostringstream details;
-            details << "timestamp=" << au.timestamp << ";first_sequence=" << au.first
-                << ";last_sequence=" << au.last << ";marker=1;nal_types=";
-            for (auto type : au.types) details << unsigned(type) << ',';
-            details << ";bytes=" << au.bytes.size() << ";single_timestamp=true"
-                << ";recovery=" << (au.recovery ? "true" : "false");
-            firstAccessUnitNals_.push_back(details.str());
-        }
-        const bool accepted = api_.decoderPush(decoder_, au.bytes.data(),
-            static_cast<std::uint32_t>(au.bytes.size()),
-            static_cast<std::uint64_t>(au.timestamp) * 10000000ull / 90000ull) == 1;
-        if (accepted) {
-            ++accessUnitsDelivered_;
-            if (au.recovery) {
-                recoveryOutputPending_ = true;
-                recoveryTimestamp_ = static_cast<std::uint64_t>(au.timestamp) * 10000000ull / 90000ull;
-            }
-        }
-        return accepted;
-    }
+
     void requestRecoveryKeyframe(std::uint64_t now) {
-        if (!rtpReceiver_.needsKeyframe() || now < nextRecoveryRequestMs_ || !trackOpen_) return;
+        if (!receiveBackend_.rtpReceiver_.needsKeyframe() || now < nextRecoveryRequestMs_ || !trackOpen_) return;
         nextRecoveryRequestMs_ = now + 500;
         const int track = receiveTrack_ >= 0 ? receiveTrack_ : track_;
         if (track >= 0 && rtcRequestKeyframe(track) >= 0) ++recoveryKeyframeRequests_;
@@ -875,19 +760,19 @@ private:
     void received(const char* packet, int size) {
         ++rawRtpCallbacks_;
         if (stopping_) { ++rtpStaleGenerationPacket_; return; }
-        if (options_.sender || !decoder_) return;
+        if (options_.sender || !receiveBackend_) return;
         const std::uint8_t* payload = nullptr;
         size_t length = 0;
         std::uint16_t sequence = 0;
         std::uint32_t timestamp = 0;
         bool marker = false;
-        if (!parseRtp(packet, size, payload, length, sequence, timestamp, marker)) {
+        if (!ScreenReceiveDecodeBackend::parseRtp(packet, size, payload, length, sequence, timestamp, marker)) {
             ++rtpParseFailures_;return;
         }
         ++rtpReceived_;
         mediaBytesReceived_ += static_cast<std::uint64_t>(size);
         std::lock_guard lock(mutex_);
-        if (stopping_ || !decoder_) { ++rtpStaleGenerationPacket_; return; }
+        if (stopping_ || !receiveBackend_) { ++rtpStaleGenerationPacket_; return; }
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(packet);
         const auto ssrc = (std::uint32_t(bytes[8]) << 24) | (std::uint32_t(bytes[9]) << 16) |
             (std::uint32_t(bytes[10]) << 8) | bytes[11];
@@ -899,18 +784,17 @@ private:
         copied.marker = marker;
         copied.payload.assign(payload, payload + length);
         const auto now = monotonicMs();
-        rtpReceiver_.receive(std::move(copied), now,
-            [this](const H264RtpReceiver::AccessUnit& au) { return submitAccessUnit(au); });
+        receiveBackend_.receive(std::move(copied), now);
     }
     static void message(int, const char* packet, int size, void* context) {
         if (context) static_cast<ScreenShareMedia*>(context)->received(packet, size);
     }
 
     FailureDomain encoderFailureDomain() const {
-        if (!encoder_ || !api_.encoderStatus) return FailureDomain::LocalEncoder;
+        if (!captureBackend_) return FailureDomain::LocalEncoder;
         pc_screen_encoder_status status{};
         status.structure_size = sizeof(status);
-        if (!api_.encoderStatus(encoder_, &status)) return FailureDomain::LocalEncoder;
+        if (!captureBackend_.status(status)) return FailureDomain::LocalEncoder;
         return status.failed_operation == PC_SCREEN_ENCODER_FAILURE_WGC ||
                status.failed_operation == PC_SCREEN_ENCODER_FAILURE_CAPTURE
             ? FailureDomain::LocalCapture : FailureDomain::LocalEncoder;
@@ -962,8 +846,8 @@ private:
     }
 
     void requestEncoderKeyframe() {
-        if (!options_.sender || !encoder_ || stopping_) return;
-        if (api_.encoderRequestKeyframe(encoder_)) ++senderKeyframeRequests_;
+        if (!options_.sender || !captureBackend_ || stopping_) return;
+        if (captureBackend_.requestKeyframe()) ++senderKeyframeRequests_;
     }
 
 
@@ -973,7 +857,7 @@ private:
         localFailureReported_ = false;
         startupWatchdogFailed_ = false;
         startupDeadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
-        encodedSubmitted_ = rtpReceived_ = accessUnitsDelivered_ = 0;
+        encodedSubmitted_ = rtpReceived_ = receiveBackend_.accessUnitsDelivered_ = 0;
         rawRtpCallbacks_ = rtpParseFailures_ = remoteTrackCallbacks_ = 0;
         rtpStaleGenerationPacket_ = 0;
         encodedBytesSubmitted_ = mediaBytesReceived_ = 0;
@@ -981,15 +865,14 @@ private:
         senderContinuity_ = {}; senderContinuityDropped_ = 0; nextSenderRecoveryRequestMs_ = 0;
         {
             std::lock_guard lock(mutex_);
-            rtpReceiver_.reset();
+            receiveBackend_.rtpReceiver_.reset();
             nextRecoveryRequestMs_ = recoveryKeyframeRequests_ = 0;
-            recoveryTimestamp_ = recoveryCompleted_ = 0; recoveryOutputPending_ = false;
+            receiveBackend_.recoveryTimestamp_ = receiveBackend_.recoveryCompleted_ = 0; receiveBackend_.recoveryOutputPending_ = false;
             haveReceiveSsrc_ = false; receiveSsrc_ = 0; pendingPli_ = false;
-            firstAccessUnitNals_.clear();
+            receiveBackend_.firstAccessUnitNals_.clear();
         }
         { std::lock_guard sampleLock(sampleMutex_); samples_.clear(); }
         encodedWidth_ = encodedHeight_ = 0;
-        if (!api_.open()) { error = "Windows screen media adapter is unavailable"; return false; }
         if (options_.sender) {
             pc_screen_encoder_options capture{};
             capture.structure_size = sizeof(capture);
@@ -1000,8 +883,8 @@ private:
             capture.capture_cursor = options_.captureCursor ? 1u : 0u;
             capture.backend = options_.backend == screen::Backend::WebRtcCompatibility ?
                 PC_SCREEN_BACKEND_WEBRTC_COMPATIBILITY : PC_SCREEN_BACKEND_NATIVE;
-            encoder_ = api_.encoderOpen(&capture);
-            if (!encoder_) { error = options_.backend == screen::Backend::WebRtcCompatibility ?
+            captureBackend_.open(capture);
+            if (!captureBackend_) { error = options_.backend == screen::Backend::WebRtcCompatibility ?
                 "Windows screen capture or software H.264 encoding failed" :
                 "Windows screen capture or H.264 hardware encoding failed"; stop(); return false; }
         } else {
@@ -1011,8 +894,8 @@ private:
             viewer.width = options_.width;
             viewer.height = options_.height;
             viewer.frames_per_second = options_.fps;
-            decoder_ = api_.decoderOpen(&viewer);
-            if (!decoder_) { error = "Windows H.264 screen decoder or viewer failed"; stop(); return false; }
+            receiveBackend_.open(viewer);
+            if (!receiveBackend_) { error = "Windows H.264 screen decoder or viewer failed"; stop(); return false; }
         }
         const auto now = static_cast<std::int64_t>(std::time(nullptr));
         if (!options_.ice.valid(now) && options_.ice.policy != MediaIceConfiguration::Policy::DirectTestOnly) {
@@ -1076,21 +959,15 @@ private:
     }
 
     Options options_;
-    Api api_;
-    pc_screen_encoder* encoder_ = nullptr;
-    pc_screen_decoder* decoder_ = nullptr;
+    ScreenCaptureEncodeBackend captureBackend_;
+    ScreenReceiveDecodeBackend receiveBackend_;
     int pc_ = -1, track_ = -1, receiveTrack_ = -1;
     mutable std::mutex mutex_;
     std::mutex callbackRegistrationMutex_;
     std::deque<Event> events_;
-    std::vector<std::uint8_t> encodedScratch_;
-    H264RtpReceiver rtpReceiver_;
     std::uint64_t nextRecoveryRequestMs_ = 0, recoveryKeyframeRequests_ = 0;
-    std::uint64_t recoveryTimestamp_ = 0, recoveryCompleted_ = 0;
-    bool recoveryOutputPending_ = false;
     std::uint32_t receiveSsrc_ = 0;
     bool haveReceiveSsrc_ = false;
-    std::deque<std::string> firstAccessUnitNals_;
     std::atomic<bool> stopping_{true}, trackOpen_{false}, connected_{false}, failed_{false};
     std::atomic<bool> pendingPli_{false};
     bool localFailureReported_ = false;
@@ -1099,7 +976,7 @@ private:
     std::atomic<std::uint64_t> encodedSubmitted_{0}, rtpReceived_{0};
     std::atomic<std::uint64_t> rawRtpCallbacks_{0}, rtpParseFailures_{0}, remoteTrackCallbacks_{0};
     std::atomic<std::uint32_t> encodedWidth_{0}, encodedHeight_{0};
-    std::atomic<std::uint64_t> accessUnitsDelivered_{0}, rtpStaleGenerationPacket_{0};
+    std::atomic<std::uint64_t> rtpStaleGenerationPacket_{0};
     std::atomic<std::uint64_t> encodedBytesSubmitted_{0}, mediaBytesReceived_{0};
     std::atomic<std::uint64_t> senderKeyframeRequests_{0};
     H264SenderContinuity senderContinuity_;
