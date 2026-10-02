@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.peerchat.android"
     compileSdk = 35
+    buildToolsVersion = "34.0.0"
     ndkVersion = "27.0.12077973"
     defaultConfig {
         applicationId = "com.peerchat.android"

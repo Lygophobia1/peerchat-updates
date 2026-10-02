@@ -5,7 +5,9 @@ The Windows testing worktree and its physical-test packages remain unchanged.
 
 ## Scope and current status
 
-This is a **partial foundation**, not a completed Android messaging engine or APK.
+This is a **partial foundation**, not a completed Android messaging engine.
+The ARM64 native libraries, Compose shell APK and instrumentation APK now build.
+No device was attached, so Android installation/runtime validation remains pending.
 The native target reuses the existing `SessionTransportManager` and PT1 format
 code; it includes the existing DeliveryManager declarations but does **not**
 instantiate delivery/history until a real profile storage provider is available.
@@ -62,44 +64,75 @@ Android ELF/import audit.
 Actually used for host validation: TDM GCC 10.3.0, Visual Studio's installed CMake
 and CTest, and Oracle JDK 22.0.2 (`C:\Program Files\Java\jdk-22`) for JNI.
 
-**No Android SDK/NDK/Gradle/adb was found in PATH, Android environment variables or
-the checked standard installation locations. No Android SDK/NDK version has been
-used or proven.** No tools were installed/downloaded.
+Verified Android SDK root: `C:\Users\Livel\AppData\Local\Android\Sdk`.
+SDK paths need not be added to global PATH. Set JAVA_HOME to the installed JDK;
+the helper resolves the SDK explicitly and uses the committed Gradle wrapper.
+NDK Clang 18.0.1 builds the ARM64 targets with API 26 as their minimum platform.
+Gradle 8.9 and AGP 8.7.3 successfully build with Oracle JDK 22.0.2; no JDK downgrade
+or plugin upgrade was needed. SDK processing emits a nonfatal XML-version warning
+with this newer installed SDK manager; compilation and packaging succeed.
 
-Project pins, selected for compatibility rather than claimed installed:
+Verified project pins:
 
 | Tool/component | Required |
 |---|---|
 | Android Gradle Plugin | 8.7.3 |
 | Gradle | 8.9 |
 | Kotlin + Compose compiler plugin | 2.0.21 |
-| JDK | 17+; host JDK 22 is present |
+| JDK | Oracle 22.0.2 used; Java/Kotlin target 17 |
 | Android platform/target | API 35; min SDK 26 |
 | SDK build tools | 34.0.0 |
 | NDK | 27.0.12077973 |
 | Android SDK CMake | 3.22.1 |
 | ABI | arm64-v8a |
-| Test execution | adb plus an arm64 device/emulator |
+| Test execution | adb installed; no device attached |
 
 AGP compatibility reference:
 https://developer.android.com/build/releases/agp-8-7-0-release-notes
 
-Once these tools are available, from this worktree's `peerchat` directory:
+From this worktree's `peerchat` directory:
 
 ```powershell
-.\android\build.ps1 -SdkRoot '<installed SDK path>' -Gradle '<Gradle 8.9 executable>'
-.\android\build.ps1 -SdkRoot '<installed SDK path>' -Gradle '<Gradle 8.9 executable>' -ConnectedTests
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-22'
+.\android\build.ps1 -SdkRoot 'C:\Users\Livel\AppData\Local\Android\Sdk'
+# Build the instrumentation APK without requiring a device:
+$env:ANDROID_HOME = 'C:\Users\Livel\AppData\Local\Android\Sdk'
+Push-Location android
+.\gradlew.bat :app:assembleDebug :app:assembleDebugAndroidTest --console=plain
+Pop-Location
+# When a usable ARM64 device is attached:
+.\android\build.ps1 -SdkRoot $env:ANDROID_HOME -ConnectedTests
 ```
 
-The script preflights without installing anything. A Gradle wrapper is not yet
-generated/downloaded because Gradle is absent. Gradle's first successful build
-will require the pinned Maven artifacts if not cached.
+The script preflights without installing SDK tools. The committed wrapper downloads
+Gradle 8.9 and verifies distribution SHA256:
+`d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab`.
+The first build downloads pinned Maven dependencies if not already cached.
+No global Git, Java, Android or Windows build configuration was changed.
 
-Expected outputs (NOT produced yet):
+Produced outputs, relative to this isolated worktree's `peerchat` directory:
 
 - `android/app/build/outputs/apk/debug/app-debug.apk`
+- `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`
 - APK libraries `lib/arm64-v8a/libpeerchat_messaging.so`, `libpeerchat_jni.so`
-- Native debug intermediates under `android/app/.cxx/`
+- Unstripped libraries: `android/app/build/intermediates/cxx/Debug/592r5010/obj/arm64-v8a/`
+  (the CMake configuration identifier can change on another checkout).
+- Standalone ARM64 native regression executable: `build/android-foundation/arm64/portable_core_test`.
+
+APK SHA256: `24B8121A520B16DD9B9874467929E507922D7CB5EFA0343CDCF04CDA9266A6C1`.
+Test APK SHA256: `783E07A095608FA255FDFDFE3A3FEED6ABAD01FA19FFA66AB2E5D8BEA98A2FE0`.
+Exact packaged/stripped library hashes:
+
+- `libpeerchat_messaging.so`: `0FE6F93D843AC0FAB2135C1958E707F9C26D545ADA7C5341D4F3F0B281267B6D`
+- `libpeerchat_jni.so`: `0C6F05C742EF0A3A2C8CEB1FD982AD734B1408326E87C1559337DCDBF231877A`
+
+The APK also includes Compose's `libandroidx.graphics.path.so`, ARM64 only.
+All three ELF libraries import only Android system libc/libm/libdl, plus JNI's
+dependency on the packaged messaging library. C++ runtime archive symbols are
+hidden with Android-only `--exclude-libs,ALL`. The exported ABI is exactly the five
+`pc_core_*` functions and four `Java_com_peerchat_android_NativeBridge_*` functions.
+APK metadata confirms min 26, target/compile 35 and launcher MainActivity; debug
+signature verification passes. No Windows/media libraries are packaged.
 
 Android version is `Android dev.1`, independent of Windows package numbering.
 
@@ -119,16 +152,57 @@ Android version is `Android dev.1`, independent of Windows package numbering.
 - Existing group envelope/tamper/key rotation/protected history regression: PASS.
 - Existing group sender/history UI and three-client ciphertext fanout: PASS.
 - Windows all-features build/package restricted dependency/load audit: PASS,
-  isolated output `build/development/4.0.1-dev.1/Package`. This is a regression
+  initial isolated output `build/development/4.0.1-dev.1/Package`, rerun after the
+  Android build changes: `build/development/4.0.1-dev.2/Package`. These are regression
   build in this Android worktree, not a replacement for authoritative dev.61/.62.
-- Android preflight: correctly BLOCKED on missing SDK/NDK/Gradle tools.
-- Android APK, ELF, Kotlin/Compose build, emulator, physical Android, Android
-  identity persistence and server interoperability: NOT TESTED / NOT IMPLEMENTED.
+- Android Gradle app and instrumentation builds, ARM64 CMake library/test compile,
+  Kotlin/Compose compile, ELF imports/exports, APK contents/signature: PASS.
+- Android instrumentation compiles coverage for 1,000 lifetimes, Unicode/NUL,
+  invalid UTF-8, maximum/oversized/empty input and invalid/stale handles.
+- `adb devices -l`: empty device list. Install, launch, ART/JNI execution, logcat
+  and on-device native regression: NOT RUN. Host JVM JNI is not ART validation.
+- Android identity persistence and server interoperability: NOT IMPLEMENTED.
+
+## Exact device validation commands (pending)
+
+From the isolated `peerchat` directory, attach/unlock an ARM64 phone, enable USB
+debugging and accept its authorization prompt. Replace the serial below with
+the device shown as `device`, not `unauthorized` or `offline`:
+
+```powershell
+$adb = 'C:\Users\Livel\AppData\Local\Android\Sdk\platform-tools\adb.exe'
+& $adb devices -l
+$serial = '<authorized-device-serial>'
+& $adb -s $serial shell getprop ro.product.cpu.abi # must be arm64-v8a
+& $adb -s $serial install -r android/app/build/outputs/apk/debug/app-debug.apk
+& $adb -s $serial shell am start -W -n com.peerchat.android/.MainActivity
+# Expected UI: Native foundation Loaded; ABI 1; Passed (100 cycles).
+& $adb -s $serial install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+& $adb -s $serial shell am instrument -w -r com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+# Require OK (1 test), not just a successful adb process exit.
+$appPid = (& $adb -s $serial shell pidof com.peerchat.android).Trim()
+if ($appPid) { & $adb -s $serial logcat -d "--pid=$appPid" }
+# Inspect for linker/JNI errors, FATAL EXCEPTION, signals and unexpected failures.
+& $adb -s $serial shell am force-stop com.peerchat.android
+& $adb -s $serial shell am start -W -n com.peerchat.android/.MainActivity
+```
+
+For the same native C ABI boundary test on ARM64, the already-built executable
+and its library can also be run independently of ART:
+
+```powershell
+& $adb -s $serial shell mkdir -p /data/local/tmp/peerchat-foundation
+& $adb -s $serial push build/android-foundation/arm64/portable_core_test /data/local/tmp/peerchat-foundation/
+& $adb -s $serial push build/android-foundation/arm64/libpeerchat_messaging.so /data/local/tmp/peerchat-foundation/
+& $adb -s $serial shell chmod 700 /data/local/tmp/peerchat-foundation/portable_core_test
+& $adb -s $serial shell 'cd /data/local/tmp/peerchat-foundation && LD_LIBRARY_PATH=. ./portable_core_test'
+```
 
 ## Remaining platform work / next checkpoint
 
-First provision/point to the agreed Android toolchain, compile the shell and run
-the existing JNI instrumentation proof. Only after that succeeds, add real P-256
+First complete the attached-device launch and JNI/native instrumentation proof.
+Build work is complete; the external runtime gate is the absent Android device.
+Only after the device milestone succeeds, add real P-256
 generation/signing and a Keystore-wrapped software identity with restart proof.
 Do not call the existing non-exportable key/TLS problem solved by this scaffold.
 
@@ -145,4 +219,5 @@ roster. Android must get its OWN device identity, not replace the Windows identi
 Offline mailbox/FCM, full multi-device repair, DM/group UI, voice, screen and files
 are out of this foundation checkpoint.
 
-The source preparation is uncommitted pending actual Android build/runtime proof.
+Foundation source checkpoint: `40ef623`. Android build/runtime preparation is a
+separate checkpoint; no branch merge or Windows source/package replacement.

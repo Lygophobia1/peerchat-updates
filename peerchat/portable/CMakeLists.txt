@@ -8,6 +8,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 target_include_directories(peerchat_messaging PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(peerchat_messaging PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+if(ANDROID)
+    # Keep statically linked C++ runtime symbols private to this C ABI library.
+    target_link_options(peerchat_messaging PRIVATE "-Wl,--exclude-libs,ALL")
+endif()
 # Explicit source list: no Node, Windows storage/TLS, audio, RTC, or ScreenMedia.
 # Missing providers are reported unavailable; no dummy crypto/storage is linked.
 option(PEERCHAT_PORTABLE_TESTS "Build the host ABI/format regression" ON)
