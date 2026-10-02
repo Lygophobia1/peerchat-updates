@@ -6,6 +6,7 @@ object NativeBridge {
     external fun destroy(handle: Long): Int
     external fun info(handle: Long): IntArray?
     external fun exchange(handle: Long, bytes: ByteArray): ByteArray?
+    external fun normalizeIdentity(public: ByteArray, signature: ByteArray): ByteArray?
 
     fun prove(): String {
         val bytes = "PeerChat / 日本語 / café / 😀\u0000end".toByteArray(Charsets.UTF_8)

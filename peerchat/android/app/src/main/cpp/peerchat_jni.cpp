@@ -1,8 +1,23 @@
 #include <jni.h>
 #include "peerchat_core.h"
 #include <vector>
+#include "identity_format.hpp"
 
 // Copying/binding only: no protocol, identity, retries or authorization here.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_NativeBridge_normalizeIdentity(JNIEnv* env,jobject,jbyteArray publicKey,jbyteArray signature) {
+    try {
+        if(!publicKey||!signature||env->GetArrayLength(publicKey)!=72||env->GetArrayLength(signature)!=64)return nullptr;
+        uint8_t publicBytes[72]{},signatureBytes[64]{};
+        env->GetByteArrayRegion(publicKey,0,72,reinterpret_cast<jbyte*>(publicBytes));
+        env->GetByteArrayRegion(signature,0,64,reinterpret_cast<jbyte*>(signatureBytes));
+        if(env->ExceptionCheck()||!peerchat::identity_format::validPublicRepresentation(publicBytes,72))return nullptr;
+        auto normalizedPublic=peerchat::identity_format::publicKey(publicBytes+8,publicBytes+40);
+        auto normalizedSignature=peerchat::identity_format::signature(signatureBytes,signatureBytes+32);
+        auto output=env->NewByteArray(136);if(!output)return nullptr;
+        env->SetByteArrayRegion(output,0,72,reinterpret_cast<const jbyte*>(normalizedPublic.data()));
+        env->SetByteArrayRegion(output,72,64,reinterpret_cast<const jbyte*>(normalizedSignature.data()));return output;
+    }catch(...){return nullptr;}
+}
 extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_NativeBridge_create(JNIEnv*,jobject) {
     pc_core_handle handle=0;return pc_core_create(&handle)==PC_CORE_OK?static_cast<jlong>(handle):0;
 }

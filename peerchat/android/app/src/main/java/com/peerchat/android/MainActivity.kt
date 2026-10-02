@@ -27,7 +27,7 @@ class MainActivity : ComponentActivity() {
                 var status by remember { mutableStateOf("Checking native foundation…") }
                 LaunchedEffect(Unit) {
                     status = withContext(Dispatchers.Default) {
-                        try { NativeBridge.prove() }
+                        try { NativeBridge.prove() + "\n" + com.peerchat.android.platform.SecurityProof.run(applicationContext) }
                         catch (failure: Throwable) { "Native proof failed: ${failure.javaClass.simpleName}" }
                     }
                 }
