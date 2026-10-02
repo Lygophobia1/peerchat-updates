@@ -39,7 +39,8 @@ PC_CORE_API pc_core_status pc_core_get_info(pc_core_handle handle,pc_core_info* 
 // On BUFFER_TOO_SMALL no output is written. Invalid UTF-8 is rejected.
 PC_CORE_API pc_core_status pc_core_exchange_utf8(pc_core_handle handle,
     const uint8_t* input,uint32_t length,uint8_t* output,uint32_t capacity,uint32_t* required);
-// No insecure stand-ins: profile/identity/TLS/storage are not wired yet.
+// Path-only opening is unavailable: Android requires explicit opaque profile
+// provider binding. No insecure stand-in/default exported identity is created.
 PC_CORE_API pc_core_status pc_core_open_profile(pc_core_handle handle,const uint8_t* path,uint32_t length);
 #ifdef __cplusplus
 }

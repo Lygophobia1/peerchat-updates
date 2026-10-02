@@ -44,6 +44,13 @@ class AndroidStoragePlatform(context: Context, private val profile: String) : Au
     fun scope(): ByteArray = profile.toByteArray(Charsets.UTF_8)
     fun publicKey(): ByteArray = identity.publicRepresentation()
     fun sign(bytes: ByteArray): ByteArray = identity.sign(bytes)
+    fun createPeerTls(incoming: Boolean, expectedPeer: ByteArray): com.peerchat.android.platform.tls.PeerTls {
+        checkOpen()
+        invalid(expectedPeer.size == 64 && expectedPeer.all { it in 48..57 || it in 97..102 })
+        return com.peerchat.android.platform.tls.PeerTls(
+            com.peerchat.android.platform.tls.AndroidTlsIdentity(identity), incoming,
+            expectedPeer.toString(Charsets.US_ASCII))
+    }
     fun protect(bytes: ByteArray, context: ByteArray): ByteArray = records.protect(bytes, context)
     fun unprotect(bytes: ByteArray, context: ByteArray): ByteArray = records.unprotect(bytes, context)
     fun execute(bytes: ByteArray) {

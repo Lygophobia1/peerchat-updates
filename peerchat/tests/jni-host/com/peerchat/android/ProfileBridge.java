@@ -24,6 +24,9 @@ public final class ProfileBridge {
         check(bind(handle,new UnavailableDatabase())==6);
         check(publicKey(handle)==null&&sign(handle,new byte[]{1})==null);
         int[] state=foundation.info(handle);check(state[2]==0&&state[3]==0&&state[4]==0);
+        check(PeerTlsBridge.open(handle,false,new byte[64])==0);
+        check(PeerTlsBridge.exchange(handle,1,5,new byte[0])==null);
+        check(PeerTlsBridge.close(handle,1)==2);
         check(foundation.destroy(handle)==0&&foundation.destroy(handle)==2);
     }
     public static void main(String[] args) throws Exception {

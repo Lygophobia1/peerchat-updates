@@ -1,4 +1,5 @@
 import com.peerchat.android.platform.tls.OpaqueTlsSigner;
+import com.peerchat.android.platform.tls.PeerTls;
 import java.io.*;
 import java.math.BigInteger;
 import java.nio.file.*;
@@ -39,6 +40,13 @@ public final class SigningProof {
         ExecutorService pool=Executors.newFixedThreadPool(4);try{List<Future<?>> tasks=new ArrayList<>();for(int i=0;i<100;i++)tasks.add(pool.submit(()->{try{OpaqueTlsSigner.signOriginal(identity,original);}catch(Exception e){throw new RuntimeException(e);}}));for(Future<?> f:tasks)f.get();}finally{pool.shutdown();}
         byte[] proof=Arrays.copyOf(pub,136);System.arraycopy(raw(signature),0,proof,72,64);Files.write(Paths.get(args[0]),proof);
         check(OpaqueTlsSigner.SCHEME.getHash()==HashAlgorithm.sha256 && OpaqueTlsSigner.SCHEME.getSignature()==SignatureAlgorithm.ecdsa);
+        org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto crypto=new org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto(new SecureRandom());
+        byte[] certificate=PeerTls.certificate(identity,new Date(System.currentTimeMillis()-86400000L),new Date(System.currentTimeMillis()+86400000L));
+        OpaqueTlsSigner signer=new OpaqueTlsSigner(identity,new org.bouncycastle.tls.Certificate(new org.bouncycastle.tls.crypto.TlsCertificate[]{crypto.createCertificate(certificate)}));
+        rejected(()->signer.generateRawSignature(MessageDigest.getInstance("SHA-256").digest(original)));
+        org.bouncycastle.tls.crypto.TlsStreamSigner stream=signer.getStreamSigner();stream.getOutputStream().write(original);stream.getSignature();
+        rejected(()->stream.getSignature());rejected(()->stream.getOutputStream().write(1));
+        rejected(()->signer.getStreamSigner().getOutputStream().write(new byte[70001]));
         System.out.println("PASS: original-message SHA256/ECDSA, no double hash, P-256/raw64, malformed/provider failure, 1000 repeats and 100 concurrent signatures (host test key only)");
     }
 }

@@ -23,6 +23,7 @@ foreach($variant in @('debug','release')){
             $symbols=(& $readelf --dyn-syms --wide $path|Out-String); if($LASTEXITCODE -ne 0){throw 'ELF export inspection failed'}
             if($name -eq 'peerchat_messaging'){
                 foreach($method in @('bind','publicKey','sign')){if($symbols -notmatch "Java_com_peerchat_android_ProfileBridge_$method\b"){throw "Missing ProfileBridge $method"}}
+                foreach($method in @('open','exchange','close')){if($symbols -notmatch "Java_com_peerchat_android_PeerTlsBridge_$method\b"){throw "Missing PeerTlsBridge $method"}}
                 $testHook=$symbols -match 'Java_com_peerchat_android_ProfileBridge_storageTest\b'
                 if($testHook -ne ($variant -eq 'debug')){throw "$variant test-hook isolation failed"}
             }

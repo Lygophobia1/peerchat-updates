@@ -29,7 +29,7 @@ class NativeProfileTest {
                 NativeProfile(context, profile).use { native ->
                     handle = native.handle
                     assertArrayEquals(public, ProfileBridge.publicKey(handle))
-                    assertArrayEquals(intArrayOf(1, 1, 1, 1, 0), NativeBridge.info(handle))
+                    assertArrayEquals(intArrayOf(1, 1, 1, 1, 1), NativeBridge.info(handle))
                     val bytes = "日本語 😀\u0000native signing".toByteArray()
                     assertTrue(PeerIdentityFormat.verify(public, bytes, checkNotNull(ProfileBridge.sign(handle, bytes))))
                     assertEquals(0, ProfileBridge.storageTest(handle, 0))

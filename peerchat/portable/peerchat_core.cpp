@@ -9,6 +9,8 @@
 #include <mutex>
 #if defined(__ANDROID__)
 #include "android_storage_provider.hpp"
+#include "android_tls_provider.hpp"
+#include "../tls.hpp"
 #endif
 
 namespace {
@@ -21,6 +23,10 @@ struct Instance {
     std::unique_ptr<peerchat::Storage> storage;
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
+    // Provider objects only; existing SessionTransportManager will own route
+    // association when networking is ported. No second reconnect/session policy.
+    uint64_t nextTls=1;
+    std::map<uint64_t,std::unique_ptr<peerchat::TlsSession>> tls;
 #if defined(PEERCHAT_STORAGE_TEST_HOOKS)
     bool testProfile=false;
     std::shared_ptr<peerchat::platform::SqlDatabase> testDatabase;
@@ -55,7 +61,7 @@ pc_core_status pc_core_get_info(pc_core_handle handle,pc_core_info* info){return
 #if defined(__ANDROID__)
     loaded=instance->storage?1:0;
 #endif
-    *info={sizeof(pc_core_info),PC_CORE_ABI_VERSION,1,loaded,loaded,0};return PC_CORE_OK;
+    *info={sizeof(pc_core_info),PC_CORE_ABI_VERSION,1,loaded,loaded,loaded};return PC_CORE_OK;
 });}
 pc_core_status pc_core_exchange_utf8(pc_core_handle handle,const uint8_t* input,uint32_t length,uint8_t* output,uint32_t capacity,uint32_t* required){return guarded([&]()->pc_core_status{
     if(!required)return PC_CORE_INVALID_ARGUMENT;
@@ -95,6 +101,54 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_bind(J
         instance->sessions=peerchat::session::SessionTransportManager(profile.peerId,profile.peerId,{1});
         instance->profile=std::move(profile);instance->storage=std::move(store);instance->deliveries=std::move(delivery);
         return PC_CORE_OK;
+    });
+}
+extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_PeerTlsBridge_open(JNIEnv* env,jobject,jlong handle,jboolean incoming,jbyteArray pin){
+    try{
+        if(!pin || env->GetArrayLength(pin)!=64)return 0;
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(!instance->storage || instance->tls.size()>=32 || instance->nextTls==std::numeric_limits<uint64_t>::max())return 0;
+        auto bytes=peerchat::platform::android::Context::output(env,pin);
+        auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);
+        if(!identity)return 0;
+        auto factory=std::make_shared<peerchat::platform::android::TlsFactory>(identity->context);
+        peerchat::TlsCredentials credentials(instance->profile,std::move(factory));
+        auto session=std::make_unique<peerchat::TlsSession>(credentials,incoming==JNI_TRUE,std::string(bytes.begin(),bytes.end()));
+        auto id=instance->nextTls++;instance->tls.emplace(id,std::move(session));return static_cast<jlong>(id);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 0;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_PeerTlsBridge_exchange(JNIEnv* env,jobject,jlong handle,jlong token,jint operation,jbyteArray input){
+    try{
+        if(!input || env->GetArrayLength(input)>262144)return nullptr;
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        auto found=instance->tls.find(static_cast<uint64_t>(token));if(found==instance->tls.end())return nullptr;
+        auto& session=*found->second;peerchat::Blob output;
+        try{
+            if(operation==0 || operation==1){
+                auto bytes=peerchat::platform::android::Context::output(env,input);
+                if(operation==0)session.receive(bytes);else session.send(bytes);
+            }else{
+                if(env->GetArrayLength(input)!=0)return nullptr;
+                switch(operation){
+                    case 2:output=session.takeOutput();break;
+                    case 3:output=session.takePlaintext();break;
+                    case 4:output=session.remotePublicKey();break;
+                    case 5:output={static_cast<unsigned char>(session.ready()),static_cast<unsigned char>(session.closed())};break;
+                    case 6:session.shutdown();break;
+                    default:return nullptr;
+                }
+            }
+        }catch(...){instance->tls.erase(found);throw;}
+        return peerchat::platform::android::Context::input(env,output);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_PeerTlsBridge_close(JNIEnv*,jobject,jlong handle,jlong token){
+    return guarded([&]()->pc_core_status{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        return instance->tls.erase(static_cast<uint64_t>(token))?PC_CORE_OK:PC_CORE_INVALID_HANDLE;
     });
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ProfileBridge_publicKey(JNIEnv* env,jobject,jlong handle){
