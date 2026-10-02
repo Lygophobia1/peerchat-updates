@@ -7,7 +7,9 @@ The Windows testing worktree and its physical-test packages remain unchanged.
 
 This is a **partial foundation**, not a completed Android messaging engine.
 The ARM64 native libraries, Compose shell APK and instrumentation APK now build.
-No device was attached, so Android installation/runtime validation remains pending.
+Physical installation/runtime validation passed on a Motorola moto g power (2025)
+running Android 16/API 36, ARM64, on 2026-10-02. This proves the foundation only;
+identity, secure storage, TLS and real messaging are still not implemented.
 The native target reuses the existing `SessionTransportManager` and PT1 format
 code; it includes the existing DeliveryManager declarations but does **not**
 instantiate delivery/history until a real profile storage provider is available.
@@ -85,7 +87,7 @@ Verified project pins:
 | NDK | 27.0.12077973 |
 | Android SDK CMake | 3.22.1 |
 | ABI | arm64-v8a |
-| Test execution | adb installed; no device attached |
+| Test execution | adb 1.0.41 / platform-tools 37.0.1; physical ARM64 device |
 
 AGP compatibility reference:
 https://developer.android.com/build/releases/agp-8-7-0-release-notes
@@ -159,11 +161,49 @@ Android version is `Android dev.1`, independent of Windows package numbering.
   Kotlin/Compose compile, ELF imports/exports, APK contents/signature: PASS.
 - Android instrumentation compiles coverage for 1,000 lifetimes, Unicode/NUL,
   invalid UTF-8, maximum/oversized/empty input and invalid/stale handles.
-- `adb devices -l`: empty device list. Install, launch, ART/JNI execution, logcat
-  and on-device native regression: NOT RUN. Host JVM JNI is not ART validation.
+- Physical Android install, Compose render, ART/JNI execution, five cold launches,
+  scoped logcat inspection and standalone ARM64 native regression: PASS (see below).
 - Android identity persistence and server interoperability: NOT IMPLEMENTED.
 
-## Exact device validation commands (pending)
+## Physical device validation — 2026-10-02
+
+- Manufacturer/model: Motorola `moto g power - 2025` (`vegas`).
+- Android 16, API 36; primary/supported ABI `arm64-v8a` only.
+- ADB initially reported unauthorized; after the user accepted the debugging
+  prompt, status became `device`. No driver/configuration change was needed.
+- Existing debug APK and test APK installed with `install -r`: both `Success`.
+- MainActivity cold launch: `Status: ok`; Compose accessibility hierarchy showed
+  `Native foundation: Loaded`, `ABI version: 1`, `Passed (100 cycles)`.
+- Native loader explicitly reported `base.apk!/lib/arm64-v8a/libpeerchat_jni.so: ok`.
+  Its dependency `libpeerchat_messaging.so` was exercised by all four JNI methods.
+  JNI binds exported methods by name; there is no separate RegisterNatives table.
+- Instrumentation: `OK (1 test)`, 0.919 seconds, 1,000 JNI/native lifecycle cycles
+  plus boundary assertions. Unicode, embedded NUL, invalid/stale/negative handles,
+  empty/65,536-byte/oversized input and malformed UTF-8 all passed.
+- Standalone ARM64 C ABI test: PASS, 1,000 lifecycle cycles, UTF-8/PT1, copied
+  output buffers/canaries, bounded/error handling, concurrent handle retirement
+  and public/signature representation. Exception containment on malformed UTF-8
+  is exercised by both tests. No live session start/stop exists in this foundation.
+- Five additional force-stop/cold-start cycles, each with a new process and a
+  rendered 100-lifetime proof: PASS. No subsequent-launch crash or initialization
+  ordering failure observed; this is not an exhaustive memory-leak proof.
+- Installed package reports `primaryCpuAbi=arm64-v8a`. Pulling its base.apk and
+  hashing it confirmed an exact match to the APK SHA256 recorded above. Native
+  code maps directly from APK entries; separate extracted .so paths are not needed.
+- App-scoped logcat: no UnsatisfiedLinkError, JNI error, missing PeerChat native
+  symbol, SIGSEGV/SIGABRT, fatal signal, uncaught Java/Kotlin exception or native
+  initialization failure. ART logcat reports `-Xcheck:jni` enabled.
+- Nonfatal device/platform messages were present: vendor QT `file does not exist`,
+  ashmem pinning deprecation, MediaTek perfctl output, HWUI optional
+  `fbcNotifySbeRescue`/`fbcNotifyHintFrame`/`updateSbeFeatureOption` symbols unavailable,
+  and SELinux denial for the vendor mbrain service. These did not prevent rendering
+  or tests; they are not PeerChat JNI-library symbol failures. They were recorded,
+  not hidden or worked around with product changes.
+- No production source changed. Existing Windows compatibility/build/package
+  results remain applicable; Windows suites were not rerun for this docs-only pass.
+  Authoritative Windows worktree and its packages remain untouched.
+
+## Exact device validation commands
 
 From the isolated `peerchat` directory, attach/unlock an ARM64 phone, enable USB
 debugging and accept its authorization prompt. Replace the serial below with
@@ -200,9 +240,8 @@ and its library can also be run independently of ART:
 
 ## Remaining platform work / next checkpoint
 
-First complete the attached-device launch and JNI/native instrumentation proof.
-Build work is complete; the external runtime gate is the absent Android device.
-Only after the device milestone succeeds, add real P-256
+The physical foundation milestone is complete with no remaining runtime blocker.
+The next separately authorized milestone may add real P-256
 generation/signing and a Keystore-wrapped software identity with restart proof.
 Do not call the existing non-exportable key/TLS problem solved by this scaffold.
 
