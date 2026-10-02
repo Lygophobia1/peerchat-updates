@@ -9,7 +9,8 @@ This is a **partial foundation**, not a completed Android messaging engine.
 The ARM64 native libraries, Compose shell APK and instrumentation APK now build.
 Physical installation/runtime validation passed on a Motorola moto g power (2025)
 running Android 16/API 36, ARM64, on 2026-10-02. This proves the foundation only;
-identity, secure storage, TLS and real messaging are still not implemented.
+identity and record protection are now physically validated providers. TLS,
+native profile-store binding and real messaging are not implemented yet.
 The native target reuses the existing `SessionTransportManager` and PT1 format
 code; it includes the existing DeliveryManager declarations but does **not**
 instantiate delivery/history until a real profile storage provider is available.
@@ -121,9 +122,10 @@ Produced outputs, relative to this isolated worktree's `peerchat` directory:
   (the CMake configuration identifier can change on another checkout).
 - Standalone ARM64 native regression executable: `build/android-foundation/arm64/portable_core_test`.
 
-APK SHA256: `24B8121A520B16DD9B9874467929E507922D7CB5EFA0343CDCF04CDA9266A6C1`.
-Test APK SHA256: `783E07A095608FA255FDFDFE3A3FEED6ABAD01FA19FFA66AB2E5D8BEA98A2FE0`.
-Exact packaged/stripped library hashes:
+Current identity/storage APK SHA256: `7AC781B8E1F7312C71BD7F47299E106692E257FF7BD5BBF362F669084C84FA2F`.
+Test APK SHA256: `67306899E9AD9706A8F33577D434D2DB7BA6FCCBE70BB87A2A26ED66E376A249`.
+Original foundation-only packaged/stripped library hashes (JNI gains one
+representation-normalization method in the identity checkpoint):
 
 - `libpeerchat_messaging.so`: `0FE6F93D843AC0FAB2135C1958E707F9C26D545ADA7C5341D4F3F0B281267B6D`
 - `libpeerchat_jni.so`: `0C6F05C742EF0A3A2C8CEB1FD982AD734B1408326E87C1559337DCDBF231877A`
@@ -131,8 +133,9 @@ Exact packaged/stripped library hashes:
 The APK also includes Compose's `libandroidx.graphics.path.so`, ARM64 only.
 All three ELF libraries import only Android system libc/libm/libdl, plus JNI's
 dependency on the packaged messaging library. C++ runtime archive symbols are
-hidden with Android-only `--exclude-libs,ALL`. The exported ABI is exactly the five
-`pc_core_*` functions and four `Java_com_peerchat_android_NativeBridge_*` functions.
+hidden with Android-only `--exclude-libs,ALL`. The exported ABI contains five
+`pc_core_*` functions and five `Java_com_peerchat_android_NativeBridge_*` functions
+(including the representation-only `normalizeIdentity`).
 APK metadata confirms min 26, target/compile 35 and launcher MainActivity; debug
 signature verification passes. No Windows/media libraries are packaged.
 
@@ -163,7 +166,8 @@ Android version is `Android dev.1`, independent of Windows package numbering.
   invalid UTF-8, maximum/oversized/empty input and invalid/stale handles.
 - Physical Android install, Compose render, ART/JNI execution, five cold launches,
   scoped logcat inspection and standalone ARM64 native regression: PASS (see below).
-- Android identity persistence and server interoperability: NOT IMPLEMENTED.
+- Android identity and record-provider persistence: PASS. Native profile binding
+  and server interoperability: NOT IMPLEMENTED.
 
 ## Physical device validation — 2026-10-02
 
@@ -238,12 +242,89 @@ and its library can also be run independently of ART:
 & $adb -s $serial shell 'cd /data/local/tmp/peerchat-foundation && LD_LIBRARY_PATH=. ./portable_core_test'
 ```
 
+## Identity and protected records — 2026-10-02
+
+`platform/SecurityProviders.kt` (inside the Android application source tree) exposes
+small IdentityProvider and RecordProtector operations. Android APIs stay here; no
+platform APIs enter shared protocol/session/delivery code. There are no static JNI
+references, cached JNIEnv pointers or global keys. The JNI addition only copies and
+normalizes public/signature bytes using the existing native representation helper.
+Providers are not yet bound into native Storage; `pc_core_open_profile` deliberately
+remains unavailable, and native info does not falsely advertise an opened store.
+
+Identity is AndroidKeyStore EC secp256r1 with SHA256withECDSA. Private material is
+non-exportable. Public representation is the existing 72-byte CNG P-256 header/X/Y;
+signatures normalize DER to existing 64-byte big-endian r/s. Peer ID hashes all 72
+public bytes. An actual Android signature, including Unicode and embedded-NUL
+payload, passed unchanged Windows `verifyDevicePayload` in group.cpp; changed
+payload failed. No alternate wire representation or crypto algorithm was added.
+
+Aliases are versioned, app-private and profile-hash-scoped (`peerchat.identity.v1.`
+and `peerchat.records.v1.`). Tests use `peerchat.test.*` aliases and UUID-namespaced
+profile directories. Public identity metadata is atomic; reopen checks it against
+Keystore. Missing key, missing metadata with an existing alias, mismatched public
+key, provider failure and interrupted initialization fail closed with bounded
+recovery errors; there is no replacement-key or plaintext fallback. A creation
+lock/file lock prevents concurrent duplicate creation. Cryptographic operations
+use fresh Signature/Cipher instances. No raw key, plaintext or blob is logged.
+
+Record format PCR1 is explicitly versioned: 12-byte header (magic, version 1,
+AES-GCM algorithm 1, IV length 12, tag length 16, big-endian ciphertext-plus-tag
+length), 12-byte provider-generated IV, then ciphertext plus 128-bit tag. AES-256
+GCM uses a non-exportable Keystore key with randomized encryption required.
+AAD binds the entire header, profile hash and length-prefixed record context.
+Maximum plaintext is 65,536 bytes and context 4,096 bytes. Invalid lengths/version,
+truncation, modified IV/ciphertext/tag and wrong context/profile fail closed.
+This protects records, not rollback of previously valid records; durable history,
+ACK/dedupe and database integration remain the existing shared owners' next work.
+
+Physical results on the same moto g power (2025), Android 16/API 36, ARM64:
+
+- Full instrumentation twice: `OK (3 tests)` (22.797s and 22.639s).
+- Each suite: 1,000 foundation lifetimes; 250 identity reopen/sign/verify cycles;
+  250 record-provider round trips; 40 concurrent sign/protect/unprotect tasks;
+  boundary, tamper, empty/binary/Unicode/max-size and recovery assertions.
+- Private and AES key `encoded` values are null. Identity KeyInfo reports TEE,
+  not StrongBox; this is device-reported local information, not remote attestation.
+- Five cold launches kept the same Peer ID and decrypted the same protected
+  restart record. A fresh persistence-only process passed `OK (1 test)` (0.148s).
+- Tests assert no remaining `peerchat.test.*` aliases and exactly one normal
+  identity plus one normal record key. Test directories are removed in finally;
+  the public interoperability fixture was removed after the Windows check.
+- Only replacement installs were used; no uninstall/clear-data occurred.
+  Uninstall/intentional clear-data removes the app identity and protected data;
+  the next clean installation creates a different identity. This behavior was
+  documented, not destructively tested on the normal profile.
+- No PeerChat provider/JNI/Keystore crash/error observed in cold-launch logcat.
+  Previously recorded device/vendor warnings remain unrelated.
+- Windows DPAPI, identity, history/outbox/ACK/dedupe, group envelope/tamper,
+  sender/history UI, three-client fanout and host C/JNI regressions passed.
+  Full Windows build/package audit passed in isolated `4.0.1-dev.3`; the
+  authoritative Windows tree/packages were untouched. Diff check passed.
+
+Build/install/launch commands above still apply. The existing instrumentation
+command now runs three tests; the persistence-only rerun is:
+
+```powershell
+& $adb -s $serial shell am force-stop com.peerchat.android
+& $adb -s $serial shell am instrument -w -r -e class com.peerchat.android.SecurityProviderTest#productionProfilePersistence com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
 ## Remaining platform work / next checkpoint
 
-The physical foundation milestone is complete with no remaining runtime blocker.
-The next separately authorized milestone may add real P-256
-generation/signing and a Keystore-wrapped software identity with restart proof.
-Do not call the existing non-exportable key/TLS problem solved by this scaffold.
+Foundation and identity/record-provider milestones are physically green. The
+conditional continuation authorizes secure TLS/discovery/DM interoperability,
+but does not authorize exporting this Keystore identity or duplicating the engine.
+Native profile binding must first remove the raw-private-key assumption on Android:
+Profile has a CNG privateKey blob, Storage validates/imports that blob and loads
+winsqlite3.dll, and TlsCredentials imports the blob into Schannel. The portable
+target currently links none of Storage/Node/TlsSession. Adding only Java sockets
+would not prove existing SessionTransportManager/DeliveryManager, trust, ACK or
+dedupe behavior. Required next boundary: opaque identity signing/certificate
+provider + record provider injection + portable SQLite/profile binding, followed
+by Android TLS behind the existing byte-feed/TlsSession contract and existing
+reliable-session path. Do not claim login, presence or real Android/Windows DM
+interoperability until those owners actually run on Android.
 
 Remaining messaging implementations: CNG signing/hash/random/AEAD provider,
 Schannel replacement behind existing `TlsSession` contract, bundled SQLite and
