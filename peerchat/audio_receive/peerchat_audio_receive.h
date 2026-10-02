@@ -10,6 +10,10 @@
 extern "C" {
 #endif
 enum { PC_RX_OK=0, PC_RX_INVALID=1, PC_RX_BUSY=2, PC_RX_FAILED=3, PC_RX_LIMIT=4 };
+// Config ABI layout is unchanged. Version 1 is the deterministic proof clock;
+// version 2 uses WebRTC's real monotonic clock and device-paced Pull calls.
+// For version 2, caller clock_ms/arrival_ms are not used as wall-clock authority.
+enum { PC_RX_DETERMINISTIC=1, PC_RX_DEVICE_PACED=2 };
 typedef uint64_t pc_rx_engine;
 typedef uint64_t pc_rx_source;
 typedef struct pc_rx_config { uint32_t size, version, max_sources, max_packets, max_delay_ms; } pc_rx_config;

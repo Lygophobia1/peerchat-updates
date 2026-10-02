@@ -20,7 +20,11 @@ internal static class GroupRosterDatabaseTest {
                 Require(database.CreateAccountWithDevice("stranger",salt,hash,strangerId)==3,"Stranger fixture account mismatch.");
                 var people=database.PeopleSearch("me",1);
                 Require(people.Count==1&&Convert.ToInt64(people[0]["accountId"])==2&&Convert.ToString(people[0]["username"])=="member","Public prefix search did not find the expected account.");
-                Require(people[0].Count==2&&!people[0].ContainsKey("publicIdentity")&&!people[0].ContainsKey("online"),"Public people search exposed device or presence data.");
+                Require(people[0].Count==3&&!people[0].ContainsKey("publicIdentity")&&!Convert.ToBoolean(people[0]["online"]),"Public search leaked device identity or invented availability.");
+                database.TouchPresence(2,memberId,"",0,"",0,"Relay-only presence","Event-channel lease");
+                Require(Convert.ToBoolean(database.PeopleSearch("me",1)[0]["online"]),"Find People lost online availability.");
+                database.ClearPresence(2,memberId);
+                Require(!Convert.ToBoolean(database.PeopleSearch("me",1)[0]["online"]),"Find People lost offline availability.");
                 Require(database.PeopleSearch("2",1).Count==1,"Exact account ID search failed.");
                 Require(database.PeopleSearch("m",1).Count==0,"One-letter username enumeration was permitted.");
                 Require(database.SetBlocked(1,3,true)=="blocked"&&database.PeopleSearch("str",1).Count==0,"Blocked account remained discoverable.");

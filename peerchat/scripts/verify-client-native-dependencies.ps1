@@ -31,6 +31,13 @@ try {
         $unexpectedScreen=@($screenImports | Where-Object {-not $_.StartsWith('api-ms-win-') -and $screenWindows -notcontains $_})
         if($unexpectedScreen.Count -ne 0){throw 'Packaged screen-media adapter has unexpected dynamic dependencies: '+($unexpectedScreen -join ', ')}
     }
+    $receive=Join-Path $client 'PeerChat.AudioReceive.dll'
+    if(Test-Path -LiteralPath $receive){
+        $receiveImports=@(& $objdump -p $receive | ForEach-Object {if($_ -match 'DLL Name:\s*(\S+)'){$Matches[1].ToLowerInvariant()}} | Sort-Object -Unique)
+        if($LASTEXITCODE -ne 0){throw 'Could not inspect AudioReceive import table.'}
+        $unexpectedReceive=@($receiveImports | Where-Object {@('kernel32.dll','user32.dll','winmm.dll') -notcontains $_})
+        if($unexpectedReceive.Count){throw 'Unexpected AudioReceive dependencies: '+($unexpectedReceive -join ', ')}
+    }
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $smoke=Join-Path $client 'PackageNativeLoadSmoke.exe'
     & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$smoke" /reference:"$framework\System.dll" .\tests\PackageNativeLoadSmoke.cs

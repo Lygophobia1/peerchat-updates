@@ -41,12 +41,12 @@ struct Source final : webrtc::AudioMixer::Source {
  int PreferredSampleRate() const override {return 16000;}
 };
 struct Engine {
- std::mutex mutex;bool retired=false;pc_rx_config config;webrtc::SimulatedClock clock{0};webrtc::Environment env=webrtc::CreateEnvironment(&clock);
+ std::mutex mutex;bool retired=false;pc_rx_config config;webrtc::SimulatedClock clock{0};webrtc::Clock* active_clock;webrtc::Environment env;
  webrtc::scoped_refptr<webrtc::AudioMixerImpl> mixer=webrtc::AudioMixerImpl::Create();std::map<uint64_t,std::unique_ptr<Source>> sources;
  uint64_t time=0,blocks=0,last_pull=0;bool pulled=false;
- explicit Engine(const pc_rx_config& c):config(c){}
+ explicit Engine(const pc_rx_config& c):config(c),active_clock(c.version==PC_RX_DEVICE_PACED?webrtc::Clock::GetRealTimeClock():&clock),env(webrtc::CreateEnvironment(active_clock)){}
  ~Engine(){for(auto& s:sources)mixer->RemoveSource(s.second.get());}
- bool advance(uint64_t t){if(t<time||t>UINT64_C(86400000000))return false;clock.AdvanceTimeMilliseconds(t-time);time=t;return true;}
+ bool advance(uint64_t t){if(config.version==PC_RX_DEVICE_PACED){time=active_clock->TimeInMilliseconds();return true;}if(t<time||t>UINT64_C(86400000000))return false;clock.AdvanceTimeMilliseconds(t-time);time=t;return true;}
 };
 std::mutex registry_mutex;std::map<uint64_t,std::shared_ptr<Engine>> registry;uint64_t next_engine=1;
 std::atomic<uint64_t> next_source{1};
@@ -58,7 +58,7 @@ template<class F> int access(pc_rx_engine id,F fn) noexcept {
 bool valid(const pc_rx_source_config* c){return c&&c->size==sizeof(*c)&&c->version==1&&c->ssrc&&c->payload_type<=127&&c->endpoint_generation;}
 }
 extern "C" PC_RX_API int pc_rx_create(const pc_rx_config* c,pc_rx_engine* out){
- if(!c||!out||c->size!=sizeof(*c)||c->version!=1||!c->max_sources||c->max_sources>32||!c->max_packets||c->max_packets>200||c->max_delay_ms<20||c->max_delay_ms>500)return PC_RX_INVALID;
+ if(!c||!out||c->size!=sizeof(*c)||(c->version!=PC_RX_DETERMINISTIC&&c->version!=PC_RX_DEVICE_PACED)||!c->max_sources||c->max_sources>32||!c->max_packets||c->max_packets>200||c->max_delay_ms<20||c->max_delay_ms>500)return PC_RX_INVALID;
  *out=0;try{auto e=std::make_shared<Engine>(*c);std::lock_guard<std::mutex> l(registry_mutex);if(registry.size()>=64)return PC_RX_LIMIT;auto id=next_engine++;registry.emplace(id,e);*out=id;return PC_RX_OK;}catch(...){return PC_RX_FAILED;}
 }
 extern "C" PC_RX_API int pc_rx_destroy(pc_rx_engine id){
@@ -82,10 +82,10 @@ extern "C" PC_RX_API int pc_rx_insert(pc_rx_engine id,pc_rx_source s,const pc_rx
  return access(id,[&](Engine& e)->int{auto it=e.sources.find(s);if(it==e.sources.end())return PC_RX_INVALID;auto& a=*it->second;
  if(p->ssrc!=a.config.ssrc||p->payload_type!=a.config.payload_type||p->endpoint_generation!=a.config.endpoint_generation||!e.advance(p->arrival_ms))return PC_RX_INVALID;
  webrtc::RTPHeader h;h.ssrc=p->ssrc;h.timestamp=p->timestamp;h.sequenceNumber=p->sequence;h.payloadType=p->payload_type;
- if(a.neteq->InsertPacket(h,std::span<const uint8_t>(bytes,count),webrtc::Timestamp::Millis(p->arrival_ms))!=0){++a.rejected;return PC_RX_FAILED;}++a.inserted;return PC_RX_OK;});
+ if(a.neteq->InsertPacket(h,std::span<const uint8_t>(bytes,count),webrtc::Timestamp::Millis(e.time))!=0){++a.rejected;return PC_RX_FAILED;}++a.inserted;return PC_RX_OK;});
 }
 extern "C" PC_RX_API int pc_rx_pull_10ms(pc_rx_engine id,uint64_t t,int16_t* out,uint32_t capacity){
- if(!out||capacity!=160)return PC_RX_INVALID;return access(id,[&](Engine& e)->int{if((e.pulled&&t!=e.last_pull+10)||!e.advance(t))return PC_RX_INVALID;
+ if(!out||capacity!=160)return PC_RX_INVALID;return access(id,[&](Engine& e)->int{if((e.config.version==PC_RX_DETERMINISTIC&&e.pulled&&t!=e.last_pull+10)||!e.advance(t))return PC_RX_INVALID;
  // Empty upstream mixer defaults to 48 kHz; this fixed-format adapter emits silence.
  if(e.sources.empty())std::fill_n(out,160,0);else{webrtc::AudioFrame f;e.mixer->Mix(1,&f);if(f.sample_rate_hz_!=16000||f.num_channels_!=1||f.samples_per_channel_!=160)return PC_RX_FAILED;std::copy_n(f.data(),160,out);}
  e.last_pull=t;e.pulled=true;++e.blocks;return PC_RX_OK;});

@@ -10,7 +10,15 @@ internal sealed class GroupMediaRooms {
     readonly AccountDatabase database;
     readonly object gate=new object();
     readonly string epoch=Guid.NewGuid().ToString("N");
-    sealed class Device { public long Account; public string Peer,Binding; }
+    sealed class Device {
+        public long Account;
+        public string Peer,Binding;
+        // Public lifetime token, not the private authenticated event-session binding.
+        // Stable across unrelated joins; replaced on leave/rejoin/session replacement.
+        public readonly string MediaGeneration=Guid.NewGuid().ToString("N");
+        public long SignalWindowUtc;
+        public int SignalCount;
+    }
     sealed class Room {
         public string Id,Kind,Name,CreatorDevice;
         public long CreatorAccount;
@@ -42,7 +50,7 @@ internal sealed class GroupMediaRooms {
     static Dictionary<string,object> DeviceWire(Device value,Dictionary<string,object> roster){
         if(value==null)return null;
         var member=Members(roster).FirstOrDefault(m=>Convert.ToInt64(m["accountId"])==value.Account&&Convert.ToString(m["publicIdentity"])==value.Peer);
-        return new Dictionary<string,object>{{"accountId",value.Account},{"publicIdentity",value.Peer},{"username",member==null?"":Convert.ToString(member["username"])}};
+        return new Dictionary<string,object>{{"accountId",value.Account},{"publicIdentity",value.Peer},{"username",member==null?"":Convert.ToString(member["username"])},{"mediaGeneration",value.MediaGeneration}};
     }
     Dictionary<string,object> Snapshot(string id,Group group,Dictionary<string,object> roster){
         var rooms=group.Rooms.Values.OrderBy(r=>r.Id,StringComparer.Ordinal).Select(r=>(object)new Dictionary<string,object>{
@@ -136,6 +144,48 @@ internal sealed class GroupMediaRooms {
     }
     public string[] Disconnect(string binding){
         lock(gate)return groups.Where(pair=>Prune(pair.Value,d=>d.Binding!=binding)).Select(pair=>pair.Key).ToArray();
+    }
+    // Transport-neutral media signaling admission. This service never creates
+    // sockets/ICE agents and never accepts sender identity from request fields.
+    // Delivery is linearized with leave/move/roster removal under the same locks
+    // as room mutation. Existing event-session write deadlines bound Send.
+    public Dictionary<string,object> Signal(GroupFanoutSession actor,Dictionary<string,object> request,IEnumerable<GroupFanoutSession> sessions){
+        string groupId=Text(request,"groupId"),roomId=Text(request,"roomId"),requestId=Text(request,"requestId");
+        var result=new Dictionary<string,object>{{"type","group_media_result"},{"groupId",Id(groupId)?groupId:""},{"roomId",Id(roomId)?roomId:""},{"requestId",Id(requestId)?requestId:""},{"state","malformed_request"}};
+        string kind=Text(request,"kind"),data=Text(request,"data"),route=Text(request,"routeId");
+        var allowed=new[]{"type","requestId","groupId","roomId","epoch","revision","rosterGeneration","sourceGeneration","targetGeneration","targetAccountId","targetDevice","routeId","mediaGeneration","kind","data","mid"};
+        if(!Id(groupId)||!Id(roomId)||!Id(requestId)||!Id(route)||!Id(Text(request,"sourceGeneration"))||!Id(Text(request,"targetGeneration"))||
+            request.Keys.Any(k=>!allowed.Contains(k))||Number(request,"mediaGeneration")<=0||Text(request,"mid").Length>32||
+            (kind!="offer"&&kind!="answer"&&kind!="candidate"&&kind!="close")||data.Length>(kind=="candidate"?4096:32768)||
+            (kind!="close"&&String.IsNullOrWhiteSpace(data))||(kind=="close"&&data.Length!=0))return result;
+        lock(gate){
+            bool admitted=database.WithGroupRosterAuthorization(groupId,actor.Account,actor.Device,roster=>{
+                if(!actor.Current()){result["state"]="stale_session";return;}
+                Group group;Room room;
+                if(!groups.TryGetValue(groupId,out group)||!group.Rooms.TryGetValue(roomId,out room)||room.Kind!="voice"){result["state"]="room_not_found";return;}
+                if(Text(request,"epoch")!=epoch||Number(request,"revision")!=group.Revision||Number(request,"rosterGeneration")!=Convert.ToInt64(roster["rosterGeneration"])){
+                    result["state"]="stale_room_state";result["snapshot"]=Snapshot(groupId,group,roster);return;
+                }
+                Device source,target;long targetAccount=Number(request,"targetAccountId");string targetDevice=Text(request,"targetDevice");
+                if(!room.People.TryGetValue(Key(actor.Account,actor.Device),out source)||source.Binding!=actor.Binding||source.MediaGeneration!=Text(request,"sourceGeneration")){
+                    result["state"]="source_not_authorized";return;
+                }
+                long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if(now-source.SignalWindowUtc>=10){source.SignalWindowUtc=now;source.SignalCount=0;}
+                if(++source.SignalCount>256){result["state"]="signaling_rate_limited";return;}
+                if(targetAccount==actor.Account&&targetDevice==actor.Device||!room.People.TryGetValue(Key(targetAccount,targetDevice),out target)||
+                    target.MediaGeneration!=Text(request,"targetGeneration")||!Authorized(roster,targetAccount,targetDevice)){
+                    result["state"]="target_not_authorized";return;
+                }
+                var destination=sessions.FirstOrDefault(s=>s.Account==target.Account&&s.Device==target.Peer&&s.Binding==target.Binding&&s.Current());
+                if(destination==null){result["state"]="target_unavailable";return;}
+                var wire=new Dictionary<string,object>(request);
+                wire["type"]="group_media_signal";wire["sourceAccountId"]=actor.Account;wire["sourceDevice"]=actor.Device;
+                try{destination.Send(wire);result["state"]="forwarded";}catch{result["state"]="target_unavailable";}
+            });
+            if(!admitted)result["state"]="group_not_authorized";
+        }
+        return result;
     }
     public void Reconcile(string groupId){
         lock(gate){Group group;if(!groups.TryGetValue(groupId,out group))return;

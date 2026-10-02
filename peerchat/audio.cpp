@@ -259,6 +259,7 @@ struct Audio::Impl {
     audio_detail::Mixer mixer;
     std::deque<audio_detail::Frame> captured;
     std::function<void(const std::vector<unsigned char>&)> captureHandler;
+    std::function<bool(std::int16_t*,std::size_t)> playoutHandler;
     std::wstring pendingError;
     std::wstring captureDiagnostics = L"capture_waveinopen_mmresult=not attempted";
     std::wstring captureStage = L"idle", playbackDiagnostics;
@@ -366,7 +367,17 @@ struct Audio::Impl {
             for (std::size_t n = 0; n < outputBuffers.size(); ++n) {
                 auto& buffer = outputBuffers[nextOutput];
                 if (!(buffer.header.dwFlags & WHDR_DONE)) break;
-                buffer.data = mixer.mix(audio_detail::Clock::now());
+                if(playoutHandler){
+                    std::array<std::int16_t,320> samples{};
+                    // Provider is immutable until stop has joined this worker.
+                    // It must be bounded and must not invoke UI/device lifecycle.
+                    lock.unlock();
+                    bool supplied=playoutHandler(samples.data(),samples.size());
+                    lock.lock();
+                    if(!started)return;
+                    if(!supplied)samples.fill(0);
+                    for(std::size_t sample=0;sample<samples.size();++sample){auto bits=static_cast<std::uint16_t>(samples[sample]);buffer.data[2*sample]=bits&255;buffer.data[2*sample+1]=bits>>8;}
+                }else buffer.data = mixer.mix(audio_detail::Clock::now());
                 audio_detail::scalePcm(buffer.data, outputGain);
                 const MMRESULT result = waveOutWrite(output, &buffer.header, sizeof(WAVEHDR));
                 if (result != MMSYSERR_NOERROR) {
@@ -383,6 +394,11 @@ struct Audio::Impl {
 
 Audio::Audio() : impl_(std::make_unique<Impl>()) {}
 Audio::~Audio() { stop(); }
+bool Audio::setPlayoutHandler(std::function<bool(std::int16_t*,std::size_t)> handler){
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if(impl_->started||impl_->worker.joinable())return false;
+    impl_->playoutHandler=std::move(handler);return true;
+}
 void Audio::setVolumes(float inputGain,float outputGain){std::lock_guard<std::mutex> lock(impl_->mutex);impl_->inputGain=std::max(0.0f,std::min(2.0f,inputGain));impl_->outputGain=std::max(0.0f,std::min(2.0f,outputGain));}
 
 bool Audio::start(std::wstring& error) {

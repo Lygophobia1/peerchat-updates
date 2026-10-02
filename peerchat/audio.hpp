@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -34,6 +36,9 @@ public:
     void play(int sender, const std::vector<unsigned char>& pcm);
     std::vector<std::vector<unsigned char>> takeCaptured();
     void setCaptureHandler(std::function<void(const std::vector<unsigned char>&)> handler);
+    // Optional device-paced receive path. Install before start and do not change
+    // it while running. With no provider, accepted 1:1 mixing is unchanged.
+    bool setPlayoutHandler(std::function<bool(std::int16_t*,std::size_t)> handler);
     std::wstring takeError();
     std::wstring diagnostics();
     MediaTelemetry telemetry();

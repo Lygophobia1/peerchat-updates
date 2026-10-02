@@ -115,7 +115,26 @@ void mix(Api& a,int count){
  if(count>1){auto beforeB=stats(a,e,handles[1]);configs[0].endpoint_generation=2;CHECK(a.pc_rx_source_reset(e,handles[0],&configs[0])==0);std::array<int16_t,160> out{};CHECK(a.pc_rx_pull_10ms(e,30000,out.data(),160)==0);CHECK(stats(a,e,handles[1]).pulled_blocks==beforeB.pulled_blocks+1);CHECK(a.pc_rx_source_remove(e,handles[0])==0);CHECK(a.pc_rx_pull_10ms(e,30010,out.data(),160)==0);CHECK(stats(a,e,handles[1]).pulled_blocks==beforeB.pulled_blocks+2);}
  std::printf("MEASURE sources=%d simulated_s=30 average_pull_us=%.2f worst_pull_us=%.2f cpu_ms=%.2f private_bytes_warm=%llu end=%llu\n",count,total/pulls,worst,(cpu100ns()-cpuStart)/10000.,(unsigned long long)before,(unsigned long long)after);CHECK(after<=before+32*1024*1024);CHECK(a.pc_rx_destroy(e)==0);
 }
-int main(int argc,char** argv){CHECK(argc==2);Api a(argv[1]);lifecycle(a);boundariesAndConcurrency(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
+void devicePaced(Api& a){
+ auto cfg=config();cfg.version=PC_RX_DEVICE_PACED;pc_rx_engine e=0;CHECK(a.pc_rx_create(&cfg,&e)==PC_RX_OK);
+ auto packets=fixture(40);auto c=source(0);pc_rx_source s=0;CHECK(a.pc_rx_source_add(e,&c,&s)==PC_RX_OK);
+ uint64_t energy=0;
+ // A completed 20 ms device buffer pulls two blocks together. Arrival can occur
+ // between callbacks; it must never invalidate the next playout block's clock.
+ for(size_t i=0;i<packets.size();++i){
+  CHECK(insert(a,e,s,c,packets[i],UINT64_MAX-i)==PC_RX_OK);
+  std::array<int16_t,322> pcm{};pcm.front()=1234;pcm.back()=4321;
+  CHECK(a.pc_rx_pull_10ms(e,0,pcm.data()+1,160)==PC_RX_OK);
+  CHECK(a.pc_rx_pull_10ms(e,0,pcm.data()+161,160)==PC_RX_OK);
+  CHECK(pcm.front()==1234&&pcm.back()==4321);for(size_t n=1;n<=320;++n)energy+=std::abs(int(pcm[n]));
+  std::this_thread::sleep_for(std::chrono::milliseconds(i%2?18:22));
+ }
+ CHECK(energy>100000);auto v=stats(a,e,s);CHECK(v.pulled_blocks==80&&v.pull_failures==0);
+ pc_rx_mixer_stats m{};m.size=sizeof(m);m.version=1;CHECK(a.pc_rx_get_mixer_stats(e,&m)==PC_RX_OK);CHECK(m.mixed_blocks==80&&m.clock_ms>0);
+ CHECK(a.pc_rx_destroy(e)==PC_RX_OK);
+ std::puts("PASS: real-clock receive, irregular device-paced 20 ms pairs, independent packet arrival, fixed buffers");
+}
+int main(int argc,char** argv){CHECK(argc==2);Api a(argv[1]);lifecycle(a);boundariesAndConcurrency(a);devicePaced(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
  scenario(a,"moderate reorder",1);auto fec=scenario(a,"single loss/FEC",2);CHECK(fec.fec_decode_rate>0);auto plc=scenario(a,"burst loss/PLC",3,false);CHECK(plc.stats.concealed_samples>clean.stats.concealed_samples);scenario(a,"late packet",4);scenario(a,"timestamp wrap",5);scenario(a,"jitter variation",6);scenario(a,"increasing delay",7);scenario(a,"decreasing delay",8);scenario(a,"timestamp discontinuity",9);auto duplicate=scenario(a,"duplicate",10);CHECK(duplicate.hash==clean.hash);scenario(a,"source becomes silent",11);
  for(int n:{1,2,3,4,8})mix(a,n);
  std::puts("PASS: standalone receive/mix proof tests completed");}

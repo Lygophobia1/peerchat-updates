@@ -109,6 +109,41 @@ internal static class GroupMediaRoomsTest {
         Console.WriteLine("PASS: independent voice/screen rooms, voluntary device membership, atomic move, zero/one participants, moderation, malformed/stale/cross-group denial, immutable revisions, removal and disconnect cleanup.");
     }
     static ECDsaCng TestOwner;
+    static Dictionary<string,object> SignalRequest(GroupMediaState state,string room,GroupRoomDevice source,GroupRoomDevice target){
+        return new Dictionary<string,object>{{"type","group_media"},{"groupId",state.GroupId},{"roomId",room},{"requestId",Guid.NewGuid().ToString("N")},{"epoch",state.Epoch},{"revision",state.Revision},{"rosterGeneration",state.RosterGeneration},{"sourceGeneration",source.MediaGeneration},{"targetGeneration",target.MediaGeneration},{"targetAccountId",target.AccountId},{"targetDevice",target.PeerId},{"routeId",Guid.NewGuid().ToString("N")},{"mediaGeneration",1},{"kind","offer"},{"data","test SDP; no audio"},{"mid","0"}};
+    }
+    static void MediaAuthorization(AccountDatabase db,string group,string[] devices){
+        var service=new GroupMediaRooms(db);var received=new List<Dictionary<string,object>>();bool current=true;
+        var sessions=Enumerable.Range(0,4).Select(i=>new GroupFanoutSession{Account=i+1,Device=devices[i],Binding="signal-"+i,Current=()=>current,Send=x=>received.Add(x)}).ToArray();
+        var state=Snapshot(service,sessions[0],group);state=Apply(service,sessions[0],state,"create",kind:"voice",name:"Signal");string room=Room(state,"Signal").Id;
+        state=Apply(service,sessions[0],state,"join_voice",room);state=Apply(service,sessions[1],state,"join_voice",room);
+        var a=Room(state,"Signal").Members.Single(d=>d.AccountId==1);var b=Room(state,"Signal").Members.Single(d=>d.AccountId==2);
+        var request=SignalRequest(state,room,a,b);
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="forwarded","Authorized voice signal not forwarded.");
+        Require(received.Count==1&&Convert.ToInt64(received[0]["sourceAccountId"])==1&&Convert.ToString(received[0]["sourceDevice"])==devices[0],"Sender was not bound to authenticated actor.");
+        request["epoch"]=Guid.NewGuid().ToString("N");Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="stale_room_state","Wrong server epoch accepted.");request["epoch"]=state.Epoch;
+        request["rosterGeneration"]=state.RosterGeneration-1;Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="stale_room_state","Stale roster accepted.");request["rosterGeneration"]=state.RosterGeneration;
+        request["roomId"]=Guid.NewGuid().ToString("N");Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="room_not_found","Wrong room accepted.");request["roomId"]=room;
+        request["sourceGeneration"]=Guid.NewGuid().ToString("N");Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="source_not_authorized","Wrong source generation accepted.");request["sourceGeneration"]=a.MediaGeneration;
+        var replacement=new GroupFanoutSession{Account=1,Device=devices[0],Binding="different-event-session",Current=()=>true,Send=x=>{}};
+        Require(Convert.ToString(service.Signal(replacement,request,sessions)["state"])=="source_not_authorized","Unjoined replacement event session inherited media authority.");
+        request["sourceAccountId"]=3;Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="malformed_request","Forged sender field accepted.");request.Remove("sourceAccountId");
+        Require(Convert.ToString(service.Signal(sessions[3],request,sessions)["state"])=="group_not_authorized","Nonmember signaling accepted.");
+        Require(Convert.ToString(service.Signal(sessions[2],request,sessions)["state"])=="source_not_authorized","Nonparticipant signaling accepted.");
+        request["targetDevice"]=devices[2];Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="target_not_authorized","Wrong target device accepted.");request["targetDevice"]=devices[1];
+        request["data"]=new string('x',32769);Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="malformed_request","Unbounded SDP accepted.");request["data"]="test SDP";
+        current=false;Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="stale_session","Expired event session accepted.");current=true;
+        state=Apply(service,sessions[2],state,"join_voice",room);
+        Require(Room(state,"Signal").Members.Single(d=>d.AccountId==1).MediaGeneration==a.MediaGeneration&&Room(state,"Signal").Members.Single(d=>d.AccountId==2).MediaGeneration==b.MediaGeneration,"Unrelated join invalidated established endpoint generations.");
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="stale_room_state","Old room revision accepted.");request=SignalRequest(state,room,a,b);
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="forwarded","Existing source route cannot use fresh authority after another joins.");
+        state=Apply(service,sessions[1],state,"leave_voice",room);state=Apply(service,sessions[1],state,"join_voice",room);
+        request["revision"]=state.Revision;Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="target_not_authorized","Old participation token resurrected after rejoin.");
+        b=Room(state,"Signal").Members.Single(d=>d.AccountId==2);Require(b.MediaGeneration!=Convert.ToString(request["targetGeneration"]),"Rejoin reused old generation.");
+        request=SignalRequest(state,room,a,b);service.Disconnect(sessions[1].Binding);state=Snapshot(service,sessions[0],group);request["revision"]=state.Revision;
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="target_not_authorized","Disconnect retained media authorization.");
+        Console.WriteLine("PASS: room-bound media signaling, authenticated sender/device, nonmember/nonparticipant denial, stable incremental generations, bounded SDP, stale revision/session/rejoin/disconnect rejection.");
+    }
     static void Network(string directory,string certificate,string password,string[] devices,string group,AccountDatabase database){
         var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();int port=((IPEndPoint)listener.LocalEndpoint).Port;listener.Stop();
         var server=new DiscoveryServer(new ServerConfiguration{Port=port,DatabasePath=Path.Combine(directory,"rooms.db"),DataDirectory=directory,LogDirectory=Path.Combine(directory,"logs"),CertificatePath=certificate,CertificatePassword=password});
@@ -133,6 +168,13 @@ internal static class GroupMediaRoomsTest {
             op(0,"create","","voice","A");string va=Room(clients[0].GroupRooms(group),"A").Id;
             op(0,"create","","voice","B");string vb=Room(clients[0].GroupRooms(group),"B").Id;
             op(0,"join_voice",va,"","");op(1,"join_voice",va,"","");op(2,"join_voice",vb,"","");
+            var route=Guid.NewGuid().ToString("N");
+            string signalId=clients[0].QueueGroupMediaSignal(group,va,2,devices[1],route,1,"offer","test SDP; opaque to server");
+            Require(signalId!=null,"Media signal not queued on existing event channel.");
+            Wait(()=>clients[0].GroupMediaResult(signalId)=="forwarded","Server did not admit authenticated voice-room signal.");
+            GroupMediaSignal signal=null;Wait(()=>{signal=clients[1].TakeGroupMediaSignal();return signal!=null;},"Target event channel did not receive signal.");
+            Require(signal.SourceAccountId==1&&signal.SourceDevice==devices[0]&&signal.TargetAccountId==2&&signal.RouteId==route&&signal.Data=="test SDP; opaque to server","Server media signaling changed identity/payload.");
+            Require(clients[0].QueueGroupMediaSignal(group,va,3,devices[2],route,1,"offer","test")==null,"Cross-room media queued.");
             op(0,"create","","screen_share","S1");string s1=Room(clients[0].GroupRooms(group),"S1").Id;
             op(2,"create","","screen_share","S2");string s2=Room(clients[0].GroupRooms(group),"S2").Id;
             op(0,"start_share",s1,"","");op(2,"start_share",s2,"","");op(1,"join_viewer",s1,"","");op(0,"join_viewer",s2,"","");
@@ -167,7 +209,7 @@ internal static class GroupMediaRoomsTest {
             Require(db.RegisterGroup(1,devices[0],proof)!=null,"Register failed.");
             Require(db.GroupInvite(group,1,devices[0],2,devices[1],1)!=null&&db.GroupRespond(group,2,devices[1],true,2)!=null,"Join B failed.");
             Require(db.GroupInvite(group,1,devices[0],3,devices[2],3)!=null&&db.GroupRespond(group,3,devices[2],true,4)!=null,"Join C failed.");
-            Network(args[0],args[1],args[2],devices,group,db);StateTests(db,group,devices);
+            Network(args[0],args[1],args[2],devices,group,db);MediaAuthorization(db,group,devices);StateTests(db,group,devices);
         }
         return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}

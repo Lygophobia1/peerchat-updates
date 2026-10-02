@@ -35,6 +35,68 @@ public sealed class DiscoveryClient {
     readonly HashSet<string> roomTargets=new HashSet<string>(StringComparer.Ordinal);
     readonly Dictionary<string,GroupMediaState> roomStates=new Dictionary<string,GroupMediaState>(StringComparer.Ordinal);
     readonly Dictionary<string,string> roomResults=new Dictionary<string,string>(StringComparer.Ordinal);
+    readonly Queue<Dictionary<string,object>> mediaOutput=new Queue<Dictionary<string,object>>();
+    readonly Dictionary<string,DateTime> mediaPending=new Dictionary<string,DateTime>(StringComparer.Ordinal);
+    readonly Queue<GroupMediaSignal> mediaSignals=new Queue<GroupMediaSignal>();
+    readonly Dictionary<string,string> mediaResults=new Dictionary<string,string>(StringComparer.Ordinal);
+    public string GroupMediaResult(string requestId){lock(eventGate){string state;return mediaResults.TryGetValue(requestId,out state)?state:"Pending";}}
+    public GroupMediaSignal TakeGroupMediaSignal(){lock(eventGate){
+        int count=mediaSignals.Count;
+        for(int i=0;i<count;i++){
+            var signal=mediaSignals.Dequeue();GroupMediaState state;
+            if(DateTime.UtcNow-signal.ReceivedUtc>TimeSpan.FromSeconds(10)||!roomStates.TryGetValue(signal.GroupId,out state)||state.Epoch!=signal.Epoch||state.RosterGeneration>signal.RosterGeneration)continue;
+            // A broadcast to another member can race this targeted frame. Wait
+            // boundedly for the authoritative snapshot, never infer membership.
+            if(signal.Revision>state.Revision||signal.RosterGeneration>state.RosterGeneration){mediaSignals.Enqueue(signal);continue;}
+            var room=state.Rooms.FirstOrDefault(r=>r.Id==signal.RoomId&&r.Kind=="voice");
+            if(room!=null&&room.Members.Any(d=>d.AccountId==signal.SourceAccountId&&d.PeerId==signal.SourceDevice&&d.MediaGeneration==signal.SourceGeneration)&&
+                signal.TargetAccountId==AccountId&&signal.TargetDevice==eventPublicIdentity&&room.Members.Any(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity&&d.MediaGeneration==signal.TargetGeneration))return signal;
+        }
+        return null;
+    }}
+    // Called by the media owner, not WPF. Authoritative snapshots supply identity
+    // and participation generations; no friend relationship is manufactured.
+    public string QueueGroupMediaSignal(string group,string room,long targetAccount,string targetDevice,string route,long generation,string kind,string data,string mid="0"){
+        lock(eventGate){
+            GroupMediaState state;if(eventStop||!EventChannelConnected||mediaOutput.Count+mediaPending.Count>=64||!roomStates.TryGetValue(group,out state))return null;
+            var voice=state.Rooms.FirstOrDefault(r=>r.Id==room&&r.Kind=="voice");if(voice==null)return null;
+            var source=voice.Members.FirstOrDefault(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity);
+            var target=voice.Members.FirstOrDefault(d=>d.AccountId==targetAccount&&d.PeerId==targetDevice);
+            if(source==null||target==null||source==target||source.MediaGeneration.Length!=32||target.MediaGeneration.Length!=32||route==null||route.Length!=32||generation<=0||mid==null||mid.Length>32||data==null||
+                (kind!="offer"&&kind!="answer"&&kind!="candidate"&&kind!="close")||data.Length>(kind=="candidate"?4096:32768)||(kind!="close"&&String.IsNullOrWhiteSpace(data))||(kind=="close"&&data.Length!=0))return null;
+            string id=Guid.NewGuid().ToString("N");
+            mediaOutput.Enqueue(new Dictionary<string,object>{{"type","group_media"},{"requestId",id},{"groupId",group},{"roomId",room},{"epoch",state.Epoch},{"revision",state.Revision},{"rosterGeneration",state.RosterGeneration},{"sourceGeneration",source.MediaGeneration},{"targetGeneration",target.MediaGeneration},{"targetAccountId",targetAccount},{"targetDevice",targetDevice},{"routeId",route},{"mediaGeneration",generation},{"kind",kind},{"data",data},{"mid",mid}});
+            return id;
+        }
+    }
+    void DrainMediaOutput(SslStream tls){for(int i=0;i<8;i++){
+        Dictionary<string,object> request;lock(eventGate){
+            foreach(string id in mediaPending.Where(p=>DateTime.UtcNow-p.Value>TimeSpan.FromSeconds(15)).Select(p=>p.Key).ToArray()){
+                mediaPending.Remove(id);if(mediaResults.Count>=128)mediaResults.Clear();mediaResults[id]="signaling_timeout";
+            }
+            if(mediaOutput.Count==0)return;request=mediaOutput.Dequeue();mediaPending[Text(request,"requestId")]=DateTime.UtcNow;
+        }
+        WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));
+    }}
+    bool MediaNotification(Dictionary<string,object> response){
+        string type=Text(response,"type");if(type!="group_media_signal"&&type!="group_media_result")return false;
+        if(type=="group_media_result"){
+            lock(eventGate){string id=Text(response,"requestId");if(!mediaPending.Remove(id))return true;
+                if(mediaResults.Count>=128)mediaResults.Clear();mediaResults[id]=Text(response,"state");
+                object raw;if(response.TryGetValue("snapshot",out raw)){
+                    var next=GroupMediaState.Parse((Dictionary<string,object>)raw);GroupMediaState current;
+                    if(roomStates.TryGetValue(next.GroupId,out current)&&current.Accepts(next))roomStates[next.GroupId]=next;
+                }
+            }
+        }else{
+            var signal=new GroupMediaSignal(response);
+            lock(eventGate){GroupMediaState state;if(!roomStates.TryGetValue(signal.GroupId,out state)||state.Epoch!=signal.Epoch||signal.TargetAccountId!=AccountId||signal.TargetDevice!=eventPublicIdentity)return true;
+                if(mediaSignals.Count<128)mediaSignals.Enqueue(signal);
+            }
+        }
+        if(eventHandler!=null)eventHandler(new DiscoveryEvent{Event=type,GroupId=Text(response,"groupId"),State=Text(response,"state")});
+        return true;
+    }
     readonly Dictionary<string,string> roomMutations=new Dictionary<string,string>(StringComparer.Ordinal),roomRejections=new Dictionary<string,string>(StringComparer.Ordinal);
     public string GroupRoomDiagnostics(string group){lock(eventGate){string mutation,rejection;roomMutations.TryGetValue(group,out mutation);roomRejections.TryGetValue(group,out rejection);return "Last room result: "+GroupRoomResult(group)+"\nLast room mutation: "+(mutation??"None")+"\nLast room rejection: "+(rejection??"None");}}
     public GroupMediaState GroupRooms(string group){lock(eventGate){GroupMediaState state;return roomStates.TryGetValue(group,out state)?state:null;}}
@@ -59,6 +121,7 @@ public sealed class DiscoveryClient {
     void RoomChannelLost(){lock(eventGate){
         foreach(string group in roomTargets)roomResults[group]="Disconnected; explicit rejoin required";
         roomStates.Clear();roomOutput.Clear();roomPending.Clear();
+        mediaOutput.Clear();mediaPending.Clear();mediaSignals.Clear();mediaResults.Clear();
     }}
     bool RoomNotification(Dictionary<string,object> response){
         string type=Text(response,"type");if(type!="group_room_snapshot"&&type!="group_room_result")return false;
@@ -88,6 +151,7 @@ public sealed class DiscoveryClient {
     public bool QueueGroupAck(string group,string message,string state){lock(eventGate){if(eventStop||!EventChannelConnected||groupChannelOutput.Count>=32)return false;groupChannelOutput.Enqueue(new Dictionary<string,object>{{"type","group_ack"},{"groupId",group},{"messageId",message},{"state",state}});return true;}}
     void DrainGroupOutput(SslStream tls){
         DrainRoomOutput(tls);
+        DrainMediaOutput(tls);
         for(int i=0;i<8;i++){
             Dictionary<string,object> request;lock(eventGate){if(groupChannelOutput.Count==0)return;request=groupChannelOutput.Dequeue();if(Text(request,"type")=="group_send")groupChannelPending[Text(request,"messageId")]=request;}
             WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));
@@ -100,6 +164,7 @@ public sealed class DiscoveryClient {
     }
     bool GroupChannelNotification(Dictionary<string,object> response){
         if(RoomNotification(response))return true;
+        if(MediaNotification(response))return true;
         string type=Text(response,"type");if(type!="group_message"&&type!="group_delivery")return false;
         if(type=="group_delivery")lock(eventGate)groupChannelPending.Remove(Text(response,"messageId"));
         if(eventHandler!=null)eventHandler(new DiscoveryEvent{Event=type,GroupId=Text(response,"groupId"),MessageId=Text(response,"messageId"),Envelope=Text(response,"envelope"),State=Text(response,"state"),SessionCount=Number(response,"sessionCount"),AcceptedCount=Number(response,"acceptedCount"),DuplicateCount=Number(response,"duplicateCount"),RejectedCount=Number(response,"rejectedCount")});
@@ -166,13 +231,13 @@ public sealed class DiscoveryClient {
         System.Diagnostics.Debug.WriteLine("PeerChat discovery suggest response: "+results.Count+" public result(s): "+String.Join(",",results.Select(x=>x.Username).ToArray()));
         return results;
     }
-    // The shared Find People search deliberately has no device identity or
-    // presence field. A friend or group action must perform its own authorized
+    // Shared search has lease-derived availability, but no device identity.
+    // A friend or group action must perform its own authorized
     // follow-up rather than treating a public search result as peer trust.
     public List<PublicAccountResult> SearchPeople(string query){
         var response=Request("people_search",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"query",query??""}});
         var results=new List<PublicAccountResult>();object raw;
-        if(response.TryGetValue("accounts",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var item=value as Dictionary<string,object>;if(item==null)continue;results.Add(new PublicAccountResult{AccountId=Convert.ToInt64(item["accountId"]),Username=Convert.ToString(item["username"])});}}
+        if(response.TryGetValue("accounts",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var item=value as Dictionary<string,object>;if(item==null)continue;results.Add(new PublicAccountResult{AccountId=Convert.ToInt64(item["accountId"]),Username=Convert.ToString(item["username"]),Online=item.ContainsKey("online")&&Convert.ToBoolean(item["online"])});}}
         return results;
     }
     public Dictionary<string,object> InviteAccountToGroup(string groupId,long rosterGeneration,long targetAccountId,string localDevice){return Request("group_invite_account",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"groupId",groupId??""},{"rosterGeneration",rosterGeneration.ToString()},{"targetAccountId",targetAccountId.ToString()}});}
@@ -214,10 +279,23 @@ public sealed class DiscoveryClient {
     void EventLoop(){bool everConnected=false;while(!eventStop){TcpClient tcp=null;SslStream tls=null;try{tcp=new TcpClient();tcp.ReceiveTimeout=1000;tcp.SendTimeout=10000;tcp.Connect(Host,Port);tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);var request=new Dictionary<string,object>{{"version",1},{"type","events"},{"sessionToken",SessionToken??""},{"publicIdentity",eventPublicIdentity??""},{"clientHeartbeats",true}};WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(request)));var ready=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));object ok;if(!ready.TryGetValue("ok",out ok)||!(bool)ok){string reason=Text(ready,"error");if(reason=="event_session_superseded")eventStop=true;throw new InvalidOperationException("Discovery event subscription rejected: "+reason); }EventChannelConnected=true;RoomChannelReady();eventConnectedUtc=DateTime.UtcNow;if(everConnected&&eventHandler!=null)eventHandler(new DiscoveryEvent{Event="channel_connected"});everConnected=true;long nextHeartbeat=0;while(!eventStop){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(now>=nextHeartbeat){WriteFrame(tls,Encoding.UTF8.GetBytes(channelJson.Serialize(new Dictionary<string,object>{{"type","event_heartbeat"}})));nextHeartbeat=now+20;}DrainGroupOutput(tls);if(!tcp.Client.Poll(250000,SelectMode.SelectRead))continue;if(tcp.Available==0)throw new IOException("Discovery event channel closed.");var response=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));if(GroupChannelNotification(response))continue;object type;if(!response.TryGetValue("type",out type)||!String.Equals(type as string,"friend_event",StringComparison.Ordinal))continue;var notification=new DiscoveryEvent{Event=Text(response,"event"),AccountId=Number(response,"accountId"),PublicIdentity=Text(response,"publicIdentity"),TargetPublicIdentity=Text(response,"targetPublicIdentity"),RequestId=Text(response,"requestId"),PeerHost=Text(response,"peerHost"),PeerPublicIdentity=Text(response,"peerPublicIdentity"),PeerPort=(int)Number(response,"peerPort"),ExpiresUtc=Number(response,"expiresUtc"),EndpointHost=Text(response,"endpointHost"),EndpointPort=(int)Number(response,"endpointPort"),PublicEndpointHost=Text(response,"publicEndpointHost"),PublicEndpointPort=(int)Number(response,"publicEndpointPort")};try{if(eventHandler!=null)eventHandler(notification);}catch{}}}catch(Exception error){if(!eventStop){System.Diagnostics.Debug.WriteLine("Discovery event channel reconnect in "+eventReconnectDelayMs+" ms: "+error.GetType().Name);eventReconnectDelayMs=Math.Min(30000,eventReconnectDelayMs*2);}}finally{if(EventChannelConnected&&DateTime.UtcNow-eventConnectedUtc>TimeSpan.FromSeconds(15))eventReconnectDelayMs=1000;EventChannelConnected=false;GroupChannelLost();try{if(tls!=null)tls.Dispose();}catch{}try{if(tcp!=null)tcp.Close();}catch{}}if(!eventStop)eventStopSignal.WaitOne(eventReconnectDelayMs);}}
 }
 // Immutable server projections. No media objects, networking or local membership authority.
+public sealed class GroupMediaSignal {
+    internal readonly DateTime ReceivedUtc=DateTime.UtcNow;
+    public readonly string GroupId,RoomId,Epoch,SourceDevice,TargetDevice,SourceGeneration,TargetGeneration,RouteId,Kind,Data,Mid;
+    public readonly long Revision,RosterGeneration,SourceAccountId,TargetAccountId,MediaGeneration;
+    internal GroupMediaSignal(Dictionary<string,object> value){
+        GroupId=Convert.ToString(value["groupId"]);RoomId=Convert.ToString(value["roomId"]);Epoch=Convert.ToString(value["epoch"]);
+        SourceDevice=Convert.ToString(value["sourceDevice"]);TargetDevice=Convert.ToString(value["targetDevice"]);SourceGeneration=Convert.ToString(value["sourceGeneration"]);TargetGeneration=Convert.ToString(value["targetGeneration"]);
+        RouteId=Convert.ToString(value["routeId"]);Kind=Convert.ToString(value["kind"]);Data=Convert.ToString(value["data"]);Mid=Convert.ToString(value["mid"]);
+        Revision=Convert.ToInt64(value["revision"]);RosterGeneration=Convert.ToInt64(value["rosterGeneration"]);SourceAccountId=Convert.ToInt64(value["sourceAccountId"]);TargetAccountId=Convert.ToInt64(value["targetAccountId"]);MediaGeneration=Convert.ToInt64(value["mediaGeneration"]);
+        if(GroupId.Length!=32||RoomId.Length!=32||Epoch.Length!=32||RouteId.Length!=32||SourceDevice.Length!=64||TargetDevice.Length!=64||SourceGeneration.Length!=32||TargetGeneration.Length!=32||SourceAccountId<=0||TargetAccountId<=0||MediaGeneration<=0||Revision<0||RosterGeneration<=0||Mid.Length>32||
+            (Kind!="offer"&&Kind!="answer"&&Kind!="candidate"&&Kind!="close")||Data.Length>(Kind=="candidate"?4096:32768))throw new InvalidDataException("Invalid group media signaling.");
+    }
+}
 public sealed class GroupRoomDevice {
     public readonly long AccountId;
-    public readonly string PeerId,Username;
-    internal GroupRoomDevice(Dictionary<string,object> value){AccountId=Convert.ToInt64(value["accountId"]);PeerId=Convert.ToString(value["publicIdentity"]);Username=Convert.ToString(value["username"]);if(AccountId<=0||PeerId.Length!=64)throw new InvalidDataException("Invalid room device.");}
+    public readonly string PeerId,Username,MediaGeneration;
+    internal GroupRoomDevice(Dictionary<string,object> value){AccountId=Convert.ToInt64(value["accountId"]);PeerId=Convert.ToString(value["publicIdentity"]);Username=Convert.ToString(value["username"]);object generation;MediaGeneration=value.TryGetValue("mediaGeneration",out generation)?Convert.ToString(generation):"";if(AccountId<=0||PeerId.Length!=64||(MediaGeneration.Length!=0&&MediaGeneration.Length!=32))throw new InvalidDataException("Invalid room device.");}
 }
 public sealed class GroupRoom {
     public readonly string Id,Kind,Name,CreatorDevice;
@@ -243,7 +321,7 @@ public sealed class GroupMediaState {
     public static GroupMediaState Parse(Dictionary<string,object> value){return new GroupMediaState(value);}
     public bool Accepts(GroupMediaState next){return next!=null&&next.GroupId==GroupId&&next.Epoch==Epoch&&next.Revision>=Revision&&next.RosterGeneration>=RosterGeneration;}
     public string Diagnostics(long localAccount,string localDevice,string kind=""){
-        var text=new StringBuilder();text.AppendLine("Group media: room state only; no audio/video");text.AppendLine("Group ID: "+GroupId);text.AppendLine("Room revision: "+Revision);text.AppendLine("Roster generation: "+RosterGeneration);
+          var text=new StringBuilder();text.AppendLine("Group media: authoritative room state");text.AppendLine("Group ID: "+GroupId);text.AppendLine("Room revision: "+Revision);text.AppendLine("Roster generation: "+RosterGeneration);
         foreach(var room in Rooms.Where(r=>String.IsNullOrEmpty(kind)||r.Kind==kind)){
             text.AppendLine("Room: "+room.Name+" | "+room.Id+" | "+room.Kind);
             text.AppendLine((room.Kind=="voice"?"Participant count: ":"Viewer count: ")+room.Members.Count);
@@ -257,7 +335,7 @@ public sealed class GroupMediaState {
 }
 public sealed class DiscoveryRequestException : InvalidOperationException { public string ErrorCode { get; private set; } public DiscoveryRequestException(string code):base("Discovery request was rejected."){ErrorCode=String.IsNullOrWhiteSpace(code)?"request_failed":code;} }
 public sealed class DiscoverySearchResult { public long AccountId,CandidateSeenUtc; public string Username,PublicIdentity,EndpointHost,PublicEndpointHost,PublicCandidateSource,ObservedAddressClassification; public int EndpointPort,PublicEndpointPort; public bool Online; }
-public sealed class PublicAccountResult { public long AccountId; public string Username; }
+public sealed class PublicAccountResult { public long AccountId; public string Username; public bool Online; }
 public sealed class GroupInviteResult { public string InviteId,GroupId,InviterUsername; public long InviterAccountId,CreatedUtc; }
 public sealed class ServerGroupMember { public long AccountId; public string PeerId,Role,State,Username; }
 public sealed class ServerGroupRoster { public string GroupId,LegacyGroupId,DistributorPeerId; public long RosterGeneration; public List<ServerGroupMember> Members=new List<ServerGroupMember>(); }
