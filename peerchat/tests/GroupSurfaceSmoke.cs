@@ -44,7 +44,15 @@ class GroupSurfaceSmoke {
         text=Descendants<TextBlock>(pane).Select(t=>t.Text).ToArray();
         foreach(string name in new[]{"General Voice","Raid Team","Share One","Share Two"})Check(text.Contains(name),"Multiple authoritative room missing: "+name);
         Check(Descendants<Button>(pane).Count(b=>Convert.ToString(b.Content)=="Join")==2,"Independent voice join actions missing");
-        Check(Descendants<Button>(pane).Count(b=>Convert.ToString(b.Content)=="Watch unavailable"&&!b.IsEnabled)==2,"Group screen media was simulated");
+        Check(Descendants<Button>(pane).Count(b=>Convert.ToString(b.Content)=="Stop Sharing")==2,"Authoritative screen sharer actions missing");
+        Check(!Descendants<Button>(pane).Any(b=>Convert.ToString(b.Content)=="Watch unavailable"),"Unavailable testing surface retained");
+        var emptyScreen=room("Empty share","screen_share");emptyScreen["sharer"]=null;
+        var remoteScreen=room("Remote share","screen_share");remoteScreen["sharer"]=member(2,"Other Member");
+        state=GroupMediaState.Parse(new Dictionary<string,object>{{"groupId",serverGroup},{"epoch",new string('c',32)},{"revision",2},{"rosterGeneration",1},{"rooms",new object[]{room("General Voice","voice"),room("Raid Team","voice"),emptyScreen,remoteScreen}}});
+        ((Dictionary<string,GroupMediaState>)Field(discovery,"roomStates"))[serverGroup]=state;
+        desktop.GetType().GetMethod("RefreshGroupDetails",Private).Invoke(desktop,new object[]{true});
+        Check(Descendants<Button>(pane).Count(b=>Convert.ToString(b.Content)=="Start Sharing")==1,"Inactive room start-share command missing");
+        Check(Descendants<Button>(pane).Count(b=>Convert.ToString(b.Content)=="Watch")==1,"Voluntary remote viewing command missing");
         Check(text.Any(t=>t.Contains("Other Member")),"Participant names missing");
         var firstControl=pane.Children[0];
         var repeatedStatus=typeof(GroupVoiceRoomStatus).GetConstructors(Private)[0].Invoke(new object[]{"","","Not joined","",false,false,false});
@@ -56,5 +64,5 @@ class GroupSurfaceSmoke {
         toggle.Invoke(desktop,null);Check(column.Width.Value>0&&pane.Visibility==Visibility.Visible,"Pane not restored");
         model.Groups=false;desktop.GetType().GetMethod("Refresh",Private).Invoke(desktop,null);Check(pane.Visibility==Visibility.Collapsed&&((StackPanel)window.FindName("ContextConnection")).Visibility==Visibility.Visible,"DM pane not restored");
         Console.WriteLine("PASS: synthetic WPF group layout, separate DM/group panes, room actions, dark labels, collapse/reopen and unchanged DM surface");return 0;
-    }catch(Exception error){Console.Error.WriteLine(error);return 1;}finally{if(desktop!=null){((GroupVoiceService)Field(desktop,"groupVoice")).Dispose();((CoreAdapter)Field(desktop,"core")).Dispose();}}}
+    }catch(Exception error){Console.Error.WriteLine(error);return 1;}finally{if(desktop!=null){((GroupScreenShareService)Field(desktop,"groupScreen")).Dispose();((GroupVoiceService)Field(desktop,"groupVoice")).Dispose();((CoreAdapter)Field(desktop,"core")).Dispose();}}}
 }

@@ -94,7 +94,7 @@ public sealed class GroupVoiceService:IDisposable {
                 else if(cfg!=null){var c=cfg.Credentials;pc_group_voice_configure(handle,c.Host,(ushort)c.Port,c.Username,c.Password,c.ExpiresUtc,cfg.ProfileGeneration,cfg.DiscoveryGeneration,cfg.ConfigurationGeneration);}
                 if(pc_group_voice_reconcile(handle,(ulong)state.Revision,(ulong)state.RosterGeneration,sources)==0){Fail(group,room,"Authorized participant reconciliation failed","participants",member.MediaGeneration);return;}
                 boundSources=sources;
-                GroupMediaSignal signal;while((signal=d.TakeGroupMediaSignal())!=null){if(signal.GroupId==group&&signal.RoomId==room&&signal.Epoch==boundEpoch&&signal.TargetGeneration==boundParticipation)pc_group_voice_signal(handle,signal.SourceAccountId+":"+signal.SourceDevice+":"+signal.SourceGeneration,signal.RouteId,(ulong)signal.MediaGeneration,signal.Kind,signal.Data,signal.Mid);}
+                GroupMediaSignal signal;while((signal=d.TakeGroupMediaSignal(group,room))!=null){if(signal.GroupId==group&&signal.RoomId==room&&signal.Epoch==boundEpoch&&signal.TargetGeneration==boundParticipation)pc_group_voice_signal(handle,signal.SourceAccountId+":"+signal.SourceDevice+":"+signal.SourceGeneration,signal.RouteId,(ulong)signal.MediaGeneration,signal.Kind,signal.Data,signal.Mid);}
                 var outbound=json.Deserialize<List<NativeSignal>>(Marshal.PtrToStringUni(pc_group_voice_take_signals(handle)));
                 foreach(var output in outbound)if(signals.Count<64)signals.Add(new PendingSignal{Signal=output,Expires=DateTime.UtcNow.AddSeconds(10)});
                 foreach(var pending in signals.ToArray()){

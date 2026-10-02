@@ -30,6 +30,14 @@ class PackageNativeLoadSmoke {
             if(audio==IntPtr.Zero||GetProcAddress(audio,"pc_rx_create")==IntPtr.Zero){Console.Error.WriteLine("FAIL: packaged AudioReceive component unavailable");return 1;}
             Console.WriteLine("PASS: group voice C ABI exports, 15 create/snapshot/destroy lifetimes and packaged AudioReceive load under restricted search.");
         }
+        var screen=GetProcAddress(module,"pc_group_screen_create");
+        if(screen!=IntPtr.Zero){
+            foreach(string export in new[]{"pc_group_screen_destroy","pc_group_screen_start","pc_group_screen_configure","pc_group_screen_reconcile","pc_group_screen_signal","pc_group_screen_pump","pc_group_screen_take_signals","pc_group_screen_snapshot","pc_group_screen_stop"})if(GetProcAddress(module,export)==IntPtr.Zero){Console.Error.WriteLine("FAIL: group screen ABI missing "+export);return 1;}
+            var create=(Create)Marshal.GetDelegateForFunctionPointer(screen,typeof(Create));var destroy=(Destroy)Marshal.GetDelegateForFunctionPointer(GetProcAddress(module,"pc_group_screen_destroy"),typeof(Destroy));
+            var snapshot=(Snapshot)Marshal.GetDelegateForFunctionPointer(GetProcAddress(module,"pc_group_screen_snapshot"),typeof(Snapshot));
+            for(int i=0;i<15;i++){var handle=create();if(handle==IntPtr.Zero)return 1;try{if(!Marshal.PtrToStringUni(snapshot(handle)).Contains("\"active\":false"))return 1;}finally{destroy(handle);}}
+            Console.WriteLine("PASS: group screen C ABI exports and 15 create/snapshot/destroy lifetimes under restricted search.");
+        }
         // Keep the module pinned until process exit, matching the desktop host. The smoke test's
         // purpose is to prove that the Windows loader resolves the packaged core without PATH.
         Console.WriteLine("PASS: packaged native core loads with package/system DLL search only.");return 0;

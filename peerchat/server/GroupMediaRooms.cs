@@ -162,21 +162,30 @@ internal sealed class GroupMediaRooms {
             bool admitted=database.WithGroupRosterAuthorization(groupId,actor.Account,actor.Device,roster=>{
                 if(!actor.Current()){result["state"]="stale_session";return;}
                 Group group;Room room;
-                if(!groups.TryGetValue(groupId,out group)||!group.Rooms.TryGetValue(roomId,out room)||room.Kind!="voice"){result["state"]="room_not_found";return;}
+                if(!groups.TryGetValue(groupId,out group)||!group.Rooms.TryGetValue(roomId,out room)||(room.Kind!="voice"&&room.Kind!="screen_share")){result["state"]="room_not_found";return;}
                 if(Text(request,"epoch")!=epoch||Number(request,"revision")!=group.Revision||Number(request,"rosterGeneration")!=Convert.ToInt64(roster["rosterGeneration"])){
                     result["state"]="stale_room_state";result["snapshot"]=Snapshot(groupId,group,roster);return;
                 }
                 Device source,target;long targetAccount=Number(request,"targetAccountId");string targetDevice=Text(request,"targetDevice");
-                if(!room.People.TryGetValue(Key(actor.Account,actor.Device),out source)||source.Binding!=actor.Binding||source.MediaGeneration!=Text(request,"sourceGeneration")){
+                source=room.Kind=="screen_share"&&room.Sharer!=null&&room.Sharer.Account==actor.Account&&room.Sharer.Peer==actor.Device?room.Sharer:null;
+                if(source==null)room.People.TryGetValue(Key(actor.Account,actor.Device),out source);
+                if(source==null||source.Binding!=actor.Binding||source.MediaGeneration!=Text(request,"sourceGeneration")){
                     result["state"]="source_not_authorized";return;
                 }
                 long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 if(now-source.SignalWindowUtc>=10){source.SignalWindowUtc=now;source.SignalCount=0;}
                 if(++source.SignalCount>256){result["state"]="signaling_rate_limited";return;}
-                if(targetAccount==actor.Account&&targetDevice==actor.Device||!room.People.TryGetValue(Key(targetAccount,targetDevice),out target)||
+                target=room.Kind=="screen_share"&&room.Sharer!=null&&room.Sharer.Account==targetAccount&&room.Sharer.Peer==targetDevice?room.Sharer:null;
+                if(target==null)room.People.TryGetValue(Key(targetAccount,targetDevice),out target);
+                if(targetAccount==actor.Account&&targetDevice==actor.Device||target==null||
                     target.MediaGeneration!=Text(request,"targetGeneration")||!Authorized(roster,targetAccount,targetDevice)){
                     result["state"]="target_not_authorized";return;
                 }
+                // Screen signaling is exclusively current sharer <-> current
+                // viewer. Room membership never authorizes viewer-to-viewer
+                // media or voice participation. The sharer token binds the
+                // current share lifetime in either signaling direction.
+                if(room.Kind=="screen_share"&&(room.Sharer==null||(source==room.Sharer)==(target==room.Sharer))){result["state"]="screen_role_not_authorized";return;}
                 var destination=sessions.FirstOrDefault(s=>s.Account==target.Account&&s.Device==target.Peer&&s.Binding==target.Binding&&s.Current());
                 if(destination==null){result["state"]="target_unavailable";return;}
                 var wire=new Dictionary<string,object>(request);

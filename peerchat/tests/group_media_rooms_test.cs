@@ -109,6 +109,32 @@ internal static class GroupMediaRoomsTest {
         Console.WriteLine("PASS: independent voice/screen rooms, voluntary device membership, atomic move, zero/one participants, moderation, malformed/stale/cross-group denial, immutable revisions, removal and disconnect cleanup.");
     }
     static ECDsaCng TestOwner;
+    static void ScreenAuthorization(AccountDatabase db,string group,string[] devices){
+        var service=new GroupMediaRooms(db);var received=new List<Dictionary<string,object>>();
+        var sessions=Enumerable.Range(0,4).Select(i=>new GroupFanoutSession{Account=i+1,Device=devices[i],Binding="screen-"+i,Current=()=>true,Send=x=>received.Add(x)}).ToArray();
+        var state=Snapshot(service,sessions[0],group);state=Apply(service,sessions[0],state,"create",kind:"screen_share",name:"Screen auth");string room=Room(state,"Screen auth").Id;
+        state=Apply(service,sessions[0],state,"start_share",room);state=Apply(service,sessions[1],state,"join_viewer",room);state=Apply(service,sessions[2],state,"join_viewer",room);
+        var screen=Room(state,"Screen auth");var sharer=screen.Sharer;var b=screen.Members.Single(m=>m.AccountId==2);var c=screen.Members.Single(m=>m.AccountId==3);
+        var request=SignalRequest(state,room,sharer,b);
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="forwarded","Sharer-to-viewer signaling denied");
+        Require(Convert.ToString(service.Signal(sessions[1],SignalRequest(state,room,b,sharer),sessions)["state"])=="forwarded","Viewer-to-sharer signaling denied");
+        Require(Convert.ToString(service.Signal(sessions[1],SignalRequest(state,room,b,c),sessions)["state"])=="screen_role_not_authorized","Viewer-to-viewer signaling admitted");
+        Require(Convert.ToString(service.Signal(sessions[3],request,sessions)["state"])=="group_not_authorized","Nonmember screen signaling admitted");
+        var replacement=new GroupFanoutSession{Account=1,Device=devices[0],Binding="wrong-screen-binding",Current=()=>true,Send=x=>{}};
+        Require(Convert.ToString(service.Signal(replacement,request,sessions)["state"])=="source_not_authorized","Replacement event session inherited sharer");
+        state=Apply(service,sessions[1],state,"leave_viewer",room);request["revision"]=state.Revision;
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="target_not_authorized","Stopped viewer retained authorization");
+        state=Apply(service,sessions[1],state,"join_viewer",room);request["revision"]=state.Revision;
+        Require(Convert.ToString(service.Signal(sessions[0],request,sessions)["state"])=="target_not_authorized","Old viewer token survived rejoin");
+        b=Room(state,"Screen auth").Members.Single(m=>m.AccountId==2);request=SignalRequest(state,room,b,sharer);
+        state=Apply(service,sessions[0],state,"stop_share",room);state=Apply(service,sessions[0],state,"start_share",room);state=Apply(service,sessions[1],state,"join_viewer",room);
+        var next=Room(state,"Screen auth");Require(next.Sharer.MediaGeneration!=sharer.MediaGeneration,"Restart reused share generation");
+        request["revision"]=state.Revision;request["sourceGeneration"]=next.Members.Single(m=>m.AccountId==2).MediaGeneration;
+        Require(Convert.ToString(service.Signal(sessions[1],request,sessions)["state"])=="target_not_authorized","Old sharer generation admitted");
+        state=Apply(service,sessions[0],state,"close",room);request["revision"]=state.Revision;
+        Require(Convert.ToString(service.Signal(sessions[1],request,sessions)["state"])=="room_not_found","Closed room admitted screen signaling");
+        Console.WriteLine("PASS: screen sharer/viewer roles, both signaling directions, viewer-to-viewer/nonmember/session denial, stop/rejoin tokens, share generation replacement and room-close revocation");
+    }
     static Dictionary<string,object> SignalRequest(GroupMediaState state,string room,GroupRoomDevice source,GroupRoomDevice target){
         return new Dictionary<string,object>{{"type","group_media"},{"groupId",state.GroupId},{"roomId",room},{"requestId",Guid.NewGuid().ToString("N")},{"epoch",state.Epoch},{"revision",state.Revision},{"rosterGeneration",state.RosterGeneration},{"sourceGeneration",source.MediaGeneration},{"targetGeneration",target.MediaGeneration},{"targetAccountId",target.AccountId},{"targetDevice",target.PeerId},{"routeId",Guid.NewGuid().ToString("N")},{"mediaGeneration",1},{"kind","offer"},{"data","test SDP; no audio"},{"mid","0"}};
     }
@@ -178,6 +204,11 @@ internal static class GroupMediaRoomsTest {
             op(0,"create","","screen_share","S1");string s1=Room(clients[0].GroupRooms(group),"S1").Id;
             op(2,"create","","screen_share","S2");string s2=Room(clients[0].GroupRooms(group),"S2").Id;
             op(0,"start_share",s1,"","");op(2,"start_share",s2,"","");op(1,"join_viewer",s1,"","");op(0,"join_viewer",s2,"","");
+            string screenSignalId=clients[0].QueueGroupMediaSignal(group,s1,2,devices[1],Guid.NewGuid().ToString("N"),1,"offer","screen signaling over existing channel");
+            Require(screenSignalId!=null,"Screen signal not queued");Wait(()=>clients[0].GroupMediaResult(screenSignalId)=="forwarded","Screen signal not forwarded");
+            Require(clients[1].TakeGroupMediaSignal(group,va)==null,"Voice consumer stole screen signal");
+            GroupMediaSignal screenSignal=null;Wait(()=>{screenSignal=clients[1].TakeGroupMediaSignal(group,s1);return screenSignal!=null;},"Screen consumer did not receive authenticated signal");
+            Require(screenSignal.SourceAccountId==1&&screenSignal.SourceDevice==devices[0],"Screen sender identity not server-bound");
             Require(Room(clients[1].GroupRooms(group),"A").Members.Count==2&&Room(clients[1].GroupRooms(group),"B").Members.Count==1,"Voice convergence failed.");
             clients[2].StopEventChannel();
             Wait(()=>Room(clients[0].GroupRooms(group),"B").Members.Count==0&&Room(clients[0].GroupRooms(group),"S2").Sharer==null,"Disconnect did not clear participant/sharer/viewers.");
@@ -209,7 +240,7 @@ internal static class GroupMediaRoomsTest {
             Require(db.RegisterGroup(1,devices[0],proof)!=null,"Register failed.");
             Require(db.GroupInvite(group,1,devices[0],2,devices[1],1)!=null&&db.GroupRespond(group,2,devices[1],true,2)!=null,"Join B failed.");
             Require(db.GroupInvite(group,1,devices[0],3,devices[2],3)!=null&&db.GroupRespond(group,3,devices[2],true,4)!=null,"Join C failed.");
-            Network(args[0],args[1],args[2],devices,group,db);MediaAuthorization(db,group,devices);StateTests(db,group,devices);
+            Network(args[0],args[1],args[2],devices,group,db);ScreenAuthorization(db,group,devices);MediaAuthorization(db,group,devices);StateTests(db,group,devices);
         }
         return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}

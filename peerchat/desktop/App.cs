@@ -287,7 +287,7 @@ public class DesktopApplication {
         BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
         window.Loaded+=(s,e)=>{if(startupUncleanOperations.Count>0)window.Dispatcher.BeginInvoke((Action)(()=>ShowFailureNotification(startupUncleanOperations[0])));};
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>{if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>{if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -444,6 +444,7 @@ public class DesktopApplication {
             if(discovery!=null&&!mediaTurnRefreshInFlight&&(model.VoiceStateCode!=0||activeScreenState!=0)&&
                 (mediaTurnCredentials==null||mediaTurnCredentials.ExpiresUtc<=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+60))_ = EnsureMediaIceConfigurationAsync();
             PumpGroupVoice();
+            PumpGroupScreen();
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
@@ -631,16 +632,22 @@ public class DesktopApplication {
     }
 
     GroupVoiceService groupVoice;
+    GroupScreenShareService groupScreen;
+    readonly Dictionary<string,Window> groupScreenWindows=new Dictionary<string,Window>(StringComparer.Ordinal);
+    readonly Dictionary<string,string> groupScreenMarkerStages=new Dictionary<string,string>(StringComparer.Ordinal);
     StackPanel groupDetails;
     Button groupCreateVoice,groupCreateScreen;
     GroupMediaState renderedGroupRooms;
     GroupVoiceRoomStatus renderedGroupVoice;
     string renderedGroupId="";
+    string renderedGroupScreen="";
     async Task<GroupVoiceMediaConfiguration> GroupMediaConfiguration(){
         if(!await EnsureMediaIceConfigurationAsync())return null;
         return new GroupVoiceMediaConfiguration(mediaTurnCredentials,profileSessionGeneration,discoverySessionGeneration,mediaIceConfigurationGeneration);
     }
     void BuildGroupSurface(){
+        groupScreen=new GroupScreenShareService(()=>discovery,()=>model.OwnId,GroupMediaConfiguration);
+        groupScreen.Failed+=failure=>window.Dispatcher.BeginInvoke((Action)(()=>RetainFailure("Group screen — "+failure.Reason,"GroupScreenShare",failure.RoomId,"group_screen",failure.Reason,failure.Stage,failure.Generation,failure.Details)));
         groupVoice=new GroupVoiceService(()=>discovery,()=>model.OwnId,GroupMediaConfiguration,()=>new VoicePreferenceData{
             InputDeviceId=voicePreferences.InputDeviceId,OutputDeviceId=voicePreferences.OutputDeviceId,InputVolume=voicePreferences.InputVolume,OutputVolume=voicePreferences.OutputVolume,
             AudioProcessingEnabled=voicePreferences.AudioProcessingEnabled,NoiseSuppressionEnabled=voicePreferences.NoiseSuppressionEnabled,AutomaticGainEnabled=voicePreferences.AutomaticGainEnabled,
@@ -657,7 +664,7 @@ public class DesktopApplication {
     }
     void OpenGroupDetails(){var column=(ColumnDefinition)window.FindName("RightPaneColumn");if(column.Width.Value<=0)ToggleRightPane();RefreshGroupDetails(true);}
     void CreateMediaRoom(string kind){
-        ServerGroupRoster roster;if(model.SelectedGroup==null||groupVoice==null||!serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out roster))return;var values=Dialog(kind=="voice"?"Create voice room":"Create screen-share room",new[]{"Room name"},new[]{kind=="voice"?"General Voice":"Screen Room"},"Create",kind=="voice"?"Members join voluntarily. A room may contain one person.":"Room state only. Group screen video is not available yet.");
+        ServerGroupRoster roster;if(model.SelectedGroup==null||groupVoice==null||!serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out roster))return;var values=Dialog(kind=="voice"?"Create voice room":"Create screen-share room",new[]{"Room name"},new[]{kind=="voice"?"General Voice":"Screen Room"},"Create",kind=="voice"?"Members join voluntarily. A room may contain one person.":"Members choose when to share or watch. Viewing is independent of voice.");
         if(values!=null&&!groupVoice.CreateRoom(roster.GroupId,kind,values[0].Trim()))Notify("The authoritative room channel is unavailable.");
     }
     void RefreshGroupDetails(bool force=false){
@@ -672,7 +679,9 @@ public class DesktopApplication {
         string serverId=roster==null?"":roster.GroupId;
         var rooms=discovery==null||roster==null?null:discovery.GroupRooms(serverId);var voice=groupVoice.Snapshot();
         bool sameVoice=renderedGroupVoice!=null&&voice.GroupId==renderedGroupVoice.GroupId&&voice.RoomId==renderedGroupVoice.RoomId&&voice.State==renderedGroupVoice.State&&voice.Error==renderedGroupVoice.Error&&voice.Joined==renderedGroupVoice.Joined&&voice.Muted==renderedGroupVoice.Muted&&voice.Deafened==renderedGroupVoice.Deafened;
-        if(!force&&id==renderedGroupId&&rooms==renderedGroupRooms&&sameVoice)return;
+        string screenSignature=rooms==null?"":String.Join(";",rooms.Rooms.Where(r=>r.Kind=="screen_share").Select(r=>{var s=groupScreen.Snapshot(serverId,r.Id);return r.Id+":"+s.State+":"+s.Error+":"+s.Sharing+":"+s.Watching;}));
+        if(!force&&id==renderedGroupId&&rooms==renderedGroupRooms&&sameVoice&&screenSignature==renderedGroupScreen)return;
+        renderedGroupScreen=screenSignature;
         renderedGroupId=id;renderedGroupRooms=rooms;renderedGroupVoice=voice;groupDetails.Children.Clear();
         Action<string,bool> text=(label,heading)=>groupDetails.Children.Add(new TextBlock{Text=label,Foreground=Brush(heading?"#EDF1F5":"#A1AEBB"),FontSize=heading?15:12,FontWeight=heading?FontWeights.SemiBold:FontWeights.Normal,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,heading?15:4,0,5)});
         text("Group Details",true);text(model.SelectedGroup.Name,true);text(ready?"Server-authorized group":"Legacy or unavailable server roster",false);
@@ -692,7 +701,13 @@ public class DesktopApplication {
                     var action=new Button{Content=joined?"Leave":"Join",Padding=new Thickness(10,6,10,6),Margin=new Thickness(0,3,5,3),IsEnabled=ready};
                     action.Click+=async(s,e)=>{bool ok=joined?await groupVoice.Leave():await groupVoice.Join(serverId,room.Id);if(!ok)Notify("Voice participation is unavailable; finish any direct call first.");await groupVoice.Pump();RefreshGroupDetails(true);};row.Children.Add(action);
                     if(joined){var mute=new Button{Content=voice.Muted?"Unmute":"Mute",Padding=new Thickness(8,6,8,6)};mute.Click+=async(s,e)=>{await groupVoice.SetMuted(!voice.Muted);RefreshGroupDetails(true);};row.Children.Add(mute);var deafen=new Button{Content=voice.Deafened?"Undeafen":"Deafen",Padding=new Thickness(8,6,8,6),Margin=new Thickness(4,0,0,0)};deafen.Click+=async(s,e)=>{await groupVoice.SetDeafened(!voice.Deafened);RefreshGroupDetails(true);};row.Children.Add(deafen);}
-                }else row.Children.Add(new Button{Content="Watch unavailable",IsEnabled=false,ToolTip="Group screen media is not implemented yet",Padding=new Thickness(8,6,8,6)});
+                }else {
+                    var screen=groupScreen.Snapshot(serverId,room.Id);
+                    bool localSharer=room.Sharer!=null&&discovery!=null&&room.Sharer.AccountId==discovery.AccountId&&room.Sharer.PeerId==model.OwnId;
+                    var action=new Button{Content=localSharer||screen.Sharing?"Stop Sharing":room.Sharer==null?"Start Sharing":screen.Watching?"Stop Watching":"Watch",IsEnabled=ready,Padding=new Thickness(8,6,8,6)};
+                    action.Click+=async(s,e)=>{if(localSharer||screen.Sharing||screen.Watching){await groupScreen.Stop(serverId,room.Id);if(localSharer)groupVoice.RoomAction(serverId,room.Id,"stop_share");}else if(room.Sharer==null)StartGroupScreenShare(serverId,room.Id);else OpenGroupScreenViewer(serverId,room.Id,room.Name);await groupScreen.Pump();RefreshGroupDetails(true);};row.Children.Add(action);
+                    if(screen.Sharing||screen.Watching)text(screen.State+(String.IsNullOrEmpty(screen.Error)?"":" · "+screen.Error),false);
+                }
                 if(discovery!=null&&room.CreatorAccountId==discovery.AccountId){var close=new Button{Content="Close room",Padding=new Thickness(8,6,8,6),Margin=new Thickness(4,0,0,0)};close.Click+=(s,e)=>groupVoice.RoomAction(serverId,room.Id,"close");row.Children.Add(close);}
             }
         }
@@ -700,6 +715,51 @@ public class DesktopApplication {
         text("Group management",true);var manage=new Button{Content="Group Settings",Padding=new Thickness(10,7,10,7)};manage.Click+=(s,e)=>ShowGroupFlyout("GroupMembers","settings");groupDetails.Children.Add(manage);
     }
     async void PumpGroupVoice(){if(groupVoice==null)return;await groupVoice.Pump();if(!closing)RefreshGroupDetails();}
+    async void PumpGroupScreen(){
+        if(groupScreen==null)return;await groupScreen.Pump();if(closing)return;
+        foreach(var pair in groupScreenWindows.ToArray()){
+            var key=pair.Key.Split(':');var status=groupScreen.Snapshot(key[0],key[1]);
+            pair.Value.Title="Group Screen — "+status.State+(status.State=="Watching"?" | TURN | H.264":"");
+            if(status.State=="Ended"||status.State=="Error"||status.State=="Inactive")pair.Value.Close();
+        }
+        foreach(var marker in groupScreenMarkerStages.Keys.ToArray()){
+            var parts=marker.Split(':');if(parts.Length!=2)continue;
+            if(!groupScreen.Snapshot(parts[0],parts[1]).Active&&!String.IsNullOrEmpty(groupScreenMarkerStages[marker])){
+                CompleteDiagnosticOperation("GroupScreenShare",marker);groupScreenMarkerStages[marker]="";
+            }
+        }
+        if(discovery!=null)foreach(var roster in serverGroupRosters.Values){var rooms=discovery.GroupRooms(roster.GroupId);if(rooms==null)continue;foreach(var room in rooms.Rooms.Where(r=>r.Kind=="screen_share")){
+            var status=groupScreen.Snapshot(roster.GroupId,room.Id);string marker=roster.GroupId+":"+room.Id,stage;groupScreenMarkerStages.TryGetValue(marker,out stage);
+            string current=status.Active?status.State+":"+status.Generation:"";
+            if(stage==current)continue;
+            if(String.IsNullOrEmpty(current))CompleteDiagnosticOperation("GroupScreenShare",marker);
+            else UpdateDiagnosticOperation("GroupScreenShare",marker,status.State,(long)status.Generation,diagnosticsService.Capture());
+            groupScreenMarkerStages[marker]=current;
+        }}
+        RefreshGroupDetails();
+    }
+    ScreenSharePreferenceData GroupScreenPreferences(){return new ScreenSharePreferenceData{FramesPerSecond=screenPreferences.FramesPerSecond,BitrateBitsPerSecond=screenPreferences.BitrateBitsPerSecond,CaptureCursor=screenPreferences.CaptureCursor};}
+    async void StartGroupScreenShare(string group,string room){
+        ScreenSource[] sources;try{sources=await Task.Run(()=>core.ScreenSources());}catch(Exception){Notify("Screen capture sources unavailable.");return;}
+        if(sources.Length==0){Notify("No screen capture source available.");return;}
+        var dialog=new Window{Title="Share screen to room",Owner=window,Width=480,SizeToContent=SizeToContent.Height,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),Resources=window.Resources,WindowStartupLocation=WindowStartupLocation.CenterOwner};
+        var panel=new StackPanel{Margin=new Thickness(24)};var choices=new ComboBox{ItemsSource=sources,SelectedIndex=0,Margin=new Thickness(0,10,0,15)};panel.Children.Add(new TextBlock{Text="Choose what to share"});panel.Children.Add(choices);
+        var confirm=new Button{Content="Start Sharing"};confirm.Click+=(s,e)=>{dialog.DialogResult=true;};panel.Children.Add(confirm);dialog.Content=panel;
+        if(dialog.ShowDialog()!=true)return;var source=choices.SelectedItem as ScreenSource;if(source==null)return;
+        if(!await groupScreen.StartSharing(group,room,source,GroupScreenPreferences()))Notify("Could not request authorized screen participation.");
+        await groupScreen.Pump();RefreshGroupDetails(true);
+    }
+    void OpenGroupScreenViewer(string group,string room,string name){
+        string key=group+":"+room;Window existing;if(groupScreenWindows.TryGetValue(key,out existing)){existing.Activate();return;}
+        var viewer=new Window{Title="Group Screen — Connecting…",Owner=window,Width=1060,Height=700,MinWidth=480,MinHeight=320,Background=Brush("#050709"),Foreground=Brush("#EDF1F5"),ShowInTaskbar=true};
+        viewer.Content=new Grid{Background=Brush("#050709")};IntPtr child=IntPtr.Zero;bool closingViewer=false;
+        viewer.SourceInitialized+=(s,e)=>{NativeRect bounds;var hwnd=new WindowInteropHelper(viewer).Handle;if(GetClientRect(hwnd,out bounds))child=CreateWindowEx(0,"STATIC","",0x50000000,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,hwnd,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);};
+        viewer.SizeChanged+=(s,e)=>{NativeRect bounds;var hwnd=new WindowInteropHelper(viewer).Handle;if(child!=IntPtr.Zero&&GetClientRect(hwnd,out bounds))MoveWindow(child,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,true);};
+        viewer.Loaded+=async(s,e)=>{if(child==IntPtr.Zero||!await groupScreen.Watch(group,room,(ulong)child.ToInt64(),GroupScreenPreferences())){Notify("Could not request authorized viewing.");viewer.Close();}else await groupScreen.Pump();};
+        viewer.Closing+=async(s,e)=>{if(closingViewer||closing)return;e.Cancel=true;closingViewer=true;await groupScreen.Stop(group,room);viewer.Close();};
+        viewer.Closed+=(s,e)=>{groupScreenWindows.Remove(key);CompleteDiagnosticOperation("GroupScreenShare",key);};
+        groupScreenWindows[key]=viewer;viewer.Show();
+    }
     private void ShowGroupInfoDialog()
 	{
 		GroupModel group = model.SelectedGroup;
@@ -1592,7 +1652,7 @@ public class DesktopApplication {
 			if (discovery != null)
 			{
                 if(notification!=null&&(notification.Event=="group_room_snapshot"||notification.Event=="group_room_result"||notification.Event=="group_media_signal"||notification.Event=="group_media_result")){
-                    RefreshGroupDetails(true);PumpGroupVoice();return;
+                    RefreshGroupDetails(true);PumpGroupVoice();PumpGroupScreen();return;
                 }
 				if(notification!=null&&notification.Event=="group_message"){
                     try{var wire=Convert.FromBase64String(notification.Envelope??"");if(wire.Length>65790||!core.ReceiveGroupCiphertext(wire))discovery.QueueGroupAck(notification.GroupId,notification.MessageId,"rejected");}
@@ -2489,6 +2549,7 @@ public class DesktopApplication {
 			voiceTimer.Stop();
 			networkChangeTimer.Stop();
 			if(groupVoice!=null)groupVoice.Dispose();
+			if(groupScreen!=null)groupScreen.Dispose();
 			ClearScopedP2p(true);
 			StopRelays();
 			if (discovery != null)
@@ -4019,13 +4080,13 @@ public class DesktopApplication {
     }
     static string ExtractDiagnosticValue(string text,string key,string fallback){if(String.IsNullOrEmpty(text))return fallback;foreach(string line in text.Replace("\r","").Split('\n')){int split=line.IndexOf('=');if(split>0&&line.Substring(0,split).Trim()==key)return line.Substring(split+1).Trim();}return fallback;}
     static string ScreenFailureLabel(string domain){switch(domain){case "local_encoder":return "Encoder Error";case "local_capture":return "Capture Error";case "ice_turn_transport":return "Connection Lost";case "dtls_security":return "Security Error";case "rtp":return "Media Transport Error";case "remote_decoder":return "Decoder Error";case "presentation":return "Presentation Error";default:return "Error";}}
-    void UpdateDiagnosticOperation(string type,string id,string stage,long generation,DiagnosticsSnapshot snapshot){if(diagnosticsRetention==null||String.IsNullOrEmpty(id))return;try{diagnosticsRetention.UpdateOperation(new ActiveDiagnosticOperation{OperationType=type,OperationId=id,Stage=stage,Generation=generation,Module=type=="ScreenShare"?"PeerChat.ScreenMedia.dll":"PeerChat.Core.dll",Diagnostics=snapshot});}catch(Exception error){TraceUi("diagnostic operation marker update failed: "+error.GetType().Name);}}
+    void UpdateDiagnosticOperation(string type,string id,string stage,long generation,DiagnosticsSnapshot snapshot){if(diagnosticsRetention==null||String.IsNullOrEmpty(id))return;try{diagnosticsRetention.UpdateOperation(new ActiveDiagnosticOperation{OperationType=type,OperationId=id,Stage=stage,Generation=generation,Module=(type=="ScreenShare"||type=="GroupScreenShare")?"PeerChat.ScreenMedia.dll":"PeerChat.Core.dll",Diagnostics=snapshot});}catch(Exception error){TraceUi("diagnostic operation marker update failed: "+error.GetType().Name);}}
     void CompleteDiagnosticOperation(string type,string id){if(diagnosticsRetention==null||String.IsNullOrEmpty(id))return;try{diagnosticsRetention.CompleteOperation(type,id);}catch(Exception error){TraceUi("diagnostic operation marker completion failed: "+error.GetType().Name);}}
     void RetainFailure(string title,string operation,string operationId,string domain,string reason,string stage,long generation,string subsystemDetails){
         string dedupe=(operation??"")+"|"+(operationId??"")+"|"+(domain??"")+"|"+generation;
         if(!surfacedFailureKeys.Add(dedupe))return;if(surfacedFailureKeys.Count>128)surfacedFailureKeys.Clear();
         if(!String.IsNullOrWhiteSpace(subsystemDetails)){if(operation=="ScreenShare")lastScreenDiagnosticText=subsystemDetails;}
-        try{var snapshot=diagnosticsService.Capture();if(operation=="GroupVoice"&&!String.IsNullOrEmpty(subsystemDetails))snapshot.Sections.Add(new DiagnosticsSection{Name="Group voice failure owner snapshot",Details=subsystemDetails});var failure=diagnosticsService.FreezeFailure(title,operation,operationId,domain,reason,stage,generation,snapshot);failure.Module=operation=="ScreenShare"?"PeerChat.ScreenMedia.dll":"PeerChat.Core.dll";if(diagnosticsRetention!=null)diagnosticsRetention.AddFailure(failure);ShowFailureNotification(failure);}catch(Exception error){TraceUi("failure diagnostic retention failed: "+error.GetType().Name);}
+        try{var snapshot=diagnosticsService.Capture();if((operation=="GroupVoice"||operation=="GroupScreenShare")&&!String.IsNullOrEmpty(subsystemDetails))snapshot.Sections.Add(new DiagnosticsSection{Name=operation+" failure owner snapshot",Details=subsystemDetails});var failure=diagnosticsService.FreezeFailure(title,operation,operationId,domain,reason,stage,generation,snapshot);failure.Module=(operation=="ScreenShare"||operation=="GroupScreenShare")?"PeerChat.ScreenMedia.dll":"PeerChat.Core.dll";if(diagnosticsRetention!=null)diagnosticsRetention.AddFailure(failure);ShowFailureNotification(failure);}catch(Exception error){TraceUi("failure diagnostic retention failed: "+error.GetType().Name);}
     }
     void ShowFailureNotification(FailureSnapshot failure){
         if(failure==null||window==null||!window.IsLoaded)return;if(failureNotification!=null){try{failureNotification.Close();}catch{}failureNotification=null;}
@@ -4054,7 +4115,7 @@ public class DesktopApplication {
             if(hasRoster&&discovery!=null){
                 var rooms=discovery.GroupRooms(roster.GroupId);
                 data.RoomResult=discovery.GroupRoomDiagnostics(roster.GroupId);
-                if(rooms!=null){data.RoomVoiceState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"voice")+"\n"+(groupVoice==null?"Local participation: Not joined":groupVoice.Diagnostics(roster.GroupId));data.RoomScreenState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"screen_share");}
+                if(rooms!=null){data.RoomVoiceState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"voice")+"\n"+(groupVoice==null?"Local participation: Not joined":groupVoice.Diagnostics(roster.GroupId));data.RoomScreenState=rooms.Diagnostics(discovery.AccountId,model.OwnId,"screen_share")+"\n"+(groupScreen==null?"Local screen participation: Inactive":groupScreen.Diagnostics(roster.GroupId));}
             }
         }
         return result;

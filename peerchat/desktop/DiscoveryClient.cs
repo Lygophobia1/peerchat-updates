@@ -40,17 +40,22 @@ public sealed class DiscoveryClient {
     readonly Queue<GroupMediaSignal> mediaSignals=new Queue<GroupMediaSignal>();
     readonly Dictionary<string,string> mediaResults=new Dictionary<string,string>(StringComparer.Ordinal);
     public string GroupMediaResult(string requestId){lock(eventGate){string state;return mediaResults.TryGetValue(requestId,out state)?state:"Pending";}}
-    public GroupMediaSignal TakeGroupMediaSignal(){lock(eventGate){
+    static IEnumerable<GroupRoomDevice> MediaDevices(GroupRoom room){return room.Kind=="screen_share"&&room.Sharer!=null?room.Members.Concat(new[]{room.Sharer}):room.Members;}
+    static bool MediaRoles(GroupRoom room,GroupRoomDevice source,GroupRoomDevice target){return room.Kind=="voice"||room.Kind=="screen_share"&&room.Sharer!=null&&(source==room.Sharer)!=(target==room.Sharer);}
+    public GroupMediaSignal TakeGroupMediaSignal(string group=null,string roomId=null){lock(eventGate){
         int count=mediaSignals.Count;
         for(int i=0;i<count;i++){
             var signal=mediaSignals.Dequeue();GroupMediaState state;
+            if((group!=null&&signal.GroupId!=group)||(roomId!=null&&signal.RoomId!=roomId)){if(DateTime.UtcNow-signal.ReceivedUtc<=TimeSpan.FromSeconds(10))mediaSignals.Enqueue(signal);continue;}
             if(DateTime.UtcNow-signal.ReceivedUtc>TimeSpan.FromSeconds(10)||!roomStates.TryGetValue(signal.GroupId,out state)||state.Epoch!=signal.Epoch||state.RosterGeneration>signal.RosterGeneration)continue;
             // A broadcast to another member can race this targeted frame. Wait
             // boundedly for the authoritative snapshot, never infer membership.
             if(signal.Revision>state.Revision||signal.RosterGeneration>state.RosterGeneration){mediaSignals.Enqueue(signal);continue;}
-            var room=state.Rooms.FirstOrDefault(r=>r.Id==signal.RoomId&&r.Kind=="voice");
-            if(room!=null&&room.Members.Any(d=>d.AccountId==signal.SourceAccountId&&d.PeerId==signal.SourceDevice&&d.MediaGeneration==signal.SourceGeneration)&&
-                signal.TargetAccountId==AccountId&&signal.TargetDevice==eventPublicIdentity&&room.Members.Any(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity&&d.MediaGeneration==signal.TargetGeneration))return signal;
+            var room=state.Rooms.FirstOrDefault(r=>r.Id==signal.RoomId);
+            if(room==null)continue;
+            var source=MediaDevices(room).FirstOrDefault(d=>d.AccountId==signal.SourceAccountId&&d.PeerId==signal.SourceDevice&&d.MediaGeneration==signal.SourceGeneration);
+            var target=MediaDevices(room).FirstOrDefault(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity&&d.MediaGeneration==signal.TargetGeneration);
+            if(source!=null&&target!=null&&MediaRoles(room,source,target)&&signal.TargetAccountId==AccountId&&signal.TargetDevice==eventPublicIdentity)return signal;
         }
         return null;
     }}
@@ -59,10 +64,10 @@ public sealed class DiscoveryClient {
     public string QueueGroupMediaSignal(string group,string room,long targetAccount,string targetDevice,string route,long generation,string kind,string data,string mid="0"){
         lock(eventGate){
             GroupMediaState state;if(eventStop||!EventChannelConnected||mediaOutput.Count+mediaPending.Count>=64||!roomStates.TryGetValue(group,out state))return null;
-            var voice=state.Rooms.FirstOrDefault(r=>r.Id==room&&r.Kind=="voice");if(voice==null)return null;
-            var source=voice.Members.FirstOrDefault(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity);
-            var target=voice.Members.FirstOrDefault(d=>d.AccountId==targetAccount&&d.PeerId==targetDevice);
-            if(source==null||target==null||source==target||source.MediaGeneration.Length!=32||target.MediaGeneration.Length!=32||route==null||route.Length!=32||generation<=0||mid==null||mid.Length>32||data==null||
+            var voice=state.Rooms.FirstOrDefault(r=>r.Id==room);if(voice==null)return null;
+            var source=MediaDevices(voice).FirstOrDefault(d=>d.AccountId==AccountId&&d.PeerId==eventPublicIdentity);
+            var target=MediaDevices(voice).FirstOrDefault(d=>d.AccountId==targetAccount&&d.PeerId==targetDevice);
+            if(source==null||target==null||source==target||!MediaRoles(voice,source,target)||source.MediaGeneration.Length!=32||target.MediaGeneration.Length!=32||route==null||route.Length!=32||generation<=0||mid==null||mid.Length>32||data==null||
                 (kind!="offer"&&kind!="answer"&&kind!="candidate"&&kind!="close")||data.Length>(kind=="candidate"?4096:32768)||(kind!="close"&&String.IsNullOrWhiteSpace(data))||(kind=="close"&&data.Length!=0))return null;
             string id=Guid.NewGuid().ToString("N");
             mediaOutput.Enqueue(new Dictionary<string,object>{{"type","group_media"},{"requestId",id},{"groupId",group},{"roomId",room},{"epoch",state.Epoch},{"revision",state.Revision},{"rosterGeneration",state.RosterGeneration},{"sourceGeneration",source.MediaGeneration},{"targetGeneration",target.MediaGeneration},{"targetAccountId",targetAccount},{"targetDevice",targetDevice},{"routeId",route},{"mediaGeneration",generation},{"kind",kind},{"data",data},{"mid",mid}});

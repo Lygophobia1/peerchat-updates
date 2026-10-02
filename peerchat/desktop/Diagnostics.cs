@@ -211,7 +211,7 @@ public sealed class DiagnosticsService {
         if(part=="Overview")Add(sections,"Group overview",GroupOverview(group));
         else if(part=="Connection")Add(sections,"Group connection",GroupConnection(value,group));
         else if(part=="Voice")Add(sections,"Group voice",(String.IsNullOrEmpty(group.RoomVoiceState)?"Voice room: Inactive\nNo authoritative room snapshot.":group.RoomVoiceState)+"\n"+(group.RoomResult??"Last room result: Not requested"));
-        else if(part=="Screen Share")Add(sections,"Group screen share",(String.IsNullOrEmpty(group.RoomScreenState)?"Screen share: Not implemented / Inactive\nNo authoritative room snapshot.":"Group screen media: Not implemented\n"+group.RoomScreenState)+"\n"+(group.RoomResult??"Last room result: Not requested"));
+        else if(part=="Screen Share")Add(sections,"Group screen share",(String.IsNullOrEmpty(group.RoomScreenState)?"Screen share: Inactive\nNo authoritative room snapshot.":group.RoomScreenState)+"\n"+(group.RoomResult??"Last room result: Not requested"));
         return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=sections,Groups=new List<GroupDiagnosticsData>{CloneGroups(new[]{group})[0]}};
     }
     static string GroupOverview(GroupDiagnosticsData group){

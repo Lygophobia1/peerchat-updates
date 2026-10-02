@@ -32,7 +32,7 @@ namespace peerchat {
 class ScreenShareMedia {
 public:
     enum class Route : std::uint32_t { Unknown, DirectHostIce, NatTraversedIce, TurnRelay };
-    enum class EventKind { Description, Candidate, Connected, Disconnected, Failed };
+    enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, KeyframeRequested };
     // This is deliberately about the media-engine failure boundary, not a
     // recovery decision.  ScreenShareManager/Node decide whether a failure is
     // eligible for a new media generation.
@@ -46,6 +46,9 @@ public:
         std::uint64_t presentationWindow = 0;
         std::uint32_t width = 0, height = 0, fps = 60, bitrate = 20000000;
         bool captureCursor = true;
+        // Only a higher media source owner may supply AUs. Default preserves
+        // the accepted one-to-one capture/encode path.
+        bool externallyEncoded = false;
         screen::Backend backend = screen::Backend::NativeWindows;
         MediaIceConfiguration ice;
     };
@@ -157,6 +160,25 @@ public:
         if (options_.ice.policy == MediaIceConfiguration::Policy::RelayOnly &&
             !MediaIceConfiguration::relayCandidate(candidate)) return false;
         return pc_ >= 0 && rtcAddRemoteCandidate(pc_, candidate.c_str(), mid.c_str()) >= 0;
+    }
+
+    bool sendEncoded(const std::uint8_t* bytes, const pc_screen_encoded_frame& frame) {
+        if (!options_.sender || !options_.externallyEncoded || stopping_ || !trackOpen_ ||
+            !connected_ || !bytes || !frame.length || frame.length > 8 * 1024 * 1024) return false;
+        if (!senderContinuity_.allow(frame.encoded_sequence, frame.idr != 0,
+                                    frame.codec_configuration_only != 0)) {
+            ++senderContinuityDropped_; return false;
+        }
+        if (rtcGetBufferedAmount(track_) > 2 * 1024 * 1024 ||
+            rtcSendMessage(track_, reinterpret_cast<const char*>(bytes), static_cast<int>(frame.length)) < 0) {
+            senderContinuity_.sendFailed(); pendingPli_ = true; return false;
+        }
+        ++encodedSubmitted_; encodedBytesSubmitted_ += frame.length;
+        encodedWidth_ = frame.width; encodedHeight_ = frame.height;
+        std::uint32_t timestamp = 0;
+        if (rtcGetCurrentTrackTimestamp(track_, &timestamp) >= 0)
+            rtcSetTrackRtpTimestamp(track_, timestamp + 90000u / options_.fps);
+        return true;
     }
 
     std::vector<Event> poll() {
@@ -846,6 +868,9 @@ private:
     }
 
     void requestEncoderKeyframe() {
+        if (options_.sender && options_.externallyEncoded && !stopping_) {
+            push(EventKind::KeyframeRequested); return;
+        }
         if (!options_.sender || !captureBackend_ || stopping_) return;
         if (captureBackend_.requestKeyframe()) ++senderKeyframeRequests_;
     }
@@ -873,7 +898,7 @@ private:
         }
         { std::lock_guard sampleLock(sampleMutex_); samples_.clear(); }
         encodedWidth_ = encodedHeight_ = 0;
-        if (options_.sender) {
+        if (options_.sender && !options_.externallyEncoded) {
             pc_screen_encoder_options capture{};
             capture.structure_size = sizeof(capture);
             capture.source_kind = options_.sourceKind;
@@ -887,7 +912,7 @@ private:
             if (!captureBackend_) { error = options_.backend == screen::Backend::WebRtcCompatibility ?
                 "Windows screen capture or software H.264 encoding failed" :
                 "Windows screen capture or H.264 hardware encoding failed"; stop(); return false; }
-        } else {
+        } else if (!options_.sender) {
             pc_screen_decoder_options viewer{};
             viewer.structure_size = sizeof(viewer);
             viewer.presentation_window = options_.presentationWindow;
