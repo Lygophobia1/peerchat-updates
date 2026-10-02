@@ -1,5 +1,13 @@
 # PeerChat development status
 
+## One-to-one AudioReceive candidate
+
+Live one-to-one receive migrates to the existing group voice receive engine,
+with one authenticated generation-bound source and device-paced paired pulls.
+Capture/APM/send/transport and group screen source remain unchanged. Physical
+voice acceptance is pending; dev.61 / cdcded9 remains frozen for group-screen
+acceptance. See `docs/ONE_TO_ONE_AUDIO_RECEIVE.md` for boundaries and validation.
+
 ## Group media room-state/signaling foundation
 
 Accepted group messaging baseline: `3ec05e3` / `4.0.1-dev.45`.

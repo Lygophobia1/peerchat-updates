@@ -1,5 +1,14 @@
 # PeerChat architecture
 
+## Current one-to-one voice receive migration
+
+VoiceMedia now consumes the existing VoiceReceiveEngine/AudioReceive NetEq,
+WebRTC Opus and mixer path with one CallManager-bound remote source. Device
+completion drives two 10 ms pulls per existing 20 ms buffer; no new timing or
+session owner. Capture/APM, Opus sender and TURN policy are unchanged; AEC
+remains off. See `docs/ONE_TO_ONE_AUDIO_RECEIVE.md`. Older sections describing
+immediate one-to-one Opus decode are historical for this candidate.
+
 > Documentation authority
 >
 > - Product goals and roadmap: `PEERCHAT_DEVELOPMENT_GOAL.md`

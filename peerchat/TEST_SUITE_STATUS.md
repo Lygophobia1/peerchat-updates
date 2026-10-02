@@ -5,10 +5,15 @@ not delete historical tests or declare a failing assertion unimportant.
 
 ## Current
 
+- `tests/test-voice-presets.ps1` additionally exercises bidirectional live
+  one-to-one NetEq receive and 100 generation-bound source lifetimes with
+  concurrent RTP/stop, retained stale callbacks, deafen, wrap and buffer bounds.
+
 - `tests/test-audio-receive.ps1` — isolated pinned WebRTC NetEq/Opus/mixer
   proof, MinGW C ABI/restricted-PATH load, RTP timing/disorder/loss/FEC/PLC,
   independent sources, lifecycle/teardown and synthetic performance/memory runs.
-  Not integrated into accepted live voice. See `docs/AUDIO_RECEIVE_PROOF.md`.
+  Used by accepted group voice and the one-to-one receive candidate.
+  See `docs/AUDIO_RECEIVE_PROOF.md` and `docs/ONE_TO_ONE_AUDIO_RECEIVE.md`.
 
 - `tests/test-group-media-rooms.ps1` — deterministic room lifecycle, scope,
   roster/device admission, atomic moves, immutable/stale revisions and revocation,

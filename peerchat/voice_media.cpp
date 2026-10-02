@@ -4,6 +4,7 @@
 #include "voice_media.hpp"
 #include "audio.hpp"
 #include "voice_apm_capture.hpp"
+#include "voice_receive_engine.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -34,27 +35,12 @@ std::string candidateSummary(const std::string& candidate) {
     if(parts.size()>4){const auto& address=parts[4];if(address.find(':')!=std::string::npos)addressClass="ipv6";else if(address.rfind("10.",0)==0||address.rfind("192.168.",0)==0||address.rfind("172.",0)==0)addressClass="private-ipv4";else addressClass="public-ipv4";}
     return "type="+type+" address_class="+addressClass;
 }
-bool rtpPayload(const char* packet, int size, const unsigned char*& payload, int& payloadSize) {
-    if (!packet || size < 12) return false;
-    const auto* bytes = reinterpret_cast<const unsigned char*>(packet);
-    if ((bytes[0] >> 6) != 2) return false;
-    int offset = 12 + 4 * (bytes[0] & 0x0f);
-    if (offset > size) return false;
-    if (bytes[0] & 0x10) {
-        if (offset + 4 > size) return false;
-        int words = (bytes[offset + 2] << 8) | bytes[offset + 3];
-        offset += 4 + words * 4;
-        if (offset > size) return false;
-    }
-    int end = size;
-    if (bytes[0] & 0x20) {
-        int padding = bytes[size - 1];
-        if (!padding || padding > end - offset) return false;
-        end -= padding;
-    }
-    payload = bytes + offset;
-    payloadSize = end - offset;
-    return payloadSize > 0;
+std::wstring receiveDllPath() {
+    wchar_t path[32768]{};
+    auto length=GetModuleFileNameW(nullptr,path,32768);
+    if(!length||length>=32768)return {};
+    std::wstring result(path,length);auto slash=result.find_last_of(L"\\/");
+    return slash==std::wstring::npos?std::wstring{}:result.substr(0,slash+1)+L"PeerChat.AudioReceive.dll";
 }
 }
 
@@ -71,7 +57,35 @@ struct VoiceMedia::Impl {
     std::atomic<bool> failApmNextFrame{false};
 #endif
     OpusEncoder* encoder = nullptr;
-    OpusDecoder* decoder = nullptr;
+    ReceiveBinding receiveBinding;
+    struct ReceiveContext {
+        VoiceReceiveEngine engine;
+        std::string key;
+        std::uint64_t generation=0;
+        std::atomic<bool> active{true},deafened{false};
+        std::atomic<std::uint64_t> callbacks{0},accepted{0},rejected{0},busy{0},playoutFrames{0};
+        std::atomic<int> failure{PC_RX_OK};
+        int insert(const unsigned char* packet,std::size_t size){
+            if(!active)return PC_RX_INVALID;
+            ++callbacks;
+            int status=engine.insertRtp(key,generation,packet,size);
+            if(status==PC_RX_OK)++accepted;
+            else {++rejected;if(status==PC_RX_BUSY)++busy;
+                else if(status==PC_RX_FAILED||status==PC_RX_LIMIT)failure=status;}
+            return status;
+        }
+    };
+    std::shared_ptr<ReceiveContext> receive;
+    bool receiveWarningSent=false;
+    // Callback handles are monotonic library IDs, not identity. Acquiring a shared
+    // context by handle prevents an in-flight callback from touching a destroyed
+    // Impl or a replacement generation, even after C API user-pointer detachment.
+    inline static std::mutex receiveCallbacksMutex;
+    inline static std::map<int,std::shared_ptr<ReceiveContext>> receiveCallbacks;
+    void attachReceive(int tr){
+        {std::lock_guard<std::mutex> lock(receiveCallbacksMutex);receiveCallbacks[tr]=receive;}
+        rtcSetMessageCallback(tr,&Impl::message);
+    }
     int pc = -1, sendTrack = -1, receiveTrack = -1;
     std::atomic<bool> stopping{false}, deafened{false}, trackOpen{false};
     std::atomic<std::uint64_t> capturedFrames{0}, encodedFrames{0}, submittedFrames{0};
@@ -123,31 +137,16 @@ struct VoiceMedia::Impl {
         self.receiveTrack = tr;
         if (tr == self.sendTrack) return; // The local sendrecv track is already configured below.
         rtcSetUserPointer(tr, ptr);
-        rtcSetMessageCallback(tr, &Impl::message);
+        self.attachReceive(tr);
         rtcChainRtcpReceivingSession(tr);
         rtcSetOpenCallback(tr, &Impl::opened);
         rtcSetClosedCallback(tr, &Impl::closed);
     }
-    static void message(int, const char* packet, int size, void* ptr) {
-        if (!ptr || size <= 0) return;
-        auto& self = *static_cast<Impl*>(ptr);
-        ++self.trackCallbackPackets;
-        if (self.deafened || !self.decoder) return;
-        const unsigned char* payload = nullptr; int payloadSize = 0;
-        if (!rtpPayload(packet, size, payload, payloadSize)) return;
-        ++self.receivedPackets;
-        std::vector<opus_int16> pcm(960);
-        int samples = opus_decode(self.decoder, payload, payloadSize, pcm.data(), static_cast<int>(pcm.size()), 0);
-        if (samples != 320) return;
-        ++self.decodedFrames;
-        std::vector<unsigned char> bytes(static_cast<size_t>(samples) * 2);
-        for (int i = 0; i < samples; ++i) {
-            auto bits = static_cast<std::uint16_t>(pcm[i]);
-            bytes[2 * i] = static_cast<unsigned char>(bits);
-            bytes[2 * i + 1] = static_cast<unsigned char>(bits >> 8);
-        }
-        self.audio->play(0, bytes);
-        ++self.playbackFrames;
+    static void message(int tr, const char* packet, int size, void*) {
+        std::shared_ptr<ReceiveContext> context;
+        {std::lock_guard<std::mutex> lock(receiveCallbacksMutex);auto found=receiveCallbacks.find(tr);if(found!=receiveCallbacks.end())context=found->second;}
+        if(!context||!context->active||size<=0)return;
+        context->insert(reinterpret_cast<const unsigned char*>(packet),static_cast<std::size_t>(size));
     }
     void captured(const std::vector<unsigned char>& bytes) {
         std::lock_guard<std::mutex> captureLock(captureMutex);
@@ -177,14 +176,23 @@ struct VoiceMedia::Impl {
     }
     bool create(std::wstring& error) {
         stopping = false;
-        deafened=false;trackOpen=false;
+        trackOpen=false;
         capturedFrames=0;encodedFrames=0;submittedFrames=0;
         peerMediaPackets=0;peerMediaBytes=0;trackCallbackPackets=0;receivedPackets=0;decodedFrames=0;playbackFrames=0;
         {std::lock_guard<std::mutex> lock(mutex);mediaSessionId=NextMediaSessionId++;localCandidatesGenerated=remoteCandidatesReceived=0;localCandidateSummaries.clear();remoteCandidateSummaries.clear();mediaState="created";iceState="new";gatheringState="new";signalingState="stable";latestAudioError=latestMediaError="none";}
         int opusError = OPUS_OK;
         encoder = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &opusError);
-        decoder = opus_decoder_create(16000, 1, &opusError);
-        if (!encoder || !decoder || opusError != OPUS_OK) { error = L"Could not initialize the Opus voice codec."; return false; }
+        if (!encoder || opusError != OPUS_OK) { error = L"Could not initialize the Opus voice codec."; return false; }
+        if(receiveBinding.remotePeerId.size()!=64||receiveBinding.callId.size()!=32||
+           !receiveBinding.callLifetime||!receiveBinding.mediaGeneration){error=L"Voice receive authorization is missing.";return false;}
+        receive=std::make_shared<ReceiveContext>();receiveWarningSent=false;
+        receive->deafened=deafened.load();
+        receive->key=receiveBinding.remotePeerId+"/"+receiveBinding.callId+"/"+std::to_string(receiveBinding.callLifetime);
+        receive->generation=receiveBinding.mediaGeneration;
+        if(!receive->engine.open(receiveDllPath())||!receive->engine.authorize(receive->key,receive->generation)){
+            // Receive failure is audio-scoped; sender/transport remain available.
+            receive->failure=PC_RX_FAILED;
+        }
         opus_encoder_ctl(encoder, OPUS_SET_BITRATE(24000));
         opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(5));
         opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(1));
@@ -197,6 +205,13 @@ struct VoiceMedia::Impl {
         audio->setDevices(inputDevice,outputDevice);
         audio->setVolumes(inputGain,outputGain);
         audio->setCaptureHandler([this](const std::vector<unsigned char>& frame){ captured(frame); });
+        auto context=receive;
+        if(!audio->setPlayoutHandler([context](std::int16_t* pcm,std::size_t samples){
+            if(!context->active||context->failure!=PC_RX_OK)return false;
+            bool supplied=context->engine.pull20ms(pcm,samples,context->deafened);
+            if(supplied)++context->playoutFrames;
+            return supplied;
+        })){error=L"Could not configure device-paced voice playback.";return false;}
         const auto now=static_cast<std::int64_t>(std::time(nullptr));
         if(!ice.valid(now) && ice.policy!=MediaIceConfiguration::Policy::DirectTestOnly){error=L"TURN media credentials are unavailable or expiring. Messaging remains connected.";return false;}
         rtcConfiguration config{};
@@ -228,13 +243,46 @@ struct VoiceMedia::Impl {
         // When the answer reuses it, rtcSetTrackCallback does not create a second
         // remote Track, so receive handling must be installed on this same Track.
         rtcSetUserPointer(sendTrack, this);
-        rtcSetMessageCallback(sendTrack, &Impl::message);
+        attachReceive(sendTrack);
         rtcSetOpenCallback(sendTrack, &Impl::opened);
         rtcSetClosedCallback(sendTrack, &Impl::closed);
         return true;
     }
+    std::wstring receiveDiagnostics(){
+        std::wostringstream out;
+        out<<L"\nreceive_engine=WebRTC AudioReceive / NetEq / WebRTC Opus / AudioMixer"
+           <<L"\nreceive_call_id="<<std::wstring(receiveBinding.callId.begin(),receiveBinding.callId.end())
+           <<L"\nreceive_call_lifetime="<<receiveBinding.callLifetime
+           <<L"\nreceive_media_generation="<<receiveBinding.mediaGeneration
+           <<L"\nreceive_remote_peer_id="<<std::wstring(receiveBinding.remotePeerId.begin(),receiveBinding.remotePeerId.end())
+           <<L"\nreceive_pcm_sample_rate=16000\nreceive_pcm_channels=1\nreceive_rtp_clock_rate=48000"
+           <<L"\nreceive_playout=device-paced; two 160-sample pulls per 320-sample buffer"
+           <<L"\nreceive_deafened="<<(deafened?L"true":L"false");
+        if(!receive)return out.str()+L"\nreceive_state=closed";
+        const auto snapshot=receive->engine.snapshot();
+        out<<L"\nreceive_authorized_sources="<<snapshot.authorizedSources<<L"\nreceive_active_sources="<<snapshot.activeSources
+           <<L"\nreceive_rtp_accepted="<<receive->accepted.load()<<L"\nreceive_rtp_rejected="<<receive->rejected.load()
+           <<L"\nreceive_insert_busy="<<receive->busy.load()<<L"\nreceive_failure_code="<<receive->failure.load()
+           <<L"\nreceive_mixed_10ms_blocks="<<snapshot.mixedBlocks
+           <<L"\nreceive_busy_or_silence_10ms_blocks="<<snapshot.underrunBlocks
+           <<L"\nreceive_last_error="<<snapshot.lastError
+           <<L"\nreceive_late_reordered_packets=not separately exposed by pinned NetEq adapter";
+        for(const auto& item:snapshot.sources){const auto& s=item.second;
+            out<<L"\nreceive_source_generation="<<s.endpoint_generation
+               <<L"\nneteq_packets_inserted="<<s.packets_inserted<<L"\nneteq_insert_failures="<<s.insert_failures
+               <<L"\nneteq_pulled_10ms_blocks="<<s.pulled_blocks<<L"\nneteq_pull_failures="<<s.pull_failures
+               <<L"\nneteq_current_delay_ms="<<s.current_delay_ms<<L"\nneteq_target_delay_ms="<<s.target_delay_ms
+               <<L"\nneteq_concealment_events="<<s.concealment_events<<L"\nneteq_concealed_samples="<<s.concealed_samples
+               <<L"\nneteq_fec_packets_received="<<s.fec_packets_received<<L"\nneteq_fec_packets_discarded="<<s.fec_packets_discarded
+               <<L"\nneteq_secondary_decoded_rate_q14="<<s.secondary_decoded_rate_q14
+               <<L"\nneteq_packets_discarded="<<s.packets_discarded<<L"\nneteq_buffer_flushes="<<s.buffer_flushes;
+        }
+        return out.str();
+    }
     void close() {
         stopping = true;
+        if(receive)receive->active=false;
+        {std::lock_guard<std::mutex> lock(receiveCallbacksMutex);for(int tr:{sendTrack,receiveTrack})receiveCallbacks.erase(tr);}
         // C API tracks have an independent registry and must be deleted explicitly.
         // Detach callbacks before releasing audio/codecs or their owning instance.
         if(pc>=0){rtcSetStateChangeCallback(pc,nullptr);rtcSetIceStateChangeCallback(pc,nullptr);rtcSetGatheringStateChangeCallback(pc,nullptr);rtcSetSignalingStateChangeCallback(pc,nullptr);rtcSetTrackCallback(pc,nullptr);rtcSetLocalDescriptionCallback(pc,nullptr);rtcSetLocalCandidateCallback(pc,nullptr);rtcSetMediaInterceptorCallback(pc,nullptr);rtcSetUserPointer(pc,nullptr);}
@@ -247,22 +295,23 @@ struct VoiceMedia::Impl {
         trackOpen=false;sendTrack=receiveTrack=-1;
         if (encoder) opus_encoder_destroy(encoder);
         encoder=nullptr;
-        if (decoder) opus_decoder_destroy(decoder);
-        decoder=nullptr;
+        if(receive)receive->engine.close();
+        receive.reset();
         audio.reset();
         std::lock_guard<std::mutex> lock(mutex); events.clear();
     }
 };
 
 VoiceMedia::VoiceMedia(MediaIceConfiguration ice,int inputDevice,int outputDevice,std::uint64_t networkGeneration,std::string networkFingerprint):VoiceMedia(std::move(ice),inputDevice,outputDevice,networkGeneration,std::move(networkFingerprint),ProcessingOptions{}) {}
-VoiceMedia::VoiceMedia(MediaIceConfiguration ice,int inputDevice,int outputDevice,std::uint64_t networkGeneration,std::string networkFingerprint,ProcessingOptions processing):impl_(std::make_unique<Impl>()) { impl_->ice=std::move(ice);impl_->inputDevice=inputDevice;impl_->outputDevice=outputDevice;impl_->networkGeneration=networkGeneration;impl_->networkFingerprint=std::move(networkFingerprint);impl_->processing=processing;rtcInitLogger(RTC_LOG_NONE, nullptr); }
+VoiceMedia::VoiceMedia(MediaIceConfiguration ice,int inputDevice,int outputDevice,std::uint64_t networkGeneration,std::string networkFingerprint,ProcessingOptions processing):VoiceMedia(std::move(ice),inputDevice,outputDevice,networkGeneration,std::move(networkFingerprint),processing,ReceiveBinding{}) {}
+VoiceMedia::VoiceMedia(MediaIceConfiguration ice,int inputDevice,int outputDevice,std::uint64_t networkGeneration,std::string networkFingerprint,ProcessingOptions processing,ReceiveBinding binding):impl_(std::make_unique<Impl>()) { impl_->ice=std::move(ice);impl_->inputDevice=inputDevice;impl_->outputDevice=outputDevice;impl_->networkGeneration=networkGeneration;impl_->networkFingerprint=std::move(networkFingerprint);impl_->processing=processing;impl_->receiveBinding=std::move(binding);rtcInitLogger(RTC_LOG_NONE, nullptr); }
 VoiceMedia::~VoiceMedia(){ stop(); }
 bool VoiceMedia::startOffer(std::wstring& error){stop();if(!impl_->create(error))return false;return rtcSetLocalDescription(impl_->pc,"offer")>=0;}
 bool VoiceMedia::startAnswer(const std::string& offer,std::wstring& error){stop();if(!impl_->create(error))return false;if(rtcSetRemoteDescription(impl_->pc,offer.c_str(),"offer")<0||rtcSetLocalDescription(impl_->pc,"answer")<0){error=L"The remote voice offer was invalid.";return false;}return true;}
 bool VoiceMedia::setAnswer(const std::string& answer,std::wstring& error){if(impl_->pc<0||rtcSetRemoteDescription(impl_->pc,answer.c_str(),"answer")<0){error=L"The remote voice answer was invalid.";return false;}return true;}
 bool VoiceMedia::addCandidate(const std::string& candidate,const std::string& mid,std::wstring& error){if(impl_->ice.policy==MediaIceConfiguration::Policy::RelayOnly&&!MediaIceConfiguration::relayCandidate(candidate)){error=L"Direct ICE candidates are disabled by the TURN relay-only media policy.";return false;}if(impl_->pc<0||rtcAddRemoteCandidate(impl_->pc,candidate.c_str(),mid.c_str())<0){error=L"The remote ICE candidate was invalid.";return false;}{std::lock_guard<std::mutex> lock(impl_->mutex);++impl_->remoteCandidatesReceived;if(impl_->remoteCandidateSummaries.size()>=16)impl_->remoteCandidateSummaries.pop_front();impl_->remoteCandidateSummaries.push_back(candidateSummary(candidate));}return true;}
 bool VoiceMedia::setMuted(bool muted,std::wstring& error){return impl_->audio&&impl_->audio->setMuted(muted,error);}
-void VoiceMedia::setDeafened(bool value){impl_->deafened=value;}
+void VoiceMedia::setDeafened(bool value){impl_->deafened=value;if(impl_->receive)impl_->receive->deafened=value;}
 void VoiceMedia::setVolumes(float inputGain,float outputGain){impl_->inputGain=inputGain;impl_->outputGain=outputGain;if(impl_->audio)impl_->audio->setVolumes(inputGain,outputGain);}
 MediaTelemetry VoiceMedia::telemetry(){
     auto result=impl_->audio?impl_->audio->telemetry():MediaTelemetry{};
@@ -270,7 +319,7 @@ MediaTelemetry VoiceMedia::telemetry(){
     if(impl_->stopping)return {};
     return result;
 }
-std::wstring VoiceMedia::diagnostics(){std::lock_guard<std::mutex> lock(impl_->mutex);char local[512]{},remote[512]{};std::wstring pair=L"unavailable";if(impl_->pc>=0&&rtcGetSelectedCandidatePair(impl_->pc,local,sizeof(local),remote,sizeof(remote))>=0)pair=std::wstring(local,local+std::strlen(local))+L" -> "+std::wstring(remote,remote+std::strlen(remote));auto summaries=[&](const std::deque<std::string>& values){std::wstring result;if(values.empty())return std::wstring(L"none");for(const auto& value:values){if(!result.empty())result+=L" | ";result+=std::wstring(value.begin(),value.end());}return result;};std::wostringstream out;out<<L"media_session_id="<<impl_->mediaSessionId<<L"\nfresh_peer_connection=true\nnetwork_generation_at_media_creation="<<impl_->networkGeneration<<L"\nnetwork_fingerprint_at_media_creation="<<std::wstring(impl_->networkFingerprint.begin(),impl_->networkFingerprint.end())<<L"\nmedia_ice_generation="<<impl_->ice.generation<<L"\nmedia_ice_policy="<<(impl_->ice.policy==MediaIceConfiguration::Policy::RelayOnly?L"relay-only":L"test-direct")<<L"\nmedia_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_dtls_srtp_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_connection_state="<<std::wstring(impl_->iceState.begin(),impl_->iceState.end())<<L"\nice_gathering_state="<<std::wstring(impl_->gatheringState.begin(),impl_->gatheringState.end())<<L"\nsignaling_state="<<std::wstring(impl_->signalingState.begin(),impl_->signalingState.end())<<L"\ntrack_open="<<(impl_->trackOpen?L"true":L"false")<<L"\nselected_ice_pair="<<pair<<L"\nlocal_ice_candidates_generated="<<impl_->localCandidatesGenerated<<L"\nlocal_ice_candidate_summaries="<<summaries(impl_->localCandidateSummaries)<<L"\nremote_ice_candidates_added="<<impl_->remoteCandidatesReceived<<L"\nremote_ice_candidate_summaries="<<summaries(impl_->remoteCandidateSummaries)<<L"\nice_servers="<<(impl_->ice.policy==MediaIceConfiguration::Policy::RelayOnly?L"TURN configured; transport=udp; relay-only":L"test direct ICE")<<L"\ncodec=Opus 16 kHz mono, 20 ms frames, 48 kHz RTP clock\ntransport=WebRTC ICE / DTLS-SRTP\ncapture_frames="<<impl_->capturedFrames.load()<<L"\nencoded_frames="<<impl_->encodedFrames.load()<<L"\nopus_submitted="<<impl_->submittedFrames.load()<<L"\nsend_api_accepted="<<impl_->submittedFrames.load()<<L"\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\npeer_connection_incoming_media_packets=not exposed safely by pinned C API\npeer_connection_incoming_media_bytes=not exposed safely by pinned C API\nremote_track_callback_packets="<<impl_->trackCallbackPackets.load()<<L"\npayload_delivered="<<impl_->receivedPackets.load()<<L"\nreceived_packets="<<impl_->receivedPackets.load()<<L"\ndecoded_frames="<<impl_->decodedFrames.load()<<L"\nplayback_frames="<<impl_->playbackFrames.load()<<L"\nlatest_audio_error="<<std::wstring(impl_->latestAudioError.begin(),impl_->latestAudioError.end())<<L"\nlatest_media_error="<<std::wstring(impl_->latestMediaError.begin(),impl_->latestMediaError.end())<<L"\napm_enabled="<<(impl_->processing.enabled?L"true":L"false")<<L"\nnoise_suppression_enabled="<<(impl_->processing.enabled&&impl_->processing.noiseSuppression?L"true":L"false")<<L"\nnoise_suppression_strength="<<noiseSuppressionStrengthName(impl_->processing.noiseSuppressionStrength)<<L"\nagc_enabled="<<(impl_->processing.enabled&&impl_->processing.automaticGain?L"true":L"false")<<L"\nagc_strength="<<automaticGainStrengthName(impl_->processing.automaticGainStrength)<<L"\ninput_volume="<<std::lround(impl_->inputGain*100.0f)<<L"\noutput_volume="<<std::lround(impl_->outputGain*100.0f)<<L"\naec_enabled=false\napm_capture_active="<<(impl_->apm.active()?L"true":L"false")<<L"\napm_sample_rate_hz=16000\napm_channels=1\napm_capture_10ms_calls="<<impl_->apm.captureCalls()<<L"\napm_processed_20ms_frames="<<impl_->apm.processedFrames()<<L"\napm_raw_bypass_frames="<<impl_->apm.bypassedFrames()+impl_->unprocessedFrames.load()<<L"\napm_level_frames="<<impl_->apm.measuredFrames()<<L"\napm_pre_rms="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.preRms()):L"Unavailable")<<L"\napm_pre_peak="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.prePeak()):L"Unavailable")<<L"\napm_post_rms="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.postRms()):L"Unavailable")<<L"\napm_post_peak="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.postPeak()):L"Unavailable")<<L"\napm_failure_code="<<impl_->apm.failure();if(impl_->audio)out<<L"\n"<<impl_->audio->diagnostics();return out.str();}
+std::wstring VoiceMedia::diagnostics(){std::lock_guard<std::mutex> lock(impl_->mutex);char local[512]{},remote[512]{};std::wstring pair=L"unavailable";if(impl_->pc>=0&&rtcGetSelectedCandidatePair(impl_->pc,local,sizeof(local),remote,sizeof(remote))>=0)pair=std::wstring(local,local+std::strlen(local))+L" -> "+std::wstring(remote,remote+std::strlen(remote));auto summaries=[&](const std::deque<std::string>& values){std::wstring result;if(values.empty())return std::wstring(L"none");for(const auto& value:values){if(!result.empty())result+=L" | ";result+=std::wstring(value.begin(),value.end());}return result;};std::wostringstream out;out<<L"media_session_id="<<impl_->mediaSessionId<<L"\nfresh_peer_connection=true\nnetwork_generation_at_media_creation="<<impl_->networkGeneration<<L"\nnetwork_fingerprint_at_media_creation="<<std::wstring(impl_->networkFingerprint.begin(),impl_->networkFingerprint.end())<<L"\nmedia_ice_generation="<<impl_->ice.generation<<L"\nmedia_ice_policy="<<(impl_->ice.policy==MediaIceConfiguration::Policy::RelayOnly?L"relay-only":L"test-direct")<<L"\nmedia_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_dtls_srtp_state="<<std::wstring(impl_->mediaState.begin(),impl_->mediaState.end())<<L"\nice_connection_state="<<std::wstring(impl_->iceState.begin(),impl_->iceState.end())<<L"\nice_gathering_state="<<std::wstring(impl_->gatheringState.begin(),impl_->gatheringState.end())<<L"\nsignaling_state="<<std::wstring(impl_->signalingState.begin(),impl_->signalingState.end())<<L"\ntrack_open="<<(impl_->trackOpen?L"true":L"false")<<L"\nselected_ice_pair="<<pair<<L"\nlocal_ice_candidates_generated="<<impl_->localCandidatesGenerated<<L"\nlocal_ice_candidate_summaries="<<summaries(impl_->localCandidateSummaries)<<L"\nremote_ice_candidates_added="<<impl_->remoteCandidatesReceived<<L"\nremote_ice_candidate_summaries="<<summaries(impl_->remoteCandidateSummaries)<<L"\nice_servers="<<(impl_->ice.policy==MediaIceConfiguration::Policy::RelayOnly?L"TURN configured; transport=udp; relay-only":L"test direct ICE")<<L"\ncodec=Opus 16 kHz mono, 20 ms frames, 48 kHz RTP clock\ntransport=WebRTC ICE / DTLS-SRTP\ncapture_frames="<<impl_->capturedFrames.load()<<L"\nencoded_frames="<<impl_->encodedFrames.load()<<L"\nopus_submitted="<<impl_->submittedFrames.load()<<L"\nsend_api_accepted="<<impl_->submittedFrames.load()<<L"\nrtp_transport_packets_sent=not exposed by pinned C API\nrtp_transport_bytes_sent=not exposed by pinned C API\npeer_connection_incoming_media_packets=not exposed safely by pinned C API\npeer_connection_incoming_media_bytes=not exposed safely by pinned C API\nremote_track_callback_packets="<<(impl_->receive?impl_->receive->callbacks.load():0)<<L"\npayload_delivered="<<(impl_->receive?impl_->receive->accepted.load():0)<<L"\nreceived_packets="<<(impl_->receive?impl_->receive->accepted.load():0)<<L"\ndecoded_frames=not separately exposed by NetEq (playout includes PLC)"<<L"\nplayback_frames="<<(impl_->receive?impl_->receive->playoutFrames.load():0)<<L"\nlatest_audio_error="<<std::wstring(impl_->latestAudioError.begin(),impl_->latestAudioError.end())<<L"\nlatest_media_error="<<std::wstring(impl_->latestMediaError.begin(),impl_->latestMediaError.end())<<L"\napm_enabled="<<(impl_->processing.enabled?L"true":L"false")<<L"\nnoise_suppression_enabled="<<(impl_->processing.enabled&&impl_->processing.noiseSuppression?L"true":L"false")<<L"\nnoise_suppression_strength="<<noiseSuppressionStrengthName(impl_->processing.noiseSuppressionStrength)<<L"\nagc_enabled="<<(impl_->processing.enabled&&impl_->processing.automaticGain?L"true":L"false")<<L"\nagc_strength="<<automaticGainStrengthName(impl_->processing.automaticGainStrength)<<L"\ninput_volume="<<std::lround(impl_->inputGain*100.0f)<<L"\noutput_volume="<<std::lround(impl_->outputGain*100.0f)<<L"\naec_enabled=false\napm_capture_active="<<(impl_->apm.active()?L"true":L"false")<<L"\napm_sample_rate_hz=16000\napm_channels=1\napm_capture_10ms_calls="<<impl_->apm.captureCalls()<<L"\napm_processed_20ms_frames="<<impl_->apm.processedFrames()<<L"\napm_raw_bypass_frames="<<impl_->apm.bypassedFrames()+impl_->unprocessedFrames.load()<<L"\napm_level_frames="<<impl_->apm.measuredFrames()<<L"\napm_pre_rms="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.preRms()):L"Unavailable")<<L"\napm_pre_peak="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.prePeak()):L"Unavailable")<<L"\napm_post_rms="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.postRms()):L"Unavailable")<<L"\napm_post_peak="<<(impl_->apm.measuredFrames()?std::to_wstring(impl_->apm.postPeak()):L"Unavailable")<<L"\napm_failure_code="<<impl_->apm.failure();if(impl_->audio)out<<L"\n"<<impl_->audio->diagnostics();out<<impl_->receiveDiagnostics();return out.str();}
 VoiceMedia::Route VoiceMedia::route(){
     std::lock_guard<std::mutex> lock(impl_->mutex);
     char local[512]{},remote[512]{};
@@ -283,9 +332,24 @@ VoiceMedia::Route VoiceMedia::route(){
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
 void VoiceMedia::testInjectPcm(const std::vector<unsigned char>& pcm){impl_->captured(pcm);}
 void VoiceMedia::testFailApmNextFrame(){impl_->failApmNextFrame=true;}
+std::function<int(const unsigned char*,std::size_t)> VoiceMedia::testReceiveSink(){
+    auto context=impl_->receive;
+    return [context](const unsigned char* packet,std::size_t size){return context?context->insert(packet,size):PC_RX_INVALID;};
+}
+bool VoiceMedia::testPullReceive(std::int16_t* pcm,std::size_t samples){
+    return impl_->receive&&impl_->receive->engine.pull20ms(pcm,samples,impl_->receive->deafened);
+}
 #endif
 std::vector<VoiceMedia::Event> VoiceMedia::poll(){
     std::vector<Event> out;
+    if(impl_->receive&&impl_->receive->failure==PC_RX_OK){
+        int status=impl_->receive->engine.snapshot().lastError;
+        if(status==PC_RX_FAILED||status==PC_RX_LIMIT)impl_->receive->failure=status;
+    }
+    if(impl_->receive&&!impl_->receiveWarningSent&&impl_->receive->failure!=PC_RX_OK){
+        impl_->receiveWarningSent=true;
+        impl_->push(EventKind::AudioError,"Voice receive engine unavailable; playback silenced");
+    }
     {std::lock_guard<std::mutex> lock(impl_->mutex);while(!impl_->events.empty()){out.push_back(std::move(impl_->events.front()));impl_->events.pop_front();}}
     std::wstring error;
     for(const auto& event:out)if(event.kind==EventKind::Connected&&impl_->audio)impl_->audio->start(error);

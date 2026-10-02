@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#ifdef PEERCHAT_TEST_VOICE_FRAMES
+#include <functional>
+#endif
 #include "media_telemetry.hpp"
 #include "media_ice_configuration.hpp"
 #include "voice_processing_presets.hpp"
@@ -22,6 +25,11 @@ public:
         NoiseSuppressionStrength noiseSuppressionStrength = NoiseSuppressionStrength::Medium;
         AutomaticGainStrength automaticGainStrength = AutomaticGainStrength::Balanced;
     };
+    // Supplied by the existing CallManager owner, never inferred from RTP/SSRC.
+    struct ReceiveBinding {
+        std::string remotePeerId, callId;
+        std::uint64_t callLifetime=0, mediaGeneration=0;
+    };
     enum class Route { Unknown, DirectLanIce, NatTraversedIce, TurnRelay };
     enum class EventKind { Description, Candidate, Connected, Disconnected, Failed, AudioError, AudioProcessingError };
     struct Event {
@@ -35,6 +43,9 @@ public:
     VoiceMedia(MediaIceConfiguration ice, int inputDevice, int outputDevice,
                std::uint64_t networkGeneration, std::string networkFingerprint,
                ProcessingOptions processing);
+    VoiceMedia(MediaIceConfiguration ice, int inputDevice, int outputDevice,
+               std::uint64_t networkGeneration, std::string networkFingerprint,
+               ProcessingOptions processing, ReceiveBinding receive);
     ~VoiceMedia();
     VoiceMedia(const VoiceMedia&) = delete;
     VoiceMedia& operator=(const VoiceMedia&) = delete;
@@ -52,6 +63,8 @@ public:
 #ifdef PEERCHAT_TEST_VOICE_FRAMES
     void testInjectPcm(const std::vector<unsigned char>& pcm);
     void testFailApmNextFrame();
+    std::function<int(const unsigned char*,std::size_t)> testReceiveSink();
+    bool testPullReceive(std::int16_t* pcm,std::size_t samples);
 #endif
     std::vector<Event> poll();
     void stop();

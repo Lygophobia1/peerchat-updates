@@ -379,6 +379,11 @@ struct Audio::Impl {
                     for(std::size_t sample=0;sample<samples.size();++sample){auto bits=static_cast<std::uint16_t>(samples[sample]);buffer.data[2*sample]=bits&255;buffer.data[2*sample+1]=bits>>8;}
                 }else buffer.data = mixer.mix(audio_detail::Clock::now());
                 audio_detail::scalePcm(buffer.data, outputGain);
+                if(playoutHandler){
+                    const auto now=audio_detail::Clock::now();
+                    outputLevel=std::max(audio_detail::pcmLevel(buffer.data),audio_detail::decayedLevel(outputLevel,outputLevelUpdated,now));
+                    outputLevelUpdated=now;
+                }
                 const MMRESULT result = waveOutWrite(output, &buffer.header, sizeof(WAVEHDR));
                 if (result != MMSYSERR_NOERROR) {
                     pendingError = audio_detail::deviceError(L"Voice playback stopped", result, false);

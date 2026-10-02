@@ -17,7 +17,7 @@ try{
     if($IncludeStage1A){
         $native=if($env:PEERCHAT_NATIVE_DEPENDENCY_ROOT){$env:PEERCHAT_NATIVE_DEPENDENCY_ROOT}else{'C:\Peerchatdep\native\mingw-x64-libdatachannel-c6696d1-opus-ddbe483-mbedtls-068ff08'}
         foreach($test in @('group_control_scope_test','group_control_handoff_test','group_control_three_member_test')){
-            & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I. ("-I"+(Join-Path $native 'include')) "tests\$test.cpp" node.cpp tls.cpp storage.cpp group.cpp group_message_envelope.cpp voice_media.cpp audio.cpp ("-L"+(Join-Path $native 'lib')) -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m '-Wl,-Bstatic' -lssp '-Wl,-Bdynamic' -o "$out\$test.exe" -lwinmm -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -liphlpapi
+            & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I. ("-I"+(Join-Path $native 'include')) "tests\$test.cpp" node.cpp tls.cpp storage.cpp group.cpp group_message_envelope.cpp voice_media.cpp voice_receive_engine.cpp audio.cpp ("-L"+(Join-Path $native 'lib')) -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m '-Wl,-Bstatic' -lssp '-Wl,-Bdynamic' -o "$out\$test.exe" -lwinmm -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -liphlpapi
             if($LASTEXITCODE -ne 0){throw "$test compilation failed ($LASTEXITCODE)."}
             $env:PATH="$env:WINDIR\System32;$env:WINDIR"
             & "$out\$test.exe" "$out\$test-profiles"

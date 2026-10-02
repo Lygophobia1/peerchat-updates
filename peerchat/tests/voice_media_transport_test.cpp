@@ -79,8 +79,10 @@ int main(){
         if(cycle==3)processing.noiseSuppression=false;
         processing.noiseSuppressionStrength=static_cast<peerchat::NoiseSuppressionStrength>(cycle%3);
         processing.automaticGainStrength=static_cast<peerchat::AutomaticGainStrength>((cycle+2)%3);
-        peerchat::VoiceMedia caller(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24",processing);
-        peerchat::VoiceMedia answerer(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),"192.168.1.17/24");
+        peerchat::VoiceMedia::ReceiveBinding callerBinding{std::string(64,'b'),std::string(32,'c'),static_cast<std::uint64_t>(cycle+1),1};
+        peerchat::VoiceMedia::ReceiveBinding answerBinding{std::string(64,'a'),std::string(32,'c'),static_cast<std::uint64_t>(cycle+1),1};
+        peerchat::VoiceMedia caller(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),cycle==0?"192.168.1.14/24":"10.211.241.175/24",processing,callerBinding);
+        peerchat::VoiceMedia answerer(peerchat::MediaIceConfiguration::directForTests(),-1,-1,static_cast<std::uint64_t>(cycle+1),"192.168.1.17/24",{},answerBinding);
         std::wstring error;
         require(caller.startOffer(error),"Could not create caller offer");
         bool answerStarted=false,callerConnected=false,answererConnected=false;
@@ -104,8 +106,9 @@ int main(){
         for(std::size_t i=0;i<pcm.size();i+=2){pcm[i]=0x34;pcm[i+1]=0x12;}
         for(int frame=0;frame<12;++frame){caller.testInjectPcm(pcm);answerer.testInjectPcm(pcm);std::this_thread::sleep_for(20ms);}
         deadline=std::chrono::steady_clock::now()+5s;
-        while(std::chrono::steady_clock::now()<deadline){caller.poll();answerer.poll();auto a=caller.diagnostics(),b=answerer.diagnostics();if(countAtLeast(a,L"opus_submitted=",12)&&countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"decoded_frames=",12)&&countAtLeast(b,L"opus_submitted=",12)&&countAtLeast(b,L"received_packets=",12)&&countAtLeast(b,L"decoded_frames=",12))break;std::this_thread::sleep_for(20ms);}
+        while(std::chrono::steady_clock::now()<deadline){caller.poll();answerer.poll();auto a=caller.diagnostics(),b=answerer.diagnostics();if(countAtLeast(a,L"opus_submitted=",12)&&countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"neteq_pulled_10ms_blocks=",12)&&countAtLeast(b,L"opus_submitted=",12)&&countAtLeast(b,L"received_packets=",12)&&countAtLeast(b,L"neteq_pulled_10ms_blocks=",12))break;std::this_thread::sleep_for(20ms);}
         auto a=caller.diagnostics(),b=answerer.diagnostics();
+        for(const auto& value:{a,b})require(value.find(L"receive_authorized_sources=1")!=std::wstring::npos&&value.find(L"receive_active_sources=1")!=std::wstring::npos&&value.find(L"receive_source_generation=1")!=std::wstring::npos&&value.find(L"receive_pcm_sample_rate=16000")!=std::wstring::npos&&value.find(L"receive_pcm_channels=1")!=std::wstring::npos&&value.find(L"receive_rtp_clock_rate=48000")!=std::wstring::npos&&countAtLeast(value,L"neteq_packets_inserted=",12),"Incoming RTP did not reach exactly one generation-bound 16 kHz NetEq source with the 48 kHz RTP clock");
         std::wcerr<<L"Caller diagnostics:\n"<<a<<L"\nAnswerer diagnostics:\n"<<b<<L'\n';
         require(countAtLeast(a,L"capture_frames=",12)&&countAtLeast(a,L"encoded_frames=",12)&&countAtLeast(a,L"opus_submitted=",12),"Caller did not capture/encode/submit injected PCM");
         require(a.find(L"aec_enabled=false")!=std::wstring::npos,"Echo cancellation must stay disabled");
@@ -117,8 +120,8 @@ int main(){
         if(processing.enabled)require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_enabled=true")!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_enabled=")+(processing.noiseSuppression?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_strength=")+nsName)!=std::wstring::npos&&a.find(std::wstring(L"agc_enabled=")+(processing.automaticGain?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"agc_strength=")+gainName)!=std::wstring::npos&&countAtLeast(a,L"apm_level_frames=",12),"Capture-side APM configuration or cadence did not match requested generation options");
         else require(a.find(L"apm_enabled=false")!=std::wstring::npos&&countAtLeast(a,L"apm_raw_bypass_frames=",12)&&a.find(L"apm_capture_10ms_calls=0")!=std::wstring::npos,"Disabled processing did not preserve raw 20 ms PCM-to-Opus path");
         require(countAtLeast(b,L"capture_frames=",12)&&countAtLeast(b,L"encoded_frames=",12)&&countAtLeast(b,L"opus_submitted=",12),"Answerer did not capture/encode/submit injected PCM");
-        require(countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"decoded_frames=",12)&&countAtLeast(a,L"playback_frames=",12),"Caller did not receive/decode/queue answerer Opus");
-        require(countAtLeast(b,L"received_packets=",12)&&countAtLeast(b,L"decoded_frames=",12)&&countAtLeast(b,L"playback_frames=",12),"Answerer did not receive/decode/queue caller Opus");
+        require(countAtLeast(a,L"received_packets=",12)&&countAtLeast(a,L"neteq_pulled_10ms_blocks=",12)&&countAtLeast(a,L"playback_frames=",12),"Caller did not receive through NetEq/device-paced playout answerer Opus");
+        require(countAtLeast(b,L"received_packets=",12)&&countAtLeast(b,L"neteq_pulled_10ms_blocks=",12)&&countAtLeast(b,L"playback_frames=",12),"Answerer did not receive through NetEq/device-paced playout caller Opus");
         require(a.find(L"fresh_peer_connection=true")!=std::wstring::npos&&a.find(L"ice_gathering_state=new")==std::wstring::npos&&a.find(L"local_ice_candidates_generated=0")==std::wstring::npos&&a.find(L"ice_servers=test direct ICE")!=std::wstring::npos,"Fresh media session omitted ICE gathering evidence");
         require(a.find(L"network_generation_at_media_creation="+std::to_wstring(cycle+1))!=std::wstring::npos,"Media session retained an earlier network generation");
         const auto callerLevel=caller.telemetry(),answererLevel=answerer.telemetry();
@@ -130,7 +133,7 @@ int main(){
             require(apmWarning,"APM bypass did not report a nonfatal diagnostic event");}
         caller.stop();answerer.stop();
         }
-        std::cout<<"PASS: injected PCM crossed direct ICE/DTLS-SRTP as timestamped Opus and reached both playback queues.\n";
+        std::cout<<"PASS: injected PCM crossed direct ICE/DTLS-SRTP as timestamped Opus and reached both device-paced NetEq receivers.\n";
         return 0;
     }catch(const std::exception& failure){std::cerr<<"FAIL: "<<failure.what()<<'\n';return 1;}
 }
