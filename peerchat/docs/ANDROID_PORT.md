@@ -1,5 +1,60 @@
 # Android messaging portability foundation
 
+## Storage integration checkpoints (host validation, phone disconnected)
+
+Step 1 isolates Windows path creation, System32 SQLite opening and busy timeout
+in `WindowsStorageConnection`. The production SQL/schema, transactions, DPAPI
+contexts, serialization and private-key persistence remain unchanged. Provider
+interfaces and independently tested Windows SQL adapters are preparatory only.
+
+The historical `storage_test` tamper assertion was conclusively a fixture bug:
+the test erased profile 0 history and then updated a nonexistent `rowid=1`.
+It now inserts one synthetic encrypted message, selects it by stable message ID,
+and verifies the row exists and becomes zeroed before testing rejection. The
+assertion and DPAPI error checks remain intact; production crypto is unchanged.
+The complete Storage regression now passes including ciphertext rejection.
+
+The earlier execution-review blocker below is historical: the user has approved
+small independently tested production integration steps. No previously rejected
+large patch has been applied. Steps 2–4 remain pending at this checkpoint.
+
+## Backend extraction progress — 2026-10-02 (not a completed milestone)
+
+The current backend branch has an instance-owned `IdentityProvider` boundary.
+Provider signatures are checked using the existing Windows verifier; provider
+public-key mismatches, signatures from the wrong key, provider failures and a
+simultaneously populated private-key blob fail closed. No Android private key
+was exported. The provider-backed profile remains unbound to Android Storage.
+The legacy Windows store refuses to persist an opaque profile until reopen can
+explicitly bind the provider, rather than writing a record it cannot reopen.
+
+`platform/storage_backend.hpp` defines execution-only SQLite cursor/database
+interfaces and a checked cursor/transaction helper. A Windows adapter was tested
+separately; the production store still uses its established path. Schema,
+encryption contexts, history, outbox and delivery policy are unchanged.
+
+Host validation:
+
+- `opaque_identity_test`: 1,000 binding/signing cycles, unchanged CNG verifier,
+  bounds, mismatch, provider failure and group signatures passed.
+- `storage_backend_test`: protected blobs, integer bounds, rollback, invalid SQL
+  rejection and reopen passed.
+- `portable_windows_compat_test`: DPAPI compatibility/context binding, identity
+  persistence, history, outbox, authenticated ACK and dedupe passed.
+- Existing host `portable_core` CTest passed (previously built foundation).
+- Android ARM64 debug APK and instrumentation APK built successfully. The
+  backend has no JVM unit-test sources; `testDebugUnitTest` reported NO-SOURCE,
+  which is not a passing JVM test suite. No device tests ran.
+- Full Windows build/package/import audit passed as `4.0.1-dev.4`.
+
+Production Storage adapter integration was rejected by execution safety review
+because the proposed persistence refactor was not sufficiently isolated and
+independently validated. Rejected patches were not applied. This is an execution
+approval blocker, not evidence of a PeerChat storage defect or a phone-only
+blocker. Native Android profile reopen, TLS, discovery/authentication, presence
+and real message delivery remain NOT IMPLEMENTED. No completed backend milestone
+is claimed from these preparatory tests.
+
 This development worktree starts at `c87e380a6991330e83f24863efd302d4ca7c714f`.
 The Windows testing worktree and its physical-test packages remain unchanged.
 

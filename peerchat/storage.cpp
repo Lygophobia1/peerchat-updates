@@ -3,6 +3,8 @@
 #define NOMINMAX
 #include "storage.hpp"
 #include "group.hpp"
+#include "platform/identity_provider.hpp"
+#include "platform/storage_backend.hpp"
 #include <windows.h>
 #include <wincrypt.h>
 #include "platform/windows_record_protection.hpp"
@@ -72,6 +74,12 @@ Blob exportKey(BCRYPT_KEY_HANDLE key,LPCWSTR kind) {
 void validateProfile(const Profile& p) {
     require(!p.name.empty()&&p.name.size()<=64&&p.listenPort!=0,"Invalid profile settings");
     require(p.privateKey.size()<=1024&&p.publicKey.size()<=1024,"Invalid identity size");
+    if(p.identity){
+        require(p.privateKey.empty()&&p.identity->publicKey()==p.publicKey&&Storage::publicKeyId(p.publicKey)==p.peerId,"Opaque profile identity mismatch");
+        const Blob proof{'P','e','e','r','C','h','a','t',' ','p','r','o','f','i','l','e',' ','b','i','n','d','i','n','g'};
+        require(verifyDevicePayload(proof,p.identity->sign(proof),p.publicKey),"Opaque profile signing failed");
+        return;
+    }
     Algorithm alg;Key key;crypto(BCryptOpenAlgorithmProvider(&alg.h,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));
     crypto(BCryptImportKeyPair(alg.h,nullptr,BCRYPT_ECCPRIVATE_BLOB,&key.h,const_cast<PUCHAR>(p.privateKey.data()),static_cast<ULONG>(p.privateKey.size()),0));
     require(exportKey(key.h,BCRYPT_ECCPUBLIC_BLOB)==p.publicKey&&Storage::publicKeyId(p.publicKey)==p.peerId,"Identity key mismatch");
@@ -106,16 +114,59 @@ struct Sqlite {
     }
     ~Sqlite(){FreeLibrary(module);}
 };
-struct Statement {
+// Windows owns path resolution and the SQLite handle. Storage owns schema and
+// record semantics. Keeping construction here permits independent platform
+// opening tests before the SQL execution path is changed.
+struct WindowsStorageConnection {
+    Sqlite api;sqlite3* handle{};
+    explicit WindowsStorageConnection(const std::wstring& directory){
+        std::filesystem::create_directories(directory);
+        auto path=(std::filesystem::path(directory)/L"peerchat.sqlite").wstring();
+        if(api.open16(path.c_str(),&handle)!=0){if(handle)api.close(handle);handle=nullptr;throw std::runtime_error("Cannot open local database");}
+        if(api.busy_timeout(handle,1500)!=0){api.close(handle);handle=nullptr;throw std::runtime_error("Cannot configure database timeout");}
+    }
+    ~WindowsStorageConnection(){if(handle)api.close(handle);}
+    WindowsStorageConnection(const WindowsStorageConnection&)=delete;
+    WindowsStorageConnection& operator=(const WindowsStorageConnection&)=delete;
+};
+struct WindowsStatement {
     Sqlite& api;sqlite3_stmt* handle{};
-    Statement(Sqlite& a,sqlite3* db,const char* sql):api(a){require(api.prepare_v2(db,sql,-1,&handle,nullptr)==0,"Local database statement failed");}
-    ~Statement(){if(handle)api.finalize(handle);}
+    WindowsStatement(Sqlite& a,sqlite3* db,const char* sql):api(a){require(api.prepare_v2(db,sql,-1,&handle,nullptr)==0,"Local database statement failed");}
+    ~WindowsStatement(){if(handle)api.finalize(handle);}
     void text(int i,const std::string& s){require(api.bind_text(handle,i,s.data(),static_cast<int>(s.size()),reinterpret_cast<void(*)(void*)>(-1))==0,"Database text binding failed");}
     void blob(int i,const Blob& b){require(api.bind_blob(handle,i,b.data(),static_cast<int>(b.size()),reinterpret_cast<void(*)(void*)>(-1))==0,"Database blob binding failed");}
     void number(int i,std::int64_t n){require(api.bind_int64(handle,i,n)==0,"Database number binding failed");}
     bool row(){int result=api.step(handle);require(result==100||result==101,"Local database read/write failed");return result==100;}
     Blob bytes(int i){int n=api.column_bytes(handle,i);require(n>0&&n<=MaxRecord,"Invalid encrypted record size");const auto* b=static_cast<const unsigned char*>(api.column_blob(handle,i));require(b!=nullptr,"Invalid stored blob");return {b,b+n};}
     std::string text(int i){const auto* s=api.column_text(handle,i);require(s!=nullptr,"Invalid stored identifier");return reinterpret_cast<const char*>(s);}
+};
+// Adapter only: schema, record encryption, history and outbox policy remain in
+// Storage. Validate this boundary before switching the production store to it.
+struct WindowsSqlStatement final : platform::SqlStatement {
+    WindowsStatement statement;
+    WindowsSqlStatement(Sqlite& api,sqlite3* db,const std::string& sql):statement(api,db,sql.c_str()){}
+    void bindText(int i,const std::string& value) override{statement.text(i,value);}
+    void bindBlob(int i,const Blob& value) override{statement.blob(i,value);}
+    void bindNumber(int i,std::int64_t value) override{statement.number(i,value);}
+    bool row() override{return statement.row();}
+    Blob bytes(int i) override{return statement.bytes(i);}
+    std::string text(int i) override{return statement.text(i);}
+    std::int64_t number(int i) override{return statement.api.column_int64(statement.handle,i);}
+};
+struct WindowsSqlDatabase final : platform::SqlDatabase {
+    Sqlite api;sqlite3* handle{};
+    explicit WindowsSqlDatabase(const std::wstring& directory){
+        std::filesystem::create_directories(directory);
+        auto path=(std::filesystem::path(directory)/L"peerchat.sqlite").wstring();
+        if(api.open16(path.c_str(),&handle)!=0){if(handle)api.close(handle);handle=nullptr;throw std::runtime_error("Cannot open local database");}
+        if(api.busy_timeout(handle,1500)!=0){api.close(handle);handle=nullptr;throw std::runtime_error("Cannot configure database timeout");}
+    }
+    ~WindowsSqlDatabase(){if(handle)api.close(handle);}
+    void execute(const std::string& sql) override{require(api.exec(handle,sql.c_str(),nullptr,nullptr,nullptr)==0,"Local database operation failed");}
+    std::unique_ptr<platform::SqlStatement> prepare(const std::string& sql) override{return std::make_unique<WindowsSqlStatement>(api,handle,sql);}
+};
+struct Statement : WindowsStatement {
+    using WindowsStatement::WindowsStatement;
 };
 struct Transaction {
     Sqlite& api;sqlite3* db;bool committed=false;
@@ -136,13 +187,10 @@ void encodeMessage(Writer& w,const StoredMessage& m){w.string(m.id);w.string(m.s
 
 using namespace storage_detail;
 struct Storage::Impl {
-    Sqlite sql;sqlite3* db{};
-    explicit Impl(const std::wstring& directory) {
-        std::filesystem::create_directories(directory);
-        auto path=(std::filesystem::path(directory)/L"peerchat.sqlite").wstring();
-        if(sql.open16(path.c_str(),&db)!=0){if(db)sql.close(db);db=nullptr;throw std::runtime_error("Cannot open local database");}
+    WindowsStorageConnection connection;
+    Sqlite& sql;sqlite3*& db;
+    explicit Impl(const std::wstring& directory):connection(directory),sql(connection.api),db(connection.handle) {
         try {
-            require(sql.busy_timeout(db,1500)==0,"Cannot configure database timeout");
             execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON;");
             execute("CREATE TABLE IF NOT EXISTS objects(k TEXT PRIMARY KEY,b BLOB NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS messages(id TEXT UNIQUE NOT NULL,peer TEXT NOT NULL,b BLOB NOT NULL);"
@@ -160,7 +208,6 @@ struct Storage::Impl {
                     "CREATE TABLE IF NOT EXISTS group_key_receipts(group_id TEXT NOT NULL,key_generation INTEGER NOT NULL,recipient_peer TEXT NOT NULL,PRIMARY KEY(group_id,key_generation,recipient_peer));");
         }catch(...){sql.close(db);db=nullptr;throw;}
     }
-    ~Impl(){if(db)sql.close(db);}
     void execute(const char* statement){require(sql.exec(db,statement,nullptr,nullptr,nullptr)==0,"Local database operation failed");}
     Blob get(const std::string& key) {
         Statement s(sql,db,"SELECT b FROM objects WHERE k=?");s.text(1,key);if(!s.row())return {};
@@ -197,6 +244,9 @@ Profile Storage::profile() {
     p.publicKey=r.bytes();p.privateKey=r.bytes();r.end();validateProfile(p);transaction.commit();return p;
 }
 void Storage::saveProfile(const Profile& p) {
+    // The legacy Windows store cannot reopen an opaque provider yet. Refuse
+    // persistence until the injected storage backend explicitly binds it.
+    require(!p.identity,"Opaque profile requires provider-backed storage");
     validateProfile(p);Writer w;w.string(p.peerId);w.text(p.name);w.number(p.listenPort);w.bytes(p.publicKey);w.bytes(p.privateKey);impl_->put("profile",w.data);
 }
 void Storage::saveContact(const Contact& c) {

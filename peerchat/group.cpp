@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include "group.hpp"
+#include "platform/identity_provider.hpp"
 #include "protocol.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -33,6 +34,12 @@ std::string newGroupId(){return Storage::newMessageId();}
 Blob signDevicePayload(const Blob& payload,const Profile& device){
     if(payload.size()>70000||Storage::publicKeyId(device.publicKey)!=device.peerId)
         throw std::runtime_error("Invalid device signature input");
+    if(device.identity){
+        if(!device.privateKey.empty()||device.identity->publicKey()!=device.publicKey)throw std::runtime_error("Opaque identity mismatch");
+        auto signature=device.identity->sign(payload);
+        if(!verifyDevicePayload(payload,signature,device.publicKey))throw std::runtime_error("Opaque identity signature mismatch");
+        return signature;
+    }
     Blob digest=sha256(payload),signature(64);Key key=importKey(device.privateKey,true);ULONG bytes=0;
     requireNt(BCryptSignHash(key.value,nullptr,digest.data(),32,signature.data(),64,&bytes,0));
     if(bytes!=64||!verifyDevicePayload(payload,signature,device.publicKey))
@@ -50,7 +57,9 @@ bool verifyDevicePayload(const Blob& payload,const Blob& signature,const Blob& p
 
 void signGroupEvent(GroupEvent& event,const Profile& device){
     if(event.actorPeerId!=device.peerId||Storage::publicKeyId(device.publicKey)!=device.peerId)throw std::runtime_error("Group actor does not match this device");
-    Blob digest=sha256(unsignedPayload(event));event.eventId=hex(digest);Key key=importKey(device.privateKey,true);ULONG bytes=0;requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),nullptr,0,&bytes,0));event.signature.resize(bytes);requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),event.signature.data(),bytes,&bytes,0));event.signature.resize(bytes);
+    Blob digest=sha256(unsignedPayload(event));event.eventId=hex(digest);
+    if(device.identity){event.signature=signDevicePayload(unsignedPayload(event),device);return;}
+    Key key=importKey(device.privateKey,true);ULONG bytes=0;requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),nullptr,0,&bytes,0));event.signature.resize(bytes);requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),event.signature.data(),bytes,&bytes,0));event.signature.resize(bytes);
 }
 
 bool verifyGroupEventSignature(const GroupEvent& event,const Blob& publicKey){

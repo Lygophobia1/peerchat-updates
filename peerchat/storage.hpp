@@ -5,6 +5,7 @@
 #include <vector>
 
 namespace peerchat {
+namespace platform { class IdentityProvider; class StoragePlatform; }
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
@@ -20,7 +21,10 @@ struct Profile {
     std::string peerId;
     std::wstring name = L"You";
     std::uint16_t listenPort = 7777;
-    Blob publicKey, privateKey; // P-256 CNG blobs; private material is protected on disk.
+    Blob publicKey, privateKey; // Legacy Windows CNG blobs; unchanged on disk.
+    // Opaque, instance-owned key operations. Never serialized. When set, the
+    // privateKey field must be empty; public/wire identity stays exactly the same.
+    std::shared_ptr<platform::IdentityProvider> identity;
 };
 struct Endpoint { std::wstring host; std::uint16_t port=7777; };
 struct Contact {
@@ -48,6 +52,7 @@ struct StoredMessage {
 class Storage {
 public:
     explicit Storage(const std::wstring& directory);
+    explicit Storage(std::shared_ptr<platform::StoragePlatform> platform);
     ~Storage();
     Storage(const Storage&)=delete;
     Storage& operator=(const Storage&)=delete;
