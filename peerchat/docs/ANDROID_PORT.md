@@ -2,6 +2,15 @@
 
 ## Storage integration checkpoints (host validation, phone disconnected)
 
+Step 2 binds production SQL operations to `SqlDatabase`/`SqlStatement` and
+the checked cursor/transaction boundary. Windows opens the same System32 SQLite
+implementation; schema SQL and protected record formats are unchanged. An
+explicit database constructor permits injection without choosing identity or
+record-protection policy yet. Production adapter tests cover 32 reopen cycles,
+legacy profile/history readability, durable outbox/dedupe/order/ACK, competing
+connection busy rollback and malformed database rejection. This is a portable
+execution boundary, not yet an Android SQLite binding.
+
 Step 1 isolates Windows path creation, System32 SQLite opening and busy timeout
 in `WindowsStorageConnection`. The production SQL/schema, transactions, DPAPI
 contexts, serialization and private-key persistence remain unchanged. Provider

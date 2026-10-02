@@ -99,9 +99,9 @@ int main() {
             {Storage fixture((root/L"0").wstring());require(fixture.append(b.peerId,sent[0]),"Tamper fixture was not inserted");}
             Sqlite api;sqlite3* raw{};auto path=(root/L"0"/L"peerchat.sqlite").wstring();
             require(api.open16(path.c_str(),&raw)==0,"Tamper test open failed");
-            {Statement target(api,raw,"SELECT COUNT(*) FROM messages WHERE id=?");target.text(1,sent[0].id);require(target.row()&&api.column_int64(target.handle,0)==1,"Tamper target missing");}
-            {Statement mutation(api,raw,"UPDATE messages SET b=zeroblob(length(b)) WHERE id=?");mutation.text(1,sent[0].id);require(!mutation.row(),"Tamper mutation failed");}
-            {Statement changed(api,raw,"SELECT COUNT(*) FROM messages WHERE id=? AND b=zeroblob(length(b))");changed.text(1,sent[0].id);require(changed.row()&&api.column_int64(changed.handle,0)==1,"Ciphertext was not altered");}
+            {WindowsStatement target(api,raw,"SELECT COUNT(*) FROM messages WHERE id=?");target.text(1,sent[0].id);require(target.row()&&api.column_int64(target.handle,0)==1,"Tamper target missing");}
+            {WindowsStatement mutation(api,raw,"UPDATE messages SET b=zeroblob(length(b)) WHERE id=?");mutation.text(1,sent[0].id);require(!mutation.row(),"Tamper mutation failed");}
+            {WindowsStatement changed(api,raw,"SELECT COUNT(*) FROM messages WHERE id=? AND b=zeroblob(length(b))");changed.text(1,sent[0].id);require(changed.row()&&api.column_int64(changed.handle,0)==1,"Ciphertext was not altered");}
             api.close(raw);
             Storage db((root/L"0").wstring());bool rejected=false,diagnosed=false;try{db.history(b.peerId);}catch(const std::runtime_error& error){rejected=true;diagnosed=std::string(error.what()).find("DPAPI Win32 error")!=std::string::npos;}require(rejected,"Altered ciphertext was accepted");require(diagnosed,"DPAPI failure did not retain its Win32 error diagnostic");
         }
