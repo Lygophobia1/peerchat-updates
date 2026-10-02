@@ -1,11 +1,12 @@
 package com.peerchat.android;
 // Host-JVM bridge check only. This is not the Android application or engine.
 public final class NativeBridge {
-    private native long create();
-    private native int destroy(long handle);
-    private native int[] info(long handle);
+    native long create();
+    native int destroy(long handle);
+    native int[] info(long handle);
     private native byte[] exchange(long handle,byte[] input);
     public static void main(String[] args) {
+        if(args.length>1)System.load(args[1]);
         System.load(args[0]);
         NativeBridge bridge=new NativeBridge();
         byte[] input="PeerChat / 日本語 / café / 😀\u0000end".getBytes(java.nio.charset.StandardCharsets.UTF_8);

@@ -136,7 +136,7 @@ class AndroidIdentityProvider(context: Context, profile: String) : IdentityProvi
     }
     override fun publicRepresentation(): ByteArray = public.copyOf()
     override fun sign(data: ByteArray): ByteArray = protectedOperation {
-        invalid(data.size <= 65536)
+        invalid(data.size <= 70000)
         val store = state.store()
         val key = store.getKey(state.identityAlias, null) as? PrivateKey ?: throw ProviderFailure("IDENTITY_RECOVERY_REQUIRED")
         val current = PeerIdentityFormat.publicBytes(store.getCertificate(state.identityAlias).publicKey as ECPublicKey)
@@ -175,7 +175,7 @@ class AndroidRecordProtector(context: Context, profile: String) : RecordProtecto
     private fun aad(header: ByteArray, context: ByteArray): ByteArray = header + state.id +
         ByteBuffer.allocate(4).putInt(context.size).array() + context
     override fun protect(plain: ByteArray, context: ByteArray): ByteArray = protectedOperation {
-        invalid(plain.size <= 65536 && context.size <= 4096)
+        invalid(plain.size <= 1048536 && context.size <= 4096)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key(true))
         invalid(cipher.iv.size == 12)
         val header = byteArrayOf(0x50, 0x43, 0x52, 0x31, 1, 1, 12, 16) + ByteBuffer.allocate(4).putInt(plain.size + 16).array()
@@ -183,7 +183,7 @@ class AndroidRecordProtector(context: Context, profile: String) : RecordProtecto
         header + cipher.iv + cipher.doFinal(plain)
     }
     override fun unprotect(blob: ByteArray, context: ByteArray): ByteArray = protectedOperation {
-        invalid(blob.size in 40..65576 && context.size <= 4096)
+        invalid(blob.size in 40..1048576 && context.size <= 4096)
         val header = blob.copyOfRange(0, 12)
         invalid(header.copyOfRange(0, 8).contentEquals(byteArrayOf(0x50, 0x43, 0x52, 0x31, 1, 1, 12, 16)))
         invalid(ByteBuffer.wrap(header, 8, 4).int == blob.size - 24)

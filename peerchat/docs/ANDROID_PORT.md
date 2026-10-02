@@ -1,5 +1,95 @@
 # Android messaging portability foundation
 
+## Current production Profile/Storage boundary — 2026-10-02
+
+The isolated backend branch now binds actual native `Storage`, `Profile`,
+`SessionTransportManager` and `DeliveryManager` through `ProfileBridge` and
+`AndroidStoragePlatform`. Kotlin supplies SQLite execution, Keystore signing and
+PCR1 record protection only; native owners retain schema, transactions, ordering,
+history, outbox, ACK and dedupe policy. No network/TLS route is enabled.
+
+`StoragePlatform` requires instance-owned SQL, record and identity providers.
+Android private keys never cross JNI; PCS1 stores the unchanged public identity
+with an empty private-key field. Existing databases fail closed when identity
+material is missing. Windows default opening/CNG/DPAPI remain unchanged.
+Provider references are held until admitted native calls complete; no `JNIEnv`
+is cached across threads. A native instance serializes complete synchronous
+operations, including transactions, on the calling thread. Future networking
+must preserve this storage execution discipline, not move transaction fragments
+independently between threads.
+
+Use explicit provider binding (`NativeProfile`), not `pc_core_open_profile(path)`:
+the latter intentionally remains unavailable without platform providers. The
+activity is still the accepted foundation/security surface; it does not yet
+start a messaging engine or open the new native profile automatically.
+
+Current host/build validation is distinct from device execution. The new
+`NativeProfileTest` covers 32 native profile reopens, Keystore-backed signing,
+history/outbox/dedupe persistence, ACK across reopen, corrupted-record rejection,
+missing identity rejection and normal-profile test-hook exclusion. These new
+tests have NOT run on the phone. The earlier physical results below validate
+the standalone providers, not this new production binding.
+
+Final host/build gate for this binding: PASS for the seven-test portable Storage
+set (including DPAPI/history/outbox/ACK/dedupe/tamper), Stage 1B envelope controls,
+opaque-profile verification using pinned MbedTLS, existing session authorization
+scope, 1,000 native C ABI lifetimes, 1,000 foundation JNI lifetimes and 1,100 JNI
+provider-failure lifetimes (100 concurrent). `-Xcheck:jni` reports no JNI misuse.
+Debug/test/release APK builds and release lint-vital pass. The ARM64 artifact
+audit verifies both libraries, production binding exports, expected Android
+dependencies only and test-hook exclusion from release. Full Windows build and
+restricted-search package/import audits pass at isolated `4.0.1-dev.10`.
+`git diff --check` passes. Existing Windows compiler warnings and Android's
+deprecated hardware-security query warning are unchanged; no unrelated fixes
+were included.
+
+Debug-only synthetic storage hooks require a `test_` profile and are absent from
+the release native library. Test directories/aliases are removed in `finally`.
+The normal profile is never deleted or tampered with. PCR1 remains version 1;
+its production bound is now 1,048,536 plaintext bytes / 1,048,576 protected bytes,
+matching the existing native record ceiling (no format or encryption change).
+Signing accepts at most 70,000 bytes, matching native device-payload limits.
+
+Android framework SQLite supplies the database engine. Native schema/UPSERT
+semantics are unchanged; older Android vendor SQLite versions below 3.24 are
+not validated and may fail closed on these operations. API 26 is an APK minimum,
+not proof that every vendor SQLite revision is compatible.
+
+Host commands (no phone required):
+
+```powershell
+.\tests\test-portable-storage.ps1
+.\tests\test-profile-jni-host.ps1
+$env:JAVA_HOME='C:\Program Files\Java\jdk-22'
+$env:ANDROID_HOME='C:\Users\Livel\AppData\Local\Android\Sdk'
+$env:PEERCHAT_DEPENDENCY_ROOT='C:\Peerchatdep\deps'
+.\android\gradlew.bat -p android :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease --console=plain
+.\tests\test-android-profile-artifacts.ps1
+.\build.ps1 -All
+```
+
+Pending physical gate: reconnect the existing moto g power (2025), unlock it,
+enable/authorize USB debugging, and retain its installed app/data. Use replacement
+installs only (one visible app; instrumentation package is test-only):
+
+```powershell
+$adb='C:\Users\Livel\AppData\Local\Android\Sdk\platform-tools\adb.exe'
+& $adb devices -l
+# Select the authorized device serial; do not uninstall or clear app data.
+& $adb -s $serial install -r android\app\build\outputs\apk\debug\app-debug.apk
+& $adb -s $serial install -r android\app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
+& $adb -s $serial shell am instrument -w -r com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+# A fresh instrumentation process must reopen the same normal native profile.
+& $adb -s $serial shell am force-stop com.peerchat.android
+& $adb -s $serial shell am instrument -w -r -e class com.peerchat.android.NativeProfileTest#existingNormalIdentityIsNotReplaced com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Run the persistence-only invocation in several fresh processes, verify the
+existing normal Peer ID, and inspect logcat for JNI/SQLite/Keystore/native faults.
+The public/signature-only native interoperability fixture must also verify with
+the unchanged Windows verifier. No raw record or private key is logged.
+Do not proceed to TLS until this physical production-path gate passes.
+
 ## Storage integration checkpoints (host validation, phone disconnected)
 
 Android compilation now includes the actual shared `storage.cpp`/`group.cpp`.
@@ -11,7 +101,7 @@ private-key fallback exists. Public key/signature representations remain CNG
 P-256/72-byte public and raw 64-byte r/s. A host build selecting portable crypto
 verified CNG signatures and the full opaque-profile persistence regression.
 ARM64 app/test APK compilation passes with the shared Storage code included.
-JNI SQLite/Keystore binding and physical execution are still pending.
+JNI SQLite/Keystore binding is described above; physical execution is pending.
 
 Step 4 (native host boundary): the explicit `StoragePlatform` constructor requires
 database, record and opaque identity providers. Profile create/reopen binds the
@@ -21,8 +111,8 @@ providers do not regenerate identity or fall back to a private blob. Default
 Windows CNG persistence remains unchanged. A host CNG signing control proves
 32 profile reopens, protected persistence, history/outbox/ACK/dedupe and absence
 of private material in the serialized opaque profile. Android binding/compilation
-of the actual Storage implementation is the remaining host-side prerequisite;
-existing foundation APK builds alone do not prove this new native path.
+now includes the actual Storage implementation; APK builds alone do not prove
+device execution of this new native path.
 
 Step 3 adds per-instance production `RecordProtector` injection. All object,
 message, history and outbox reads/writes use it; default Windows constructors
@@ -30,7 +120,7 @@ still select unchanged DPAPI. Missing/empty/oversized provider results fail
 closed with no plaintext/decode fallback. Host tests use observed DPAPI (not
 an Android Keystore simulation), covering 32 restarts, missing provider/key,
 corruption/truncation/tampering, default-provider cross-read and disk scan.
-Android PCR1 binding and device validation are still pending; these host tests
+Android PCR1 binding now exists; device validation is pending. These host tests
 do not claim to validate Android Keystore runtime behavior.
 Run `tests/test-portable-storage.ps1` for the consolidated host regression gate.
 
@@ -57,7 +147,8 @@ The complete Storage regression now passes including ciphertext rejection.
 
 The earlier execution-review blocker below is historical: the user has approved
 small independently tested production integration steps. No previously rejected
-large patch has been applied. Steps 2–4 remain pending at this checkpoint.
+large patch has been applied. Steps 1–4 have passed host checkpoints; production
+Android execution remains the final physical gate.
 
 ## Backend extraction progress — 2026-10-02 (not a completed milestone)
 
@@ -369,7 +460,8 @@ AES-GCM algorithm 1, IV length 12, tag length 16, big-endian ciphertext-plus-tag
 length), 12-byte provider-generated IV, then ciphertext plus 128-bit tag. AES-256
 GCM uses a non-exportable Keystore key with randomized encryption required.
 AAD binds the entire header, profile hash and length-prefixed record context.
-Maximum plaintext is 65,536 bytes and context 4,096 bytes. Invalid lengths/version,
+The originally validated plaintext bound was 65,536 bytes and context 4,096 bytes;
+the production integration bound is documented above. Invalid lengths/version,
 truncation, modified IV/ciphertext/tag and wrong context/profile fail closed.
 This protects records, not rollback of previously valid records; durable history,
 ACK/dedupe and database integration remain the existing shared owners' next work.
@@ -411,21 +503,22 @@ command now runs three tests; the persistence-only rerun is:
 Foundation and identity/record-provider milestones are physically green. The
 conditional continuation authorizes secure TLS/discovery/DM interoperability,
 but does not authorize exporting this Keystore identity or duplicating the engine.
-Native profile binding must first remove the raw-private-key assumption on Android:
-Profile has a CNG privateKey blob, Storage validates/imports that blob and loads
-winsqlite3.dll, and TlsCredentials imports the blob into Schannel. The portable
-target currently links none of Storage/Node/TlsSession. Adding only Java sockets
+Native profile binding has now isolated the raw-private-key assumption on Android.
+Windows still uses CNG/DPAPI/System32 SQLite; Android Profile/Storage use providers.
+TlsCredentials still imports the Windows blob into Schannel. The Android target
+links shared Storage but not Node/TlsSession. Adding only Java sockets
 would not prove existing SessionTransportManager/DeliveryManager, trust, ACK or
-dedupe behavior. Required next boundary: opaque identity signing/certificate
-provider + record provider injection + portable SQLite/profile binding, followed
-by Android TLS behind the existing byte-feed/TlsSession contract and existing
+dedupe behavior. After the production profile physical gate, the next boundary
+is Android TLS/certificate signing behind the existing byte-feed/TlsSession
+contract and existing
 reliable-session path. Do not claim login, presence or real Android/Windows DM
 interoperability until those owners actually run on Android.
 
-Remaining messaging implementations: CNG signing/hash/random/AEAD provider,
-Schannel replacement behind existing `TlsSession` contract, bundled SQLite and
-profile-bound record protection, portable filesystem paths and Node socket/wait
-separation. DeliveryManager and SessionTransportManager remain the owners; do
+Remaining messaging implementations: Schannel/certificate integration behind
+the existing `TlsSession` contract, remaining Windows CNG group-AEAD paths, and
+Node socket/wait separation. Signing/hash/random/public verification and native
+profile/SQL/protected-record providers now have Android bindings; their physical
+production-path gate is pending. DeliveryManager and SessionTransportManager remain the owners; do
 not implement substitutes in Kotlin. Discovery/outer relay can use an Android
 application adapter analogous to the existing C# services once identity is proven.
 

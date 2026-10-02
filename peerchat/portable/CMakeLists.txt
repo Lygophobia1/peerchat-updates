@@ -23,12 +23,16 @@ if(ANDROID)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
     add_subdirectory("${PEERCHAT_DEPENDENCY_ROOT}/mbedtls" mbedtls EXCLUDE_FROM_ALL)
     target_sources(peerchat_messaging PRIVATE ../storage.cpp ../group.cpp)
+    option(PEERCHAT_STORAGE_TEST_HOOKS "Debug-only test-profile Storage proof" OFF)
+    if(PEERCHAT_STORAGE_TEST_HOOKS)
+        target_compile_definitions(peerchat_messaging PRIVATE PEERCHAT_STORAGE_TEST_HOOKS)
+    endif()
     target_link_libraries(peerchat_messaging PRIVATE mbedcrypto)
     # Keep statically linked C++ runtime symbols private to this C ABI library.
     target_link_options(peerchat_messaging PRIVATE "-Wl,--exclude-libs,ALL")
 endif()
-# Explicit source list: no Node, Windows storage/TLS, audio, RTC, or ScreenMedia.
-# Missing providers are reported unavailable; no dummy crypto/storage is linked.
+# Explicit source list: shared Storage/Profile only on Android; no Node, Windows
+# platform APIs/TLS, audio, RTC, or ScreenMedia. No dummy crypto/storage is linked.
 option(PEERCHAT_PORTABLE_TESTS "Build the host ABI/format regression" ON)
 if(PEERCHAT_PORTABLE_TESTS)
     enable_testing()

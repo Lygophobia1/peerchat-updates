@@ -28,7 +28,7 @@ Blob sha256(const Blob& value){return platform::portable_crypto::sha256(value);}
 #if defined(_WIN32)
 Key importKey(const Blob& blob,bool privateKey){Algorithm algorithm;requireNt(BCryptOpenAlgorithmProvider(&algorithm.value,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));Key key;requireNt(BCryptImportKeyPair(algorithm.value,nullptr,privateKey?BCRYPT_ECCPRIVATE_BLOB:BCRYPT_ECCPUBLIC_BLOB,&key.value,const_cast<PUCHAR>(blob.data()),static_cast<ULONG>(blob.size()),0));return key;}
 #endif
-bool validName(const std::wstring& value){return !value.empty()&&value.size()<=80&&std::none_of(value.begin(),value.end(),[](wchar_t c){return c<32;});}
+bool validName(const std::wstring& value){return !value.empty()&&unicode::utf16Units(value)<=80&&std::none_of(value.begin(),value.end(),[](wchar_t c){return c<32;});}
 bool validPeer(const std::string& value){return protocol::id(value);}
 
 void writeUnsigned(protocol::Writer& writer,const GroupEvent& event){
@@ -126,7 +126,7 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
             else if(event.kind==GroupEventKind::Leave){allowed=actorMember&&actor->second.role!=GroupRole::Owner;if(allowed)next.members.erase(actor);}
             else if(event.kind==GroupEventKind::Remove){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(actor->second.role==GroupRole::Owner||(actor->second.role==GroupRole::Admin&&subject->second.role==GroupRole::Member));if(allowed)next.members.erase(subject);}
             else if(event.kind==GroupEventKind::SetRole){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&actor->second.role==GroupRole::Owner&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(event.value==L"admin"||event.value==L"member");if(allowed)subject->second.role=event.value==L"admin"?GroupRole::Admin:GroupRole::Member;}
-            else if(event.kind==GroupEventKind::Message){allowed=actorMember&&!event.message.empty()&&event.message.size()<=16384;if(allowed)next.messages.push_back(event);}
+            else if(event.kind==GroupEventKind::Message){allowed=actorMember&&!event.message.empty()&&unicode::utf16Units(event.message)<=16384;if(allowed)next.messages.push_back(event);}
         }
         if(allowed){next.maxLogicalOrder=std::max(next.maxLogicalOrder,event.logicalOrder);accepted.insert(event.eventId);}
     }

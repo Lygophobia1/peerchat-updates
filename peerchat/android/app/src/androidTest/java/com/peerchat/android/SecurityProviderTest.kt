@@ -42,7 +42,7 @@ class SecurityProviderTest {
                 assertFalse(PeerIdentityFormat.verify(public, message + byteArrayOf(1), signature))
                 assertArrayEquals(public + signature, NativeBridge.normalizeIdentity(public, signature))
             }
-            rejected { identity.sign(ByteArray(65537)) }
+            rejected { identity.sign(ByteArray(70001)) }
             rejected { PeerIdentityFormat.verify(public, message, ByteArray(63)) }
             // Copied public buffers cannot mutate provider state.
             identity.publicRepresentation().fill(0)
@@ -62,7 +62,7 @@ class SecurityProviderTest {
                 rejected { protector.unprotect(blob, "wrong context".toByteArray()) }
                 rejected { AndroidRecordProtector(context, other).unprotect(blob, binding) }
             }
-            rejected { AndroidRecordProtector(context, profile).protect(ByteArray(65537), binding) }
+            rejected { AndroidRecordProtector(context, profile).protect(ByteArray(1048537), binding) }
             rejected { AndroidRecordProtector(context, profile).unprotect(byteArrayOf(), binding) }
             for (iteration in 0 until 250) {
                 val protector = AndroidRecordProtector(context, profile)

@@ -92,7 +92,7 @@ Blob exportKey(BCRYPT_KEY_HANDLE key,LPCWSTR kind) {
 }
 #endif
 void validateProfile(const Profile& p) {
-    require(!p.name.empty()&&p.name.size()<=64&&p.listenPort!=0,"Invalid profile settings");
+    require(!p.name.empty()&&unicode::utf16Units(p.name)<=64&&p.listenPort!=0,"Invalid profile settings");
     require(p.privateKey.size()<=1024&&p.publicKey.size()<=1024,"Invalid identity size");
     if(p.identity){
         require(p.privateKey.empty()&&p.identity->publicKey()==p.publicKey&&Storage::publicKeyId(p.publicKey)==p.peerId,"Opaque profile identity mismatch");
@@ -198,7 +198,7 @@ StoredMessage decodeMessage(const Blob& plain) {
     // position; accepting the old shape keeps existing history readable.
     if(r.remaining()>=8)m.logicalOrder=r.number();
     r.end();
-    require(identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&state<=2&&!m.text.empty()&&m.text.size()<=16384,"Invalid stored message");m.delivery=static_cast<Delivery>(state);return m;
+    require(identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&state<=2&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384,"Invalid stored message");m.delivery=static_cast<Delivery>(state);return m;
 }
 void encodeMessage(Writer& w,const StoredMessage& m){w.string(m.id);w.string(m.sender);w.string(m.recipient);w.text(m.text);w.number(m.utcMilliseconds);w.number(static_cast<unsigned char>(m.delivery));w.number(m.logicalOrder);}
 }
@@ -306,9 +306,9 @@ void Storage::saveProfile(const Profile& p) {
     validateProfile(p);Writer w;w.string(p.peerId);w.text(p.name);w.number(p.listenPort);w.bytes(p.publicKey);w.bytes(p.privateKey);impl_->put("profile",w.data);
 }
 void Storage::saveContact(const Contact& c) {
-    require(identifier(c.peerId)&&(c.publicKey.empty()||publicKeyId(c.publicKey)==c.peerId)&&!c.name.empty()&&c.name.size()<=64,"Invalid contact identity");
+    require(identifier(c.peerId)&&(c.publicKey.empty()||publicKeyId(c.publicKey)==c.peerId)&&!c.name.empty()&&unicode::utf16Units(c.name)<=64,"Invalid contact identity");
     require(c.endpoints.size()<=128,"Too many endpoints for one contact");Writer w;w.string(c.peerId);w.text(c.name);w.bytes(c.publicKey);w.number(c.verified);w.number(c.endpoints.size());
-    for(const auto& e:c.endpoints){require(!e.host.empty()&&e.host.size()<=253&&e.port,"Invalid endpoint");w.text(e.host);w.number(e.port);}
+    for(const auto& e:c.endpoints){require(!e.host.empty()&&unicode::utf16Units(e.host)<=253&&e.port,"Invalid endpoint");w.text(e.host);w.number(e.port);}
     impl_->put("contact/"+c.peerId,w.data);
 }
 void Storage::removeContact(const std::string& peerId) {
@@ -328,7 +328,7 @@ std::vector<Contact> Storage::contacts() {
 }
 bool Storage::append(const std::string& conversation,const StoredMessage& m) {
     require(identifier(conversation)&&identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&
-        (conversation==m.sender||conversation==m.recipient)&&!m.text.empty()&&m.text.size()<=16384&&static_cast<unsigned char>(m.delivery)<=2,"Invalid message");
+        (conversation==m.sender||conversation==m.recipient)&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384&&static_cast<unsigned char>(m.delivery)<=2,"Invalid message");
     Transaction transaction(impl_->sql);
     Statement existing(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");existing.text(1,m.id);
     if(existing.row()) {
@@ -407,8 +407,8 @@ std::vector<GroupEvent> Storage::groupEvents(const std::string& groupId) {
 std::vector<std::string> Storage::groupIds() {
     Statement statement(impl_->sql,"SELECT DISTINCT group_id FROM group_events ORDER BY group_id");std::vector<std::string> groups;while(statement.row()){auto id=statement.text(0);require(identifier(id,32),"Invalid stored Group ID");groups.push_back(std::move(id));}return groups;
 }
-GroupAccount Storage::groupAccount(){Blob saved=impl_->get("group-account");if(saved.empty())return {};Reader reader(saved);GroupAccount account;account.accountId=reader.number();account.name=reader.text();reader.end();require(account.accountId>0&&!account.name.empty()&&account.name.size()<=64,"Invalid group account binding");return account;}
-void Storage::saveGroupAccount(const GroupAccount& account){require(account.accountId>0&&!account.name.empty()&&account.name.size()<=64,"Invalid group account binding");Writer writer;writer.number(account.accountId);writer.text(account.name);impl_->put("group-account",writer.data);}
+GroupAccount Storage::groupAccount(){Blob saved=impl_->get("group-account");if(saved.empty())return {};Reader reader(saved);GroupAccount account;account.accountId=reader.number();account.name=reader.text();reader.end();require(account.accountId>0&&!account.name.empty()&&unicode::utf16Units(account.name)<=64,"Invalid group account binding");return account;}
+void Storage::saveGroupAccount(const GroupAccount& account){require(account.accountId>0&&!account.name.empty()&&unicode::utf16Units(account.name)<=64,"Invalid group account binding");Writer writer;writer.number(account.accountId);writer.text(account.name);impl_->put("group-account",writer.data);}
 void Storage::queueGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery identity");Statement statement(impl_->sql,"INSERT OR IGNORE INTO group_outbox(event_id,peer_id) VALUES(?,?)");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
 void Storage::acknowledgeGroupDelivery(const std::string& eventId,const std::string& peerId){require(identifier(eventId)&&identifier(peerId),"Invalid group delivery acknowledgement");Statement statement(impl_->sql,"DELETE FROM group_outbox WHERE event_id=? AND peer_id=?");statement.text(1,eventId);statement.text(2,peerId);statement.row();}
 std::vector<GroupEvent> Storage::pendingGroupEvents(const std::string& peerId,int limit){require(identifier(peerId)&&limit>0&&limit<=256,"Invalid group outbox request");Statement statement(impl_->sql,"SELECT e.event_id,e.group_id,e.b FROM group_outbox o JOIN group_events e ON e.event_id=o.event_id WHERE o.peer_id=? ORDER BY e.logical_order,e.event_id LIMIT ?");statement.text(1,peerId);statement.number(2,limit);std::vector<GroupEvent> events;while(statement.row()){auto eventId=statement.text(0),groupId=statement.text(1);Secret plain{impl_->protect(statement.bytes(2),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Group outbox identity mismatch");events.push_back(std::move(event));}return events;}

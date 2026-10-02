@@ -19,6 +19,10 @@ android {
         externalNativeBuild { cmake { arguments += "-DPEERCHAT_PORTABLE_TESTS=OFF" } }
     }
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt"); version = "3.22.1" } }
+    buildTypes {
+        getByName("debug") { externalNativeBuild { cmake { arguments += "-DPEERCHAT_STORAGE_TEST_HOOKS=ON" } } }
+        getByName("release") { externalNativeBuild { cmake { arguments += "-DPEERCHAT_STORAGE_TEST_HOOKS=OFF" } } }
+    }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
