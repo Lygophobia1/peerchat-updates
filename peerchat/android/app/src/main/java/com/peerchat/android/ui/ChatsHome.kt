@@ -23,7 +23,7 @@ import androidx.compose.ui.tooling.preview.Preview
         TopAppBar(title = { Text("PeerChat") }, actions = {
             if (state.tab == Tab.Chats) {
                 ActionIcon(Icons.Default.Search, "Search conversations", { dispatch(UiAction.ToggleSearch) })
-                Box {
+                if(state.demo) Box {
                     ActionIcon(Icons.Default.MoreVert, "Preview states", { menu = true })
                     DropdownMenu(menu, { menu = false }) {
                         LoadState.entries.forEach { load -> DropdownMenuItem(text = { Text("Preview: ${load.name}") },
@@ -41,7 +41,7 @@ import androidx.compose.ui.tooling.preview.Preview
         }
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            DemoNote()
+            if(state.demo) DemoNote()
             if (state.connection != ConnectionState.Online) Text("${state.connection.name} preview · no active server",
                 Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.secondary)
             when (state.tab) {

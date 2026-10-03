@@ -14,7 +14,7 @@ enum class Tab { Chats, Calls, You }
 enum class ChatKind { Direct, Group }
 enum class LoadState { Ready, Loading, Empty, Error }
 enum class ConnectionState { Online, Offline, Reconnecting }
-enum class MessageStatus { Received, Sent, Delivered, Read, Failed, Preview }
+enum class MessageStatus { Received, Queued, Sent, Delivered, Read, Failed, Preview }
 enum class ThemeChoice { System, Dark, Light }
 data class MemberUi(val accountId: String, val name: String, val online: Boolean, val role: String = "Member")
 data class MessageUi(
@@ -35,10 +35,10 @@ data class ConversationUi(
     val hasOlder: Boolean = true, val notifications: Boolean = true,
     val memberAudio: List<MemberAudioUi> = emptyList()
 )
-data class ServerUi(val host: String = "", val port: String = "7443")
+data class ServerUi(val host: String = "", val port: String = "7443", val certificatePin: String = "")
 fun validServerDraft(server: ServerUi): Boolean = server.host.trim().let { host ->
     host.isNotEmpty() && host.length <= 253 && host.none { it.isWhitespace() || it == '/' || it == '\\' } &&
-        server.port.toIntOrNull() in 1..65535
+        server.port.toIntOrNull() in 1..65535 && (server.certificatePin.isEmpty() || server.certificatePin.matches(Regex("[0-9a-fA-F]{64}")))
 }
 data class AccountUi(val accountId: String, val username: String)
 sealed interface LoginResult {
@@ -48,6 +48,9 @@ sealed interface LoginResult {
     data class Authenticated(val account: AccountUi) : LoginResult
 }
 data class PeerChatUiState(
+    val demo: Boolean = true, val diagnostics: String = "UI demo — no live diagnostics",
+    val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,
+    val incomingRequests:List<MemberUi> = emptyList(),
     val route: Route = Route.Welcome, val tab: Tab = Tab.Chats, val kind: ChatKind = ChatKind.Direct,
     val conversations: List<ConversationUi> = emptyList(), val selectedId: String? = null,
     val query: String = "", val searching: Boolean = false,
@@ -79,6 +82,9 @@ class UnconnectedAccountAccess : AccountAccess {
 
 sealed interface UiAction {
     data object Explore : UiAction
+    data object SignOut : UiAction
+    data class RequestFriend(val username:String):UiAction
+    data class RespondFriend(val accountId:Long,val accept:Boolean):UiAction
     data class Navigate(val route: Route) : UiAction
     data object Back : UiAction
     data class Select(val id: String) : UiAction
@@ -113,6 +119,8 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         state.conversations.map { if (it.id == state.selectedId) transform(it) else it })
     return when (action) {
         UiAction.Explore -> state.copy(route = Route.Home, notice = null)
+        UiAction.SignOut -> state.copy(account=null,route=Route.Welcome)
+        is UiAction.RequestFriend,is UiAction.RespondFriend -> state.copy(notice="Friend management is not connected in demo mode.")
         is UiAction.Navigate -> state.copy(route = action.route, notice = null, loginError = null,
             serverReturn = if (action.route == Route.Server) state.route else state.serverReturn,
             diagnosticsReturn = if (action.route == Route.Diagnostics) state.route else state.diagnosticsReturn)

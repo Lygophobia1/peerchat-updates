@@ -9,7 +9,9 @@ data class ConnectionSnapshot(val ready: Boolean=false,val pending: Boolean=fals
 data class ConversationSnapshot(val friend: FriendIdentity,val connection: ConnectionSnapshot,
     val messages: List<MessageSnapshot>)
 data class MessagingSnapshot(val accountId: Long=0,val username: String="",val localPeerId: String="",
-    val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList())
+    val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList(),
+    val incomingRequests:List<AccountRequestSnapshot> = emptyList())
+data class AccountRequestSnapshot(val accountId:Long,val username:String)
 
 internal fun connectionSnapshot(bytes: ByteArray): ConnectionSnapshot {
     val record=NativeRecord(bytes,4)

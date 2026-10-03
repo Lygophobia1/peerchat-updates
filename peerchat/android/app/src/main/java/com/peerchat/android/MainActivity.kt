@@ -6,14 +6,19 @@ import androidx.activity.compose.setContent
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.peerchat.android.ui.PeerChatApp
 import com.peerchat.android.ui.PeerChatUiModel
+import com.peerchat.android.ui.NativePresenter
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // UI-only shell: never initializes native handles, Keystore or account services.
-            val model: PeerChatUiModel = viewModel()
-            PeerChatApp(model)
+            if(BuildConfig.DEBUG && intent.getBooleanExtra("peerchat_ui_demo",false)) {
+                val model: PeerChatUiModel = viewModel()
+                PeerChatApp(model)
+            } else {
+                val model: NativePresenter = viewModel()
+                PeerChatApp(model)
+            }
         }
     }
 }

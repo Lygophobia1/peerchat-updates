@@ -58,8 +58,8 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             Route.Details -> state.selected?.let { DetailsScreen(it, state, dispatch) }
             Route.Diagnostics -> Scaffold(topBar = { PageBar("Diagnostics", dispatch) }) { padding ->
                 Column(Modifier.padding(padding).padding(24.dp)) {
-                    Text("UI demo — no live diagnostics", style = MaterialTheme.typography.titleLarge)
-                    Text("The future diagnostics adapter will project native/application snapshots here. No transport, keys or messages are inspected by this preview.", Modifier.padding(top = 16.dp))
+                    Text(if(state.demo) "UI demo — no live diagnostics" else "Native connection diagnostics", style = MaterialTheme.typography.titleLarge)
+                    Text(if(state.demo) "Explicit demo mode: no live transport or identity." else state.diagnostics, Modifier.padding(top = 16.dp))
                 }
             }
         }
@@ -92,12 +92,12 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
         Text("Private conversations, made simple.", Modifier.padding(top = 24.dp))
         Button({ dispatch(UiAction.Navigate(Route.Login)) }, Modifier.fillMaxWidth().padding(top = 32.dp)) { Text("Sign in") }
         OutlinedButton({ dispatch(UiAction.Notice("Account creation will be available when the secure account backend is connected.")) }, Modifier.fillMaxWidth()) { Text("Create account") }
-        TextButton({ dispatch(UiAction.Explore) }, Modifier.testTag("explore")) { Text("Explore UI demo") }
+        if(state.demo) TextButton({ dispatch(UiAction.Explore) }, Modifier.testTag("explore")) { Text("Explore UI demo") }
         TextButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Advanced / server settings") }
-        Text("Sign-in and account creation are not connected in this UI-only build.", style = MaterialTheme.typography.bodySmall,
+        Text(if(state.demo) "Sign-in and account creation are not connected in this UI-only build." else "Sign in to an existing account. Account creation UI is not available yet.", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         state.notice?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.primary) }
-        Text("No credentials or messages leave this preview.", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.bodySmall)
+        if(state.demo) Text("No credentials or messages leave this preview.", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -124,9 +124,9 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
                 if (state.loginBusy) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
                 Text(if (state.loginBusy) "Checking configuration…" else "Sign in")
             }
-            Text("UI preview: secure sign-in is not connected. This action never authenticates an account.", style = MaterialTheme.typography.bodySmall)
+            Text(if(state.demo) "UI preview: secure sign-in is not connected. This action never authenticates an account." else "Server TLS is verified; peer messages use authenticated end-to-end TLS.", style = MaterialTheme.typography.bodySmall)
             TextButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Server settings") }
-            Box {
+            if(state.demo) Box {
                 TextButton({ previewMenu = true }) { Text("Preview sign-in errors") }
                 DropdownMenu(previewMenu, { previewMenu = false }) {
                     listOf("Authentication failed" to LoginResult.Rejected,
@@ -144,22 +144,25 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 @Composable private fun ServerSettings(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var host by rememberSaveable { mutableStateOf(state.server.host) }
     var port by rememberSaveable { mutableStateOf(state.server.port) }
+    var pin by rememberSaveable { mutableStateOf(state.server.certificatePin) }
     var error by remember { mutableStateOf<String?>(null) }
     Scaffold(topBar = { PageBar("Server & trust", dispatch) }) { padding ->
         Column(Modifier.padding(padding).imePadding().padding(24.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Advanced connection", style = MaterialTheme.typography.titleLarge)
-            Text("These are local UI draft values, not an active connection.")
+            Text("Changes apply to the next sign-in. Certificate verification cannot be disabled.")
             OutlinedTextField(host, { host = it.take(253) }, label = { Text("Discovery host") }, placeholder = { Text("Enter your server hostname") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(port, { port = it.take(5) }, label = { Text("Port") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-            Text("Server certificate: Not connected\nTrust/pin: Not established", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedTextField(pin,{pin=it.take(64)},label={Text("Explicit server certificate SHA-256 pin (optional)")},modifier=Modifier.fillMaxWidth())
+            if(state.demo) Text("Server certificate: Not connected\nTrust/pin: Not established",color=MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Leave blank for system certificate/hostname validation. Obtain development pins through a trusted independent channel.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("The secure backend will verify the server identity. Certificate verification cannot be disabled here.", style = MaterialTheme.typography.bodySmall)
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button({
-                if (!validServerDraft(ServerUi(host, port))) error = "Enter a hostname (not a URL) and a port from 1 to 65535."
-                else { dispatch(UiAction.SaveServer(ServerUi(host.trim(), port))); error = null; dispatch(UiAction.Notice("Connection draft saved for this preview session only.")) }
+                if (!validServerDraft(ServerUi(host, port,pin))) error = "Enter a valid hostname, port and optional 64-character hexadecimal certificate pin."
+                else { dispatch(UiAction.SaveServer(ServerUi(host.trim(), port,pin))); error = null; dispatch(UiAction.Notice("Server configuration saved for this session.")) }
             }, Modifier.fillMaxWidth()) { Text("Save draft") }
             TextButton({ host = ""; port = "7443"; error = null }) { Text("Restore defaults") }
             state.notice?.let { Text(it) }

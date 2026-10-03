@@ -37,7 +37,13 @@ import kotlinx.coroutines.delay
         }
     }
     LaunchedEffect(sending) {
-        if (sending) { delay(150); dispatch(UiAction.PreviewMessage(draft)); draft = ""; sending = false }
+        if (sending) {
+            if(state.demo){delay(150);dispatch(UiAction.PreviewMessage(draft));draft="";sending=false}
+            else dispatch(UiAction.PreviewMessage(draft))
+        }
+    }
+    LaunchedEffect(state.sendCompletion) {
+        if(!state.demo&&sending){if(state.sendAccepted)draft="";sending=false}
     }
     Scaffold(topBar = {
         TopAppBar(title = {
@@ -70,13 +76,13 @@ import kotlinx.coroutines.delay
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
                 IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && state.connection == ConnectionState.Online) {
                     if (sending) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.AutoMirrored.Filled.Send, "Send local preview", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    else Icon(Icons.AutoMirrored.Filled.Send, if(state.demo) "Send local preview" else "Send message", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            DemoNote()
+            if(state.demo) DemoNote()
             if (state.connection != ConnectionState.Online) Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(if (state.connection == ConnectionState.Offline) "Offline preview · sending disabled" else "Reconnecting preview · sending disabled",
                     Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodySmall)
@@ -94,7 +100,7 @@ import kotlinx.coroutines.delay
             LazyColumn(Modifier.fillMaxSize().testTag("messages"), state = list, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 item(key = "older") { if (c.hasOlder) TextButton({ dispatch(UiAction.BeginOlder) }, enabled = !state.olderLoading, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (state.olderLoading) "Loading older preview…" else "Load older preview messages")
+                    Text(if(state.demo) {if (state.olderLoading) "Loading older preview…" else "Load older preview messages"} else if (state.olderLoading) "Loading older messages…" else "Load older messages")
                 } }
                 c.messages.forEachIndexed { index, message ->
                     if (index == 0 || c.messages[index - 1].date != message.date) item(key = "date-${message.id}") {
@@ -132,6 +138,7 @@ import kotlinx.coroutines.delay
                 SelectionContainer { Text(linkedText(m.text)) }
                 Text("${m.time}" + if (m.outgoing) " · ${when (m.status) {
                     MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
+                    MessageStatus.Queued -> "Queued";
                     MessageStatus.Preview -> "Local preview · not sent"; else -> "Sent"
                 }}" else "", style = MaterialTheme.typography.labelSmall,
                     color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

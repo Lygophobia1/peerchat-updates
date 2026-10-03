@@ -16,12 +16,12 @@ import kotlinx.coroutines.withContext
 /** Application coordinator/platform execution only. Native owns profile,
  * messages/outbox/order/ACK/dedupe, trust and session/retry state. Immutable UI
  * snapshots are read from those owners, not a Kotlin messaging engine. */
-class MessagingBackend(context: Context,private val profileName: String="default") : AutoCloseable {
+class MessagingBackend(context: Context,private val profileName: String="default") : MessagingApplication {
     private val context=context.applicationContext
     private val gate=Any()
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val mutable=MutableStateFlow(MessagingSnapshot())
-    val state: StateFlow<MessagingSnapshot> = mutable.asStateFlow()
+    override val state: StateFlow<MessagingSnapshot> = mutable.asStateFlow()
     private var profile: NativeProfile?=null
     private var accounts: ServerAccounts?=null
     private var index: FriendIdentityIndex?=null
@@ -36,14 +36,14 @@ class MessagingBackend(context: Context,private val profileName: String="default
             if(!stopped)try {synchronized(gate){tick()}}catch(failure: Exception){
                 if(failure is ServerRejected&&failure.code in listOf("session_invalid","event_session_superseded"))synchronized(gate){
                     generation++;clearAuthorization();accounts=null;index=null;friends=emptyList()
-                    mutable.value=mutable.value.copy(authenticated=false,conversations=emptyList(),status="Session expired; sign in again")
+                    mutable.value=mutable.value.copy(authenticated=false,conversations=emptyList(),incomingRequests=emptyList(),status="Session expired; sign in again")
                     return@scheduleWithFixedDelay
                 }
                 mutable.value=mutable.value.copy(status="Connection refresh failed; native delivery state retained")
             }
         },125,125,TimeUnit.MILLISECONDS)
     }
-    suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = withContext(Dispatchers.IO) {
+    override suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&accounts==null)
             val native=profile ?: NativeProfile(context,profileName).also {profile=it}
@@ -66,7 +66,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }
     }
-    suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
+    override suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&accounts?.session!=null&&friends.any {it.peerId==peerId})
             val result=checkNotNull(ReliableBridge.send(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),text.toByteArray(Charsets.UTF_8)))
@@ -74,28 +74,48 @@ class MessagingBackend(context: Context,private val profileName: String="default
             publish();id
         }
     }
-    suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
+    override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&friends.any {it.knownPeerIds.contains(peerId)})
             messageSnapshots(checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),before)))
         }
     }
+    override suspend fun requestFriend(username:String) = withContext(Dispatchers.IO) {synchronized(gate){
+        require(username.isNotBlank()&&username.length<=64)
+        val owner=checkNotNull(accounts)
+        val found=owner.request("search",org.json.JSONObject().put("username",username))
+        val account=found.getLong("accountId");require(account>0&&account!=owner.session?.accountId)
+        owner.request("friend_request",org.json.JSONObject().put("accountId",account.toString()))
+        refresh();publish()
+    }}
+    override suspend fun respondFriend(accountId:Long,accept:Boolean) = withContext(Dispatchers.IO) {synchronized(gate){
+        require(accountId>0&&mutable.value.incomingRequests.any {it.accountId==accountId})
+        checkNotNull(accounts).request("friend_respond",org.json.JSONObject().put("accountId",accountId.toString()).put("action",if(accept)"accept" else "reject"))
+        refresh();publish()
+    }}
     private fun clearAuthorization() {
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
     }
-    suspend fun signOut() = withContext(Dispatchers.IO) {
+    override suspend fun signOut():Unit = withContext(Dispatchers.IO) {
         synchronized(gate) {
             generation++;clearAuthorization()
             val old=accounts;accounts=null;friends=emptyList();index=null
             try {old?.logout()}finally {mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
+            Unit
         }
     }
     private fun refresh() {
         val accounts=checkNotNull(accounts);val active=checkNotNull(accounts.session)
         accounts.presence()
-        val list=accounts.friends().getJSONArray("friends");require(list.length()<=128)
+        val state=accounts.friends()
+        val pending=state.getJSONArray("incoming");require(pending.length()<=128)
+        val requests=List(pending.length()){i->val item=pending.getJSONObject(i)
+            val id=item.getLong("accountId");val name=item.getString("username");require(id>0&&name.length<=64)
+            AccountRequestSnapshot(id,name)
+        }
+        val list=state.getJSONArray("friends");require(list.length()<=128)
         val projected=List(list.length()) {i->val item=list.getJSONObject(i)
             FriendIdentity(item.getLong("accountId"),item.getString("username"),item.getString("publicIdentity"),item.getBoolean("online"))
         };require(projected.none {it.accountId==active.accountId})
@@ -105,6 +125,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         generation++;val native=checkNotNull(profile).handle
         check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
         friends=authoritative
+        mutable.value=mutable.value.copy(incomingRequests=requests.toList())
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
     }
     private fun tick() {
