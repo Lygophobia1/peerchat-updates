@@ -1,4 +1,4 @@
-param([switch]$BaselineOnly)
+param([switch]$BaselineOnly,[switch]$IncludeReconnect,[switch]$ReconnectOnly)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $cache=if($env:PEERCHAT_NATIVE_DEPENDENCY_ROOT){$env:PEERCHAT_NATIVE_DEPENDENCY_ROOT}else{'C:\Peerchatdep\native\mingw-x64-libdatachannel-c6696d1-opus-ddbe483-mbedtls-068ff08'}
@@ -17,7 +17,7 @@ try {
         'screen_media_topology.cpp','group_screen_share_bridge.cpp','audio.cpp')
     $link=@('-ldatachannel','-lopus','-lsrtp2','-ljuice','-lusrsctp','-lmbedtls','-lmbedx509','-lmbedcrypto','-leverest','-lp256m',
         '-lssp','-lwinmm','-lws2_32','-lsecur32','-lcrypt32','-lbcrypt','-lncrypt','-liphlpapi')
-    $variants=if($BaselineOnly){@('baseline')}else{@('baseline','current')}
+    $variants=if($ReconnectOnly){@()}elseif($BaselineOnly){@('baseline')}else{@('baseline','current')}
     foreach($variant in $variants){
         $source=if($variant -eq 'baseline'){Join-Path $out 'peerchat\node.cpp'}else{'node.cpp'}
         $exe=Join-Path $out ($variant+'-node.exe')
@@ -26,5 +26,13 @@ try {
         & $exe
         if($LASTEXITCODE -ne 0){throw "$variant Node characterization failed"}
         Write-Host "PASS: $variant actual Node/Schannel lifecycle, initial/stale/account/fingerprint trust, text/ACK/history/reconnect characterization"
+    }
+    if($IncludeReconnect -or $ReconnectOnly){
+        $reconnectSources=@($sources|Where-Object{$_ -ne 'tests/node_test.cpp'})
+        $exe=Join-Path $out 'reconnect.exe'
+        & 'C:\TDM-GCC-64\bin\g++.exe' -DPEERCHAT_TEST_MEDIA_DIRECT -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I. ("-I"+(Join-Path $cache 'include')) tests/reconnect_test.cpp $reconnectSources node.cpp ("-L"+(Join-Path $cache 'lib')) $link -o $exe
+        if($LASTEXITCODE -ne 0){throw 'Reconnect characterization build failed'}
+        & $exe
+        if($LASTEXITCODE -ne 0){throw 'Reconnect characterization failed'}
     }
 }finally{Pop-Location}
