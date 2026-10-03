@@ -209,3 +209,18 @@ Host BCJSSE warns that two Java-22 legacy SHA1 constraint-list clauses are not
 understood; no TLS settings were relaxed, and exact certificate pins/TLS versions
 remain enforced. This is host network proof, **not** real Android/Windows device
 interoperability or a physical Keystore/runtime result.
+
+### UI integration branch (no phone)
+
+The approved isolated `codex/android-messaging-integration` branch applies UI
+commits `7f4fc70`/`1d7f3dc` without altering either source branch. Normal
+`MainActivity` uses `NativePresenter` and the narrow `MessagingApplication`
+snapshot/command seam backed by `MessagingBackend`; DEBUG intent
+`peerchat_ui_demo=true` alone selects sample UI. Native owners still decide
+identity/trust, sessions, ordering, outbox, ACK and dedupe. Older pages are
+read-only native Storage projections. Accepted server friendship snapshots,
+not search results, authorize relay attempts. No second Kotlin messaging engine
+or protocol/delivery owner is introduced.
+
+See `ANDROID_MESSAGING_VALIDATION.md`. The integrated app needs actual phone
+validation; host evidence is never counted as Android Keystore/UI execution.

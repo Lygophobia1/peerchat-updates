@@ -1,5 +1,22 @@
 # Android messaging portability foundation
 
+## Current integration status — 2026-10-03 (no phone)
+
+See [ANDROID_MESSAGING_VALIDATION.md](ANDROID_MESSAGING_VALIDATION.md) for the
+current native-backed normal app, tests and replacement-install procedure.
+This isolated integration branch imports UI checkpoints onto backend `55188a6`;
+the source backend/UI branches and authoritative Windows worktree are untouched.
+Normal UI uses real login, native session/delivery/history snapshots and commands,
+with accepted server friend request/response controls. Demo is explicit DEBUG
+intent only. Earlier sections below are historical milestone records, not a claim
+that the current app is still foundation-only.
+
+Latest integration validation: **38 host Android tests, zero failures**; debug,
+instrumentation and release APKs plus lint pass; ARM64/JNI/release/TLS dependency
+audits pass; full clean-worktree Windows build/package audit passes at
+`4.0.1-dev.1` in the **integration worktree** (not another worktree's build).
+No phone command or physical message test was performed in this pass.
+
 ## Current peer-TLS provider checkpoint — 2026-10-02
 
 The user approved host-only TLS preparation without waiting for the phone.
