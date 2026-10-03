@@ -605,11 +605,21 @@ contract and existing
 reliable-session path. Do not claim login, presence or real Android/Windows DM
 interoperability until those owners actually run on Android.
 
-Remaining messaging implementations: physical validation of the Android peer-TLS
-provider, server CA/hostname TLS/discovery adapters, remaining Windows CNG group-AEAD paths, and
-Node socket/wait separation. Signing/hash/random/public verification and native
-profile/SQL/protected-record providers now have Android bindings; their physical
-production-path gate is pending. DeliveryManager and SessionTransportManager remain the owners; do
+Physical peer-TLS/profile/record gates are complete. The bounded discovery adapter
+now physically passes actual server registration/login/logout, rejected passwords,
+relay-only presence, five event reconnects and wrong-pin/untrusted-cert rejection.
+It uses pinned BC TLS with instance-local providers, not global registration.
+Reproduce using `tests/test-android-discovery-device.ps1 -ServerDirectory
+build\development\4.0.1-dev.13\Server`. The server is an isolated current build;
+ADB reverse exposes its test endpoint without changing production server config.
+No account credentials are hard-coded into the application. This is not yet a
+functional account UI, persistent session, or real DM interoperability result.
+
+Remaining messaging implementations: native Node reliable-runtime/socket/wait
+separation and application integration; Windows CNG group-AEAD is later group work.
+Signing/hash/random/public verification and native profile/SQL/protected-record
+providers now have physically validated Android bindings. DeliveryManager and
+SessionTransportManager remain the owners; do
 not implement substitutes in Kotlin. Discovery/outer relay can use an Android
 application adapter analogous to the existing C# services once identity is proven.
 

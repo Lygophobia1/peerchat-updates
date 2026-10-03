@@ -2,13 +2,17 @@
 
 Scope: TLS provider only. No discovery, login, socket owner, relay adapter or
 messaging engine is introduced. Windows keeps `tls.cpp` / Schannel unchanged.
-Phone validation remains pending until explicitly run.
+Physical peer-TLS validation passed; evidence appears below.
 
 ## Pinned dependency
 
 Low-level Bouncy Castle Java TLS, not a registered JSSE/JCA replacement provider:
 `org.bouncycastle:bctls-jdk18on:1.86.1`; supporting `bcprov`, `bcutil`, `bcpkix`
 `jdk18on:1.86`. Official distribution: https://www.bouncycastle.org/download/bouncy-castle-java/.
+The discovery adapter also uses this pinned library's JSSE facade through an
+instance-local BCJSSE/BC provider. It does not register either provider globally
+or replace Android's Keystore provider. Outer server TLS has no device client
+certificate; the existing opaque signer remains exclusively on inner peer TLS.
 Sources and artifacts are published under `https://repo.maven.apache.org/maven2/org/bouncycastle/`.
 No floating versions. Strict Gradle checksum verification covers every BC artifact.
 Existing Android build-tool BC 1.77 artifacts are separately pinned tooling-only;
@@ -122,3 +126,23 @@ do not characterize the complete OS log as warning-free. No secret logging obser
 Android debug/test/release, host TLS/Schannel interoperability, JNI lifecycle,
 Windows identity/DPAPI/profile/history/outbox/ACK/dedupe and ARM64 audits passed.
 Full isolated Windows build/package audit passed at `4.0.1-dev.12`.
+
+## Physical discovery/server adapter (2026-10-02)
+
+`ServerChannel` implements bounded length-prefixed transport with pinned BC TLS.
+Explicit developer certificate SHA-256 pins require an exact match and certificate
+validity; an absent pin requires platform CA validation and HTTPS hostname checks.
+No TOFU or replacement acceptance. Password/token data is not logged, and account
+session diagnostic strings exclude the token. Active account sessions cannot be
+silently overwritten by another login. Startup reads are bounded; established
+event sockets can be closed to interrupt reads. This is an application/platform
+adapter analogous to Windows DiscoveryClient, not a reliable-session owner.
+
+`tests/test-android-discovery-device.ps1` passed on the same phone against the
+current isolated Windows server over ADB reverse. Actual register/login/logout,
+wrong-password rejection, session/device checks, relay-only presence and five
+event reconnects passed. Wrong pin and untrusted certificate failed closed with
+certificate rejection in the exception chain. This does not prove sustained lease
+heartbeats or Android-to-Windows DM. The fixture owns only its isolated server DB.
+Android variants/ARM64 audit and Windows discovery/auth/lease regression passed;
+full Windows product build/package audit passed at isolated `4.0.1-dev.13`.

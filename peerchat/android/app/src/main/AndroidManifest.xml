@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- No networking, microphone, media, or storage permissions in this proof. -->
+    <!-- Messaging only: no microphone/media or external storage access. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application android:allowBackup="false" android:label="PeerChat Android" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
