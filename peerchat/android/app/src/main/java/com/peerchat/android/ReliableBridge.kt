@@ -7,7 +7,9 @@ package com.peerchat.android
 object ReliableBridge {
     init { System.loadLibrary("peerchat_messaging") }
     external fun friends(profile: Long, account: Long, generation: Long, snapshot: ByteArray): Int
-    external fun open(profile: Long, incoming: Boolean, expectedPeer: ByteArray): Long
+    external fun presence(profile: Long, expectedPeer: ByteArray, online: Boolean, generation: Long, network: Long): Int
+    external fun requests(profile: Long): ByteArray?
+    external fun open(profile: Long, attempt: Long, incoming: Boolean, expectedPeer: ByteArray): Long
     external fun exchange(profile: Long, peer: Long, operation: Int, input: ByteArray): ByteArray?
     external fun close(profile: Long, peer: Long, recoverable: Boolean): Int
     external fun send(profile: Long, expectedPeer: ByteArray, utf8: ByteArray): ByteArray?

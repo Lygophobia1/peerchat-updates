@@ -9,8 +9,8 @@ import java.util.concurrent.Future;
 public final class ProfileBridge {
     static { System.loadLibrary("peerchat_messaging"); System.loadLibrary("peerchat_jni"); }
     private static final NativeBridge foundation=new NativeBridge();
-    static native int bind(long handle, Object platform);
-    static native byte[] publicKey(long handle);
+    public static native int bind(long handle, Object platform);
+    public static native byte[] publicKey(long handle);
     static native byte[] sign(long handle, byte[] input);
     public static final class UnavailableDatabase {
         static final AtomicInteger closes=new AtomicInteger();

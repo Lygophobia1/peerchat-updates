@@ -110,3 +110,32 @@ must be connected before requesting another phone test. The former unused
 is not part of this checkpoint. No Android messaging success is claimed from
 host tests or earlier foundation physical tests. No ADB/device operations are
 required for the current host work.
+
+### Manager-owned relay execution requests (host green)
+
+`portable/relay_requests.hpp` retains only pending execution records. It consumes
+`SessionTransportManager::takeDueRelayAttempts` and delegates all retry delays to
+that same owner. Authenticated current friendship generation, expected device,
+network revision, monotonic attempt ID, single attachment and the existing
+20-second peer-authentication timeout are checked before opening the TLS path.
+Identical presence updates do not reset backoff. Logout/revocation closes the
+applicable paths; stale attempts and old-network attachment fail closed.
+
+JNI `presence`, `requests` and attempt-bound `open` expose these native decisions.
+The Android platform must execute the returned request, not schedule its own
+peer retries. The one instance mutex serializes these operations with profile,
+TLS, trust and delivery state. No protocol format or Windows Schannel change.
+
+`tests/test-relay-requests.ps1` passes 1,000 deterministic lifecycle/retry/stale/
+logout cycles. `tests/test-reliable-profile-jni.ps1` is a **positive** production
+JNI/Profile test using test-only host identity/Windows SQLite/DPAPI primitives
+and the production pinned Java TLS provider: eight reopen/Hello/trust/text/ACK
+cycles, including discard-ACK/profile-destroy/reopen/same-ID retry and one durable
+recipient history record. This does not claim Android Keystore execution, cold
+OS process persistence, live server relay, or physical Android messaging.
+
+All Android variants/lint and ARM64/release dependency audits pass. Windows
+identity/DPAPI/storage/history/outbox/ACK/dedupe and pinned TLS/Schannel regressions
+pass. Full Windows build/package audit: `4.0.1-dev.19`. The previously noted
+load-sensitive reconnect wall-clock assertion was rerun unchanged and passed
+after simultaneous compiler jobs ended; it has not been weakened.

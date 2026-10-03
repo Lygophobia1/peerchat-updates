@@ -1,8 +1,8 @@
 package com.peerchat.android;
 // Host-JVM bridge check only. This is not the Android application or engine.
 public final class NativeBridge {
-    native long create();
-    native int destroy(long handle);
+    public native long create();
+    public native int destroy(long handle);
     native int[] info(long handle);
     private native byte[] exchange(long handle,byte[] input);
     public static void main(String[] args) {

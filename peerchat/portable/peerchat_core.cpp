@@ -4,6 +4,7 @@
 #include "../delivery_manager.hpp"
 #include "../protocol.hpp"
 #include "reliable_endpoint.hpp"
+#include "relay_requests.hpp"
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -30,6 +31,7 @@ struct Instance {
     uint64_t nextTls=1;
     std::map<uint64_t,std::unique_ptr<peerchat::TlsSession>> tls;
     peerchat::reliable::AuthenticatedFriendSnapshot friends;
+    std::unique_ptr<peerchat::portable::RelayRequests> relayRequests;
     // Concrete platform executions only; the one existing sessions/deliveries
     // above remain route/winner/ACK/retry/history authorities.
     std::map<uint64_t,std::unique_ptr<peerchat::portable::ReliableEndpoint>> peers;
@@ -84,6 +86,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
         if(!snapshot||account<0||generation<=0||env->GetArrayLength(snapshot)>262144)return PC_CORE_INVALID_ARGUMENT;
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return PC_CORE_INVALID_ARGUMENT;
+        if(static_cast<std::uint64_t>(generation)<instance->friends.generation())return PC_CORE_INVALID_ARGUMENT;
         auto bytes=peerchat::platform::android::Context::output(env,snapshot);peerchat::protocol::Reader reader(bytes);
         peerchat::protocol::check(reader.type()==peerchat::protocol::Hello);auto count=reader.number();peerchat::protocol::check(count<=1024);
         std::vector<peerchat::reliable::FriendIdentity> values;
@@ -96,27 +99,64 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
         }
         reader.end();peerchat::protocol::check(account||values.empty());
         instance->friends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
+        instance->relayRequests->revoke();
         for(auto& peer:instance->peers)if(!instance->friends.contains(peer.second->expected())){
             peer.second->close(false);instance->sessions.removePeer(peer.second->expected());
         }
         return PC_CORE_OK;
     });
 }
-extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open(JNIEnv* env,jobject,jlong handle,jboolean incoming,jbyteArray pin){
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_presence(JNIEnv* env,jobject,jlong handle,jbyteArray pin,jboolean online,jlong generation,jlong network){
+    return guarded([&]()->pc_core_status{
+        if(generation<=0||network<=0)return PC_CORE_INVALID_ARGUMENT;
+        auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(!instance->relayRequests)return PC_CORE_INVALID_ARGUMENT;
+        return instance->relayRequests->presence(expected,online==JNI_TRUE,generation,network,runtimeNow())?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
+    });
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_requests(JNIEnv* env,jobject,jlong handle){
+    try{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->relayRequests)return nullptr;
+        // Poll execution commands, not a Kotlin retry/session policy.
+        auto now=runtimeNow();
+        for(auto& peer:instance->peers){
+            if(peer.second->closed()||!instance->sessions.attachablePeer({1},{peer.first})||
+               (!peer.second->ready()&&peer.second->authenticationExpired(now))){
+                peer.second->close(true);
+                if(instance->friends.contains(peer.second->expected())&&!instance->sessions.hasActiveWinner(peer.second->expected()))
+                    instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
+            }
+        }
+        for(auto it=instance->peers.begin();it!=instance->peers.end();){
+            if(it->second->closed())it=instance->peers.erase(it);else ++it;
+        }
+        auto used=instance->peers.size()+instance->tls.size();
+        auto requests=instance->relayRequests->take(now,static_cast<std::uint32_t>(now),used<32?32-used:0);
+        peerchat::protocol::Writer value(peerchat::protocol::Hello);value.number(requests.size());
+        for(const auto& request:requests){value.number(request.id.value);value.string(request.peer);value.number(request.route.networkRevision);}
+        return peerchat::platform::android::Context::input(env,value.data);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open(JNIEnv* env,jobject,jlong handle,jlong attempt,jboolean incoming,jbyteArray pin){
     try{
         auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
         std::lock_guard<std::mutex> lock(instance->gate);
-        if(!instance->storage||!instance->friends.contains(expected)||instance->tls.size()+instance->peers.size()>=32||instance->nextTls==std::numeric_limits<uint64_t>::max())return 0;
-        auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);if(!identity)return 0;
+        if(!instance->storage||!instance->friends.contains(expected)||instance->tls.size()+instance->peers.size()>=32||attempt<=0)return 0;
+        auto request=instance->relayRequests->attach({static_cast<std::uint64_t>(attempt)},expected);if(!request)return 0;
+        auto id=request->id.value;
+        try{
+        auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);
+        peerchat::protocol::check(identity!=nullptr);
         auto factory=std::make_shared<peerchat::platform::android::TlsFactory>(identity->context);
         peerchat::TlsCredentials credentials(instance->profile,std::move(factory));
         auto tls=std::make_unique<peerchat::TlsSession>(credentials,incoming==JNI_TRUE,expected);
-        auto id=instance->nextTls++;
-        peerchat::session::RouteObservation route{{id},"relay:"+expected,"authenticated server","opaque relay",incoming==JNI_TRUE,1,
-            peerchat::session::TransportKind::Relay,peerchat::session::RouteClass::ServerRelay};
+        auto route=request->route;route.incoming=incoming==JNI_TRUE;
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,
             instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow());
         instance->peers.emplace(id,std::move(endpoint));return static_cast<jlong>(id);
+        }catch(...){instance->relayRequests->failed(*request,runtimeNow(),static_cast<std::uint32_t>(runtimeNow()),true);throw;}
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 0;}
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_exchange(JNIEnv* env,jobject,jlong handle,jlong token,jint operation,jbyteArray input){
@@ -148,8 +188,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_close(JNIEnv*,jobject,jlong handle,jlong token,jboolean recoverable){
     return guarded([&]()->pc_core_status{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
-        std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return PC_CORE_INVALID_HANDLE;
-        found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);return PC_CORE_OK;
+        std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));
+        auto now=runtimeNow();
+        if(found==instance->peers.end())return instance->relayRequests&&instance->relayRequests->close({static_cast<std::uint64_t>(token)},now,static_cast<std::uint32_t>(now),recoverable==JNI_TRUE)?PC_CORE_OK:PC_CORE_INVALID_HANDLE;
+        auto expected=found->second->expected();found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);
+        if(recoverable==JNI_TRUE&&instance->friends.contains(expected)&&!instance->sessions.hasActiveWinner(expected))
+            instance->sessions.scheduleRelayRetry(expected,now,static_cast<std::uint32_t>(now));
+        return PC_CORE_OK;
     });
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_send(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jbyteArray text){
@@ -232,6 +277,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_bind(J
         // Rebind the existing session owner; no second session/retry owner.
         instance->sessions=peerchat::session::SessionTransportManager(profile.peerId,profile.peerId,{1});
         instance->profile=std::move(profile);instance->storage=std::move(store);instance->deliveries=std::move(delivery);
+        instance->relayRequests=std::make_unique<peerchat::portable::RelayRequests>(instance->sessions,instance->friends,peerchat::session::SessionEpoch{1},instance->nextTls);
         return PC_CORE_OK;
     });
 }

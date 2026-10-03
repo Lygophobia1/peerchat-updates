@@ -46,6 +46,7 @@ private:
         sessions_.observeTransport(observation_.observedSend(bytes.size()),now_);collect();
     }
     std::uint64_t now_=0;
+    std::uint64_t began_=0;
     void activate(){
         if(!runtime_.approved||!runtime_.remoteApproved||sessions_.active(id_))return;
         auto result=sessions_.arbitrateWinner(epoch_,id_,now_);
@@ -99,7 +100,7 @@ public:
             session::SessionEpoch epoch,session::TransportInstanceId id,std::unique_ptr<TlsSession> tls,
             const std::string& expected,session::RouteObservation route,std::uint64_t now)
         :local_(local),store_(store),sessions_(sessions),deliveries_(deliveries),friends_(friends),
-         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),now_(now){
+         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),now_(now),began_(now){
         protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&friends.contains(expected)&&
             route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
         runtime_.expected=expected;
@@ -108,9 +109,10 @@ public:
     ~ReliableEndpoint(){close(false);}
     bool ready()const{return !closed_&&sessions_.active(id_);}
     bool closed()const noexcept{return closed_;}
+    bool authenticationExpired(std::uint64_t now)const noexcept{return now>=began_&&now-began_>=20000;}
     const std::string& expected()const noexcept{return runtime_.expected;}
     void receive(const Blob& bytes,std::uint64_t now){
-        protocol::check(!closed_&&friends_.contains(runtime_.expected));now_=now;
+        protocol::check(!closed_&&friends_.contains(runtime_.expected)&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{runtime_.expected});now_=now;
         try{
             sessions_.observeProgress(epoch_,id_,now);
             bool live=runtime_.receive(*tls_,bytes,local_,protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering,0,
