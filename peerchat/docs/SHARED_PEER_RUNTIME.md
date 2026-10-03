@@ -157,3 +157,33 @@ variants/lint and full Windows build/package audit pass (`4.0.1-dev.20`). These
 component tests are not an actual Android/Windows message round-trip claim.
 Application lifecycle, authoritative friend metadata projection and presenter
 binding remain to be connected and tested before another phone request.
+
+### Native-backed application projection prepared
+
+`MessagingBackend` coordinates the existing Android platform auth/presence
+adapter, one `NativeProfile`, native-generated relay execution commands and
+immutable owner readouts. It never constructs Hello, peer text, ACK, delivery
+retry, message IDs or outbox state in Kotlin. Send returns the native durable ID;
+history and delivery indicators are reread from native Storage. Initial device
+pinning remains subject to the common native trust guard. Expired authentication
+clears native authorization; failures never synthesize successful login/delivery.
+
+`FriendIdentityIndex` mirrors the existing Desktop public-account/device index:
+profile-local, server/account-scoped, PCR1-protected and atomically persisted.
+Removed friend public bindings are retained only for historical-device guards,
+not active authorization. A current device change preserves historical IDs;
+friendly names are never identity keys. No new message database or key export.
+
+The profile gate/native instance gate serialize operations. Closing posts cleanup
+off the UI thread; concrete relay attempts distinguish awaiting-rendezvous from
+attached native TLS. Owner `state` readout exposes actual session/pending/retry
+facts rather than deriving connectivity from socket presence.
+
+Eight pure host snapshot/device-projection tests pass, Android debug/test/release
+and lint pass, JNI positive/rejection tests pass, ARM64/release audits pass and
+full Windows build/package audit passes `4.0.1-dev.21`. The isolated server suite
+passes auth/ownership/presence/relay/friend/session-lease/restart/admin persistence.
+This is not yet a physical or full application end-to-end messaging proof. The
+existing backend MainActivity intentionally remains the foundation surface;
+the source UI branch is untouched. A new integration branch/presenter and live
+server/JNI transport proof are remaining no-phone work.

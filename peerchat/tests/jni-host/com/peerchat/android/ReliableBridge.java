@@ -11,6 +11,7 @@ public final class ReliableBridge {
     public static native int close(long profile,long peer,boolean recoverable);
     public static native byte[] send(long profile,byte[] expectedPeer,byte[] text);
     public static native byte[] history(long profile,byte[] expectedPeer,long before);
+    public static native byte[] state(long profile,byte[] expectedPeer);
     static void require(boolean value,String reason){if(!value)throw new AssertionError(reason);}
     public static void main(String[] args){
         NativeBridge foundation=new NativeBridge();
@@ -27,6 +28,7 @@ public final class ReliableBridge {
             require(exchange(handle,1,0,new byte[65537])==null,"oversized transport accepted");
             require(send(handle,peer,new byte[]{'x'})==null,"unbound profile queued text");
             require(history(handle,peer,Long.MAX_VALUE)==null,"unbound profile returned history");
+            require(state(handle,peer)==null,"unbound profile returned session state");
             require(close(handle,1,true)==2,"unknown transport closed successfully");
             require(foundation.destroy(handle)==0,"destroy");
             require(friends(handle,0,1,snapshot)==2,"stale profile accepted snapshot");

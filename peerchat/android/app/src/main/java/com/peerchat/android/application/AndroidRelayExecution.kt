@@ -11,6 +11,10 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
     private val accounts: ServerAccounts,private val remoteAccount: Long) : AutoCloseable {
     @Volatile private var stopping=false
     @Volatile private var channel: ServerChannel?=null
+    @Volatile var attached=false
+        private set
+    @Volatile var finished=false
+        private set
     private var worker: Thread?=null
     fun start() {
         check(worker==null)
@@ -24,6 +28,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             if(stopping)return
             val peer=request.peerId.toByteArray(Charsets.US_ASCII)
             check(ReliableBridge.open(profile,request.attempt,relay.incoming,peer)==request.attempt)
+            attached=true
             check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,ByteArray(0))!=null)
             val frames=RelayFrames(relay.sessionId)
             writer=Thread({
@@ -47,6 +52,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             try {channel?.close()}catch(_: Exception){}
             if(writer!==Thread.currentThread())writer?.join(1500)
             ReliableBridge.close(profile,request.attempt,retry)
+            finished=true
         }
     }
     override fun close() {

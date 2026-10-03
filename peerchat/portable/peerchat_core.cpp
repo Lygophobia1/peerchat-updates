@@ -228,6 +228,18 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         return peerchat::platform::android::Context::input(env,record.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_state(JNIEnv* env,jobject,jlong handle,jbyteArray destination){
+    try{
+        auto peer=peerArgument(env,destination);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return nullptr;
+        auto snapshot=instance->sessions.snapshot(peer);
+        peerchat::protocol::Writer value(peerchat::protocol::Accepted);
+        value.number(snapshot&&snapshot->connected?1:0);value.number(snapshot&&snapshot->pending?1:0);
+        value.number(snapshot&&snapshot->retryScheduled?1:0);value.number(snapshot?snapshot->retryDelayMilliseconds:0);
+        value.number(snapshot?snapshot->networkRevision:0);value.string(snapshot?snapshot->latestFailureUtf8:"none");
+        return peerchat::platform::android::Context::input(env,value.data);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
 #endif
 extern "C" {
 pc_core_status pc_core_get_info(pc_core_handle handle,pc_core_info* info){return guarded([&]()->pc_core_status{

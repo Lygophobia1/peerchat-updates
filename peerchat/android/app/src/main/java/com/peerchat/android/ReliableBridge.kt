@@ -14,6 +14,7 @@ object ReliableBridge {
     external fun close(profile: Long, peer: Long, recoverable: Boolean): Int
     external fun send(profile: Long, expectedPeer: ByteArray, utf8: ByteArray): ByteArray?
     external fun history(profile: Long, expectedPeer: ByteArray, beforeSequence: Long): ByteArray?
+    external fun state(profile: Long, expectedPeer: ByteArray): ByteArray?
     const val RECEIVE = 0
     const val OUTPUT = 1
     const val STATUS = 2

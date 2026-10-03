@@ -44,6 +44,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    testImplementation("junit:junit:4.13.2")
 }
 configurations.configureEach {
     resolutionStrategy.force("org.bouncycastle:bctls-jdk18on:1.86.1", "org.bouncycastle:bcpkix-jdk18on:1.86",

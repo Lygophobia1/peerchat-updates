@@ -69,7 +69,12 @@ public final class ReliableProfileProof {
         void attach(boolean incoming){PeerTlsProof.check(com.peerchat.android.ReliableBridge.open(handle,peer,incoming,utf8(other))==peer);receive(empty);}
         byte[] operation(int op){byte[] result=com.peerchat.android.ReliableBridge.exchange(handle,peer,op,empty);PeerTlsProof.check(result!=null);return result;}
         void receive(byte[] bytes){PeerTlsProof.check(com.peerchat.android.ReliableBridge.exchange(handle,peer,0,bytes)!=null);}
-        boolean ready(){return operation(2)[0]!=0;}
+        boolean ready(){
+            boolean active=operation(2)[0]!=0;
+            Reader state=new Reader(com.peerchat.android.ReliableBridge.state(handle,utf8(other)),4);
+            PeerTlsProof.check((state.num()!=0)==active);state.num();state.num();state.num();state.num();state.str();state.end();
+            return active;
+        }
         void events(){while(true){byte[] event=operation(4);if(event.length==0)return;Reader read=new Reader(event,3);long kind=read.num();read.str();read.str();long message=read.num();if(kind==0)PeerTlsProof.check(operation(3)[0]!=0);PeerTlsProof.check(message==0||kind==2);}}
         void closeRoute(){PeerTlsProof.check(com.peerchat.android.ReliableBridge.close(handle,peer,false)==0);}
         @Override public void close(){PeerTlsProof.check(core.destroy(handle)==0);}
