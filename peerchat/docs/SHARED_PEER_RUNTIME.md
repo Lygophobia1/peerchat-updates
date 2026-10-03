@@ -187,3 +187,25 @@ This is not yet a physical or full application end-to-end messaging proof. The
 existing backend MainActivity intentionally remains the foundation surface;
 the source UI branch is untouched. A new integration branch/presenter and live
 server/JNI transport proof are remaining no-phone work.
+
+### Actual server/JNI relay proof (host green)
+
+`tests/test-reliable-profile-jni.ps1 -ServerDirectory
+build/development/4.0.1-dev.21/Server` now also starts an isolated localhost server
+with the existing configured developer certificate, fresh test-only DB/config and
+authenticated disposable fixture accounts. No production config or certificate
+is changed. Account session tokens pass only through a private child-process
+pipe, never the test report/log. The server has no direct peer listener to use.
+
+Production JNI/Profile/shared runtime + pinned Java outer/peer TLS complete
+three real opaque relay reconnect/profile-reopen cycles and six bidirectional
+durable Unicode text/ACK deliveries, verifying native history and identity.
+An unrelated authenticated account is rejected by server relay authorization.
+The previously separate lost-ACK test continues to prove same-ID retry/dedupe.
+The test fixture initially lacked its SQLite parent directory; only that fixture
+setup was corrected. No server/storage production workaround was introduced.
+
+Host BCJSSE warns that two Java-22 legacy SHA1 constraint-list clauses are not
+understood; no TLS settings were relaxed, and exact certificate pins/TLS versions
+remain enforced. This is host network proof, **not** real Android/Windows device
+interoperability or a physical Keystore/runtime result.
