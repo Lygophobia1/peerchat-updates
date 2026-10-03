@@ -93,8 +93,32 @@ and exact offline Java TLS runtime closure. The preexisting Compose graphics-pat
 1.0.1 ARM64 artifact is pinned in the audit; no new native TLS component exists.
 `PeerTlsTest#existingIdentityNativeMutualTls`: compiled physical-device test, 100
 native TLS lifecycles reusing the ONE normal identity; no extra app/alias created.
-Must not be reported as passing until actually executed on the phone.
+Physically passed on the Motorola device; see the evidence below.
 
 Android build: `android/gradlew.bat -p android :app:assembleDebug
 :app:assembleDebugAndroidTest :app:assembleRelease --console=plain` with existing
 JDK22/SDK35/NDK27 toolchain. No WebRTC/media rebuild is required.
+
+## Physical production gate (2026-10-02)
+
+Motorola moto g power (2025), Android 16/API 36, arm64-v8a, ADB authorized.
+Replacement installs preserved the existing normal Keystore identity and app data.
+Full instrumentation passed `OK (9 tests)`. The restart driver passed five
+fresh-process storage phases, cleaned its UUID test-only profile, then passed
+five cold launches of the normal profile with 100 native mutual TLS lifecycles
+per launch. Together with the suite this proves 600 successful TLS lifecycles.
+Actual Keystore original-message signing was also verified by the unchanged
+Windows CNG verifier; changed payload was rejected. No key export or rotation.
+
+Wrong-pin, certificate time/self-signature/malformed certificate and provider
+failure paths failed closed on-device. These are peer-TLS loopback proofs, not
+Android-to-Windows network messaging or discovery-server trust proofs.
+The normal public identity remained identical across all cold launches.
+
+Final scoped logcat contained no application native/JNI/SQLite/Keystore/TLS crash
+or unexpected fallback. Device/runtime warnings included Java-only instrumentation
+APK ABI metadata, deprecated ashmem pinning, and unsupported ART userfaultfd MOVE;
+do not characterize the complete OS log as warning-free. No secret logging observed.
+Android debug/test/release, host TLS/Schannel interoperability, JNI lifecycle,
+Windows identity/DPAPI/profile/history/outbox/ACK/dedupe and ARM64 audits passed.
+Full isolated Windows build/package audit passed at `4.0.1-dev.12`.

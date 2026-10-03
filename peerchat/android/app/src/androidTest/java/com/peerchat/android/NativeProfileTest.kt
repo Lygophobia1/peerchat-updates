@@ -20,6 +20,44 @@ class NativeProfileTest {
         check(!directory.exists() || directory.deleteRecursively())
         check(!state.directory.exists() || state.directory.deleteRecursively())
     }
+    @Test fun sqliteStartupPragmas() {
+        val profile = "test_${UUID.randomUUID()}"
+        try {
+            AndroidStoragePlatform(context, profile).use {
+                // Exact native Storage startup SQL; no records/secrets involved.
+                it.execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON;".toByteArray())
+                fun scalar(sql: String): String {
+                    val statement = it.prepare(sql.toByteArray())
+                    try { assertTrue(it.row(statement)); return it.text(statement, 0).toString(Charsets.UTF_8) }
+                    finally { it.finish(statement) }
+                }
+                assertEquals("wal", scalar("SELECT journal_mode FROM pragma_journal_mode"))
+                assertEquals("2", scalar("SELECT synchronous FROM pragma_synchronous"))
+                assertEquals("2", scalar("SELECT temp_store FROM pragma_temp_store"))
+                assertEquals("1", scalar("SELECT secure_delete FROM pragma_secure_delete"))
+            }
+        } finally { clean(profile) }
+    }
+    @Test fun crossProcessStorageCheckpoint() {
+        val args = InstrumentationRegistry.getArguments()
+        val phase = args.getString("storage_phase")
+        org.junit.Assume.assumeTrue("Explicit cross-process driver required", phase != null)
+        val profile = checkNotNull(args.getString("storage_profile"))
+        check(profile.matches(Regex("test_restart_[a-f0-9]{32}")))
+        if (phase == "cleanup") { clean(profile); return }
+        val proof = File(ProfileSecurity(context, profile).directory, "restart.expected.public")
+        NativeProfile(context, profile).use { native ->
+            val public = checkNotNull(ProfileBridge.publicKey(native.handle))
+            if (phase == "seed") {
+                check(!proof.exists()); proof.writeBytes(public)
+                assertEquals(0, ProfileBridge.storageTest(native.handle, 0))
+            } else {
+                assertArrayEquals(proof.readBytes(), public)
+                val mode = when (phase) { "pending" -> 0; "ack" -> 1; "verify" -> 2; else -> error("Unknown phase") }
+                assertEquals(0, ProfileBridge.storageTest(native.handle, mode))
+            }
+        }
+    }
     @Test fun nativeProfileAndProductionStorage() {
         val profile = "test_${UUID.randomUUID()}"
         try {

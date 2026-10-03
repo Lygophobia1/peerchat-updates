@@ -10,6 +10,46 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PeerTlsTest {
+    @Test fun certificateAndProviderFailuresFailClosed() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val provider = AndroidIdentityProvider(context, "default")
+        val public = provider.publicRepresentation()
+        val identity = com.peerchat.android.platform.tls.AndroidTlsIdentity(provider)
+        val pin = PeerIdentityFormat.peerId(public)
+        val now = System.currentTimeMillis()
+        fun rejected(block: () -> Unit) {
+            var failed = false; try { block() } catch (_: Exception) { failed = true }; assertTrue(failed)
+        }
+        val cert = com.peerchat.android.platform.tls.PeerTls.certificate(identity, java.util.Date(now - 86400000), java.util.Date(now + 86400000))
+        assertArrayEquals(public, com.peerchat.android.platform.tls.PeerTls.validateCertificate(cert, pin))
+        rejected { com.peerchat.android.platform.tls.PeerTls.validateCertificate(cert, "0".repeat(64)) }
+        rejected { com.peerchat.android.platform.tls.PeerTls.validateCertificate(byteArrayOf(1, 2, 3), pin) }
+        val altered = cert.copyOf(); altered[altered.lastIndex] = (altered.last().toInt() xor 1).toByte()
+        rejected { com.peerchat.android.platform.tls.PeerTls.validateCertificate(altered, pin) }
+        val expired = com.peerchat.android.platform.tls.PeerTls.certificate(identity, java.util.Date(now - 172800000), java.util.Date(now - 86400000))
+        rejected { com.peerchat.android.platform.tls.PeerTls.validateCertificate(expired, pin) }
+        val future = com.peerchat.android.platform.tls.PeerTls.certificate(identity, java.util.Date(now + 86400000), java.util.Date(now + 172800000))
+        rejected { com.peerchat.android.platform.tls.PeerTls.validateCertificate(future, pin) }
+        rejected { com.peerchat.android.platform.tls.PeerTls(null, false, pin) }
+        val broken = object : com.peerchat.android.platform.tls.OpaqueTlsSigner.Identity {
+            override fun publicKey() = public.copyOf()
+            override fun sign(original: ByteArray): ByteArray = throw java.io.IOException("Synthetic unavailable signer")
+        }
+        rejected { com.peerchat.android.platform.tls.PeerTls(broken, false, pin) }
+        NativeProfile(context).use { profile ->
+            val client = PeerTlsBridge.open(profile.handle, false, "0".repeat(64).toByteArray())
+            val server = PeerTlsBridge.open(profile.handle, true, pin.toByteArray())
+            assertTrue(client > 0 && server > 0)
+            try {
+                val hello = checkNotNull(PeerTlsBridge.exchange(profile.handle, client, PeerTlsBridge.OUTPUT, byteArrayOf()))
+                assertNotNull(PeerTlsBridge.exchange(profile.handle, server, PeerTlsBridge.RECEIVE, hello))
+                val response = checkNotNull(PeerTlsBridge.exchange(profile.handle, server, PeerTlsBridge.OUTPUT, byteArrayOf()))
+                assertNull(PeerTlsBridge.exchange(profile.handle, client, PeerTlsBridge.RECEIVE, response))
+                assertNull(PeerTlsBridge.exchange(profile.handle, client, PeerTlsBridge.STATUS, byteArrayOf()))
+            } finally { PeerTlsBridge.close(profile.handle, client); PeerTlsBridge.close(profile.handle, server) }
+        }
+        assertArrayEquals(public, AndroidIdentityProvider(context, "default").publicRepresentation())
+    }
     @Test fun existingIdentityNativeMutualTls() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         // Reuse the ONE normal identity. No new alias, uninstall or second app.

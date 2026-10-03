@@ -60,7 +60,14 @@ class AndroidStoragePlatform(context: Context, private val profile: String) : Au
         // all values use bound statements. Reject quoted literals/comments here
         // rather than ambiguously splitting arbitrary SQL at semicolons.
         invalid(!sql.contains('\u0000') && !sql.contains('"') && !sql.contains('\'') && !sql.contains("--") && !sql.contains("/*"))
-        sql.split(';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { database.execSQL(it) }
+        sql.split(';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { statement ->
+            // Android rejects result-producing PRAGMAs in execSQL (including
+            // journal_mode=WAL and secure_delete). Execute/drain the same native
+            // statement via a cursor; do not change durability/schema policy.
+            if (statement.startsWith("PRAGMA ", ignoreCase = true)) {
+                database.rawQuery(statement, null).use { cursor -> while (cursor.moveToNext()) { } }
+            } else database.execSQL(statement)
+        }
     }
     fun prepare(bytes: ByteArray): Long {
         checkOpen(); invalid(bytes.size in 1..32768 && statements.size < 128)

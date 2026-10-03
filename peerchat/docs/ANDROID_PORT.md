@@ -551,6 +551,45 @@ command now runs three tests; the persistence-only rerun is:
 
 ## Remaining platform work / next checkpoint
 
+### Production physical gate completed (2026-10-02)
+
+Same Motorola moto g power (2025), Android 16/API 36, arm64-v8a. Replacement
+installs only; no uninstall, clear-data or normal identity replacement. SQLite
+startup initially failed because Android `execSQL` rejects result-producing
+PRAGMAs. The narrow adapter correction drains PRAGMA results through `rawQuery`;
+schema and SQL remain unchanged. Physical assertions confirmed WAL, synchronous
+FULL, memory temp store and secure delete are actually configured.
+
+Full instrumentation: `OK (9 tests)`; the phase-only restart test is intentionally
+skipped in this generic suite and executed separately by
+`tests/test-android-production-restart.ps1 -Serial ZA2235NTXZ`.
+That driver passed seed/reopen/ACK/reopen/reopen in fresh processes, preserving
+history, pending outbox, delivered state, dedupe and protected records. It cleans
+only its UUID test profile before five normal-profile cold launches. All five
+preserved the identity, reopened Profile/Storage and passed 100 mutual native
+Keystore TLS lifecycles each. No test aliases remained. Native/JNI suite also
+passed 1,000 foundation lifetimes and the production test 32 profile reopens.
+
+Install and launch (existing authorized device):
+
+```powershell
+$adb = 'C:\Users\Livel\AppData\Local\Android\Sdk\platform-tools\adb.exe'
+$serial = 'ZA2235NTXZ'
+& $adb -s $serial install -r android/app/build/outputs/apk/debug/app-debug.apk
+& $adb -s $serial install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+& $adb -s $serial shell am start -W -n com.peerchat.android/.MainActivity
+& $adb -s $serial shell am instrument -w -r com.peerchat.android.test/androidx.test.runner.AndroidJUnitRunner
+./tests/test-android-production-restart.ps1 -Serial $serial
+```
+
+Real Keystore signatures passed the unchanged Windows verifier. Certificate/pin/
+provider rejection passed. Full host/shared regressions and Android variants/
+ARM64 audit passed; isolated Windows build/package audit passed `4.0.1-dev.12`.
+No final app crash or JNI/SQLite/Keystore/TLS error was found. OS/runtime warnings
+are documented in `ANDROID_PEER_TLS.md`. The production physical foundation gate
+is green; discovery-server trust, native session networking and real messaging
+remain subsequent work, not implied by the in-phone mutual TLS harness.
+
 Foundation and identity/record-provider milestones are physically green. The
 conditional continuation authorizes secure TLS/discovery/DM interoperability,
 but does not authorize exporting this Keystore identity or duplicating the engine.
