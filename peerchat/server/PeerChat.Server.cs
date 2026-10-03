@@ -43,6 +43,9 @@ namespace PeerChat.Server {
                 "CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password_salt BLOB NOT NULL, password_hash BLOB NOT NULL, discoverability TEXT NOT NULL DEFAULT 'public', created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), public_identity TEXT NOT NULL UNIQUE, created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), expires_utc INTEGER NOT NULL);" +
+                "CREATE TABLE IF NOT EXISTS remembered_devices(account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, public_identity TEXT NOT NULL REFERENCES devices(public_identity) ON DELETE CASCADE, credential_hash TEXT NOT NULL UNIQUE, PRIMARY KEY(account_id,public_identity));" +
+                "CREATE TABLE IF NOT EXISTS device_sessions(token_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE, public_identity TEXT NOT NULL);" +
+                "CREATE TABLE IF NOT EXISTS device_push(account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, public_identity TEXT NOT NULL REFERENCES devices(public_identity) ON DELETE CASCADE, provider TEXT NOT NULL, token TEXT NOT NULL, expires_utc INTEGER NOT NULL, PRIMARY KEY(account_id,public_identity));" +
                 "CREATE TABLE IF NOT EXISTS presence(device_id INTEGER PRIMARY KEY REFERENCES devices(id), seen_utc INTEGER NOT NULL, endpoint_host TEXT, endpoint_port INTEGER, public_endpoint_host TEXT, public_endpoint_port INTEGER, public_candidate_source TEXT, observed_classification TEXT);" +
                 "CREATE TABLE IF NOT EXISTS friend_requests(sender_id INTEGER NOT NULL REFERENCES accounts(id), recipient_id INTEGER NOT NULL REFERENCES accounts(id), state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(sender_id,recipient_id));" +
                 "CREATE INDEX IF NOT EXISTS friend_requests_recipient_state ON friend_requests(recipient_id,state,updated_utc);" +
@@ -88,8 +91,31 @@ namespace PeerChat.Server {
         public bool AddDevice(long accountId,string publicIdentity) { lock(gate){long owner=ScalarLong(database,"SELECT account_id FROM devices WHERE public_identity="+Quote(publicIdentity));if(owner!=0)return owner==accountId;Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+accountId+","+Quote(publicIdentity)+","+UnixNow()+");");return true;} }
         public bool OwnsDevice(long accountId,string publicIdentity){lock(gate)return ScalarLong(database,"SELECT count(*) FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity))>0;}
         public void CreateSession(string tokenHash,long accountId,long expires) { lock(gate) Execute("DELETE FROM sessions WHERE expires_utc<"+UnixNow()+"; INSERT INTO sessions(token_hash,account_id,expires_utc) VALUES("+Quote(tokenHash)+","+accountId+","+expires+");"); }
-        public long Authenticate(string tokenHash) { lock(gate)return ScalarLong(database,"SELECT account_id FROM sessions WHERE token_hash="+Quote(tokenHash)+" AND expires_utc>="+UnixNow()); }
+        public long Authenticate(string tokenHash) { lock(gate)return ScalarLong(database,"SELECT s.account_id FROM sessions s WHERE s.token_hash="+Quote(tokenHash)+" AND s.expires_utc>="+UnixNow()+" AND (NOT EXISTS(SELECT 1 FROM device_sessions b WHERE b.token_hash=s.token_hash) OR EXISTS(SELECT 1 FROM device_sessions b JOIN remembered_devices r ON r.account_id=s.account_id AND r.public_identity=b.public_identity WHERE b.token_hash=s.token_hash))"); }
         public void RevokeSession(string tokenHash) { lock(gate) Execute("DELETE FROM sessions WHERE token_hash="+Quote(tokenHash)+";"); }
+        public string SessionDevice(string tokenHash) { lock(gate)return ScalarText(database,"SELECT public_identity FROM device_sessions WHERE token_hash="+Quote(tokenHash))??""; }
+        public bool SessionAllowsDevice(string tokenHash,string device) { var bound=SessionDevice(tokenHash);return bound.Length==0||bound==device; }
+        public long RememberedAccount(string hash,string device) { lock(gate)return ScalarLong(database,"SELECT r.account_id FROM remembered_devices r JOIN devices d ON d.account_id=r.account_id AND d.public_identity=r.public_identity WHERE r.credential_hash="+Quote(hash)+" AND r.public_identity="+Quote(device)); }
+        // Replace/revoke atomically; no raw credential is stored. Device-bound
+        // sessions cannot survive credential revocation or device/account deletion.
+        public void RememberDevice(long account,string device,string hash) { lock(gate){
+            if(!OwnsDevice(account,device))throw new InvalidOperationException("Device is not owned by account.");
+            Execute("BEGIN IMMEDIATE;");try {
+                RevokeRememberedDevice(account,device);
+                Execute("INSERT INTO remembered_devices(account_id,public_identity,credential_hash) VALUES("+account+","+Quote(device)+","+Quote(hash)+");COMMIT;");
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        public void RevokeRememberedDevice(long account,string device) { lock(gate)Execute("DELETE FROM sessions WHERE account_id="+account+" AND token_hash IN (SELECT token_hash FROM device_sessions WHERE public_identity="+Quote(device)+"); DELETE FROM remembered_devices WHERE account_id="+account+" AND public_identity="+Quote(device)+"; DELETE FROM device_push WHERE account_id="+account+" AND public_identity="+Quote(device)+";"); }
+        public bool RegisterPush(long account,string device,string token) { lock(gate){
+            if(!OwnsDevice(account,device)||ScalarLong(database,"SELECT count(*) FROM remembered_devices WHERE account_id="+account+" AND public_identity="+Quote(device))!=1)return false;
+            Execute("DELETE FROM device_push WHERE expires_utc<"+UnixNow()+"; INSERT INTO device_push(account_id,public_identity,provider,token,expires_utc) VALUES("+account+","+Quote(device)+",'fcm',"+Quote(token)+","+(UnixNow()+30*86400)+") ON CONFLICT(account_id,public_identity) DO UPDATE SET token=excluded.token,provider=excluded.provider,expires_utc=excluded.expires_utc;");return true;
+        }}
+        public string PushToken(long account,string device) {lock(gate)return ScalarText(database,"SELECT p.token FROM device_push p JOIN remembered_devices r ON r.account_id=p.account_id AND r.public_identity=p.public_identity JOIN devices d ON d.public_identity=p.public_identity AND d.account_id=p.account_id WHERE p.account_id="+account+" AND p.public_identity="+Quote(device)+" AND p.expires_utc>="+UnixNow());}
+        public void RemovePush(long account,string device,string expectedToken=null) {lock(gate)Execute("DELETE FROM device_push WHERE account_id="+account+" AND public_identity="+Quote(device)+(expectedToken==null?"":" AND token="+Quote(expectedToken))+";");}
+        public void CreateDeviceSession(string tokenHash,long account,string device,long expires,string credentialHash) { lock(gate){
+            if(RememberedAccount(credentialHash,device)!=account)throw new InvalidOperationException("Remembered device revoked.");
+            Execute("BEGIN IMMEDIATE;");try {CreateSession(tokenHash,account,expires);Execute("INSERT INTO device_sessions(token_hash,public_identity) VALUES("+Quote(tokenHash)+","+Quote(device)+");COMMIT;");}catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
         public void TouchPresence(long accountId,string publicIdentity,string endpointHost,int endpointPort,string publicHost,int publicPort,string publicSource,string observedClassification) { lock(gate) Execute("INSERT INTO presence(device_id,seen_utc,endpoint_host,endpoint_port,public_endpoint_host,public_endpoint_port,public_candidate_source,observed_classification) SELECT id,"+UnixNow()+","+Quote(endpointHost??"")+","+endpointPort+","+Quote(publicHost??"")+","+publicPort+","+Quote(publicSource??"")+","+Quote(observedClassification??"")+" FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity)+" ON CONFLICT(device_id) DO UPDATE SET seen_utc=excluded.seen_utc,endpoint_host=excluded.endpoint_host,endpoint_port=excluded.endpoint_port,public_endpoint_host=excluded.public_endpoint_host,public_endpoint_port=excluded.public_endpoint_port,public_candidate_source=excluded.public_candidate_source,observed_classification=excluded.observed_classification;"); }
         public void ClearPresence(long accountId,string publicIdentity) { lock(gate) Execute("DELETE FROM presence WHERE device_id IN (SELECT id FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity)+");"); }
         public Dictionary<string,object> Search(string username,long viewerAccount) { lock(gate) { IntPtr s=IntPtr.Zero; try { string sql="SELECT a.id,a.username,COALESCE((SELECT d2.public_identity FROM presence p2 JOIN devices d2 ON d2.id=p2.device_id WHERE d2.account_id=a.id ORDER BY p2.seen_utc DESC LIMIT 1),(SELECT d3.public_identity FROM devices d3 WHERE d3.account_id=a.id ORDER BY d3.id LIMIT 1)),COALESCE((SELECT max(p3.seen_utc) FROM presence p3 JOIN devices d3 ON d3.id=p3.device_id WHERE d3.account_id=a.id),0) FROM accounts a WHERE a.id<>"+viewerAccount+" AND a.discoverability='public' AND a.username="+Quote(username)+" AND NOT EXISTS (SELECT 1 FROM account_blocks b WHERE (b.blocker_id="+viewerAccount+" AND b.blocked_id=a.id) OR (b.blocker_id=a.id AND b.blocked_id="+viewerAccount+")) ORDER BY a.id LIMIT 1"; if(SqliteNative.prepare(database,sql,out s)!=0||SqliteNative.step(s)!=100)return null; long seen=SqliteNative.columnLong(s,3); return new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(s,0)},{"username",SqliteNative.columnText(s,1)},{"publicIdentity",SqliteNative.columnText(s,2)},{"online",seen>=UnixNow()-90}}; } finally { if(s!=IntPtr.Zero)SqliteNative.finalize(s); } } }
@@ -271,7 +297,61 @@ namespace PeerChat.Server {
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_column_bytes(IntPtr s,int c);
         internal static int prepare(IntPtr d,string q,out IntPtr s){return sqlite3_prepare_v2(d,q,-1,out s,IntPtr.Zero);} internal static int step(IntPtr s){return sqlite3_step(s);} internal static void finalize(IntPtr s){sqlite3_finalize(s);} internal static long columnLong(IntPtr s,int c){return sqlite3_column_int64(s,c);} internal static string columnText(IntPtr s,int c){var p=sqlite3_column_text(s,c);return p==IntPtr.Zero?null:Marshal.PtrToStringAnsi(p);} internal static byte[] columnBlob(IntPtr s,int c){int n=sqlite3_column_bytes(s,c);var p=sqlite3_column_blob(s,c);var b=new byte[n];if(n>0)Marshal.Copy(p,b,0,n);return b;}
     }
+    // One-shot proof challenges, not a session/reconnect owner. Original-message
+    // SHA256/ECDSA preserves the accepted device signature representation.
+    internal sealed class RememberedDeviceProofs {
+        internal sealed class Challenge {
+            public string Id, Device, Action, Binding;
+            public long Account, Expires;
+            public byte[] Input { get { return Encoding.ASCII.GetBytes("PeerChat remembered device v1|"+Action+"|"+Account.ToString(CultureInfo.InvariantCulture)+"|"+Device+"|"+Id+"|"+Binding); } }
+        }
+        readonly object gate=new object();readonly Dictionary<string,Challenge> pending=new Dictionary<string,Challenge>();
+        public Challenge Issue(long account,string device,string action,string binding) {
+            lock(gate){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();foreach(var id in pending.Where(p=>p.Value.Expires<now).Select(p=>p.Key).ToArray())pending.Remove(id);
+                if(pending.Count>=1024||pending.Values.Count(p=>p.Account==account&&p.Device==device)>=4)throw new InvalidOperationException("Proof challenge limit.");
+                byte[] bytes=new byte[32];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(bytes);
+                var value=new Challenge{Id=BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant(),Account=account,Device=device,Action=action,Binding=binding,Expires=now+60};pending.Add(value.Id,value);return value;
+            }
+        }
+        public bool Consume(string id,long account,string device,string action,string binding,byte[] publicKey,byte[] signature) {
+            Challenge value;lock(gate){if(!pending.TryGetValue(id,out value))return false;pending.Remove(id);}
+            if(value.Expires<DateTimeOffset.UtcNow.ToUnixTimeSeconds()||value.Account!=account||value.Device!=device||value.Action!=action||value.Binding!=binding||publicKey==null||publicKey.Length!=72||signature==null||signature.Length!=64)return false;
+            try{using(var sha=SHA256.Create()){
+                if(BitConverter.ToString(sha.ComputeHash(publicKey)).Replace("-","").ToLowerInvariant()!=device)return false;
+                using(var key=CngKey.Import(publicKey,CngKeyBlobFormat.EccPublicBlob))using(var verifier=new ECDsaCng(key))return verifier.VerifyHash(sha.ComputeHash(value.Input),signature);
+            }}catch(CryptographicException){return false;}
+        }
+    }
+
+    // Provider receives only a destination token and fixed opaque hint. No
+    // message, identity, account or relationship data reaches a push vendor.
+    internal enum PushResult { Sent, Unavailable, InvalidToken }
+    internal interface IPushProvider { PushResult Wake(string destinationToken); }
+    internal sealed class NullPushProvider:IPushProvider { public PushResult Wake(string destinationToken){return PushResult.Unavailable;} }
+    internal sealed class PushWakeDispatcher {
+        readonly AccountDatabase accounts;readonly IPushProvider provider;readonly object gate=new object();
+        readonly Dictionary<string,long> last=new Dictionary<string,long>();int pending;bool stopped;
+        public PushWakeDispatcher(AccountDatabase accounts,IPushProvider provider){this.accounts=accounts;this.provider=provider;}
+        public bool Hint(long account,string device) {
+            string token;
+            lock(gate){if(stopped||provider is NullPushProvider)return false;token=accounts.PushToken(account,device);if(token==null)return false;long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();foreach(var key in last.Where(p=>p.Value<now-30).Select(p=>p.Key).ToArray())last.Remove(key);
+                long previous;if(pending>=32||last.Count>=4096||(last.TryGetValue(device,out previous)&&previous>=now-30))return false;
+                last[device]=now;pending++;
+            }
+            ThreadPool.QueueUserWorkItem(_=>{try{
+                lock(gate){if(stopped||accounts.PushToken(account,device)!=token)return;}
+                var result=provider.Wake(token);
+                if(result==PushResult.InvalidToken)lock(gate){if(!stopped)accounts.RemovePush(account,device,token);}
+            }catch{/* Push failure is never message/transport failure; no token logging. */}
+            finally{lock(gate)pending--;}});return true;
+        }
+        // After Stop returns, queued callbacks cannot touch the account DB.
+        public void Stop(){lock(gate){stopped=true;last.Clear();}}
+    }
+
         sealed class DiscoveryServer {
+        readonly RememberedDeviceProofs rememberedProofs=new RememberedDeviceProofs();
+        readonly PushWakeDispatcher pushWakes;
         const int ProtocolVersion=1, MaxRequestBytes=4096, MaxRelayPayloadBytes=64*1024, TurnCredentialRateWindowSeconds=60, TurnCredentialRateLimit=6; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=MaxRequestBytes}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly Dictionary<string,long> supersededEventSessions=new Dictionary<string,long>(StringComparer.Ordinal); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
         const int EventHeartbeatSeconds=20, EventLeaseSeconds=75;
         readonly GroupCiphertextFanout groupFanout;
@@ -330,7 +410,7 @@ namespace PeerChat.Server {
         bool PermitPeopleSearch(long accountId){lock(peopleSearchGate){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();Queue<long> times;if(!peopleSearchTimes.TryGetValue(accountId,out times)){times=new Queue<long>();peopleSearchTimes[accountId]=times;}while(times.Count>0&&times.Peek()<=now-60)times.Dequeue();if(times.Count>=20)return false;times.Enqueue(now);return true;}}
         // A certificate can be loaded from a PFX for ordinary deployment or from CurrentUser\My
         // during local development. Neither path ever exposes its private key to clients.
-        public DiscoveryServer(ServerConfiguration c){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);certificate=LoadCertificate(c);groupFanout=new GroupCiphertextFanout(accounts);groupRooms=new GroupMediaRooms(accounts);}
+        public DiscoveryServer(ServerConfiguration c,IPushProvider pushProvider=null){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);certificate=LoadCertificate(c);groupFanout=new GroupCiphertextFanout(accounts);groupRooms=new GroupMediaRooms(accounts);pushWakes=new PushWakeDispatcher(accounts,pushProvider??new NullPushProvider());}
         static X509Certificate2 LoadCertificate(ServerConfiguration config){if(!String.IsNullOrWhiteSpace(config.CertificateThumbprint)){var store=new X509Store(StoreName.My,StoreLocation.CurrentUser);store.Open(OpenFlags.ReadOnly);try{var found=store.Certificates.Find(X509FindType.FindByThumbprint,config.CertificateThumbprint.Replace(" ",""),false);if(found.Count==0||!found[0].HasPrivateKey)throw new InvalidOperationException("Configured certificate thumbprint was not found with a private key in CurrentUser\\My.");return found[0];}finally{store.Close();}}return new X509Certificate2(config.CertificatePath,config.CertificatePassword,X509KeyStorageFlags.UserKeySet|X509KeyStorageFlags.PersistKeySet);}
         static bool ValidUsername(string value){if(String.IsNullOrEmpty(value)||value.Length<3||value.Length>32)return false;foreach(char c in value)if(!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))return false;return true;}
         static bool ValidIdentity(string value){return !String.IsNullOrEmpty(value)&&value.Length>=32&&value.Length<=2048;}
@@ -375,8 +455,22 @@ namespace PeerChat.Server {
             object version; object kind; if(!request.TryGetValue("version",out version)||Convert.ToInt32(version)!=ProtocolVersion||!request.TryGetValue("type",out kind))return Error("unsupported_request"); string type=kind as string; string username=Text(request,"username"),password=Text(request,"password"),identity=Text(request,"publicIdentity"),token=Text(request,"sessionToken");
             if(type=="register") { if(!ValidUsername(username)||String.IsNullOrEmpty(password)||password.Length>256||!ValidIdentity(identity)){Log("WARNING","Rejected malformed account registration.");return Error("invalid_registration");} if(accounts.UsernameExists(username)){Log("WARNING","Rejected duplicate account registration.");return Error("registration_failed");} if(accounts.DeviceIdentityExists(identity)){Log("WARNING","Rejected account registration because this public device identity is already registered.");return Error("device_already_registered");} var salt=new byte[16];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(salt); long id;try{id=accounts.CreateAccountWithDevice(username,salt,PasswordHash(password,salt),identity);Log("INFO","Account created: "+username+".");}catch(Exception error){Log("ERROR","Account registration storage failure: "+error.GetType().Name);return Error("registration_failed");}return Session(id); }
             if(type=="login") { if(!ValidUsername(username)||String.IsNullOrEmpty(password)||password.Length>256)return Error("login_failed");long id;bool ok=accounts.PasswordMatches(username,(salt,hash)=>ConstantTimeEquals(PasswordHash(password,salt),hash),out id);Log(ok?"INFO":"WARNING",ok?"Account authentication succeeded.":"Account authentication failed.");return ok?Session(id):Error("login_failed"); }
+            if(type=="remember_challenge"||type=="remember_resume"||type=="remember_revoke")return RememberedRequest(request,type,identity);
             long accountId=accounts.Authenticate(TokenHash(token)); if(accountId==0)return Error("session_invalid");
-            if(type=="logout"){InvalidateDirectProbes(accountId);string tokenHash=TokenHash(token);accounts.RevokeSession(tokenHash);RetireEventSession(tokenHash);Log("INFO","Account session signed out.");return Ok();}
+            if(!String.IsNullOrEmpty(identity)&&!accounts.SessionAllowsDevice(TokenHash(token),identity))return Error("device_session_mismatch");
+            if(type=="remember_enroll_challenge"||type=="remember_enroll")return EnrollRemembered(request,type,accountId,identity,TokenHash(token));
+            if(type=="push_register"||type=="push_remove"){
+                if(!ValidIdentity(identity)||accounts.SessionDevice(TokenHash(token))!=identity)return Error("push_device_session_required");
+                if(type=="push_remove"){accounts.RemovePush(accountId,identity);return Ok();}
+                string pushToken=Text(request,"pushToken");if(Text(request,"provider")!="fcm"||pushToken==null||pushToken.Length<1||pushToken.Length>2048||pushToken.Any(c=>c<33||c>126))return Error("push_invalid");
+                return accounts.RegisterPush(accountId,identity,pushToken)?Ok():Error("push_not_authorized");
+            }
+            if(type=="push_hint"){
+                long target;string targetDevice=Text(request,"targetPublicIdentity");
+                if(!ValidIdentity(identity)||!accounts.OwnsDevice(accountId,identity)||!Int64.TryParse(Text(request,"targetAccountId"),out target)||target==accountId||!ValidIdentity(targetDevice)||!accounts.OwnsDevice(target,targetDevice)||!accounts.Friends(accountId,target))return Error("push_not_authorized");
+                pushWakes.Hint(target,targetDevice);return Ok();
+            }
+            if(type=="logout"){InvalidateDirectProbes(accountId);string tokenHash=TokenHash(token);string bound=accounts.SessionDevice(tokenHash);if(bound.Length>0){accounts.RevokeRememberedDevice(accountId,bound);RetireRememberedRoutes(accountId,bound);}accounts.RevokeSession(tokenHash);RetireEventSession(tokenHash);Log("INFO","Account session signed out.");return Ok();}
             if(type=="presence") { if(IsSupersededEventSession(TokenHash(token)))return Error("session_superseded");bool directCandidates=Flag(request,"directCandidates",false);int endpointPort=0,publicPort=0;string endpointHost=Text(request,"endpointHost")??"",publicHost=Text(request,"publicEndpointHost")??"";if(!ValidIdentity(identity))return Error("invalid_presence");if(directCandidates){if(!Int32.TryParse(Text(request,"endpointPort"),out endpointPort)||!ValidEndpoint(endpointHost,endpointPort))return Error("invalid_presence");if(!Int32.TryParse(Text(request,"publicEndpointPort"),out publicPort))publicPort=0;}else{endpointHost="";endpointPort=0;publicHost="";publicPort=0;}string observedClassification="Not evaluated";string publicSource; if(!directCandidates){publicSource="Relay-only presence";}else if(String.IsNullOrEmpty(publicHost)){if(IsUsablePublicIpv4(observedHost,out observedClassification)){publicHost=observedHost;publicPort=endpointPort;publicSource="Server-observed Internet address";}else if(observedClassification.StartsWith("Loopback",StringComparison.Ordinal)&&IsLocalInterfaceAddress(endpointHost)){string configuredClassification;if(IsUsablePublicIpv4(config.SelfHostedPublicP2PHost,out configuredClassification)){publicHost=config.SelfHostedPublicP2PHost;publicPort=endpointPort;publicSource="Configured self-hosted P2P fallback";}else{publicHost="";publicPort=0;publicSource="No usable configured self-hosted P2P address";}}else{publicHost="";publicPort=0;publicSource="Observed address rejected";}}else{string suppliedClassification;if(!IsUsablePublicIpv4(publicHost,out suppliedClassification))return Error("invalid_public_endpoint");publicSource="Authenticated explicit public candidate";}if(!ValidEndpoint(publicHost,publicPort))return Error("invalid_public_endpoint");if(!accounts.AddDevice(accountId,identity))return Error("device_account_mismatch");accounts.TouchPresence(accountId,identity,endpointHost,endpointPort,publicHost,publicPort,publicSource,observedClassification);BroadcastPresence(accountId,identity,endpointHost,endpointPort,publicHost,publicPort);Log("DEBUG","Presence refreshed for account "+accountId+" ("+accounts.Username(accountId)+") direct candidates="+directCandidates+"; public candidate source: "+publicSource+".");return Ok(new Dictionary<string,object>{{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"registeredPublicIdentity",identity},{"endpointHost",endpointHost},{"endpointPort",endpointPort},{"publicEndpointHost",publicHost},{"publicEndpointPort",publicPort},{"publicCandidateSource",publicSource},{"observedAddressClassification",observedClassification},{"directCandidatesEnabled",directCandidates}}); }
             if(type=="session_info")return Ok(new Dictionary<string,object>{{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"publicIdentity",accounts.PrimaryDeviceIdentity(accountId)},{"relayOnlyPresence",true}});
             if(type=="media_turn_credentials")return MediaTurnCredentials(accountId,identity);
@@ -450,12 +544,40 @@ namespace PeerChat.Server {
             return Error("unsupported_request");
         }
         Dictionary<string,object> Session(long accountId){string token=RandomToken();accounts.CreateSession(TokenHash(token),accountId,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds());return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true}});}
+        static bool ValidCredential(string value){return value!=null&&value.Length==43&&value.All(c=>Char.IsLetterOrDigit(c)||c=='-'||c=='_');}
+        Dictionary<string,object> ProofChallenge(long account,string device,string action,string binding){
+            try{var proof=rememberedProofs.Issue(account,device,action,binding);return Ok(new Dictionary<string,object>{{"challengeId",proof.Id},{"signatureInput",Convert.ToBase64String(proof.Input)},{"accountId",account},{"publicIdentity",device},{"purpose",action}});}
+            catch(InvalidOperationException){return Error("remember_rate_limited");}
+        }
+        bool VerifyRemembered(Dictionary<string,object> request,long account,string device,string action,string binding){
+            try {string id=Text(request,"challengeId"),key=Text(request,"publicKey"),sig=Text(request,"signature");if(id==null||key==null||sig==null||id.Length!=64||key.Length>100||sig.Length>90)return false;
+                return rememberedProofs.Consume(id,account,device,action,binding,Convert.FromBase64String(key),Convert.FromBase64String(sig));
+            }catch(FormatException){return false;}
+        }
+        Dictionary<string,object> EnrollRemembered(Dictionary<string,object> request,string type,long account,string device,string sessionHash){
+            if(!ValidIdentity(device)||!accounts.OwnsDevice(account,device))return Error("remember_device_mismatch");
+            if(type=="remember_enroll_challenge")return ProofChallenge(account,device,"enroll",sessionHash);
+            if(!VerifyRemembered(request,account,device,"enroll",sessionHash))return Error("remember_proof_invalid");
+            string credential=RandomToken();accounts.RememberDevice(account,device,TokenHash(credential));RetireRememberedRoutes(account,device);
+            return Ok(new Dictionary<string,object>{{"credential",credential},{"accountId",account},{"publicIdentity",device}});
+        }
+        Dictionary<string,object> RememberedRequest(Dictionary<string,object> request,string type,string device){
+            string credential=Text(request,"credential");if(!ValidCredential(credential)||!ValidIdentity(device))return Error("remember_invalid");
+            string hash=TokenHash(credential);long account=accounts.RememberedAccount(hash,device);if(account==0)return Error("remember_revoked");
+            string action=type=="remember_challenge"?Text(request,"purpose"):(type=="remember_revoke"?"revoke":"resume");
+            if(action!="resume"&&action!="revoke")return Error("remember_invalid");
+            if(type=="remember_challenge")return ProofChallenge(account,device,action,hash);
+            if(!VerifyRemembered(request,account,device,action,hash))return Error("remember_proof_invalid");
+            if(action=="revoke"){accounts.RevokeRememberedDevice(account,device);RetireRememberedRoutes(account,device);return Ok();}
+            string token=RandomToken();try{accounts.CreateDeviceSession(TokenHash(token),account,device,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds(),hash);}catch(InvalidOperationException){return Error("remember_revoked");}
+            return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",account},{"username",accounts.Username(account)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true}});
+        }
         static string Text(Dictionary<string,object> r,string key){object value;return r.TryGetValue(key,out value)?value as string:null;} static bool Flag(Dictionary<string,object> r,string key,bool fallback){object value;if(!r.TryGetValue(key,out value)||value==null)return fallback;try{return Convert.ToBoolean(value);}catch{return fallback;}} static Dictionary<string,object> Ok(Dictionary<string,object> data=null){var result=new Dictionary<string,object>{{"ok",true},{"version",ProtocolVersion}};if(data!=null)foreach(var p in data)result[p.Key]=p.Value;return result;} static Dictionary<string,object> Error(string code){return new Dictionary<string,object>{{"ok",false},{"version",ProtocolVersion},{"error",code}};}
         readonly object logGate=new object();
         // Operational logs stay in the configured Logs directory. Rotate a single old file so a
         // long-running home server cannot grow an unbounded log beside its executable.
         void Log(string level,string text){string line=DateTime.UtcNow.ToString("o")+" ["+level+"] "+text;Console.WriteLine(line);try{lock(logGate){Directory.CreateDirectory(config.LogDirectory);string file=Path.Combine(config.LogDirectory,"peerchat-server.log");if(File.Exists(file)&&new FileInfo(file).Length>1024*1024){string previous=file+".1";if(File.Exists(previous))File.Delete(previous);File.Move(file,previous);}File.AppendAllText(file,line+Environment.NewLine);}}catch{/* Logging must never prevent the server from accepting clients. */}}
-        public void Run(){startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled for "+config.TurnPublicHost+":"+config.TurnUdpPort+"/UDP; TTL="+config.TurnCredentialTtlSeconds+" seconds.":"TURN media credential issuer disabled.");ThreadPool.QueueUserWorkItem(_=>PresenceMonitor());if(!String.IsNullOrEmpty(managementPipe)){Log("INFO","Local management pipe ready: "+managementPipe);ThreadPool.QueueUserWorkItem(_=>ManagementLoop());}try{while(!stopping){try{var client=listener.AcceptTcpClient();ThreadPool.QueueUserWorkItem(_=>Serve(client));}catch(SocketException){if(!stopping)throw;}}}finally{if(listener!=null)listener.Stop();List<EventClient> subscribers;lock(eventGate){subscribers=new List<EventClient>(eventClients);eventClients.Clear();onlineAccounts.Clear();}foreach(var subscriber in subscribers)subscriber.Dispose();accounts.Dispose();Log("INFO","Server shutdown complete.");}}
+        public void Run(){startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled for "+config.TurnPublicHost+":"+config.TurnUdpPort+"/UDP; TTL="+config.TurnCredentialTtlSeconds+" seconds.":"TURN media credential issuer disabled.");ThreadPool.QueueUserWorkItem(_=>PresenceMonitor());if(!String.IsNullOrEmpty(managementPipe)){Log("INFO","Local management pipe ready: "+managementPipe);ThreadPool.QueueUserWorkItem(_=>ManagementLoop());}try{while(!stopping){try{var client=listener.AcceptTcpClient();ThreadPool.QueueUserWorkItem(_=>Serve(client));}catch(SocketException){if(!stopping)throw;}}}finally{if(listener!=null)listener.Stop();pushWakes.Stop();List<EventClient> subscribers;lock(eventGate){subscribers=new List<EventClient>(eventClients);eventClients.Clear();onlineAccounts.Clear();}foreach(var subscriber in subscribers)subscriber.Dispose();accounts.Dispose();Log("INFO","Server shutdown complete.");}}
         static string DecodeAdminText(string value){try{return String.IsNullOrEmpty(value)?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch{return null;}}
         void ManagementLoop(){while(!stopping){try{using(var pipe=new NamedPipeServerStream(managementPipe,PipeDirection.InOut,4,PipeTransmissionMode.Byte,PipeOptions.None)){pipe.WaitForConnection();var encoding=new UTF8Encoding(false);var reader=new StreamReader(pipe,encoding,false,256,true);var writer=new StreamWriter(pipe,encoding,256,true);var command=reader.ReadLine()??"";Dictionary<string,object> response;if(command=="STATUS")response=Status();else if(command=="STOP"){response=new Dictionary<string,object>{{"ok",true}};RequestStop();}else if(command.StartsWith("ACCOUNT_LIST ",StringComparison.Ordinal)){var parts=command.Substring("ACCOUNT_LIST ".Length).Split(' ');int offset,limit;response=parts.Length==3&&Int32.TryParse(parts[0],out offset)&&Int32.TryParse(parts[1],out limit)?Ok(accounts.AdminAccounts(DecodeAdminText(parts[2]),offset,limit)):Error("invalid_account_search");}else if(command.StartsWith("ACCOUNT_LOOKUP ",StringComparison.Ordinal)){var account=accounts.AdminLookup(DecodeAdminText(command.Substring("ACCOUNT_LOOKUP ".Length)));response=account==null?Error("account_not_found"):Ok(account);}else if(command.StartsWith("DELETE_ACCOUNT ",StringComparison.Ordinal)){long id;response=Int64.TryParse(command.Substring("DELETE_ACCOUNT ".Length),out id)&&id>0?AdminDeleteAccount(id):Error("invalid_account_id");}else response=Error("unsupported_admin_command");writer.WriteLine(json.Serialize(response));writer.Flush();}}catch(Exception error){if(!stopping)Log("WARNING","Local admin pipe error: "+error.GetType().Name);}}}
         Dictionary<string,object> Status(){var data=accounts.Statistics();data["ok"]=true;data["running"]=!stopping;data["uptimeSeconds"]=(long)(DateTime.UtcNow-startedUtc).TotalSeconds;data["port"]=config.Port;data["address"]="0.0.0.0";data["tls"]=true;data["connectedClients"]=Interlocked.CompareExchange(ref connectedClients,0,0);data["turnEnabled"]=config.TurnEnabled;data["turnHost"]=config.TurnEnabled?config.TurnPublicHost:"";data["turnUdpPort"]=config.TurnEnabled?config.TurnUdpPort:0;data["turnCredentialTtlSeconds"]=config.TurnEnabled?config.TurnCredentialTtlSeconds:0;return data;}
@@ -476,6 +598,12 @@ namespace PeerChat.Server {
             }
         }
         void RemoveRelay(RelayEndpoint endpoint){lock(relayGate){waitingRelays.Remove(endpoint);relayEndpoints.Remove(endpoint);activeRelayBindings.Remove(endpoint.Binding);}try{if(endpoint.Peer!=null)endpoint.Peer.Client.Close();}catch{}endpoint.Ready.Dispose();}
+        void RetireRememberedRoutes(long account,string device){
+            List<RelayEndpoint> relays;lock(relayGate)relays=relayEndpoints.Where(value=>value.AccountId==account&&value.DeviceId==device&&accounts.Authenticate(value.SessionTokenHash)==0).ToList();
+            foreach(var endpoint in relays)try{endpoint.Client.Close();}catch{}
+            List<EventClient> events;lock(eventGate)events=eventClients.Where(value=>value.AccountId==account&&value.PublicIdentity==device&&accounts.Authenticate(value.SessionTokenHash)==0).ToList();
+            foreach(var subscription in events)EndEventSubscription(subscription);
+        }
         void RetireGroupRelays(string groupId){
             List<RelayEndpoint> stale;
             lock(relayGate)stale=relayEndpoints.Where(value=>value.Scope=="group_key"&&value.GroupId==groupId).ToList();
@@ -487,12 +615,15 @@ namespace PeerChat.Server {
         void ServeRelay(TcpClient client,SslStream tls,Dictionary<string,object> request){
             string tokenHash=TokenHash(Text(request,"sessionToken"));long accountId=accounts.Authenticate(tokenHash),targetAccountId;string device=Text(request,"publicIdentity"),targetDevice=Text(request,"targetPublicIdentity");
             if(accountId==0){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
-            if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||accountId==targetAccountId||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
+            if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||accountId==targetAccountId||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.SessionAllowsDevice(tokenHash,device)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
             string scope=Text(request,"purpose")??"friend",groupId=Text(request,"groupId")??"";long rosterGeneration=0;
             if(scope=="group_key"&&(!Int64.TryParse(Text(request,"rosterGeneration"),out rosterGeneration)||rosterGeneration<1)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("group_roster_generation_invalid"))));return;}
             bool authorized=scope=="friend"&&groupId.Length==0&&rosterGeneration==0&&accounts.RelayAuthorized(accountId,targetAccountId)
                 ||scope=="group_key"&&accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration);
             if(!authorized){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
+            // Supplement native sender-owned retry/outbox; this is not a mailbox.
+            // A hint carries no TLS records or plaintext and cannot authorize delivery.
+            pushWakes.Hint(targetAccountId,targetDevice);
             var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice,scope,groupId,rosterGeneration,tokenHash);lock(relayGate)relayEndpoints.Add(endpoint);
             if(!PairRelay(endpoint)){lock(relayGate)relayEndpoints.Remove(endpoint);WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
             try{
@@ -510,7 +641,7 @@ namespace PeerChat.Server {
                 // useful for presence and request updates without making it a second data store.
                 if(requestType=="events"){
                     string eventTokenHash=TokenHash(Text(request,"sessionToken"));long eventAccount=accounts.Authenticate(eventTokenHash);string eventIdentity=Text(request,"publicIdentity");
-                    if(eventAccount==0||!ValidIdentity(eventIdentity)||!accounts.OwnsDevice(eventAccount,eventIdentity)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
+                    if(eventAccount==0||!ValidIdentity(eventIdentity)||!accounts.SessionAllowsDevice(eventTokenHash,eventIdentity)||!accounts.OwnsDevice(eventAccount,eventIdentity)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
                     if(IsSupersededEventSession(eventTokenHash)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("event_session_superseded"))));return;}
                     WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","events_ready"}}))));
                     bool clientHeartbeats=Flag(request,"clientHeartbeats",false);tls.ReadTimeout=5000;tls.WriteTimeout=1000;var subscription=new EventClient(client,tls,eventAccount,eventIdentity,eventTokenHash,clientHeartbeats);ReplaceEventSubscription(subscription);accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease");BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);Log("DEBUG","Authenticated discovery event channel opened.");

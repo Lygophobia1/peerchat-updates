@@ -42,6 +42,43 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
         check(session==null) { "Log out before authenticating another session" }
         return accept(request("login",JSONObject().put("username",username).put("password",password), false))
     }
+    private fun deviceProof(challenge:JSONObject,purpose:String,binding:String,key:ByteArray,sign:(ByteArray)->ByteArray):JSONObject {
+        val id=challenge.getString("challengeId");require(id.matches(Regex("[0-9a-f]{64}")))
+        val account=challenge.getLong("accountId");require(account>0)
+        require(challenge.getString("publicIdentity")==device&&challenge.getString("purpose")==purpose&&PeerIdentityFormat.peerId(key)==device)
+        val hash=java.security.MessageDigest.getInstance("SHA-256").digest(binding.toByteArray(Charsets.UTF_8)).joinToString(""){"%02x".format(it)}
+        val input="PeerChat remembered device v1|$purpose|$account|$device|$id|$hash".toByteArray(Charsets.US_ASCII)
+        require(java.util.Base64.getDecoder().decode(challenge.getString("signatureInput")).contentEquals(input))
+        val signature=sign(input);require(signature.size==64)
+        return JSONObject().put("publicIdentity",device).put("challengeId",id)
+            .put("publicKey",java.util.Base64.getEncoder().encodeToString(key))
+            .put("signature",java.util.Base64.getEncoder().encodeToString(signature))
+    }
+    fun remember(key:ByteArray,sign:(ByteArray)->ByteArray):RememberedLogin {
+        require(endpoint.certificatePin.matches(Regex("[0-9a-f]{64}")))
+        val active=checkNotNull(session)
+        val challenge=request("remember_enroll_challenge",JSONObject().put("publicIdentity",device))
+        require(challenge.getLong("accountId")==active.accountId)
+        val fields=deviceProof(challenge,"enroll",active.token,key,sign)
+        val response=request("remember_enroll",fields)
+        check(response.getLong("accountId")==active.accountId&&response.getString("publicIdentity")==device)
+        return RememberedLogin(endpoint,active.accountId,device,response.getString("credential"))
+    }
+    fun resume(value:RememberedLogin,key:ByteArray,sign:(ByteArray)->ByteArray):AccountSession {
+        check(session==null&&!value.revocationPending&&value.device==device&&value.endpoint==endpoint)
+        val response=rememberedAction(value,"resume",key,sign)
+        require(response.getLong("accountId")==value.accountId)
+        return accept(response)
+    }
+    fun revoke(value:RememberedLogin,key:ByteArray,sign:(ByteArray)->ByteArray) {
+        require(value.device==device&&value.endpoint==endpoint)
+        rememberedAction(value,"revoke",key,sign)
+    }
+    private fun rememberedAction(value:RememberedLogin,purpose:String,key:ByteArray,sign:(ByteArray)->ByteArray):JSONObject {
+        val challenge=request("remember_challenge",JSONObject().put("publicIdentity",device).put("credential",value.credential).put("purpose",purpose),false)
+        require(challenge.getLong("accountId")==value.accountId)
+        return request("remember_$purpose",deviceProof(challenge,purpose,value.credential,key,sign).put("credential",value.credential),false)
+    }
     fun presence(): JSONObject {
         val result=request("presence",JSONObject().put("publicIdentity",device).put("directCandidates",false))
         check(result.getLong("accountId")==checkNotNull(session).accountId && result.getString("registeredPublicIdentity")==device)
@@ -53,6 +90,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
         return result
     }
     fun friends(): JSONObject = request("friend_state")
+    fun registerPush(token:String) {require(token.length in 1..2048);request("push_register",JSONObject().put("publicIdentity",device).put("provider","fcm").put("pushToken",token))}
+    fun hint(peerAccount:Long,peerDevice:String){request("push_hint",JSONObject().put("publicIdentity",device).put("targetAccountId",peerAccount.toString()).put("targetPublicIdentity",peerDevice))}
     fun openRelay(targetAccount: Long,targetDevice: String): RelayConnection {
         require(targetAccount>0 && targetDevice.matches(Regex("[0-9a-f]{64}")))
         val active=checkNotNull(session)
