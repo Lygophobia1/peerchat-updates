@@ -23,6 +23,10 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Foundation JNI host fixture compilation failed'}
     & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp $classpath -d $out tests/jni-host/com/peerchat/android/NativeBridge.java tests/jni-host/com/peerchat/android/ProfileBridge.java tests/jni-host/com/peerchat/android/PeerTlsBridge.java tests/jni-host/com/peerchat/android/ReliableBridge.java android/app/src/main/java/com/peerchat/android/platform/tls/OpaqueTlsSigner.java android/app/src/main/java/com/peerchat/android/platform/tls/PeerTls.java android/app/src/main/java/com/peerchat/android/platform/tls/ServerChannel.java android/app/src/main/java/com/peerchat/android/platform/tls/RelayFrames.java tests/tls-host/PeerTlsProof.java tests/tls-host/ReliableProfileProof.java tests/tls-host/ServerRelayProof.java
     if($LASTEXITCODE -ne 0){throw 'Reliable production JNI Java proof compilation failed'}
+    & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp "$out;$classpath" -d $out tests/tls-host/ServerDeadlineProof.java
+    if($LASTEXITCODE -ne 0){throw 'Platform deadline proof compilation failed'}
+    & "$JavaHome\bin\java.exe" -cp "$out;$classpath" com.peerchat.android.platform.tls.ServerDeadlineProof
+    if($LASTEXITCODE -ne 0){throw 'Platform socket/TLS cancellation proof failed'}
     & "$JavaHome\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp "$out;$classpath" com.peerchat.android.platform.tls.ReliableProfileProof "$out\profiles"
     if($LASTEXITCODE -ne 0){throw 'Reliable production JNI/Profile messaging proof failed'}
     if($ServerDirectory){
