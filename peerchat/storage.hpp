@@ -5,6 +5,7 @@
 #include <vector>
 
 namespace peerchat {
+namespace platform { class IdentityProvider; class StoragePlatform; class SqlDatabase; class RecordProtector; }
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
@@ -20,7 +21,10 @@ struct Profile {
     std::string peerId;
     std::wstring name = L"You";
     std::uint16_t listenPort = 7777;
-    Blob publicKey, privateKey; // P-256 CNG blobs; private material is protected on disk.
+    Blob publicKey, privateKey; // Legacy Windows CNG blobs; unchanged on disk.
+    // Opaque, instance-owned key operations. Never serialized. When set, the
+    // privateKey field must be empty; public/wire identity stays exactly the same.
+    std::shared_ptr<platform::IdentityProvider> identity;
 };
 struct Endpoint { std::wstring host; std::uint16_t port=7777; };
 struct Contact {
@@ -43,11 +47,15 @@ struct StoredMessage {
 };
 
 // Thread-confined embedded SQLite store. Construct/use on a worker, not the GUI.
-// Every profile/contact/message payload is protected with current-user DPAPI
-// before binding it to SQLite. SQLite never receives plaintext message content.
+// Every profile/contact/message payload is protected before binding to SQLite:
+// current-user DPAPI on Windows, an explicit profile-bound provider elsewhere.
+// SQLite never receives plaintext message content.
 class Storage {
 public:
     explicit Storage(const std::wstring& directory);
+    explicit Storage(std::shared_ptr<platform::SqlDatabase> database);
+    Storage(std::shared_ptr<platform::SqlDatabase> database,std::shared_ptr<platform::RecordProtector> records);
+    explicit Storage(std::shared_ptr<platform::StoragePlatform> platform);
     ~Storage();
     Storage(const Storage&)=delete;
     Storage& operator=(const Storage&)=delete;

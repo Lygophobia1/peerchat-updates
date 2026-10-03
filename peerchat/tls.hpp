@@ -1,6 +1,9 @@
 #pragma once
 #include "storage.hpp"
 #include <memory>
+#if defined(__ANDROID__)
+#include "platform/peer_tls_provider.hpp"
+#endif
 
 namespace peerchat {
 // TLS 1.2 via Windows Schannel, with certificates backed by persistent P-256 keys.
@@ -9,6 +12,9 @@ namespace peerchat {
 class TlsCredentials {
 public:
     explicit TlsCredentials(const Profile& identity);
+#if defined(__ANDROID__)
+    TlsCredentials(const Profile&,std::shared_ptr<platform::PeerTlsFactory>);
+#endif
     ~TlsCredentials();
     TlsCredentials(const TlsCredentials&)=delete;
     TlsCredentials& operator=(const TlsCredentials&)=delete;
@@ -23,6 +29,9 @@ private:
 class TlsSession {
 public:
     TlsSession(const TlsCredentials& identity,bool incoming);
+#if defined(__ANDROID__)
+    TlsSession(const TlsCredentials&,bool incoming,const std::string& expectedPeer);
+#endif
     ~TlsSession();
     TlsSession(const TlsSession&)=delete;
     TlsSession& operator=(const TlsSession&)=delete;

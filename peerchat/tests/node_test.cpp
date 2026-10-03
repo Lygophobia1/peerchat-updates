@@ -50,7 +50,7 @@ int main(){
         for(size_t index=0;index<peers.size();index++){
             auto path=(directory/std::to_wstring(index)).wstring();
             {Storage store(path);auto profile=store.profile();profile.listenPort=static_cast<unsigned short>(basePort+index);profile.name=L"Test peer "+std::to_wstring(index);store.saveProfile(profile);}
-            peers[index].start(path);
+            peers[index].start(path,static_cast<unsigned short>(basePort+index),{},true);
         }
         wait([&]{for(bool active:ready)if(!active)return false;return true;},"Six listeners did not start");
         for(size_t index=0;index<peers.size();++index){
@@ -72,7 +72,7 @@ int main(){
         peers[5].stop();connected[5].clear();ready[5]=false;
         wait([&]{for(size_t index=0;index<5;index++)if(connected[index].count(identities[5]))return false;return true;},"Disconnect was not detected");
         std::string queued=peers[0].send(identities[5],L"Synthetic encrypted test message \u2603 https://example.test/");require(!queued.empty(),"Offline message rejected");
-        peers[5].start((directory/L"5").wstring());
+        peers[5].start((directory/L"5").wstring(),static_cast<unsigned short>(basePort+5),{},true);
         wait([&]{return received[5].count(queued)&&delivered[0].count(queued);},"Restart/reconnect did not deliver durable outbox message");
         for(auto& peer:peers)peer.stop();
         for(size_t index=0;index<peers.size();index++){
@@ -115,19 +115,27 @@ int main(){
             deadline=Clock::now()+std::chrono::seconds(8);while(Clock::now()<deadline&&!rejected){for(auto& event:local.poll())if(event.kind==NodeEvent::Kind::TrustRequired){if(!requested){require(local.pinInitialAuthenticatedFriendIdentity(event.peerId,event.attemptId,1),"Expected-peer pin command was not queued");requested=true;}else rejected=event.text.find(L"Initial automatic device pinning was rejected")!=std::wstring::npos;}for(auto& event:remote.poll())if(event.kind==NodeEvent::Kind::TrustRequired)remote.approve(event.peerId,true);std::this_thread::sleep_for(std::chrono::milliseconds(10));}
             local.stop();remote.stop();require(requested&&rejected,"Expected Peer ID mismatch was silently pinned");Storage store(localPath);require(store.contacts().empty(),"Expected Peer ID mismatch created a trusted contact");
         }
-        // A pre-existing key record, even if not marked verified, is historical security state.
-        // The restricted path must never replace it merely because the account friendship is valid.
+        // Storage rejects mismatched key/Peer ID records before Node can consume them.
+        // A valid prior device pin for the same account still blocks automatic replacement.
         {
             Node local,remote;std::string localId,remoteId;bool localReady=false,remoteReady=false,requested=false,rejected=false;
             auto localPath=(directory/L"stored-key-mismatch"/L"local").wstring(),remotePath=(directory/L"stored-key-mismatch"/L"remote").wstring();
             remote.start(remotePath,static_cast<unsigned short>(basePort+41),L"Remote");auto deadline=Clock::now()+std::chrono::seconds(5);
             while(Clock::now()<deadline&&!remoteReady){for(auto& event:remote.poll())if(event.kind==NodeEvent::Kind::Ready){remoteId=event.peerId;remoteReady=true;}std::this_thread::sleep_for(std::chrono::milliseconds(10));}
-            require(remoteReady,"Stored-key guard remote did not start");Blob historicalKey(65,0xA5);{Storage store(localPath);store.saveContact({remoteId,L"Historical device",historicalKey,{{L"localhost",static_cast<unsigned short>(basePort+41)}},false});}
+            require(remoteReady,"Stored-key guard remote did not start");
+            Profile historical;
+            {Storage store((directory/L"stored-key-mismatch"/L"historical").wstring());historical=store.profile();}
+            {Storage store(localPath);
+                bool mismatchRejected=false;
+                try{store.saveContact({remoteId,L"Invalid historical device",historical.publicKey,{},false});}
+                catch(const std::exception&){mismatchRejected=true;}
+                require(mismatchRejected&&store.contacts().empty(),"Mismatched contact identity was persisted");
+                store.saveContact({historical.peerId,L"Historical device",historical.publicKey,{},true});}
             local.start(localPath,static_cast<unsigned short>(basePort+42),L"Local");deadline=Clock::now()+std::chrono::seconds(5);
             while(Clock::now()<deadline&&!localReady){for(auto& event:local.poll())if(event.kind==NodeEvent::Kind::Ready){localId=event.peerId;localReady=true;}std::this_thread::sleep_for(std::chrono::milliseconds(10));}
-            require(localReady,"Stored-key guard local did not start");local.replaceAuthenticatedFriends(1001,1,{{1002,remoteId,{remoteId}}});local.connect(L"localhost",static_cast<unsigned short>(basePort+41),remoteId);
-            deadline=Clock::now()+std::chrono::seconds(8);while(Clock::now()<deadline&&!rejected){for(auto& event:local.poll())if(event.kind==NodeEvent::Kind::TrustRequired&&event.peerId==remoteId){if(!requested){require(local.pinInitialAuthenticatedFriendIdentity(event.peerId,event.attemptId,1),"Stored-key pin command was not queued");requested=true;}else rejected=event.text.find(L"stored device key")!=std::wstring::npos;}for(auto& event:remote.poll())if(event.kind==NodeEvent::Kind::TrustRequired)remote.approve(event.peerId,true);std::this_thread::sleep_for(std::chrono::milliseconds(10));}
-            local.stop();remote.stop();require(requested&&rejected,"Stored key mismatch was silently pinned");Storage store(localPath);auto contacts=store.contacts();require(contacts.size()==1&&!contacts[0].verified&&contacts[0].publicKey==historicalKey,"Stored key was overwritten by automatic pinning");
+            require(localReady,"Stored-key guard local did not start");local.replaceAuthenticatedFriends(1001,1,{{1002,remoteId,{remoteId,historical.peerId}}});local.connect(L"localhost",static_cast<unsigned short>(basePort+41),remoteId);
+            deadline=Clock::now()+std::chrono::seconds(8);while(Clock::now()<deadline&&!rejected){for(auto& event:local.poll())if(event.kind==NodeEvent::Kind::TrustRequired&&event.peerId==remoteId){if(!requested){require(local.pinInitialAuthenticatedFriendIdentity(event.peerId,event.attemptId,1),"Stored-key pin command was not queued");requested=true;}else rejected=event.text.find(L"prior device identity")!=std::wstring::npos;}for(auto& event:remote.poll())if(event.kind==NodeEvent::Kind::TrustRequired)remote.approve(event.peerId,true);std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+            local.stop();remote.stop();require(requested&&rejected,"Historical device pin was silently replaced");Storage store(localPath);auto contacts=store.contacts();require(contacts.size()==1&&contacts[0].verified&&contacts[0].peerId==historical.peerId&&contacts[0].publicKey==historical.publicKey,"Historical device pin was overwritten by automatic pinning");
         }
         std::cout<<"PASS: six concurrent peer nodes, 15 direct mutual-TLS links, hostnames, trust, 30 messages and ACKs, disconnect, restart/reconnect, offline outbox, contacts and encrypted histories.\n";
         return 0;

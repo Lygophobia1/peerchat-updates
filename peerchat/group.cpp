@@ -1,20 +1,34 @@
 #define WIN32_LEAN_AND_MEAN
+#if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
+#endif
+#if !defined(_WIN32) || defined(PEERCHAT_PORTABLE_CRYPTO)
+#include "platform/portable_crypto.hpp"
+#endif
 #include "group.hpp"
+#include "platform/identity_provider.hpp"
 #include "protocol.hpp"
 #include <algorithm>
 #include <stdexcept>
 
 namespace peerchat {
 namespace {
+#if defined(_WIN32)
 struct Algorithm { BCRYPT_ALG_HANDLE value{};~Algorithm(){if(value)BCryptCloseAlgorithmProvider(value,0);} };
 struct Key { BCRYPT_KEY_HANDLE value{};Key()=default;Key(const Key&)=delete;Key& operator=(const Key&)=delete;Key(Key&& other)noexcept:value(other.value){other.value=nullptr;}~Key(){if(value)BCryptDestroyKey(value);} };
 void requireNt(NTSTATUS status){if(status<0)throw std::runtime_error("Group signature operation failed");}
+#endif
 std::string hex(const Blob& value){static const char digits[]="0123456789abcdef";std::string result;result.reserve(value.size()*2);for(auto byte:value){result.push_back(digits[byte>>4]);result.push_back(digits[byte&15]);}return result;}
+#if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
 Blob sha256(const Blob& value){Algorithm algorithm;requireNt(BCryptOpenAlgorithmProvider(&algorithm.value,BCRYPT_SHA256_ALGORITHM,nullptr,0));DWORD objectBytes=0,resultBytes=0;requireNt(BCryptGetProperty(algorithm.value,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&objectBytes),sizeof(objectBytes),&resultBytes,0));Blob object(objectBytes),digest(32);BCRYPT_HASH_HANDLE hash{};requireNt(BCryptCreateHash(algorithm.value,&hash,object.data(),static_cast<ULONG>(object.size()),nullptr,0,0));NTSTATUS status=BCryptHashData(hash,const_cast<PUCHAR>(value.data()),static_cast<ULONG>(value.size()),0);if(status>=0)status=BCryptFinishHash(hash,digest.data(),static_cast<ULONG>(digest.size()),0);BCryptDestroyHash(hash);requireNt(status);return digest;}
+#else
+Blob sha256(const Blob& value){return platform::portable_crypto::sha256(value);}
+#endif
+#if defined(_WIN32)
 Key importKey(const Blob& blob,bool privateKey){Algorithm algorithm;requireNt(BCryptOpenAlgorithmProvider(&algorithm.value,BCRYPT_ECDSA_P256_ALGORITHM,nullptr,0));Key key;requireNt(BCryptImportKeyPair(algorithm.value,nullptr,privateKey?BCRYPT_ECCPRIVATE_BLOB:BCRYPT_ECCPUBLIC_BLOB,&key.value,const_cast<PUCHAR>(blob.data()),static_cast<ULONG>(blob.size()),0));return key;}
-bool validName(const std::wstring& value){return !value.empty()&&value.size()<=80&&std::none_of(value.begin(),value.end(),[](wchar_t c){return c<32;});}
+#endif
+bool validName(const std::wstring& value){return !value.empty()&&unicode::utf16Units(value)<=80&&std::none_of(value.begin(),value.end(),[](wchar_t c){return c<32;});}
 bool validPeer(const std::string& value){return protocol::id(value);}
 
 void writeUnsigned(protocol::Writer& writer,const GroupEvent& event){
@@ -33,28 +47,52 @@ std::string newGroupId(){return Storage::newMessageId();}
 Blob signDevicePayload(const Blob& payload,const Profile& device){
     if(payload.size()>70000||Storage::publicKeyId(device.publicKey)!=device.peerId)
         throw std::runtime_error("Invalid device signature input");
+    if(device.identity){
+        if(!device.privateKey.empty()||device.identity->publicKey()!=device.publicKey)throw std::runtime_error("Opaque identity mismatch");
+        auto signature=device.identity->sign(payload);
+        if(!verifyDevicePayload(payload,signature,device.publicKey))throw std::runtime_error("Opaque identity signature mismatch");
+        return signature;
+    }
+#if defined(_WIN32)
     Blob digest=sha256(payload),signature(64);Key key=importKey(device.privateKey,true);ULONG bytes=0;
     requireNt(BCryptSignHash(key.value,nullptr,digest.data(),32,signature.data(),64,&bytes,0));
     if(bytes!=64||!verifyDevicePayload(payload,signature,device.publicKey))
         throw std::runtime_error("Device signature key mismatch");
     return signature;
+#else
+    throw std::runtime_error("Opaque signing provider required");
+#endif
 }
 bool verifyDevicePayload(const Blob& payload,const Blob& signature,const Blob& publicKey){
     try{
         if(payload.size()>70000||signature.size()!=64)return false;
+#if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
         Blob digest=sha256(payload);Key key=importKey(publicKey,false);
         return BCryptVerifySignature(key.value,nullptr,digest.data(),32,
             const_cast<PUCHAR>(signature.data()),64,0)>=0;
+#else
+        return platform::portable_crypto::verify(payload,signature,publicKey);
+#endif
     }catch(...){return false;}
 }
 
 void signGroupEvent(GroupEvent& event,const Profile& device){
     if(event.actorPeerId!=device.peerId||Storage::publicKeyId(device.publicKey)!=device.peerId)throw std::runtime_error("Group actor does not match this device");
-    Blob digest=sha256(unsignedPayload(event));event.eventId=hex(digest);Key key=importKey(device.privateKey,true);ULONG bytes=0;requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),nullptr,0,&bytes,0));event.signature.resize(bytes);requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),event.signature.data(),bytes,&bytes,0));event.signature.resize(bytes);
+    Blob digest=sha256(unsignedPayload(event));event.eventId=hex(digest);
+    if(device.identity){event.signature=signDevicePayload(unsignedPayload(event),device);return;}
+#if defined(_WIN32)
+    Key key=importKey(device.privateKey,true);ULONG bytes=0;requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),nullptr,0,&bytes,0));event.signature.resize(bytes);requireNt(BCryptSignHash(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),event.signature.data(),bytes,&bytes,0));event.signature.resize(bytes);
+#else
+    throw std::runtime_error("Opaque signing provider required");
+#endif
 }
 
 bool verifyGroupEventSignature(const GroupEvent& event,const Blob& publicKey){
+#if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
     try{Blob digest=sha256(unsignedPayload(event));if(event.eventId!=hex(digest)||Storage::publicKeyId(publicKey)!=event.actorPeerId)return false;Key key=importKey(publicKey,false);return BCryptVerifySignature(key.value,nullptr,digest.data(),static_cast<ULONG>(digest.size()),const_cast<PUCHAR>(event.signature.data()),static_cast<ULONG>(event.signature.size()),0)>=0;}catch(...){return false;}
+#else
+    try{auto payload=unsignedPayload(event);return event.eventId==hex(sha256(payload))&&Storage::publicKeyId(publicKey)==event.actorPeerId&&platform::portable_crypto::verify(payload,event.signature,publicKey);}catch(...){return false;}
+#endif
 }
 
 Blob encodeGroupEvent(const GroupEvent& event){protocol::Writer writer(protocol::GroupEvent);writer.string(event.eventId);writeUnsigned(writer,event);writer.bytes(event.signature);return writer.data;}
@@ -88,7 +126,7 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
             else if(event.kind==GroupEventKind::Leave){allowed=actorMember&&actor->second.role!=GroupRole::Owner;if(allowed)next.members.erase(actor);}
             else if(event.kind==GroupEventKind::Remove){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(actor->second.role==GroupRole::Owner||(actor->second.role==GroupRole::Admin&&subject->second.role==GroupRole::Member));if(allowed)next.members.erase(subject);}
             else if(event.kind==GroupEventKind::SetRole){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&actor->second.role==GroupRole::Owner&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(event.value==L"admin"||event.value==L"member");if(allowed)subject->second.role=event.value==L"admin"?GroupRole::Admin:GroupRole::Member;}
-            else if(event.kind==GroupEventKind::Message){allowed=actorMember&&!event.message.empty()&&event.message.size()<=16384;if(allowed)next.messages.push_back(event);}
+            else if(event.kind==GroupEventKind::Message){allowed=actorMember&&!event.message.empty()&&unicode::utf16Units(event.message)<=16384;if(allowed)next.messages.push_back(event);}
         }
         if(allowed){next.maxLogicalOrder=std::max(next.maxLogicalOrder,event.logicalOrder);accepted.insert(event.eventId);}
     }

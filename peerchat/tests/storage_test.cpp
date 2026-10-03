@@ -94,17 +94,17 @@ int main() {
             require(bytes.find(utf16)==std::string::npos,"UTF-16 plaintext leaked to disk");
         }
         {
-            // Profile 0 deliberately erased its history above. Use the independent
-            // recipient copy and prove this fixture contains a protected record.
-            Sqlite api;sqlite3* raw{};auto path=(root/L"1"/L"peerchat.sqlite").wstring();
+            // History deletion above intentionally emptied profile 0. Reinsert
+            // one encrypted fixture and target its stable ID, not an assumed rowid.
+            {Storage fixture((root/L"0").wstring());require(fixture.append(b.peerId,sent[0]),"Tamper fixture was not inserted");}
+            Sqlite api;sqlite3* raw{};auto path=(root/L"0"/L"peerchat.sqlite").wstring();
             require(api.open16(path.c_str(),&raw)==0,"Tamper test open failed");
-            {
-                Statement fixture(api,raw,"SELECT b FROM messages WHERE rowid=1");
-                require(fixture.row(),"Tamper fixture has no message record");
-                require(fixture.bytes(0).size()>32,"Tamper fixture has no valid protected blob");
-            }
-            int rc=api.exec(raw,"UPDATE messages SET b=zeroblob(length(b)) WHERE rowid=1",nullptr,nullptr,nullptr);api.close(raw);require(rc==0,"Tamper test update failed");
-            Storage db((root/L"1").wstring());bool rejected=false,diagnosed=false;try{db.history(a.peerId);}catch(const std::runtime_error& error){rejected=true;diagnosed=std::string(error.what()).find("DPAPI Win32 error")!=std::string::npos;}require(rejected,"Altered ciphertext was accepted");require(diagnosed,"DPAPI failure did not retain its Win32 error diagnostic");
+            {WindowsStatement target(api,raw,"SELECT COUNT(*) FROM messages WHERE id=?");target.text(1,sent[0].id);require(target.row()&&api.column_int64(target.handle,0)==1,"Tamper target missing");}
+            {WindowsStatement fixture(api,raw,"SELECT b FROM messages WHERE id=?");fixture.text(1,sent[0].id);require(fixture.row()&&fixture.bytes(0).size()>32,"Tamper fixture has no valid protected blob");}
+            {WindowsStatement mutation(api,raw,"UPDATE messages SET b=zeroblob(length(b)) WHERE id=?");mutation.text(1,sent[0].id);require(!mutation.row(),"Tamper mutation failed");}
+            {WindowsStatement changed(api,raw,"SELECT COUNT(*) FROM messages WHERE id=? AND b=zeroblob(length(b))");changed.text(1,sent[0].id);require(changed.row()&&api.column_int64(changed.handle,0)==1,"Ciphertext was not altered");}
+            api.close(raw);
+            Storage db((root/L"0").wstring());bool rejected=false,diagnosed=false;try{db.history(b.peerId);}catch(const std::runtime_error& error){rejected=true;diagnosed=std::string(error.what()).find("DPAPI Win32 error")!=std::string::npos;}require(rejected,"Altered ciphertext was accepted");require(diagnosed,"DPAPI failure did not retain its Win32 error diagnostic");
         }
         std::cout<<"PASS: six persistent identities, encrypted history, destination-scoped delivery/ACK, draining ACK, restart resend, dedup, pagination, disk scan, and tamper rejection.\n";
         // Test-created directory is retained for inspection; contains encrypted synthetic data only.
