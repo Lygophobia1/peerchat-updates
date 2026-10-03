@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.peerchat.android.platform.NotificationPreview
 
 enum class Route { Welcome, Login, Server, Home, Conversation, Details, Diagnostics }
 enum class Tab { Chats, Calls, You }
@@ -56,6 +57,9 @@ data class PeerChatUiState(
     val query: String = "", val searching: Boolean = false,
     val load: LoadState = LoadState.Ready, val connection: ConnectionState = ConnectionState.Online,
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
+    val rememberMe:Boolean=false,
+    val drafts:Map<String,String> = emptyMap(),val notificationsEnabled:Boolean=true,
+    val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
     val diagnosticsReturn: Route = Route.Details,
     val theme: ThemeChoice = ThemeChoice.System, val incomingCallPreview: Boolean = false,
@@ -95,6 +99,9 @@ sealed interface UiAction {
     data class SetLoad(val load: LoadState) : UiAction
     data class SetConnection(val connection: ConnectionState) : UiAction
     data class SaveServer(val server: ServerUi) : UiAction
+    data class RememberMe(val enabled:Boolean):UiAction
+    data class Draft(val conversationId:String,val text:String):UiAction
+    data class NotificationSettings(val enabled:Boolean,val preview:NotificationPreview):UiAction
     data class PreviewMessage(val text: String) : UiAction
     data object Older : UiAction
     data object ToggleNotifications : UiAction
@@ -142,6 +149,9 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.SetLoad -> state.copy(load = action.load)
         is UiAction.SetConnection -> state.copy(connection = action.connection)
         is UiAction.SaveServer -> state.copy(server = action.server)
+        is UiAction.RememberMe -> state.copy(rememberMe=action.enabled)
+        is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
+        is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

@@ -3,6 +3,7 @@ package com.peerchat.android.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -27,11 +28,13 @@ import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ConversationScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
-    var draft by rememberSaveable(c.id) { mutableStateOf("") }
+    var draft by rememberSaveable(c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
     var sending by remember(c.id) { mutableStateOf(false) }
-    val list = rememberLazyListState()
+    val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
+    LaunchedEffect(c.id,state.drafts[c.id]){if(!sending&&!state.demo)draft=state.drafts[c.id] ?: ""}
     LaunchedEffect(c.id, c.messages.lastOrNull()?.id) {
-        if (c.messages.isNotEmpty()) {
+        val nearBottom=(list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)>=list.layoutInfo.totalItemsCount-3
+        if (c.messages.isNotEmpty()&&nearBottom) {
             val dateSeparators = c.messages.indices.count { it == 0 || c.messages[it - 1].date != c.messages[it].date }
             list.scrollToItem(c.messages.size + dateSeparators) // + older item, then -1 for last index
         }
@@ -43,7 +46,7 @@ import kotlinx.coroutines.delay
         }
     }
     LaunchedEffect(state.sendCompletion) {
-        if(!state.demo&&sending){if(state.sendAccepted)draft="";sending=false}
+        if(!state.demo&&sending){if(state.sendAccepted){draft="";dispatch(UiAction.Draft(c.id,""))};sending=false}
     }
     Scaffold(topBar = {
         TopAppBar(title = {
@@ -73,7 +76,7 @@ import kotlinx.coroutines.delay
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                 ActionIcon(Icons.Default.Add, "Attachments", { dispatch(UiAction.Notice("File sharing is not available in this preview.")) })
-                OutlinedTextField(draft, { if (it.length <= 4096) draft = it }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                OutlinedTextField(draft, { if (it.length <= 4096){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = state.connection == ConnectionState.Online && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
                 IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && state.connection == ConnectionState.Online) {
@@ -86,7 +89,7 @@ import kotlinx.coroutines.delay
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             if(state.demo) DemoNote()
             if (state.connection != ConnectionState.Online) Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-                Text(if (state.connection == ConnectionState.Offline) "Offline preview · sending disabled" else "Reconnecting preview · sending disabled",
+                Text(if (state.connection == ConnectionState.Offline) "Offline${if(state.demo) " preview" else ""} · sending disabled" else "Reconnecting${if(state.demo) " preview" else ""} · sending disabled",
                     Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodySmall)
             }
             state.notice?.let { notice -> Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {

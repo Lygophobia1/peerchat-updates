@@ -655,3 +655,14 @@ are out of this foundation checkpoint.
 
 Foundation source checkpoint: `40ef623`. Android build/runtime preparation is a
 separate checkpoint; no branch merge or Windows source/package replacement.
+
+## 2026-10-03 accepted messaging and unified QOL candidate
+
+The historical foundation limitations above are superseded for direct text by
+accepted physical messaging checkpoint `5481933`: Android/Windows bidirectional
+text, identity-preserving restart/reconnect and queued recovery are accepted.
+Unified branch `codex/windows-android-unified` merges that state onto Windows
+`2a5b721` at pre-QOL checkpoint `a8bab7b`; authoritative main remains untouched.
+See `ANDROID_QOL_NO_PHONE.md` for Remember Me, bounded wake/notification/QOL
+implementation, host validation, artifact hashes and the next physical checklist.
+QOL has not been physically validated, and concrete FCM delivery remains disabled.

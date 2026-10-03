@@ -120,6 +120,10 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
                 trailingIcon = { TextButton({ visible = !visible }) { Text(if (visible) "Hide" else "Show") } },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().testTag("password"))
             state.loginError?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("login-error")) }
+            Row(verticalAlignment=Alignment.CenterVertically) {
+                Checkbox(state.rememberMe,{dispatch(UiAction.RememberMe(it))},enabled=!state.loginBusy,modifier=Modifier.testTag("remember-me"))
+                Text("Remember me")
+            }
             Button({ login(username, password); password = "" }, enabled = !state.loginBusy, modifier = Modifier.fillMaxWidth().testTag("sign-in-submit")) {
                 if (state.loginBusy) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
                 Text(if (state.loginBusy) "Checking configuration…" else "Sign in")

@@ -29,34 +29,59 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var generation=0L
     private var network=0L
     private var refreshAt=0L
+    private val remembered=AndroidRememberedLoginStore(this.context,profileName)
+    private val pushRegistration=AndroidPushRegistration(this.context,profileName)
+    private var pushRegisteredToken:String?=null
     private val executions=mutableMapOf<Long,AndroidRelayExecution>()
     @Volatile private var stopped=false
+    @Volatile private var inUse=true
+    internal fun setInUse(value:Boolean) {
+        inUse=value
+        if(!value)executor.execute {synchronized(gate){if(!inUse&&!stopped){
+            generation++;clearAuthorization();try{if(remembered.load()==null)accounts?.logout()}catch(_:Exception){}
+            accounts=null;friends=emptyList();index=null;pushRegisteredToken=null;profile?.close();profile=null
+            mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId,status="Inactive; authentication/presence will be verified on resume")
+        }}}
+    }
     init {
         executor.scheduleWithFixedDelay({
             if(!stopped)try {synchronized(gate){tick()}}catch(failure: Exception){
                 if(expiredServerSession(failure))synchronized(gate){
                     generation++;clearAuthorization();accounts=null;index=null;friends=emptyList()
                     mutable.value=mutable.value.copy(authenticated=false,serverPresenceLive=false,conversations=emptyList(),incomingRequests=emptyList(),status="Session expired; sign in again")
+                    // Expiring access sessions are not remembered credentials.
+                    // One bounded refresh through the same coordinator; never
+                    // fight a superseded session or bypass server revocation.
+                    if(inUse&&failure is ServerRejected&&failure.code=="session_invalid")try{
+                        val saved=remembered.load();if(saved!=null&&!saved.revocationPending)restoreRememberedLocked(saved.endpoint)
+                    }catch(_:Exception){/* Retain fail-closed offline state; lifecycle/wake may retry. */}
                     return@scheduleWithFixedDelay
                 }
                 synchronized(gate){mutable.value=mutable.value.copy(serverPresenceLive=false,status=if(failure is ServerRejected)serverRefreshFailure(failure) else "Application/native update validation failed; native delivery state retained")}
             }
         },125,125,TimeUnit.MILLISECONDS)
     }
-    override suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = withContext(Dispatchers.IO) {
+    override suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = signInRemembered(endpoint,username,password,false)
+    override suspend fun signInRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&accounts==null)
             val native=profile ?: NativeProfile(context,profileName).also {profile=it}
             val key=checkNotNull(ProfileBridge.publicKey(native.handle))
             val device=PeerIdentityFormat.peerId(key)
+            if(remember)require(endpoint.certificatePin.matches(Regex("[0-9a-f]{64}")))
+            // Explicit login replaces a previous remembered account only after
+            // durable revocation. Network failure leaves a non-login tombstone.
+            revokeSaved(native,key)
             val connection=ServerAccounts(endpoint,device)
             val authenticated=connection.login(username,password)
             try {
                 connection.verifySession();connection.presence()
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
-                accounts=connection;index=metadata;network++
+                accounts=connection;index=metadata;pushRegisteredToken=null;network++
                 mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,device,true,"Authenticated; refreshing contacts")
                 refresh();refreshAt=System.nanoTime()/1_000_000+5000
+                if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
+                    try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}}
                 authenticated
             } catch(failure: Exception){
                 accounts=null;index=null;friends=emptyList();generation++
@@ -66,12 +91,47 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }
     }
+    private fun revokeSaved(native:NativeProfile,key:ByteArray) {
+        val saved=remembered.load() ?: return
+        check(saved.device==PeerIdentityFormat.peerId(key))
+        remembered.save(saved.pendingRevocation())
+        try{ServerAccounts(saved.endpoint,saved.device).revoke(saved,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}
+        catch(failure:ServerRejected){if(failure.code!="remember_revoked")throw failure}
+        remembered.clear()
+    }
+    override suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean = withContext(Dispatchers.IO) {synchronized(gate){restoreRememberedLocked(endpoint)}}
+    private fun restoreRememberedLocked(endpoint:ServerEndpoint):Boolean {
+        check(!stopped&&inUse)
+        accounts?.let{check(it.endpoint==endpoint);refresh();return true}
+        val saved=remembered.load() ?: return false
+        val native=profile ?: NativeProfile(context,profileName).also{profile=it}
+        val key=checkNotNull(ProfileBridge.publicKey(native.handle));check(saved.device==PeerIdentityFormat.peerId(key))
+        if(saved.revocationPending){revokeSaved(native,key);return false}
+        check(saved.endpoint==endpoint){"Remembered credential belongs to different trusted server"}
+        val connection=ServerAccounts(endpoint,saved.device)
+        try{
+            val authenticated=connection.resume(saved,key){checkNotNull(ProfileBridge.sign(native.handle,it))}
+            connection.verifySession();connection.presence()
+            accounts=connection;index=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId);pushRegisteredToken=null;network++
+            mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,saved.device,true,"Authenticated; refreshing contacts")
+            refresh();refreshAt=System.nanoTime()/1_000_000+5000;return true
+        }catch(failure:Exception){
+            accounts=null;index=null;friends=emptyList();generation++;clearAuthorization()
+            mutable.value=MessagingSnapshot(localPeerId=saved.device,status="Remembered authentication unavailable; sign in or retry")
+            if(failure is ServerRejected&&failure.code=="remember_revoked")remembered.clear()
+            throw failure
+        }
+    }
     override suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&accounts?.session!=null&&friends.any {it.peerId==peerId})
             val result=checkNotNull(ReliableBridge.send(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),text.toByteArray(Charsets.UTF_8)))
             val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
-            publish();id
+            publish()
+            val friend=friends.first{it.peerId==peerId};val owner=accounts
+            // Best effort after native durable queueing. Not another retry policy.
+            executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}
+            id
         }
     }
     override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
@@ -102,7 +162,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         synchronized(gate) {
             generation++;clearAuthorization()
             val old=accounts;accounts=null;friends=emptyList();index=null
-            try {old?.logout()}finally {mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
+            pushRegisteredToken=null
+            try {profile?.let{revokeSaved(it,checkNotNull(ProfileBridge.publicKey(it.handle)))};old?.logout()}
+            finally {mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
             Unit
         }
     }
@@ -128,9 +190,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(incomingRequests=requests.toList())
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
         mutable.value=mutable.value.copy(serverPresenceLive=true,status="Authenticated device presence refreshed; native delivery state active")
+        try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts.registerPush(token);pushRegisteredToken=token}}
+        catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
     }
     private fun tick() {
-        if(accounts?.session==null)return
+        if(!inUse||accounts?.session==null)return
         val now=System.nanoTime()/1_000_000
         if(now>=refreshAt) {
             refreshAt=now+5000
@@ -183,7 +247,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(stopped)return;stopped=true
         // Do not block the UI waiting for an in-progress bounded server request.
         executor.execute {synchronized(gate){
-            generation++;clearAuthorization();try {accounts?.logout()}catch(_: Exception){}
+            generation++;clearAuthorization();try {if(remembered.load()==null)accounts?.logout()}catch(_: Exception){}
             accounts=null;friends=emptyList();index=null;profile?.close();profile=null
         }}
         executor.shutdown()

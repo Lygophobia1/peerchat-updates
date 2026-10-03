@@ -11,6 +11,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
+import android.app.Activity
+import android.os.Build
+import android.Manifest
+import com.peerchat.android.platform.NotificationPreview
 
 @Composable internal fun CallsPage(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -45,6 +50,7 @@ import androidx.compose.ui.unit.dp
 @OptIn(ExperimentalLayoutApi::class)
 @Composable internal fun YouPage(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var friendName by remember {mutableStateOf("")}
+    val context=LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Avatar("You", size = 64)
         Text("Your space", style = MaterialTheme.typography.headlineSmall)
@@ -58,6 +64,19 @@ import androidx.compose.ui.unit.dp
             }
         }
         Text("Settings", style = MaterialTheme.typography.titleLarge)
+        if(!state.demo){
+            Text("Message notifications",style=MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment=Alignment.CenterVertically){
+                Switch(state.notificationsEnabled,{dispatch(UiAction.NotificationSettings(it,state.notificationPreview))})
+                Text("Enable notifications")
+            }
+            if(Build.VERSION.SDK_INT>=33)TextButton({(context as? Activity)?.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),7341)}){Text("Allow Android notifications")}
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)){
+                NotificationPreview.entries.forEach{choice->FilterChip(state.notificationPreview==choice,
+                    {dispatch(UiAction.NotificationSettings(state.notificationsEnabled,choice))},label={Text(when(choice){NotificationPreview.SenderAndMessage->"Sender and message";NotificationPreview.SenderOnly->"Sender only";NotificationPreview.HideContent->"Hide content"})})}
+            }
+            Text("Push carries no content. Background delivery requires Remember Me and a configured push provider.",style=MaterialTheme.typography.bodySmall)
+        }
         if(!state.demo && state.account!=null) {
             OutlinedTextField(friendName,{friendName=it.take(64)},label={Text("Add friend by username")},modifier=Modifier.fillMaxWidth())
             TextButton({dispatch(UiAction.RequestFriend(friendName))},enabled=friendName.isNotBlank()){Text("Send friend request")}
