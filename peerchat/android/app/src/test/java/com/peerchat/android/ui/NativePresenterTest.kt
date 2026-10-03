@@ -20,13 +20,20 @@ import org.robolectric.annotation.Config
 class NativePresenterTest {
     private val dispatcher=StandardTestDispatcher()
     private val store=ViewModelStore()
+    private class Settings:ServerConfigurationRepository {
+        var saved:ServerEndpoint?=null;var invalid=false;var failSave=false
+        override fun load():ServerEndpoint? {if(invalid)error("corrupted settings");return saved}
+        override fun save(endpoint:ServerEndpoint) {if(failSave)error("write failed");saved=endpoint}
+    }
     private class Commands:MessagingApplication {
         override val state=MutableStateFlow(MessagingSnapshot())
         var reject=true;var sends=0;var failSend=false;var closed=false
+        var signIns=0;var endpoint:ServerEndpoint?=null
         override suspend fun signIn(endpoint:ServerEndpoint,username:String,password:String):AccountSession {
+            signIns++;this.endpoint=endpoint
             if(reject)throw ServerRejected("bad_credentials")
             state.value=MessagingSnapshot(19,"Jonah","a".repeat(64),true,"Authenticated",listOf(
-                ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())))
+                ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())),serverPresenceLive=true)
             return AccountSession(19,"Jonah","test-only-token",true)
         }
         override suspend fun send(peerId:String,text:String):String {sends++;if(failSend)error("test failure");return "c".repeat(32)}
@@ -39,10 +46,42 @@ class NativePresenterTest {
     @Before fun start(){Dispatchers.setMain(dispatcher)}
     @After fun stop(){store.clear();Dispatchers.resetMain()}
     private fun presenter(commands:Commands):NativePresenter {
-        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands)
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,Settings(),dispatcher)
         store.put("native",p);dispatcher.scheduler.runCurrent()
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
+        dispatcher.scheduler.advanceUntilIdle()
         return p
+    }
+    @Test fun savedEndpointAndPinAreUsedAfterPresenterRestartAndSignOut() {
+        val settings=Settings();val application=ApplicationProvider.getApplicationContext<Application>()
+        val first=NativePresenter(application,Commands(),settings,dispatcher);store.put("first",first)
+        dispatcher.scheduler.advanceUntilIdle()
+        first.dispatch(UiAction.SaveServer(ServerUi("server.example","8443","F".repeat(64))))
+        dispatcher.scheduler.advanceUntilIdle()
+        val commands=Commands().apply {reject=false}
+        val second=NativePresenter(application,commands,settings,dispatcher);store.put("second",second)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("server.example",second.state.value.server.host)
+        second.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(ServerEndpoint("server.example",8443,"f".repeat(64)),commands.endpoint)
+        second.dispatch(UiAction.SaveServer(ServerUi("attacker.example","7443")))
+        dispatcher.scheduler.advanceUntilIdle();assertEquals("server.example",settings.saved!!.host)
+        second.dispatch(UiAction.SignOut);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("f".repeat(64),second.state.value.server.certificatePin)
+    }
+    @Test fun corruptSavedConfigurationBlocksLoginAndFailedSaveKeepsTrustedPin() {
+        val settings=Settings().apply {invalid=true}
+        val commands=Commands();val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher)
+        store.put("blocked",p);dispatcher.scheduler.advanceUntilIdle()
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle();assertEquals(0,commands.signIns)
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443","a".repeat(64))))
+        dispatcher.scheduler.advanceUntilIdle()
+        settings.failSave=true
+        p.dispatch(UiAction.SaveServer(ServerUi("different.example","7443")))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("a".repeat(64),p.state.value.server.certificatePin)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("a".repeat(64),commands.endpoint!!.certificatePin)
     }
     @Test fun failedLoginNeverAuthenticatesOrEntersDemo() {
         val commands=Commands();val p=presenter(commands)

@@ -6,6 +6,11 @@ import androidx.lifecycle.viewModelScope
 import com.peerchat.android.application.*
 import com.peerchat.android.platform.ServerEndpoint
 import com.peerchat.android.platform.ServerRejected
+import com.peerchat.android.platform.ServerConfigurationRepository
+import com.peerchat.android.platform.AndroidServerConfigurationStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +37,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
     // Diagnostics are safe owner metadata, never messages, credentials or keys.
     val diagnostics=buildString {
         appendLine(snapshot.status)
+        appendLine("Authenticated=${snapshot.authenticated} Server presence live=${snapshot.serverPresenceLive}")
         appendLine("Profile identity: ${snapshot.localPeerId}")
         for(c in snapshot.conversations) {
             appendLine("${c.friend.username}:${c.friend.accountId} · Server Relay")
@@ -43,15 +49,22 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
     return previous.copy(demo=false,conversations=conversations,diagnostics=diagnostics,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
-        connection=if(snapshot.authenticated)ConnectionState.Online else ConnectionState.Offline,
+        connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
+            snapshot.authenticated->ConnectionState.Reconnecting
+            else->ConnectionState.Offline},
         load=if(conversations.isEmpty())LoadState.Empty else LoadState.Ready,recentCalls=emptyList())
 }
 
-class NativePresenter(application: Application,private val backend:MessagingApplication):AndroidViewModel(application),PeerChatPresenter {
+class NativePresenter(application: Application,private val backend:MessagingApplication,
+    private val serverConfiguration:ServerConfigurationRepository=AndroidServerConfigurationStore(application),
+    private val configurationDispatcher:CoroutineDispatcher=Dispatchers.IO):AndroidViewModel(application),PeerChatPresenter {
     constructor(application:Application):this(application,MessagingBackend(application))
     private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList()))
     override val state:StateFlow<PeerChatUiState> = mutable.asStateFlow()
     private var current=MessagingSnapshot()
+    private var configurationReady=false
+    private var configurationInvalid=false
+    private var configurationSaving=false
     // View-only older pages, always fetched from native Storage. Never an outbox.
     private val older=mutableMapOf<Long,List<MessageSnapshot>>()
     private val exhausted=mutableSetOf<Long>()
@@ -65,13 +78,22 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
         })}
     }
-    init {viewModelScope.launch {backend.state.collect {snapshot ->
+    init {viewModelScope.launch {
+        try {
+            val saved=withContext(configurationDispatcher){serverConfiguration.load()}
+            if(saved!=null)mutable.value=mutable.value.copy(server=ServerUi(saved.host,saved.port.toString(),saved.certificatePin))
+        }catch(_:Exception){
+            configurationInvalid=true
+            mutable.value=mutable.value.copy(notice="Saved server configuration could not be verified. Re-enter trusted server settings before signing in.")
+        }finally{configurationReady=true}
+        backend.state.collect {snapshot ->
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
         current=snapshot;project()
     }}}
     override fun login(username:String,password:String) {
         val s=mutable.value
         if(s.loginBusy)return
+        if(!configurationReady||configurationInvalid||configurationSaving){mutable.value=s.copy(loginError="Verify and save trusted server settings before signing in.");return}
         if(username.isBlank()||password.isEmpty()||username.length>64||password.length>1024) {
             mutable.value=s.copy(loginError="Enter your username and password.");return
         }
@@ -136,8 +158,20 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen,
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,
             is UiAction.PreviewLoginFailure,is UiAction.RetryPreview -> mutable.value=mutable.value.copy(notice="This capability is unavailable in Android messaging.")
-            is UiAction.SaveServer -> if(current.authenticated) mutable.value=mutable.value.copy(notice="Sign out before changing server.")
-                else if(validServerDraft(action.server))mutable.value=reduceUi(mutable.value,action)
+            is UiAction.SaveServer -> if(current.authenticated||mutable.value.loginBusy) mutable.value=mutable.value.copy(notice="Sign out before changing server.")
+                else if(configurationReady&&!configurationSaving&&validServerDraft(action.server)) {
+                    configurationSaving=true
+                    viewModelScope.launch {
+                    try {
+                        val endpoint=ServerEndpoint(action.server.host.trim(),action.server.port.toInt(),action.server.certificatePin.lowercase())
+                        withContext(configurationDispatcher){serverConfiguration.save(endpoint)}
+                        configurationInvalid=false
+                        mutable.value=mutable.value.copy(server=ServerUi(endpoint.host,endpoint.port.toString(),endpoint.certificatePin),
+                            notice="Server configuration saved securely for future sign-ins.",loginError=null)
+                    }catch(_:Exception){mutable.value=mutable.value.copy(notice="Server configuration was not saved. Existing trusted settings are unchanged.")}
+                    finally{configurationSaving=false}
+                    }
+                }
             else -> mutable.value=reduceUi(mutable.value,action)
         }
     }

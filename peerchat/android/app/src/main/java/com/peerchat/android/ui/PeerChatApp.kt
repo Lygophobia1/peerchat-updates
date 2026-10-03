@@ -162,8 +162,8 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button({
                 if (!validServerDraft(ServerUi(host, port,pin))) error = "Enter a valid hostname, port and optional 64-character hexadecimal certificate pin."
-                else { dispatch(UiAction.SaveServer(ServerUi(host.trim(), port,pin))); error = null; dispatch(UiAction.Notice("Server configuration saved for this session.")) }
-            }, Modifier.fillMaxWidth()) { Text("Save draft") }
+                else { dispatch(UiAction.SaveServer(ServerUi(host.trim(), port,pin))); error = null }
+            }, Modifier.fillMaxWidth()) { Text("Save server") }
             TextButton({ host = ""; port = "7443"; error = null }) { Text("Restore defaults") }
             state.notice?.let { Text(it) }
         }

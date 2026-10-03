@@ -10,7 +10,20 @@ data class ConversationSnapshot(val friend: FriendIdentity,val connection: Conne
     val messages: List<MessageSnapshot>)
 data class MessagingSnapshot(val accountId: Long=0,val username: String="",val localPeerId: String="",
     val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList(),
-    val incomingRequests:List<AccountRequestSnapshot> = emptyList())
+    val incomingRequests:List<AccountRequestSnapshot> = emptyList(),
+    // Authentication alone is not evidence of a currently refreshed device lease.
+    val serverPresenceLive:Boolean=false)
+
+internal fun expiredServerSession(failure:Exception):Boolean = failure is com.peerchat.android.platform.ServerRejected &&
+    failure.code in setOf("session_invalid","session_superseded","event_session_superseded")
+
+// Safe classification only: never expose exception messages, request bodies,
+// session tokens, credentials, or TLS provider buffers to the UI/diagnostics.
+internal fun serverRefreshFailure(failure:Exception):String = when(failure) {
+    is com.peerchat.android.platform.ServerRejected -> "Server rejected presence/session refresh (${failure.code.take(80).filter {it.isLetterOrDigit()||it=='_'}})"
+    is java.io.IOException -> "Server presence/session refresh unavailable (network/TLS I/O)"
+    else -> "Server presence/session refresh validation failed"
+}
 data class AccountRequestSnapshot(val accountId:Long,val username:String)
 
 internal fun connectionSnapshot(bytes: ByteArray): ConnectionSnapshot {

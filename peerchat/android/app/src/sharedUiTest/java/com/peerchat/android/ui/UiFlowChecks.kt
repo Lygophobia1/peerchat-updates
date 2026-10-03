@@ -3,12 +3,30 @@ package com.peerchat.android.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.graphics.Color
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Rule
 import org.junit.Test
 
 /** UI-only: does not create native handles, identities, aliases or secure records. */
 abstract class UiFlowChecks {
     @get:Rule val compose = createComposeRule()
+    @Test fun onlineColorUsesPresenceAndComposerRemainsVisibleWhileEditing() {
+        var onlineColor=Color.Unspecified;var offlineColor=Color.Unspecified
+        compose.setContent { PeerChatTheme(true) {
+            onlineColor=presenceColor(true);offlineColor=presenceColor(false)
+            val state=PeerChatUiState(route=Route.Conversation,selectedId="demo-dm-sammy",conversations=DemoConversations().initialSnapshot())
+            ConversationScreen(state.selected!!,state,{})
+        } }
+        compose.runOnIdle {
+            assertEquals(Color(0xFF4ADE80),onlineColor)
+            assertNotEquals(onlineColor,offlineColor)
+        }
+        compose.onNodeWithTag("composer").assertIsDisplayed().performClick().performTextInput("Inset check")
+        compose.onNodeWithTag("composer").assertIsDisplayed().assertTextContains("Inset check")
+        compose.onNodeWithContentDescription("Send local preview").assertIsDisplayed().assertIsEnabled()
+    }
     private fun launch(initial: PeerChatUiState = PeerChatUiState(conversations = DemoConversations().initialSnapshot())) {
         compose.setContent {
             var state by remember { mutableStateOf(initial) }

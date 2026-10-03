@@ -34,12 +34,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
     init {
         executor.scheduleWithFixedDelay({
             if(!stopped)try {synchronized(gate){tick()}}catch(failure: Exception){
-                if(failure is ServerRejected&&failure.code in listOf("session_invalid","event_session_superseded"))synchronized(gate){
+                if(expiredServerSession(failure))synchronized(gate){
                     generation++;clearAuthorization();accounts=null;index=null;friends=emptyList()
-                    mutable.value=mutable.value.copy(authenticated=false,conversations=emptyList(),incomingRequests=emptyList(),status="Session expired; sign in again")
+                    mutable.value=mutable.value.copy(authenticated=false,serverPresenceLive=false,conversations=emptyList(),incomingRequests=emptyList(),status="Session expired; sign in again")
                     return@scheduleWithFixedDelay
                 }
-                mutable.value=mutable.value.copy(status="Connection refresh failed; native delivery state retained")
+                synchronized(gate){mutable.value=mutable.value.copy(serverPresenceLive=false,status=if(failure is ServerRejected)serverRefreshFailure(failure) else "Application/native update validation failed; native delivery state retained")}
             }
         },125,125,TimeUnit.MILLISECONDS)
     }
@@ -127,11 +127,20 @@ class MessagingBackend(context: Context,private val profileName: String="default
         friends=authoritative
         mutable.value=mutable.value.copy(incomingRequests=requests.toList())
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
+        mutable.value=mutable.value.copy(serverPresenceLive=true,status="Authenticated device presence refreshed; native delivery state active")
     }
     private fun tick() {
         if(accounts?.session==null)return
         val now=System.nanoTime()/1_000_000
-        if(now>=refreshAt) {refreshAt=now+5000;refresh()}
+        if(now>=refreshAt) {
+            refreshAt=now+5000
+            try {refresh()}catch(failure:Exception){
+                if(failure !is java.io.IOException)throw failure
+                mutable.value=mutable.value.copy(serverPresenceLive=false,status=serverRefreshFailure(failure)+"; native delivery state retained")
+                // A transient server refresh failure must not skip native route
+                // retirement, TLS event draining, ACKs or owner-driven retry.
+            }
+        }
         val native=checkNotNull(profile).handle
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.

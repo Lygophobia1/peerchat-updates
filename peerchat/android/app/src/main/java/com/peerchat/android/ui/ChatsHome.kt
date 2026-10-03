@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,7 +43,7 @@ import androidx.compose.ui.tooling.preview.Preview
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if(state.demo) DemoNote()
-            if (state.connection != ConnectionState.Online) Text("${state.connection.name} preview · no active server",
+            if (state.connection != ConnectionState.Online) Text(if(state.demo)"${state.connection.name} preview · no active server" else "${state.connection.name} · server presence not confirmed",
                 Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.secondary)
             when (state.tab) {
                 Tab.Chats -> {
@@ -74,6 +75,9 @@ import androidx.compose.ui.tooling.preview.Preview
     }
 }
 
+@Composable internal fun presenceColor(online: Boolean): Color =
+    if (online) Color(0xFF4ADE80) else MaterialTheme.colorScheme.onSurfaceVariant
+
 @Composable internal fun Avatar(name: String, group: Boolean = false, size: Int = 48) {
     Surface(shape = CircleShape, color = if (group) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primaryContainer,
         modifier = Modifier.size(size.dp)) {
@@ -90,7 +94,7 @@ import androidx.compose.ui.tooling.preview.Preview
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
             Text(if (c.kind == ChatKind.Group) "Group · ${c.members.size} members · ${c.members.count { it.online }} online" else
-                if (c.online) "● Online" else "Offline", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (c.online) "● Online" else "Offline", style = MaterialTheme.typography.labelSmall, color = presenceColor(c.online))
             Text(c.preview, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (!c.notifications) Text("Muted · preview", style = MaterialTheme.typography.labelSmall)

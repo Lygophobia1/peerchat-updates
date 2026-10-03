@@ -50,8 +50,8 @@ import kotlinx.coroutines.delay
             Column {
                 Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                 Text(if (c.kind == ChatKind.Group) "Group · ${c.members.size} members · ${c.members.count { it.online }} online" else
-                    if (c.online) "Online · demo" else "Offline · demo", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (c.online) "● Online" else "Offline", style = MaterialTheme.typography.labelSmall,
+                    color = presenceColor(c.online))
             }
         }, navigationIcon = { ActionIcon(Icons.AutoMirrored.Filled.ArrowBack, "Back", { dispatch(UiAction.Back) }) }, actions = {
             ActionIcon(Icons.Default.Call, if (c.kind == ChatKind.Group) "Voice rooms" else "Voice call", {
@@ -60,7 +60,9 @@ import kotlinx.coroutines.delay
             ActionIcon(Icons.Default.Info, "Conversation details", { dispatch(UiAction.Navigate(Route.Details)) })
         })
     }, bottomBar = {
-        Column(Modifier.imePadding()) {
+        // The bottom bar owns its insets; Scaffold reserves this measured height.
+        // Union uses the larger nav/IME inset, never adding both paddings.
+        Column(Modifier.windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))) {
             c.voiceRooms.find { it.joined }?.let { CallBar(it, dispatch) }
             c.shareRooms.find { it.watching }?.let { share -> Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                 Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -81,7 +83,7 @@ import kotlinx.coroutines.delay
             }
         }
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
+        Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             if(state.demo) DemoNote()
             if (state.connection != ConnectionState.Online) Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(if (state.connection == ConnectionState.Offline) "Offline preview · sending disabled" else "Reconnecting preview · sending disabled",
