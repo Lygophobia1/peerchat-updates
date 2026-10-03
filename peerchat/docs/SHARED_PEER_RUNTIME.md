@@ -139,3 +139,21 @@ identity/DPAPI/storage/history/outbox/ACK/dedupe and pinned TLS/Schannel regress
 pass. Full Windows build/package audit: `4.0.1-dev.19`. The previously noted
 load-sensitive reconnect wall-clock assertion was rerun unchanged and passed
 after simultaneous compiler jobs ended; it has not been weakened.
+
+### Physical relay adapter prepared (not device-validated)
+
+`ServerAccounts.openRelay` executes the existing authenticated `relay_attach`
+request over the already-validated pinned outer server TLS. It checks the
+friend-only response scope and unchanged session binding before exposing opaque
+bytes. Pairing reads are bounded; idle connected reads remain interruptible by
+closing the socket. `AndroidRelayExecution` executes exactly one native attempt,
+feeds/takes copied peer TLS bytes, and retires it through the native owner. It
+contains no peer reconnect scheduler or Hello/trust/delivery implementation.
+
+`RelayFrames` validates the existing 43-byte ASCII session prefix and exact
+64 KiB payload bound; 1,000 host copied-buffer/session-binding cases pass,
+including malformed, empty, oversized and changed-session envelopes. All Android
+variants/lint and full Windows build/package audit pass (`4.0.1-dev.20`). These
+component tests are not an actual Android/Windows message round-trip claim.
+Application lifecycle, authoritative friend metadata projection and presenter
+binding remain to be connected and tested before another phone request.

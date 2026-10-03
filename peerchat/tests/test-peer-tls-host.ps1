@@ -18,8 +18,10 @@ New-Item -ItemType Directory -Path $out|Out-Null
 $classpath=$jars -join ';'
 Push-Location $root
 try {
-    & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp $classpath -d $out android/app/src/main/java/com/peerchat/android/platform/tls/OpaqueTlsSigner.java android/app/src/main/java/com/peerchat/android/platform/tls/PeerTls.java tests/tls-host/SigningProof.java tests/tls-host/PeerTlsProof.java tests/tls-host/NativeTlsProof.java
+    & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp $classpath -d $out android/app/src/main/java/com/peerchat/android/platform/tls/OpaqueTlsSigner.java android/app/src/main/java/com/peerchat/android/platform/tls/PeerTls.java android/app/src/main/java/com/peerchat/android/platform/tls/RelayFrames.java tests/tls-host/SigningProof.java tests/tls-host/PeerTlsProof.java tests/tls-host/NativeTlsProof.java tests/tls-host/RelayFramesProof.java
     if($LASTEXITCODE -ne 0){throw 'TLS proof compilation failed'}
+    & "$JavaHome\bin\java.exe" -cp "$out;$classpath" com.peerchat.android.platform.tls.RelayFramesProof
+    if($LASTEXITCODE -ne 0){throw 'Opaque relay envelope proof failed'}
     & "$JavaHome\bin\java.exe" -cp "$out;$classpath" SigningProof "$out\compatibility.bin"
     if($LASTEXITCODE -ne 0){throw 'Signing proof failed'}
     & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/android_identity_compat_test.cpp storage.cpp group.cpp -lbcrypt -lcrypt32 -o "$out\windows-verifier.exe"
