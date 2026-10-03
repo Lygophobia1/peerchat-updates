@@ -11,6 +11,9 @@ using PeerChat.Updater;
 static class UpdaterTests
 {
     static int assertions;
+    // Installer fixtures must offer an upgrade from the actual compiled version.
+    static readonly SemanticVersion Current = SemanticVersion.Parse(PeerChat.VersionInfo.Display);
+    static readonly string FutureVersion = Current.Major + "." + Current.Minor + "." + (Current.Patch + 1) + "-dev.1";
 
     static void Assert(bool condition, string message)
     {
@@ -167,7 +170,7 @@ static class UpdaterTests
         string parent = Path.Combine(root, "transaction"); string target = Path.Combine(parent, "Client"); string staged = Path.Combine(parent, "staged");
         Directory.CreateDirectory(target); Directory.CreateDirectory(staged);
         File.WriteAllText(Path.Combine(target, "PeerChat.Desktop.exe"), "old"); File.WriteAllText(Path.Combine(staged, "PeerChat.Desktop.exe"), "new");
-        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = "4.0.1-dev.2", EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = staged };
+        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = FutureVersion, EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = staged };
         string planPath = UpdatePlan.CreateAndSave(prepared, target, 0, 10); UpdatePlan plan = UpdatePlan.Load(planPath);
         Directory.Move(plan.TargetDirectory, plan.BackupDirectory); plan.Phase = UpdatePhase.TargetBackedUp; UpdatePlan.Save(plan);
         new StandaloneInstaller(delegate { }).RecoverInterruptedTransaction(plan);
@@ -188,7 +191,7 @@ static class UpdaterTests
         Directory.CreateDirectory(successTarget); Directory.CreateDirectory(successStage);
         File.WriteAllText(Path.Combine(successTarget, "old.marker"), "old"); File.Copy(healthProbe, Path.Combine(successStage, "PeerChat.Desktop.exe"));
         File.Copy(updaterCore, Path.Combine(successStage, "PeerChat.Updater.Core.dll"));
-        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = "4.0.1-dev.2", EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = successStage };
+        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = FutureVersion, EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = successStage };
         UpdatePlan successPlan = UpdatePlan.Load(UpdatePlan.CreateAndSave(prepared, successTarget, 0, 10));
         Assert(new StandaloneInstaller(delegate { }).Apply(successPlan) == 0, "healthy first launch confirms update");
         Assert(UpdatePlan.Load(successPlan.PlanPath).Phase == UpdatePhase.Confirmed, "successful update phase confirmed");
@@ -199,7 +202,7 @@ static class UpdaterTests
         Directory.CreateDirectory(failureTarget); Directory.CreateDirectory(failureStage);
         File.Copy(healthProbe, Path.Combine(failureTarget, "PeerChat.Desktop.exe")); File.Copy(updaterCore, Path.Combine(failureTarget, "PeerChat.Updater.Core.dll")); File.WriteAllText(Path.Combine(failureTarget, "old.marker"), "old");
         File.Copy(healthProbe, Path.Combine(failureStage, "PeerChat.Desktop.exe")); File.Copy(updaterCore, Path.Combine(failureStage, "PeerChat.Updater.Core.dll")); File.WriteAllText(Path.Combine(failureStage, "fail-health"), "fail");
-        PreparedUpdate failing = new PreparedUpdate { Manifest = new UpdateManifest { Version = "4.0.1-dev.2", EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = failureStage };
+        PreparedUpdate failing = new PreparedUpdate { Manifest = new UpdateManifest { Version = FutureVersion, EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = failureStage };
         UpdatePlan failurePlan = UpdatePlan.Load(UpdatePlan.CreateAndSave(failing, failureTarget, 0, 10));
         Assert(new StandaloneInstaller(delegate { }).Apply(failurePlan) == 2, "missing first-launch confirmation triggers rollback");
         Assert(File.Exists(Path.Combine(failureTarget, "old.marker")), "failed update restores prior installation");
@@ -215,7 +218,7 @@ static class UpdaterTests
         File.WriteAllText(Path.Combine(target, "old.marker"), "old");
         File.Copy(healthProbe, Path.Combine(stage, "PeerChat.Desktop.exe"));
         File.Copy(updaterCore, Path.Combine(stage, "PeerChat.Updater.Core.dll"));
-        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = "4.0.1-dev.2", EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = stage };
+        PreparedUpdate prepared = new PreparedUpdate { Manifest = new UpdateManifest { Version = FutureVersion, EntryExecutable = "PeerChat.Desktop.exe" }, StagedDirectory = stage };
         UpdatePlan plan = UpdatePlan.Load(UpdatePlan.CreateAndSave(prepared, target, 0, 10));
         int targetRenameAttempts = 0; List<string> log = new List<string>();
         Action<string, string> move = (source, destination) => {

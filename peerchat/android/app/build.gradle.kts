@@ -5,6 +5,13 @@ plugins {
 }
 // Integrated app always includes the shared native messaging engine.
 val uiOnly = false
+// Shared product version is authoritative for Android as well as Windows.
+// An explicitly allocated development revision may be supplied by build tooling.
+val sourceVersion = Regex("Display\\s*=\\s*\"([^\"]+)\"")
+    .find(file("../../shared/VersionInfo.cs").readText())?.groupValues?.get(1)
+    ?: error("Missing shared PeerChat version")
+val peerChatVersion = providers.gradleProperty("peerchatVersion").orElse(sourceVersion).get()
+require(Regex("[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+").matches(peerChatVersion))
 android {
     namespace = "com.peerchat.android"
     compileSdk = 35
@@ -14,8 +21,8 @@ android {
         applicationId = "com.peerchat.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "Android messaging integration.1"
+        versionCode = 2
+        versionName = peerChatVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         if (!uiOnly) {
             ndk { abiFilters += "arm64-v8a" }

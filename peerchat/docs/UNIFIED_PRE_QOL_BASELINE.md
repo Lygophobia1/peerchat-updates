@@ -15,8 +15,10 @@ the protected record is nonempty and valid-sized before corruption.
 ## No-phone validation
 
 - Full direct Windows build, restricted package loading/import audit and version
-  checks pass: local worktree build `4.0.1-dev.1`, all component version constants
-  match. Windows reference dev.64 is preserved, not replaced by this package.
+  checks passed during the merge proof. Its local `4.0.1-dev.1` label was stale
+  merged metadata, not unified version history. The first unified development
+  version is `4.0.2-dev.1`; see `ANDROID_QOL_NO_PHONE.md` for its rebuilt artifacts
+  and version/updater audit. Windows reference dev.64 remains preserved.
 - Portable production Storage, DPAPI, opaque identity (1,000 cycles), SQLite,
   protected records, Profile reopen, history/outbox/ACK/dedupe pass.
 - Shared reliable protocol/runtime, 102 real TLS lifecycles, 1,000 stale relay

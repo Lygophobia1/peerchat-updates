@@ -73,9 +73,11 @@ push case. QOL physical results have not been claimed.
   expiring access session, 32 resumes, DB reopen, credential replacement, explicit
   revocation, deleted-device failure, push persistence/replacement/coalescing and
   shutdown. Normal Windows account-token behavior remains tested.
-- Full Windows direct build and restricted package/import audit pass at local
-  `4.0.1-dev.4`; Client/Server/Admin/Updater/Package version constants match.
-  Worktree-local revisions are not newer updater releases than rollback dev.64.
+- Full Windows direct build and restricted package/import audit pass at unified
+  `4.0.2-dev.1`; Client/Server/Admin/Updater/Package and Android versions match.
+  Windows `4.0.1-dev.64` remains the final pre-Android baseline. Earlier local
+  `4.0.1-dev.1`–`.4` merge-proof outputs are stale metadata, not unified version
+  history, and are not publication candidates.
 - Pre-QOL and follow-up discovery/heartbeat/reconnect, real shared JNI/TLS queued
   delivery and group fanout/room regressions retain the accepted media architecture.
 - No ADB commands, phone installation or physical QOL validation occurred.
@@ -85,12 +87,22 @@ push case. QOL physical results have not been claimed.
 Worktree: `C:\Users\Livel\.codex\worktrees\windows-android-unified\Create 2D Game\peerchat`.
 
 - `android/app/build/outputs/apk/debug/app-debug.apk`
-  SHA256 `B4949715E2D17C232CAABE42DE53D9B7B80DADC21926C45DD0E0C5CD50AE711C`
+  SHA256 `B5F9E181B485C6C391F765AA647BD1F144DD0C50C0DCB330644D89D5D68D9202`
 - `android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk`
 - `android/app/build/outputs/apk/release/app-release-unsigned.apk`
-  SHA256 `C0479A969BF8B3BACFB2FC2D56CF5EED22D0BC0D4030C88A3C48BE64D7077E2B`
-- Windows: `build/development/4.0.1-dev.4/{Client,Server,ServerAdmin,Package}`.
+  SHA256 `AE2DD8AA05151E5BB065D7CB833ABB6DC7447C99D87B3E13556E6240CC8375C2`
+- Windows: `build/development/4.0.2-dev.1/{Client,Server,ServerAdmin,Package}`.
   No development updater publication or authoritative-main merge is performed.
+
+Local prepared updater ZIP:
+`build/development/4.0.2-dev.1/DevelopmentUpdater/PeerChat-4.0.2-dev.1.zip`.
+SHA256 `49E850A33146BCC8711751CB78760EB642D3D715FB83D652E4D0F23386D7AA1F`.
+Sibling `manifest.json` declares Development, `4.0.2-dev.1`, and upgrade floor
+`4.0.1-dev.64`. It is unsigned under the existing Development-only policy;
+no release signature is claimed and prospective URLs have not been published.
+Version consistency, exact extracted runtime hashes and production updater safe
+extraction pass via `tests/test-development-version.ps1`. Updater hash/signature,
+downgrade, interrupted-transaction and first-launch rollback tests pass (42 assertions).
 
 ## Morning physical checklist
 

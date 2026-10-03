@@ -51,7 +51,8 @@ credential-reset/admin-device-management UI remains a separate product surface.
 - All 56 Android host/UI tests, debug/test/release APKs and lint pass.
 - ARM64/JNI/TLS release audit, shared profile/reconnect/queued-delivery and existing
   server group fanout/room tests pass. Full Windows build/package passes at local
-  integration build `4.0.1-dev.4`; rollback Windows dev.64 is untouched.
+  integration build `4.0.2-dev.1`; rollback Windows dev.64 is untouched. Earlier
+  `.4` reporting was stale merge metadata, not a unified version-history entry.
 
 Expired access sessions may perform one bounded remembered authentication refresh
 through the existing coordinator. Superseded sessions never fight the replacement.
