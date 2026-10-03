@@ -74,9 +74,38 @@ pass. Full Windows product/package audit passes at **4.0.1-dev.16**. Android
 debug/instrumentation/release APK builds pass. These are host/build results,
 not a new physical-device claim.
 
-This extraction is not yet a complete Android messaging endpoint. JNI must bind
-the same runtime to production peer sessions and existing owners, then connect
-discovery/relay outputs and native-backed presenter state. The former unused
+## Native/JNI messaging adapter
+
+`portable/reliable_endpoint.hpp` now binds the same protocol runtime to the
+profile's existing session/delivery owners and opaque TLS provider. It owns one
+concrete transport execution, not a reconnect scheduler. It advertises only
+mutual TLS and logical ordering, rejects unsupported operations, and keeps
+group/media handlers unavailable on the messaging-only endpoint.
+
+`ReliableBridge` provides copied-buffer commands for authenticated friendship
+snapshots, opening a peer-TLS execution, encrypted transport input/output,
+restricted initial pinning, immutable event polling, durable send, paged native
+history and close. All operations serialize under the existing instance gate.
+Retired handles are not reused. Output chunks are at most 64 KiB; the pending
+transport output ceiling remains 2 MiB. Local native history pages contain at
+most eight entries. Snapshot/event records reuse the checked local serializer;
+they are JNI records, not additional server/peer wire messages.
+
+Trust-contact persistence and durable text construction are shared with Windows
+Node, not reimplemented in Kotlin. GroupControl approval still does not create a
+friend contact. A committed send returns its durable message ID even if the
+current transport fails afterward; the outbox keeps it for reconnect. Revoked
+friend authorization closes the applicable executions without deleting history.
+
+The host endpoint proof runs 102 actual Schannel/TLS executions, then deliberately
+loses an ACK, reconnects, retransmits the same message ID and verifies one history
+record. Native/JNI tests exercise 1,000 invalid/unbound/stale profile lifetimes;
+that rejection proof is not a positive Android profile-messaging claim. Android
+debug/test/release builds, lint and audits include the new production JNI symbols.
+
+This is still not a complete Android networked messaging endpoint. Discovery/
+relay requests, manager-owned retry execution and native-backed presenter state
+must be connected before requesting another phone test. The former unused
 `reliable_peer_runtime.hpp` draft is not included by any production target and
 is not part of this checkpoint. No Android messaging success is claimed from
 host tests or earlier foundation physical tests. No ADB/device operations are

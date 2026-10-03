@@ -11,10 +11,12 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Profile JNI host library compilation failed.'}
     & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -shared -static-libgcc -static-libstdc++ '-Iportable' ("-I$java\include") ("-I$java\include\win32") android\app\src\main\cpp\peerchat_jni.cpp ("-L$out") -lpeerchat_messaging -o "$out\peerchat_jni.dll"
     if($LASTEXITCODE -ne 0){throw 'Foundation JNI host library compilation failed.'}
-    & "$java\bin\javac.exe" -encoding UTF-8 -d $out tests\jni-host\com\peerchat\android\NativeBridge.java tests\jni-host\com\peerchat\android\ProfileBridge.java tests\jni-host\com\peerchat\android\PeerTlsBridge.java
+    & "$java\bin\javac.exe" -encoding UTF-8 -d $out tests\jni-host\com\peerchat\android\NativeBridge.java tests\jni-host\com\peerchat\android\ProfileBridge.java tests\jni-host\com\peerchat\android\PeerTlsBridge.java tests\jni-host\com\peerchat\android\ReliableBridge.java
     if($LASTEXITCODE -ne 0){throw 'Host Java proof compilation failed.'}
     & "$java\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp $out com.peerchat.android.ProfileBridge
     if($LASTEXITCODE -ne 0){throw 'Profile JNI failure-boundary proof failed.'}
     & "$java\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp $out com.peerchat.android.NativeBridge "$out\peerchat_jni.dll" "$out\peerchat_messaging.dll"
     if($LASTEXITCODE -ne 0){throw 'Foundation JNI regression failed.'}
+    & "$java\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp $out com.peerchat.android.ReliableBridge
+    if($LASTEXITCODE -ne 0){throw 'Reliable JNI rejection/lifetime proof failed.'}
 } finally {Pop-Location}

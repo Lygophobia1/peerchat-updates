@@ -665,7 +665,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         outbox(c);groupOutbox(c);
     }
     void approve(Connection& c){
-        c.approved=true;if(c.directTransport){project(c,c.directTransport->locallyTrusted());if(sessionTransports)sessionTransports->markLocallyTrusted(sessionEpoch,{c.attemptId});}protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
+        c.locallyTrusted();if(c.directTransport){project(c,c.directTransport->locallyTrusted());if(sessionTransports)sessionTransports->markLocallyTrusted(sessionEpoch,{c.attemptId});}protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
     }
     void process(Connection& c,const Blob& frame){
         protocol::Reader r(frame);
@@ -703,10 +703,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
             auto known=contacts.find(c.peerId);
             if(c.verifiedContactMatches(known==contacts.end()?nullptr:&known->second,c.tls->remotePublicKey())){
-                Contact contact=known->second;contact.name=c.name;
-                auto endpoint=std::find_if(contact.endpoints.begin(),contact.endpoints.end(),[&](const Endpoint& e){return e.host==c.host&&e.port==c.port;});
-                if(!c.relay&&endpoint==contact.endpoints.end()&&contact.endpoints.size()<128)contact.endpoints.push_back({c.host,c.port});
-                store->saveContact(contact);contacts[c.peerId]=contact;publishContacts();approve(c);
+                auto contact=reliable::persistAuthenticatedContact(*store,c,&known->second,c.tls->remotePublicKey(),c.relay?std::optional<Endpoint>{}:Endpoint{c.host,c.port});
+                contacts[c.peerId]=contact;publishContacts();approve(c);
             }else{NodeEvent e=connectionEvent(NodeEvent::Kind::TrustRequired,c.name,c,c.peerId);e.contacts.push_back({c.peerId,c.name,c.tls->remotePublicKey(),c.relay?std::vector<Endpoint>{}:std::vector<Endpoint>{{c.host,c.port}},false});emit(std::move(e));}
             return;
         }
@@ -1066,10 +1064,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     reject(decision==reliable::InitialPinDecision::HistoricalPin?L"A prior device identity is already pinned for this friend. Verify the changed device explicitly.":L"The stored device key does not match the presented Peer ID. Verify this device explicitly.");
                     continue;
                 }
-                Contact contact=known==contacts.end()?Contact{connection->peerId,connection->name,connection->tls->remotePublicKey(),{},true}:known->second;
-                contact.name=connection->name;contact.publicKey=connection->tls->remotePublicKey();contact.verified=true;
-                if(!connection->relay){auto endpoint=std::find_if(contact.endpoints.begin(),contact.endpoints.end(),[&](const Endpoint& value){return value.host==connection->host&&value.port==connection->port;});if(endpoint==contact.endpoints.end()&&contact.endpoints.size()<128)contact.endpoints.push_back({connection->host,connection->port});}
-                store->saveContact(contact);contacts[connection->peerId]=contact;publishContacts();approve(*connection);
+                auto contact=reliable::persistAuthenticatedContact(*store,*connection,known==contacts.end()?nullptr:&known->second,connection->tls->remotePublicKey(),connection->relay?std::optional<Endpoint>{}:Endpoint{connection->host,connection->port});
+                contacts[connection->peerId]=contact;publishContacts();approve(*connection);
                 emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Initial authenticated friend device identity pinned automatically",*connection,connection->peerId));
             }
             else if(command.action==Action::SaveContact){
@@ -1081,11 +1077,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             else if(command.action==Action::RemoveContact){
                 store->removeContact(command.peer);contacts.erase(command.peer);if(sessionTransports)sessionTransports->removePeer(command.peer);publishContacts();
             }
-            else if(command.action==Action::Approve){for(auto& c:connections)if(!c->dead&&c->hello&&!c->approved&&c->peerId==command.peer){if(!command.accepted){c->closeReason=L"local trust rejection";c->dead=true;continue;}auto known=contacts.find(c->peerId);Contact contact=known==contacts.end()?Contact{c->peerId,c->name,c->tls->remotePublicKey(),{},true}:known->second;contact.name=c->name;contact.publicKey=c->tls->remotePublicKey();contact.verified=true;if(!c->relay){auto endpoint=std::find_if(contact.endpoints.begin(),contact.endpoints.end(),[&](const Endpoint& value){return value.host==c->host&&value.port==c->port;});if(endpoint==contact.endpoints.end()&&contact.endpoints.size()<128)contact.endpoints.push_back({c->host,c->port});}store->saveContact(contact);contacts[c->peerId]=contact;publishContacts();approve(*c);}}
+            else if(command.action==Action::Approve){for(auto& c:connections)if(!c->dead&&c->hello&&!c->approved&&c->peerId==command.peer){
+                if(!command.accepted){c->closeReason=L"local trust rejection";c->dead=true;continue;}
+                auto known=contacts.find(c->peerId);
+                auto contact=reliable::persistAuthenticatedContact(*store,*c,known==contacts.end()?nullptr:&known->second,c->tls->remotePublicKey(),c->relay?std::optional<Endpoint>{}:Endpoint{c->host,c->port});
+                contacts[c->peerId]=contact;publishContacts();approve(*c);
+            }}
             else if(command.action==Action::Send){
                 if(!contacts.count(command.peer)||!contacts[command.peer].verified)throw std::runtime_error("Verify this peer before sending");
-                StoredMessage m{command.id,profile.peerId,command.peer,command.text,static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()),Delivery::Queued,0,store->nextLogicalOrder()};
-                store->append(command.peer,m);NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
+                auto m=reliable::queueText(*store,profile,&contacts.at(command.peer),command.peer,command.id,command.text,
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+                NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
             else if(command.action==Action::EraseHistory){store->eraseHistory(command.peer);NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.text=L"history_cleared";emit(std::move(e));}

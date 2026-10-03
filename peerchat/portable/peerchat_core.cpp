@@ -3,6 +3,8 @@
 #include "../group.hpp"
 #include "../delivery_manager.hpp"
 #include "../protocol.hpp"
+#include "reliable_endpoint.hpp"
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -27,6 +29,10 @@ struct Instance {
     // association when networking is ported. No second reconnect/session policy.
     uint64_t nextTls=1;
     std::map<uint64_t,std::unique_ptr<peerchat::TlsSession>> tls;
+    peerchat::reliable::AuthenticatedFriendSnapshot friends;
+    // Concrete platform executions only; the one existing sessions/deliveries
+    // above remain route/winner/ACK/retry/history authorities.
+    std::map<uint64_t,std::unique_ptr<peerchat::portable::ReliableEndpoint>> peers;
 #if defined(PEERCHAT_STORAGE_TEST_HOOKS)
     bool testProfile=false;
     std::shared_ptr<peerchat::platform::SqlDatabase> testDatabase;
@@ -53,6 +59,132 @@ pc_core_status pc_core_create(pc_core_handle* result){return guarded([&]()->pc_c
 pc_core_status pc_core_destroy(pc_core_handle handle){return guarded([&]()->pc_core_status{
     auto& r=registry();std::lock_guard<std::mutex> lock(r.gate);return r.instances.erase(handle)?PC_CORE_OK:PC_CORE_INVALID_HANDLE;
 });}
+}
+#if defined(__ANDROID__)
+namespace {
+std::uint64_t runtimeNow(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+std::string peerArgument(JNIEnv* env,jbyteArray bytes){
+    if(!bytes||env->GetArrayLength(bytes)!=64)throw std::invalid_argument("Invalid peer identity");
+    auto copy=peerchat::platform::android::Context::output(env,bytes);std::string peer(copy.begin(),copy.end());
+    peerchat::protocol::check(peerchat::protocol::id(peer));return peer;
+}
+void retireEndpoints(Instance& instance,peerchat::portable::ReliableEndpoint& endpoint){
+    for(auto retired:endpoint.takeRetired()){
+        auto found=instance.peers.find(retired.value);
+        if(found!=instance.peers.end())found->second->close(false);
+    }
+}
+void messageRecord(peerchat::protocol::Writer& value,const peerchat::StoredMessage& message){
+    value.string(message.sender);value.string(message.recipient);value.number(message.utcMilliseconds);value.number(message.logicalOrder);
+    value.number(static_cast<std::uint64_t>(message.sequence));value.number(static_cast<std::uint64_t>(message.delivery));value.text(message.text);
+}
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_friends(JNIEnv* env,jobject,jlong handle,jlong account,jlong generation,jbyteArray snapshot){
+    return guarded([&]()->pc_core_status{
+        if(!snapshot||account<0||generation<=0||env->GetArrayLength(snapshot)>262144)return PC_CORE_INVALID_ARGUMENT;
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return PC_CORE_INVALID_ARGUMENT;
+        auto bytes=peerchat::platform::android::Context::output(env,snapshot);peerchat::protocol::Reader reader(bytes);
+        peerchat::protocol::check(reader.type()==peerchat::protocol::Hello);auto count=reader.number();peerchat::protocol::check(count<=1024);
+        std::vector<peerchat::reliable::FriendIdentity> values;
+        for(std::uint64_t i=0;i<count;++i){
+            peerchat::reliable::FriendIdentity value;value.accountId=reader.number();value.expectedPeerId=reader.string();
+            peerchat::protocol::check(value.accountId&&peerchat::protocol::id(value.expectedPeerId));
+            auto known=reader.number();peerchat::protocol::check(known<=32);
+            for(std::uint64_t j=0;j<known;++j){auto peer=reader.string();peerchat::protocol::check(peerchat::protocol::id(peer));value.knownPeerIds.push_back(std::move(peer));}
+            values.push_back(std::move(value));
+        }
+        reader.end();peerchat::protocol::check(account||values.empty());
+        instance->friends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
+        for(auto& peer:instance->peers)if(!instance->friends.contains(peer.second->expected())){
+            peer.second->close(false);instance->sessions.removePeer(peer.second->expected());
+        }
+        return PC_CORE_OK;
+    });
+}
+extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open(JNIEnv* env,jobject,jlong handle,jboolean incoming,jbyteArray pin){
+    try{
+        auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(!instance->storage||!instance->friends.contains(expected)||instance->tls.size()+instance->peers.size()>=32||instance->nextTls==std::numeric_limits<uint64_t>::max())return 0;
+        auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);if(!identity)return 0;
+        auto factory=std::make_shared<peerchat::platform::android::TlsFactory>(identity->context);
+        peerchat::TlsCredentials credentials(instance->profile,std::move(factory));
+        auto tls=std::make_unique<peerchat::TlsSession>(credentials,incoming==JNI_TRUE,expected);
+        auto id=instance->nextTls++;
+        peerchat::session::RouteObservation route{{id},"relay:"+expected,"authenticated server","opaque relay",incoming==JNI_TRUE,1,
+            peerchat::session::TransportKind::Relay,peerchat::session::RouteClass::ServerRelay};
+        auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,
+            instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow());
+        instance->peers.emplace(id,std::move(endpoint));return static_cast<jlong>(id);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 0;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_exchange(JNIEnv* env,jobject,jlong handle,jlong token,jint operation,jbyteArray input){
+    try{
+        if(!input||env->GetArrayLength(input)>65536)return nullptr;
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return nullptr;
+        auto& endpoint=*found->second;peerchat::Blob output;
+        try{
+            if(operation==0){endpoint.receive(peerchat::platform::android::Context::output(env,input),runtimeNow());retireEndpoints(*instance,endpoint);}
+            else{
+                if(env->GetArrayLength(input)!=0)return nullptr;
+                if(operation==1)output=endpoint.takeOutput();
+                else if(operation==2)output={static_cast<unsigned char>(endpoint.ready()),static_cast<unsigned char>(endpoint.closed())};
+                else if(operation==3){
+                    output={static_cast<unsigned char>(endpoint.initialPin(instance->friends.generation(),runtimeNow()))};retireEndpoints(*instance,endpoint);
+                }else if(operation==4){
+                    if(auto event=endpoint.poll()){
+                        peerchat::protocol::Writer value(peerchat::protocol::Ack);value.number(static_cast<std::uint64_t>(event->kind));value.string(event->peer);value.string(event->id);value.number(event->message?1:0);
+                        if(event->message)messageRecord(value,*event->message);
+                        output=std::move(value.data);
+                    }
+                }else return nullptr;
+            }
+        }catch(...){endpoint.close(false);throw;}
+        return peerchat::platform::android::Context::input(env,output);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_close(JNIEnv*,jobject,jlong handle,jlong token,jboolean recoverable){
+    return guarded([&]()->pc_core_status{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return PC_CORE_INVALID_HANDLE;
+        found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);return PC_CORE_OK;
+    });
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_send(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jbyteArray text){
+    try{
+        if(!text||env->GetArrayLength(text)>16384)return nullptr;
+        auto peer=peerArgument(env,destination);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(!instance->storage||!instance->friends.contains(peer))return nullptr;
+        auto bytes=peerchat::platform::android::Context::output(env,text);
+        auto content=peerchat::unicode::decode(std::string(bytes.begin(),bytes.end()));
+        auto contacts=instance->storage->contacts();auto known=std::find_if(contacts.begin(),contacts.end(),[&](const auto& value){return value.peerId==peer;});
+        auto id=peerchat::Storage::newMessageId();
+        peerchat::reliable::queueText(*instance->storage,instance->profile,known==contacts.end()?nullptr:&*known,peer,id,content,
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+        // A committed message remains a successful durable send even if this
+        // particular route fails. Retire it; the same message ID stays pending.
+        for(auto& endpoint:instance->peers)if(endpoint.second->expected()==peer){
+            try{endpoint.second->pump();}catch(...){endpoint.second->close(false);}
+        }
+        return peerchat::platform::android::Context::input(env,peerchat::Blob(id.begin(),id.end()));
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_history(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jlong before){
+    try{
+        if(before<=0)return nullptr;
+        auto peer=peerArgument(env,destination);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return nullptr;
+        auto history=instance->storage->history(peer,8,static_cast<std::int64_t>(before));
+        peerchat::protocol::Writer record(peerchat::protocol::Text);record.number(history.size());
+        for(const auto& message:history){record.string(message.id);messageRecord(record,message);}
+        return peerchat::platform::android::Context::input(env,record.data);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+#endif
+extern "C" {
 pc_core_status pc_core_get_info(pc_core_handle handle,pc_core_info* info){return guarded([&]()->pc_core_status{
     if(!info||info->struct_size!=sizeof(pc_core_info))return PC_CORE_INVALID_ARGUMENT;
     auto instance=lookup(handle);if(!instance)return PC_CORE_INVALID_HANDLE;
@@ -108,7 +240,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_PeerTlsBridge_open(
         if(!pin || env->GetArrayLength(pin)!=64)return 0;
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
         std::lock_guard<std::mutex> lock(instance->gate);
-        if(!instance->storage || instance->tls.size()>=32 || instance->nextTls==std::numeric_limits<uint64_t>::max())return 0;
+        if(!instance->storage || instance->tls.size()+instance->peers.size()>=32 || instance->nextTls==std::numeric_limits<uint64_t>::max())return 0;
         auto bytes=peerchat::platform::android::Context::output(env,pin);
         auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);
         if(!identity)return 0;

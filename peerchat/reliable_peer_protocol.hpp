@@ -1,7 +1,9 @@
 #pragma once
 #include "protocol.hpp"
+#include "group.hpp"
 #include "delivery_manager.hpp"
 #include <map>
+#include <algorithm>
 #include <set>
 
 namespace peerchat::reliable {
@@ -73,6 +75,7 @@ struct PeerProtocolState {
         protocol::check(hello&&reader.type()==protocol::Accepted&&!remoteApproved);
         reader.end();remoteApproved=true;
     }
+    void locallyTrusted(){protocol::check(hello);approved=true;}
     bool verifiedContactMatches(const Contact* contact,const Blob& tlsPublicKey)const {
         if(!contact||!contact->verified)return false;
         protocol::check(contact->peerId==peerId&&contact->publicKey==tlsPublicKey);
@@ -92,6 +95,8 @@ class AuthenticatedFriendSnapshot {
     std::uint64_t account_=0,generation_=0;
     std::map<std::string,Friend> friends_;
 public:
+    bool contains(const std::string& peer)const{return account_&&friends_.count(peer)!=0;}
+    std::uint64_t generation()const noexcept{return generation_;}
     void replace(std::uint64_t account,std::uint64_t generation,const std::vector<FriendIdentity>& values) {
         account_=account;generation_=generation;friends_.clear();
         if(!account_)return;
@@ -122,11 +127,31 @@ public:
         return InitialPinDecision::Allowed;
     }
 };
+// Caller must first pass either stored-pin verification, the constrained initial
+// friend-pin guard, or an explicit user verification decision. Group membership
+// alone must never call this function or create ordinary contact trust.
+inline Contact persistAuthenticatedContact(Storage& store,const PeerProtocolState& state,
+        const Contact* existing,const Blob& tlsKey,std::optional<Endpoint> endpoint={}) {
+    protocol::check(state.hello&&Storage::publicKeyId(tlsKey)==state.peerId);
+    Contact contact=existing?*existing:Contact{state.peerId,state.name,tlsKey,{},true};
+    contact.name=state.name;contact.publicKey=tlsKey;contact.verified=true;
+    if(endpoint&&contact.endpoints.size()<128&&std::none_of(contact.endpoints.begin(),contact.endpoints.end(),
+        [&](const auto& known){return known.host==endpoint->host&&known.port==endpoint->port;}))contact.endpoints.push_back(*endpoint);
+    store.saveContact(contact);return contact;
+}
 struct TextReceipt {
     std::string messageId;
     std::optional<StoredMessage> message;
     bool inserted=false;
 };
+inline StoredMessage queueText(Storage& store,const Profile& local,const Contact* contact,
+                              const std::string& destination,const std::string& messageId,
+                              const std::wstring& text,std::uint64_t utcMilliseconds) {
+    protocol::check(contact&&contact->peerId==destination&&contact->verified&&protocol::id(destination)&&
+        protocol::id(messageId,32)&&!text.empty()&&unicode::utf16Units(text)<=protocol::MaxChatCharacters);
+    StoredMessage message{messageId,local.peerId,destination,text,utcMilliseconds,Delivery::Queued,0,store.nextLogicalOrder()};
+    store.append(destination,message);return message;
+}
 
 inline protocol::Writer textPacket(const StoredMessage& message,bool logicalOrdering) {
     protocol::Writer packet(protocol::Text);
