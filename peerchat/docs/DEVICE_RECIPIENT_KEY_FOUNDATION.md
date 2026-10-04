@@ -1,5 +1,11 @@
 # Device recipient-key foundation: validation and remaining security gate
 
+Status update: the narrow upstream external-DH hook and host opaque HPKE proofs
+are now implemented; see [the current hook report](OPAQUE_HPKE_UPSTREAM_HOOK.md).
+The scalar-only-library blocker described below is historical for Android, but
+production Windows library integration and physical Keystore HPKE remain open.
+No mailbox has been enabled. The original foundation evidence below is retained.
+
 Date: 2026-10-04. Branch: `codex/windows-android-unified`.
 This is a foundation checkpoint, **not an implemented encrypted mailbox**.
 The accepted key audit remains the architecture reference.
