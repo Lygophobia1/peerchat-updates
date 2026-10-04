@@ -4,6 +4,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 // Integrated app always includes the shared native messaging engine.
+apply(from = "../hpke-dependency.gradle.kts")
 val uiOnly = false
 // Shared product version is authoritative for Android as well as Windows.
 // An explicitly allocated development revision may be supplied by build tooling.
