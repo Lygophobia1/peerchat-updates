@@ -51,6 +51,22 @@ string peerTwo=new string('c',64),wrongPeer=new string('d',64);var second=view.B
         Require(legacy.AudioProcessingEnabled&&legacy.NoiseSuppressionEnabled&&legacy.AutomaticGainEnabled,"Existing voice preferences without APM fields lost default-on processing");
     }
     static int Main(string[] args){try{
+        if(args.Contains("--offline-composer-only")){
+            var model=new ChatViewModel{Listening=true};bool offlineReused;
+            var conversation=model.BindFriend(8,"JonahTest2",new string('a',64),null,out offlineReused);
+            conversation.Contact.verified=true;model.Selected=conversation;
+            conversation.Online=true;Require(model.CanQueueDirectText(true,false),"Connected verified friend cannot compose");
+            foreach(var state in new[]{"Offline","Connecting","Retrying with backoff","Unavailable"}){
+                conversation.Online=false;conversation.ConnectionState=state;conversation.WinningConnectionId=0;
+                Require(model.CanQueueDirectText(true,false),"Connection-only state disabled durable offline composition: "+state);
+            }
+            Require(!model.CanQueueDirectText(false,false),"Signed-out account conversation can send");
+            conversation.IsFriend=false;Require(!model.CanQueueDirectText(true,false),"Revoked friend can send");conversation.IsFriend=true;
+            conversation.Contact.verified=false;Require(!model.CanQueueDirectText(true,false),"Unverified device can send");conversation.Contact.verified=true;
+            model.Listening=false;Require(!model.CanQueueDirectText(true,false),"Unavailable profile can send");model.Listening=true;
+            Require(!model.CanQueueDirectText(true,true),"Busy profile can send");model.Selected=null;Require(!model.CanQueueDirectText(true,false),"Missing conversation can send");
+            Console.WriteLine("PASS: offline composer independent of route state; signed-out/revoked/unverified/unavailable/busy/invalid states blocked.");return 0;
+        }
         if(args.Contains("--voice-preferences-only")){TestVoicePreferences(Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","voice-preferences-"+Guid.NewGuid().ToString("N")));Console.WriteLine("PASS: profile-local Voice Audio Processing settings and defaults.");return 0;}
         TestLocalSubnetTransition();if(args.Contains("--subnet-only")){Console.WriteLine("PASS: bidirectional same-LAN classification and runtime cross-subnet invalidation.");return 0;}
         var eligibility=new ChatViewModel();bool reused;

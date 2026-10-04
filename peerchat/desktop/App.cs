@@ -1233,7 +1233,7 @@ public class DesktopApplication {
         RefreshGroupDetails();
 		bool canLoadOlder = (!model.Groups && model.Selected != null && model.Selected.Messages.Count > 0 && !model.Selected.HistoryExhausted) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
 		Find<Button>("Older").Visibility = canLoadOlder ? Visibility.Visible : Visibility.Collapsed;
-		bool flag4 = flag && model.Listening && model.Selected.Contact.verified && !busy;
+        bool flag4=model.CanQueueDirectText(flag3||(accountLink!=null&&accountLink.HasSession),busy);
         ServerGroupRoster sendRoster;
         bool flag5=flag2&&!model.SelectedGroup.Invited&&!busy&&discovery!=null&&discovery.EventChannelConnected&&serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out sendRoster)&&sendRoster.Members.Any(m=>m.State=="member"&&m.AccountId==discovery.AccountId&&m.PeerId==model.OwnId);
 		Find<Button>("Send").IsEnabled = flag4 || flag5;
@@ -4198,7 +4198,26 @@ public class DesktopApplication {
         long dmBefore=conversation.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
         conversation.HistoryLoading=true;conversation.LoadingHistoryPeer=peer;conversation.RequestedPeerHistory.Add(peer);historyScrollKey=conversation.ConversationId;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.History(peer,dmBefore);
     }
-    void Send(){if(!Find<Button>("Send").IsEnabled)return;string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}bool queued=model.Selected!=null&&core.Send(model.Selected.Contact.peer,text);if(queued){var senderDiscovery=discovery;long targetAccount=model.Selected.AccountId;string targetDevice=model.Selected.Contact.peer,localDevice=model.OwnId;Task.Run(()=>{try{if(senderDiscovery!=null)senderDiscovery.HintPendingPeer(targetAccount,targetDevice,localDevice);}catch{/* Optional wake hint never changes durable native delivery. */}});Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Message could not be queued. Try again.");}
+    bool directSendInFlight;
+    async void Send(){
+        if(!Find<Button>("Send").IsEnabled||directSendInFlight)return;
+        string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;
+        if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}
+        var conversation=model.Selected;if(conversation==null||conversation.Contact==null)return;
+        string peer=conversation.Contact.peer;directSendInFlight=true;
+        bool queued=false;
+        try{queued=await Task.Run(()=>core.Send(peer,text));}
+        catch(Exception){/* Preserve draft; the native write did not confirm acceptance. */}
+        finally{directSendInFlight=false;}
+        if(!queued){Notify("Message could not be durably queued. Your draft was kept.");return;}
+        // Message projection comes from the native committed Message event. No
+        // UI-only queue or fabricated Delivered state. Preserve edits/selection
+        // changes made while the local storage operation was finishing.
+        if(conversation.Draft==text)conversation.Draft="";
+        if(!model.Groups&&model.Selected==conversation&&Find<TextBox>("Composer").Text==text){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}
+        var senderDiscovery=discovery;long targetAccount=conversation.AccountId;string localDevice=model.OwnId;
+        Task.Run(()=>{try{if(senderDiscovery!=null)senderDiscovery.HintPendingPeer(targetAccount,peer,localDevice);}catch{/* Optional wake hint never changes durable native delivery. */}});
+    }
     void Notify(string text){Notify(text,null);}
     void Notify(string text,Window owner){Dialog("PeerChat",new string[0],new string[0],"OK",text,false,owner);}
     bool Confirm(string title,string text,string accept){return Dialog(title,new string[0],new string[0],accept,text,true)!=null;}

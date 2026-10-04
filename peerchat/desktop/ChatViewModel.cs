@@ -109,6 +109,14 @@ public class ChatViewModel {
     public string OwnId="",Name="You",Status="Opening your encrypted profile…";
     public ushort Port=7777;
     public bool Listening,Groups;
+    // Local enqueue eligibility, not route readiness. Historical/revoked account
+    // conversations remain readable but cannot send; legacy verified direct
+    // contacts retain their existing profile-local behavior.
+    public bool CanQueueDirectText(bool accountAuthorized,bool busy){
+        var selected=Selected;
+        return !Groups&&Listening&&!busy&&selected!=null&&selected.Contact!=null&&selected.Contact.verified&&
+            !String.IsNullOrEmpty(selected.Contact.peer)&&(selected.AccountId==0||(accountAuthorized&&selected.IsFriend));
+    }
     public string VoiceState="Idle",VoiceCallId="",VoicePeerId="";
     public int VoiceStateCode,VoiceCallType;
     public long VoiceCallLifetime;

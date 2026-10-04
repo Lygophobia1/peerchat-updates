@@ -88,6 +88,9 @@ static void relayNodeContracts(){
     const auto oldLeftAttempt=leftAttempt,oldRightAttempt=rightAttempt;leftSessionDisconnected=rightSessionDisconnected=false;
     left.relayClosed(oldLeftAttempt,L"test remote relay EOF");
     untilLocal([&]{return !leftOnline&&leftSessionDisconnected;},"first relay EOF did not retire the local authoritative winning session");
+    const auto queuedOffline=left.send(rightId,L"queued during disconnected relay");
+    require(!queuedOffline.empty(),"verified disconnected relay rejected durable offline enqueue");
+    require(rightReceivedMessages.count(queuedOffline)==0,"offline message was projected as remotely received before delivery");
     untilLocal([&]{return leftAttempt!=oldLeftAttempt;},"relay-only idle loop did not request a replacement while its peer was still stale",7000);
     require(rightOnline&&rightAttempt==oldRightAttempt,"test did not preserve the asymmetric stale winning session");
     require(left.relayReady(leftAttempt,leftId>rightId),"early replacement relay attempt was rejected");
@@ -96,6 +99,7 @@ static void relayNodeContracts(){
     untilLocal([&]{return rightAttempt!=oldRightAttempt;},"stale remote session blocked a fresh authenticated relay request",7000);
     require(right.relayReady(rightAttempt,rightId>leftId),"replacement relay attempt was rejected");
     leftOnline=rightOnline=false;pumpUntil([&]{return leftOnline&&rightOnline;},"fresh relay sessions did not reauthenticate without restarting either node");
+    pumpUntil([&]{return rightReceivedMessages.count(queuedOffline)!=0;},"existing outbox did not drain the exact offline ID after reconnect");
     const auto afterReconnect=left.send(rightId,L"message after asymmetric relay recovery");require(!afterReconnect.empty(),"reconnected relay winner rejected a message");
     pumpUntil([&]{return rightReceivedMessages.count(afterReconnect)!=0;},"reconnected relay did not carry a new message");
     require(left.beginScopedP2pProbe(rightId,std::string(43,'s'),L"127.0.0.1",1,UINT64_MAX,1),"authorized scoped probe was rejected before temporary listener allocation");untilLocal([&]{return temporaryListenerOpened;},"scoped P2P did not open a temporary listener");require(temporaryListenerPort!=0,"temporary listener did not report its OS-selected port");left.cancelScopedP2p(rightId);untilLocal([&]{return temporaryListenerClosed;},"cancelling scoped P2P did not close the temporary listener");

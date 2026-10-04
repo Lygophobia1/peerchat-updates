@@ -1087,6 +1087,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(!contacts.count(command.peer)||!contacts[command.peer].verified)throw std::runtime_error("Verify this peer before sending");
                 auto m=reliable::queueText(*store,profile,&contacts.at(command.peer),command.peer,command.id,command.text,
                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+                // The caller may clear its draft only after queueText committed
+                // the existing history/outbox transaction, never on command admission.
+                if(command.response)command.response->set_value(std::wstring(m.id.begin(),m.id.end()));
                 NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
@@ -1233,7 +1236,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 else throw std::runtime_error("Unsupported group action");
                 commitLocalGroupEvent(ledger,std::move(event),peers,command.action==Action::GroupInvite);
             }
-        }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
+        }catch(const std::exception& error){if(command.response)try{command.response->set_exception(std::current_exception());}catch(const std::future_error&){}std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
     }
     void reapDeadConnections(){
         for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
@@ -1361,7 +1364,16 @@ int Node::takeRelayOutput(std::uint64_t attempt,unsigned char* bytes,std::size_t
 void Node::saveContact(const Contact& contact){Impl::Command c{};c.action=Impl::Action::SaveContact;c.contact=contact;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::removeContact(const std::string& peer){Impl::Command c{};c.action=Impl::Action::RemoveContact;c.peer=peer;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::approve(const std::string& peer,bool accepted){Impl::Command c{};c.action=Impl::Action::Approve;c.peer=peer;c.accepted=accepted;impl_->command(std::move(c));}
-std::string Node::send(const std::string& peer,const std::wstring& text){if(!protocol::id(peer)||text.empty()||text.size()>protocol::MaxChatCharacters)return {};Impl::Command c{};c.action=Impl::Action::Send;c.peer=peer;c.text=text;c.id=Storage::newMessageId();auto id=c.id;return impl_->command(std::move(c))?id:std::string{};}
+std::string Node::send(const std::string& peer,const std::wstring& text){
+    if(!protocol::id(peer)||text.empty()||text.size()>protocol::MaxChatCharacters)return {};
+    auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();
+    Impl::Command c{};c.action=Impl::Action::Send;c.peer=peer;c.text=text;c.id=Storage::newMessageId();c.response=response;
+    if(!impl_->command(std::move(c)))return {};
+    response.reset(); // A discarded command breaks its promise instead of stranding the caller.
+    // No network wait, and no timeout that could report failure then commit a
+    // message later. The desktop awaits this local persistence result off-thread.
+    try{auto id=result.get();return std::string(id.begin(),id.end());}catch(const std::exception&){return {};}
+}
 void Node::loadHistory(const std::string& peer,std::int64_t before){Impl::Command c{};c.action=Impl::Action::History;c.peer=peer;c.before=before;impl_->command(std::move(c));}
 bool Node::eraseHistory(const std::string& peer){if(!protocol::id(peer))return false;Impl::Command c{};c.action=Impl::Action::EraseHistory;c.peer=peer;return impl_->command(std::move(c));}
 void Node::setName(const std::wstring& name){if(name.empty()||name.size()>64)return;Impl::Command c{};c.action=Impl::Action::Name;c.text=name;impl_->command(std::move(c));}
