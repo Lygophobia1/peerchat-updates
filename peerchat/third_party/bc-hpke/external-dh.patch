@@ -1,0 +1,69 @@
+diff --git a/DHKEM.java b/DHKEM.java
+--- a/DHKEM.java
++++ b/DHKEM.java
+@@ -401,1 +401,8 @@
+-        byte[] secret = calculateRawAgreement(rawAgreement, kpR.getPrivate(), pkE);
++        boolean external = kpR.getPrivate() instanceof ExternalP256PrivateKey;
++        if (external && kemId != HPKE.kem_P256_SHA256)
++        {
++            throw new IllegalArgumentException("external agreement requires P-256");
++        }
++        byte[] secret = external
++            ? ((ExternalP256PrivateKey)kpR.getPrivate()).agree((ECPublicKeyParameters)pkE, (ECPublicKeyParameters)kpR.getPublic())
++            : calculateRawAgreement(rawAgreement, kpR.getPrivate(), pkE);
+@@ -406,1 +413,11 @@
+-        return ExtractAndExpand(secret, KEMContext);
++        try
++        {
++            return ExtractAndExpand(secret, KEMContext);
++        }
++        finally
++        {
++            if (external)
++            {
++                Arrays.fill(secret, (byte)0);
++            }
++        }
+diff --git a/HPKE.java b/HPKE.java
+--- a/HPKE.java
++++ b/HPKE.java
+@@ -540,6 +540,10 @@
+     public HPKEContext setupBaseR(byte[] enc, AsymmetricCipherKeyPair skR, byte[] info)
+     {
++        if (skR.getPrivate() instanceof ExternalP256PrivateKey && (mode != mode_base || kemId != kem_P256_SHA256))
++        {
++            throw new IllegalArgumentException("external agreement requires Base P-256");
++        }
+         byte[] sharedSecret = kem.Decap(enc, skR);
+         return keySchedule(mode_base, sharedSecret, info, default_psk, default_psk_id);
+     }
+@@ -555,6 +559,10 @@
+     public HPKEContext setupPSKR(byte[] enc, AsymmetricCipherKeyPair skR, byte[] info, byte[] psk, byte[] psk_id)
+     {
++        if (skR.getPrivate() instanceof ExternalP256PrivateKey)
++        {
++            throw new IllegalArgumentException("external agreement supports Base only");
++        }
+         byte[] sharedSecret = kem.Decap(enc, skR);
+         return keySchedule(mode_psk, sharedSecret, info, psk, psk_id);
+     }
+@@ -570,6 +578,10 @@
+     public HPKEContext setupAuthR(byte[] enc, AsymmetricCipherKeyPair skR, byte[] info, AsymmetricKeyParameter pkS)
+     {
++        if (skR.getPrivate() instanceof ExternalP256PrivateKey)
++        {
++            throw new IllegalArgumentException("external agreement supports Base only");
++        }
+         byte[] sharedSecret = kem.AuthDecap(enc, skR, pkS);
+         return keySchedule(mode_auth, sharedSecret, info, default_psk, default_psk_id);
+     }
+@@ -585,6 +597,10 @@
+     public HPKEContext setupAuthPSKR(byte[] enc, AsymmetricCipherKeyPair skR, byte[] info, byte[] psk, byte[] psk_id, AsymmetricKeyParameter pkS)
+     {
++        if (skR.getPrivate() instanceof ExternalP256PrivateKey)
++        {
++            throw new IllegalArgumentException("external agreement supports Base only");
++        }
+         byte[] sharedSecret = kem.AuthDecap(enc, skR, pkS);
+         return keySchedule(mode_auth_psk, sharedSecret, info, psk, psk_id);
+     }

@@ -1,0 +1,17 @@
+{
+  "version": "1.86",
+  "commit": "eacda831fbe15b272933e40841d8b0827b556fae",
+  "upstreamMainInspected": "6d7d611b9dcb20c59b2172975ba2a863f17705dc",
+  "files": {
+    "AEAD.java": "c73a0e36b53d63dde66f17bb166c5f987b435ff8d72b782ee510aee70608981b",
+    "DHKEM.java": "e0ab893fd29d408eee3be5ae45284b7a35d13166f4e8afb00d4122eeff4349e7",
+    "HKDF.java": "b8378f10c6a4e83766ecace551e1708b7985b3758871b5b548257e35b69c9860",
+    "HPKE.java": "6fd9300507eb57c28e91ec78602f022f7b1f162bded1dad863cf528664b31973",
+    "HPKEContext.java": "ccbc8caf3dd2257fd031e2a8407f1ea35d4127ab36bcbdc0e516760002109440",
+    "HPKEContextWithEncapsulation.java": "0fab08d60195e354ce1a48c86d72dcbaf45babc2a575dce0098d586eedf95da6",
+    "KEM.java": "bb51b0e681f54fae9e06838c38bb72a2270dc27979ac04ed6c44db899a07b103",
+    "MLKEM.java": "c8f0ca2d1a5bbeab4cd05ec3aee11d5f7bae1659dd17e121e56d64865b7ef575",
+    "XWingKEM.java": "7e0c8ec9e52c67a093f02948fb08780e62b736a31d6e520af941a360514faa64",
+    "LICENSE.html": "afaf5bd0b0d869dc86b71711e1b775b204948634c9710a35a9a70d1613a2ab14"
+  }
+}
