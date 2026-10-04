@@ -8,9 +8,47 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
+import org.bouncycastle.crypto.hpke.HPKE
 
 @RunWith(AndroidJUnit4::class)
 class RecipientKeyDeviceTest {
+    @Test fun stockSenderToOpaqueKeystoreHpke() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val profile = "test_${UUID.randomUUID()}"
+        val provider = AndroidRecipientKeyProvider(context, profile)
+        assumeTrue(provider.supported())
+        val alias = provider.alias(1)
+        val state = ProfileSecurity(context, profile)
+        try {
+            val publicKey = provider.create(alias)
+            val stock = HPKE(HPKE.mode_base, HPKE.kem_P256_SHA256,
+                HPKE.kdf_HKDF_SHA256, HPKE.aead_AES_GCM128)
+            val info = "PeerChat/opaque-hpke-device-test/v1".toByteArray()
+            val aad = "test-account/device/message".toByteArray()
+            val plain = "Synthetic device fixture".toByteArray()
+            repeat(100) {
+                val reopened = AndroidRecipientKeyProvider(context, profile)
+                val sender = stock.setupBaseS(stock.deserializePublicKey(publicKey), info)
+                val ct = sender.seal(aad, plain)
+                assertArrayEquals(plain, AndroidRecipientHpke.open(reopened, alias,
+                    publicKey, sender.encapsulation, info, aad, ct))
+            }
+            assertNull(state.store().getKey(alias, null).encoded)
+            assertFalse(state.store().containsAlias(state.identityAlias))
+            state.store().deleteEntry(alias)
+            val sender = stock.setupBaseS(stock.deserializePublicKey(publicKey), info)
+            var rejected = false
+            try { AndroidRecipientHpke.open(provider, alias, publicKey,
+                sender.encapsulation, info, aad, sender.seal(aad, plain)) }
+            catch (_: Exception) { rejected = true }
+            assertTrue(rejected)
+            assertFalse(provider.exists(alias)) // Never creates on failed open.
+        } finally {
+            check(profile.startsWith("test_"))
+            state.store().deleteEntry(alias)
+            check(!state.directory.exists() || state.directory.deleteRecursively())
+        }
+    }
     @Test fun opaqueAgreementAndReopen() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val profiles = listOf("test_${UUID.randomUUID()}", "test_${UUID.randomUUID()}")

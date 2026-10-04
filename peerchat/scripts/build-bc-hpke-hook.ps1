@@ -21,13 +21,15 @@ $stage=Join-Path $cache ('proof-'+[Guid]::NewGuid().ToString('N'))
 $source=Join-Path $stage 'source'; $classes=Join-Path $stage 'classes'
 New-Item -ItemType Directory -Path $source,$classes | Out-Null
 Copy-Item -LiteralPath @($pins.files.PSObject.Properties | Where-Object {$_.Name -like '*.java'} | ForEach-Object {Join-Path $cache $_.Name}) -Destination $source
+$preparedPatch=Join-Path $stage 'external-dh.patch'
+[IO.File]::WriteAllText($preparedPatch,[IO.File]::ReadAllText((Join-Path $definition 'external-dh.patch')).Replace("`r`n","`n"),$utf8)
 $gitRoot=(& git -C $root rev-parse --show-toplevel).Trim()
 if($LASTEXITCODE -ne 0){throw 'Repository root unavailable'}
 $relativeSource=[IO.Path]::GetRelativePath($gitRoot,$source).Replace('\','/')
 if($relativeSource.StartsWith('../')){throw 'Generated source must remain inside this worktree'}
 Push-Location $gitRoot
 try {
-    & git apply --unidiff-zero --recount "--directory=$relativeSource" (Join-Path $definition 'external-dh.patch')
+    & git apply --unidiff-zero --recount "--directory=$relativeSource" $preparedPatch
     if($LASTEXITCODE -ne 0){throw 'Exact upstream hook patch failed'}
 } finally {Pop-Location}
 if([IO.File]::ReadAllText((Join-Path $source 'DHKEM.java')) -notmatch 'boolean external = kpR.getPrivate\(\) instanceof ExternalP256PrivateKey'){throw 'External DH seam absent; do not compile stock receiver by accident'}
