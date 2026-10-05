@@ -90,6 +90,28 @@ public class DesktopApplication {
     bool changingSelection,busy,closing,closed,trustDialog,friendRefreshInFlight,presenceInFlight,networkRecoveryInFlight,networkRecoveryPending,firewallConfigurationInFlight,accountSetupPrompted,interactiveAccountSetup,groupCreationInFlight;
     ushort firewallConfiguredPort;
     Task startupTask=Task.FromResult(0);
+    Task mailboxTask=Task.FromResult(0);DateTime mailboxNextUtc=DateTime.MinValue;
+    MailboxExecution mailboxExecution;DiscoveryClient mailboxService;
+    bool mailboxStorageAllowed;
+    string MailboxPolicyPath {get{return Path.Combine(directory,"mailbox-policy.dat");}}
+    bool LoadMailboxPolicy(){try{return File.Exists(MailboxPolicyPath)&&Encoding.ASCII.GetString(ProtectedData.Unprotect(File.ReadAllBytes(MailboxPolicyPath),null,DataProtectionScope.CurrentUser))=="PeerChat/mailbox-policy/v1/ALLOWED";}catch{return false;}}
+    void SaveMailboxPolicy(bool allowed){var data=ProtectedData.Protect(Encoding.ASCII.GetBytes("PeerChat/mailbox-policy/v1/"+(allowed?"ALLOWED":"FORBIDDEN")),null,DataProtectionScope.CurrentUser);string temporary=MailboxPolicyPath+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,data);if(File.Exists(MailboxPolicyPath))File.Replace(temporary,MailboxPolicyPath,null);else File.Move(temporary,MailboxPolicyPath);mailboxStorageAllowed=allowed;}
+    void PumpMailbox(){
+        if(closing||busy||discovery==null||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||DateTime.UtcNow<mailboxNextUtc)return;
+        var service=discovery;var peer=model.OwnId;bool allowed=mailboxStorageAllowed;
+        if(mailboxService!=service){mailboxService=service;mailboxExecution=new MailboxExecution(core);}
+        var execution=mailboxExecution;
+        mailboxNextUtc=DateTime.UtcNow.AddSeconds(5);
+        mailboxTask=Task.Run(()=>execution.Service(service,peer,allowed,(sender,inserted)=>window.Dispatcher.BeginInvoke((Action)(()=>{
+            if(closing||discovery!=service)return;
+            var conversation=model.FindByPeer(sender);if(conversation!=null){core.History(sender,Int64.MaxValue);}
+        })))).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
+            if(closing||discovery!=service)return;
+            mailboxNextUtc=DateTime.UtcNow.AddSeconds(5);
+            if(task.IsFaulted)TraceUi("mailbox servicing failed: "+task.Exception.GetBaseException().GetType().Name);
+            else if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);
+        })));
+    }
     readonly Queue<Tuple<CoreEvent,string>> trustRequests=new Queue<Tuple<CoreEvent,string>>();
     readonly HashSet<string> trustPrompted=new HashSet<string>(StringComparer.Ordinal);
     readonly HashSet<string> trustSuppressed=new HashSet<string>(StringComparer.Ordinal);
@@ -274,6 +296,7 @@ public class DesktopApplication {
     }
     public DesktopApplication(string dataDirectory,ushort port,string capturePath=null,bool compact=false,LocalProfileManager manager=null,LocalProfileInfo selectedProfile=null,string healthToken=null){
         directory=dataDirectory;
+        mailboxStorageAllowed=LoadMailboxPolicy();
         conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);pendingGroupStore=new PendingGroupRegistrationStore(directory);foreach(string id in pendingGroupStore.AllIds())markedNewGroupIds.Add(id);connectionPreferenceStore=new ConnectionPreferenceStore(directory);connectionPreferences=connectionPreferenceStore.Load();voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();screenPreferenceStore=new ScreenSharePreferenceStore(directory);screenPreferences=screenPreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
@@ -431,6 +454,7 @@ public class DesktopApplication {
     void Poll(){
         if(busy||closing)return;
         try{
+            PumpMailbox();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -1651,6 +1675,9 @@ public class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+                if(notification!=null&&(notification.Event=="mailbox_ready"||notification.Event=="mailbox_receipt_ready")){
+                    mailboxNextUtc=DateTime.MinValue;PumpMailbox();return;
+                }
                 if(notification!=null&&(notification.Event=="group_room_snapshot"||notification.Event=="group_room_result"||notification.Event=="group_media_signal"||notification.Event=="group_media_result")){
                     RefreshGroupDetails(true);PumpGroupVoice();PumpGroupScreen();return;
                 }
@@ -2988,6 +3015,10 @@ public class DesktopApplication {
 		};
 		settingsPages.Add("General", createInfoPage("General", "General client preferences will appear here as they are introduced. Local profile and account controls remain available from the profile bubble."));
 		settingsPages.Add("Privacy & Security", createInfoPage("Privacy & Security", "Local history is encrypted on this PC. Peer and account trust status remains available in the main Security & Status surface."));
+        var mailboxToggle=new CheckBox{Content="Allow temporary encrypted server storage for offline messages",IsChecked=mailboxStorageAllowed,IsEnabled=core.MailboxSupported,Margin=new Thickness(0,16,0,8),Foreground=Brush("#EDF1F5")};
+        mailboxToggle.Click+=(s,e)=>{try{SaveMailboxPolicy(mailboxToggle.IsChecked==true);mailboxNextUtc=DateTime.MinValue;mailboxExecution=null;mailboxService=null;}catch{mailboxToggle.IsChecked=mailboxStorageAllowed;Notify("Mailbox privacy preference could not be saved.",dialog);}};
+        settingsPages["Privacy & Security"].Children.Add(mailboxToggle);
+        settingsPages["Privacy & Security"].Children.Add(new TextBlock{Text=core.MailboxSupported?"Evaluation only. Server acceptance is Stored, not Delivered. Plaintext and private keys are never uploaded.":"Mailbox encryption is unavailable: no approved shipping HPKE provider is configured.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
 		StackPanel voiceSettings = createInfoPage("Voice", "Profile-specific audio devices and working software levels. Call controls remain in the conversation header.");
 		StackPanel voiceDevicesPanel = new StackPanel();
 		voiceDevicesPanel.Children.Add(new TextBlock { Text = "Input device", Foreground = Brush("#AAB7C4") });

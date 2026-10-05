@@ -15,6 +15,8 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         private set
     @Volatile var finished=false
         private set
+    @Volatile var lastOutputIdleNanos=0L
+        private set
     private var worker: Thread?=null
     fun start() {
         check(worker==null)
@@ -22,13 +24,18 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
     }
     private fun run() {
         var writer: Thread?=null
+        var stage="relay_rendezvous"
         try {
+            android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             val relay=accounts.openRelay(remoteAccount,request.peerId)
+            stage="native_peer_tls_open"
+            android.util.Log.i("PeerChatWake","stage=relay_rendezvous_ready account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             channel=relay.channel
             if(stopping)return
             val peer=request.peerId.toByteArray(Charsets.US_ASCII)
             check(ReliableBridge.open(profile,request.attempt,relay.incoming,peer)==request.attempt)
             attached=true
+            stage="peer_tls_receive"
             check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,ByteArray(0))!=null)
             val frames=RelayFrames(relay.sessionId)
             writer=Thread({
@@ -36,7 +43,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                     while(!stopping) {
                         val bytes=checkNotNull(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.OUTPUT,ByteArray(0)))
                         if(bytes.isNotEmpty())relay.channel.write(frames.wrap(bytes),43+65536)
-                        else Thread.sleep(10) // output readiness poll, never a reconnect decision
+                        else {lastOutputIdleNanos=System.nanoTime();Thread.sleep(10)} // Readout, not a reconnect decision.
                     }
                 } catch(_: Exception) {try {relay.channel.close()}catch(_: Exception){}}
             },"PeerChat relay output").apply {isDaemon=true;start()}
@@ -44,7 +51,8 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 val bytes=frames.unwrap(relay.channel.read(43+65536))
                 check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)
             }
-        } catch(_: Exception) {
+        } catch(failure: Exception) {
+            android.util.Log.i("PeerChatWake","stage="+stage+" attempt=${request.attempt} result="+failure.javaClass.simpleName)
             // No payload/session-token/exception-message logging. Native route
             // retirement and bounded retry stay with the current owner.
         } finally {

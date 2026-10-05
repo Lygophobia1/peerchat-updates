@@ -6,8 +6,8 @@ $compiler=if(Get-Command g++ -ErrorAction SilentlyContinue){(Get-Command g++).So
 New-Item -ItemType Directory -Path $out|Out-Null
 Push-Location $root
 try {
-    foreach($test in @('storage_test','portable_windows_compat_test','opaque_identity_test','storage_backend_test','storage_sql_integration_test','storage_record_provider_test','opaque_profile_storage_test')){
-        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. "tests\$test.cpp" group.cpp -o "$out\$test.exe" -lbcrypt -lcrypt32
+    foreach($test in @('storage_test','portable_windows_compat_test','opaque_identity_test','storage_backend_test','storage_sql_integration_test','storage_record_provider_test','opaque_profile_storage_test','sql_key_registry_test')){
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. "tests\$test.cpp" group.cpp -o "$out\$test.exe" -lbcrypt -lcrypt32 -lncrypt
         if($LASTEXITCODE -ne 0){throw "$test compilation failed ($LASTEXITCODE)."}
         & "$out\$test.exe"
         if($LASTEXITCODE -ne 0){throw "$test failed ($LASTEXITCODE)."}

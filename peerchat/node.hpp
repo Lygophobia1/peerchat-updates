@@ -142,6 +142,7 @@ public:
     std::wstring screenShareDiagnostics();
     MediaTelemetry voiceTelemetry() const;
     std::vector<NodeEvent> poll();
+    Blob mailbox(unsigned operation,const Blob& input={},const std::string& messageId={},bool storageAllowed=false);
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };

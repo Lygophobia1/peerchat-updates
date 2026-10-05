@@ -16,6 +16,10 @@ public sealed class ServerConfiguration {
  // configuration. It is DPAPI-protected for the Windows user running this server and is never
  // serialized in plaintext or returned by the discovery protocol.
  public bool TurnEnabled=false;
+ // FCM service credentials stay in an external administrator-managed file,
+ // never in discovery responses, client packages or the server database.
+ public bool FcmEnabled=false;
+ public string FcmProjectId="",FcmServiceAccountPath="";
  public string TurnPublicHost="";
  public int TurnUdpPort=3478;
  public int TurnCredentialTtlSeconds=600;

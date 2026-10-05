@@ -23,14 +23,22 @@ public final class ServerChannel implements AutoCloseable {
         private boolean active=true;
         private long deadline=Long.MAX_VALUE;
         private BouncyCastleJsseProvider tlsProvider;
+        private int providerInitializations;
+        private long providerInitializationNanos;
         // Provider construction loads the pinned algorithm registry. Reuse that
         // immutable registry within the backend I/O scope, not SSLContext,
         // sessions, credentials, sockets or a platform-global registration.
         private synchronized BouncyCastleJsseProvider tlsProvider() throws IOException {
             check();
-            if(tlsProvider==null)tlsProvider=new BouncyCastleJsseProvider(new BouncyCastleProvider());
+            if(tlsProvider==null){
+                long start=System.nanoTime();
+                tlsProvider=new BouncyCastleJsseProvider(new BouncyCastleProvider());
+                providerInitializationNanos=System.nanoTime()-start;providerInitializations++;
+            }
             check();return tlsProvider;
         }
+        public synchronized int providerInitializationCount(){return providerInitializations;}
+        public synchronized long providerInitializationMillis(){return providerInitializationNanos/1_000_000;}
         public synchronized void configure(boolean enabled,long deadlineNanos) {
             if(alarm!=null)alarm.cancel(false);
             active=enabled;deadline=deadlineNanos;
@@ -96,7 +104,14 @@ public final class ServerChannel implements AutoCloseable {
         // No global provider
         // registration and no Android identity/private-key substitution. Outer
         // server TLS uses account authentication, not mutual device certificates.
+        int previousInitializations=operations.providerInitializationCount();
+        long providerAcquireStarted=System.nanoTime();
         BouncyCastleJsseProvider provider=operations.tlsProvider();
+        if(timing!=null)try{
+            timing.accept("crypto_provider_initializations",(long)operations.providerInitializationCount());
+            timing.accept(previousInitializations==0?"crypto_provider_initialized":"crypto_provider_reused",(System.nanoTime()-providerAcquireStarted)/1_000_000);
+            if(previousInitializations==0)timing.accept("crypto_provider_initialization_duration",operations.providerInitializationMillis());
+        }catch(RuntimeException ignored){/* Instrumentation cannot affect TLS/trust. */}
         SSLContext context=SSLContext.getInstance("TLS",provider);context.init(null,new TrustManager[]{trust},null);
         observe(timing,"tls_context_ready",started);
         tcp=new Socket(); SSLSocket candidate=null;

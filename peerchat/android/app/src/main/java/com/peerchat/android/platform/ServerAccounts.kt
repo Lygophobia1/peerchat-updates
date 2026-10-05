@@ -4,31 +4,40 @@ import com.peerchat.android.platform.tls.ServerChannel
 import org.json.JSONObject
 
 data class ServerEndpoint(val host: String, val port: Int, val certificatePin: String = "")
-data class AccountSession(val accountId: Long, val username: String, internal val token: String, val relayOnly: Boolean) {
+data class AccountSession(val accountId: Long, val username: String, internal val token: String, val relayOnly: Boolean,val bootstrapVersion:Int=0) {
     override fun toString() = "AccountSession(accountId=$accountId, username=$username, relayOnly=$relayOnly)"
 }
 
 // Counterpart of Desktop DiscoveryClient, not a native session/delivery owner.
 // Passwords/tokens are never logged. A session remains scoped to this profile.
-class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
+class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
+    private val operations:ServerChannel.OperationScope=ServerChannel.OperationScope()) {
     @Volatile var session: AccountSession? = null
         private set
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
+    private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","friend_request","friend_respond"))type else "other"
+    private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
+        android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
+    }
     fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true): JSONObject {
+        operations.check()
+        val started=System.nanoTime()
+        android.util.Log.i("PeerChatWake","stage=server_request_started operation="+safeOperation(type))
         fields.put("version", 1).put("type", type)
         if(authenticated) fields.put("sessionToken", checkNotNull(session).token)
         val bytes = fields.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 4096)
-        val response = ServerChannel(endpoint.host, endpoint.port, endpoint.certificatePin, false).use { channel ->
+        val response=try {channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
+            android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
             JSONObject(channel.read(16384).toString(Charsets.UTF_8))
-        }
+        }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
         if(!response.optBoolean("ok")) throw ServerRejected(response.optString("error", "request_failed"))
         return response
     }
     private fun accept(response: JSONObject): AccountSession {
         val next = AccountSession(response.getLong("accountId"), response.getString("username"),
-            response.getString("sessionToken"), response.optBoolean("relayOnlyPresence"))
+            response.getString("sessionToken"), response.optBoolean("relayOnlyPresence"),response.optInt("messagingBootstrapVersion",0))
         check(next.accountId > 0 && next.token.isNotEmpty() && next.relayOnly) { "Server lacks required relay-only capability" }
         session = next
         return next
@@ -90,13 +99,19 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
         return result
     }
     fun friends(): JSONObject = request("friend_state")
+    fun bootstrap():JSONObject {
+        val active=checkNotNull(session)
+        if(active.bootstrapVersion!=1){presence();return friends()} // Existing servers, same fail-closed checks.
+        val response=request("messaging_bootstrap",JSONObject().put("publicIdentity",device).put("bootstrapVersion",1))
+        return validateMessagingBootstrap(response,active.accountId,device)
+    }
     fun registerPush(token:String) {require(token.length in 1..2048);request("push_register",JSONObject().put("publicIdentity",device).put("provider","fcm").put("pushToken",token))}
     fun hint(peerAccount:Long,peerDevice:String){request("push_hint",JSONObject().put("publicIdentity",device).put("targetAccountId",peerAccount.toString()).put("targetPublicIdentity",peerDevice))}
     fun openRelay(targetAccount: Long,targetDevice: String): RelayConnection {
         require(targetAccount>0 && targetDevice.matches(Regex("[0-9a-f]{64}")))
         val active=checkNotNull(session)
         require(active.accountId!=targetAccount)
-        val channel=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false)
+        val channel=channel("relay_attach")
         try {
             channel.readTimeout(20000) // existing server pairing deadline is 15 s
             val fields=JSONObject().put("version",1).put("type","relay_attach").put("sessionToken",active.token)
@@ -113,8 +128,30 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
     }
     fun logout() { try { if(session != null) request("logout") } finally { session=null } }
     fun openEvents(): ServerChannel = openSubscription("events",JSONObject().put("clientHeartbeats",true))
+    // Opaque mailbox application RPC over the existing authenticated/pinned
+    // server TLS request adapter. No plaintext, local outbox, or retry owner here.
+    fun mailbox(operation: String, payload: JSONObject): JSONObject {
+        require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"))
+        val requestId=java.util.UUID.randomUUID().toString().replace("-","")
+        val connection=channel("mailbox")
+        try {
+            connection.readTimeout(10000)
+            val hello=JSONObject().put("version",1).put("type","mailbox_rpc").put("requestId",requestId)
+                .put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
+            connection.write(hello.toString().toByteArray(Charsets.UTF_8),4096)
+            val ready=JSONObject(connection.read(16384).toString(Charsets.UTF_8))
+            if(!ready.optBoolean("ok"))throw ServerRejected(ready.optString("error","mailbox_rejected"))
+            check(ready.getString("type")=="mailbox_ready"&&ready.getString("requestId")==requestId)
+            payload.put("type",operation).put("requestId",requestId)
+            connection.write(payload.toString().toByteArray(Charsets.UTF_8),100000)
+            connection.readTimeout(10000)
+            val reply=JSONObject(connection.read(100000).toString(Charsets.UTF_8))
+            check(reply.getString("type")=="mailbox_result"&&reply.getString("requestId")==requestId&&reply.getString("operation")==operation)
+            return reply
+        } finally {connection.close()}
+    }
     private fun openSubscription(type: String, fields: JSONObject): ServerChannel {
-        val channel=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false)
+        val channel=channel("events")
         try {
             fields.put("version",1).put("type",type).put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
             channel.write(fields.toString().toByteArray(Charsets.UTF_8),4096)
@@ -130,3 +167,12 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String) {
 class RelayConnection(val channel: ServerChannel,val sessionId: String,val incoming: Boolean)
 class ServerRejected(val code: String) : Exception("Server request rejected: " +
     code.take(80).filter { it.isLetterOrDigit() || it=='_' })
+
+internal fun validateMessagingBootstrap(response:JSONObject,account:Long,device:String):JSONObject {
+    require(response.getInt("version")==1&&response.getInt("bootstrapVersion")==1)
+    require(response.getLong("accountId")==account&&response.getString("registeredPublicIdentity")==device)
+    require(response.getBoolean("presenceLive")&&response.getBoolean("relayOnlyPresence"))
+    val state=response.getJSONObject("friendState")
+    for(name in listOf("friends","incoming","outgoing","blocked"))require(state.getJSONArray(name).length()<=128)
+    return state
+}

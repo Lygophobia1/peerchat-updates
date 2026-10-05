@@ -26,7 +26,8 @@ public final class WolfCryptCngEvaluation {
         }));
         byte[] info=bytes("PeerChat evaluation RFC9180 Base"),aad=bytes("synthetic-account/device/message-v1"),plain=bytes("Synthetic HPKE test fixture only");
         var hex=HexFormat.of();
-        Process process=new ProcessBuilder(args[0]).redirectError(ProcessBuilder.Redirect.INHERIT).start();
+        ProcessBuilder launch=args.length==1?new ProcessBuilder(args[0]):new ProcessBuilder(args[0],args[1]);
+        Process process=launch.redirectError(ProcessBuilder.Redirect.INHERIT).start();
         var watchdog=Executors.newSingleThreadScheduledExecutor(r->{var t=new Thread(r,"evaluation-timeout");t.setDaemon(true);return t;});
         watchdog.schedule(()->{if(process.isAlive())process.destroyForcibly();},90,TimeUnit.SECONDS);
         try(var read=new BufferedReader(new InputStreamReader(process.getInputStream()));var write=new PrintWriter(process.getOutputStream(),true)){

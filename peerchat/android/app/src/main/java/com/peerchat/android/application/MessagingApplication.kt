@@ -14,10 +14,15 @@ interface MessagingApplication:AutoCloseable {
         return signIn(endpoint,username,password)
     }
     suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean = false
+    suspend fun restoreLocalHistory(endpoint:ServerEndpoint):Boolean = false
     fun setForeground(active:Boolean) {}
+    /** Readout only: native output was drained after received-history observation. */
+    fun backgroundOutputDrained(afterNanos:Long):Boolean = false
+    suspend fun awaitQuiescence(milliseconds:Long):Boolean = true
     suspend fun send(peerId:String,text:String):String
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
     suspend fun requestFriend(username:String)
     suspend fun respondFriend(accountId:Long,accept:Boolean)
     suspend fun signOut()
+    suspend fun setMailboxStorageAllowed(allowed:Boolean){check(!allowed){"Mailbox configuration unavailable"}}
 }

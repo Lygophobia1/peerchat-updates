@@ -1,6 +1,7 @@
 #include "../device_key_manager.hpp"
 #include <iostream>
 #include <map>
+#include <future>
 
 using namespace peerchat;
 namespace {
@@ -40,6 +41,10 @@ struct Registry : DeviceKeyRegistry {
         ++writes; check(writes!=failWrite); data=value; present=true;
     }
 };
+struct LockedRegistry : Registry {
+    std::mutex gate;
+    void locked(const std::function<void()>& f)override{std::lock_guard<std::mutex> lock(gate);f();}
+};
 }
 int main() { try {
     Identity identity; Provider provider; Registry registry;
@@ -65,6 +70,16 @@ int main() { try {
     rejects([&]{manager.openRecipient(descriptor.id);});
     registry.data[0].state=DeviceKeyState::Retired; check(bool(manager.openRecipient(descriptor.id)));
     registry.data[0].state=DeviceKeyState::Active;
+    unsigned operations=0;
+    manager.withRecipient(descriptor.id,false,[&](const auto& metadata,const auto& handle){check(metadata.id==descriptor.id&&handle->publicKey()==descriptor.publicKey);++operations;});
+    check(operations==1);
+    registry.data[0].state=DeviceKeyState::Retired;
+    rejects([&]{manager.withRecipient(descriptor.id,false,[](const auto&,const auto&){});});
+    manager.withRecipient(descriptor.id,true,[&](const auto&,const auto&){++operations;});check(operations==2);
+    manager.revokeRecipient(descriptor.id);manager.revokeRecipient(descriptor.id);
+    check(registry.data[0].state==DeviceKeyState::Revoked);
+    rejects([&]{manager.withRecipient(descriptor.id,true,[](const auto&,const auto&){});});
+    registry.data[0].state=DeviceKeyState::Active;
     provider.handles.clear(); rejects([&]{manager.provisionRecipient(descriptor.id,descriptor.providerAlias,1,123);});
     check(provider.creations==1); // Missing initialized key must never be replaced.
 
@@ -81,6 +96,32 @@ int main() { try {
     DeviceKeyManager unsupported(identity,unavailable,clean);
     rejects([&]{unsupported.provisionRecipient("r1","p.recipient.v1",1,1);}); check(unavailable.creations==0);
     rejects([&]{manager.signIdentity(std::vector<unsigned char>(65537));});
+    Provider rotating;Registry rotatingRegistry;DeviceKeyManager rotation(identity,rotating,rotatingRegistry);
+    auto previous=rotation.provisionRecipient("rotate-v1","rotate.alias.v1",1,1);
+    rejects([&]{rotation.recordRegistration(previous.id,{1},true);});
+    rotation.recordRegistration(previous.id,{1},false);rotation.recordRegistration(previous.id,{1},true);
+    rejects([&]{rotation.recordRegistration(previous.id,{2},false);});
+    auto next=rotation.rotateRecipient(previous.id,"rotate-v2","rotate.alias.v2",2,2);
+    check(next.predecessorId==previous.id&&rotation.snapshot()[0].state==DeviceKeyState::Retired&&rotating.creations==2);
+    check(rotation.rotateRecipient(previous.id,next.id,next.providerAlias,2,2).publicKey==next.publicKey&&rotating.creations==2);
+    rejects([&]{rotation.withRecipient(previous.id,false,[](const auto&,const auto&){});});
+    rotation.withRecipient(previous.id,true,[](const auto&,const auto&){});
+    rejects([&]{rotation.rotateRecipient(previous.id,"rotate-v3","rotate.alias.v3",3,3);});
+    rotatingRegistry.failWrite=rotatingRegistry.writes+2;
+    rejects([&]{rotation.rotateRecipient(next.id,"rotate-v3","rotate.alias.v3",3,3);});
+    check(rotating.creations==3);rotatingRegistry.failWrite=0;
+    check(rotation.rotateRecipient(next.id,"rotate-v3","rotate.alias.v3",3,3).generation==3&&rotating.creations==3);
+    Provider concurrentProvider;LockedRegistry concurrentRegistry;
+    DeviceKeyManager firstManager(identity,concurrentProvider,concurrentRegistry),secondManager(identity,concurrentProvider,concurrentRegistry);
+    auto concurrentKey=firstManager.provisionRecipient("lease-key","lease.recipient.v1",1,1);
+    std::promise<void> entered,release;auto released=release.get_future().share();auto began=entered.get_future();
+    auto operation=std::async(std::launch::async,[&]{firstManager.withRecipient(concurrentKey.id,false,[&](const auto&,const auto&){entered.set_value();released.wait();});});
+    check(began.wait_for(std::chrono::seconds(10))==std::future_status::ready);
+    auto revocation=std::async(std::launch::async,[&]{secondManager.revokeRecipient(concurrentKey.id);});
+    check(revocation.wait_for(std::chrono::milliseconds(100))==std::future_status::timeout);
+    release.set_value();operation.get();revocation.get();
+    rejects([&]{firstManager.withRecipient(concurrentKey.id,true,[](const auto&,const auto&){});});
+    rejects([&]{secondManager.openRecipient(concurrentKey.id);});
     std::cout << "PASS: opaque roles, 1000 reopen cycles, provisioning interruption, registry loss/corruption, missing/revoked keys, capabilities and identity preservation\n";
     return 0;
 } catch(const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; } }

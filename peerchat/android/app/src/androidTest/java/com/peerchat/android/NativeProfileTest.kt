@@ -71,6 +71,15 @@ class NativeProfileTest {
                     val bytes = "日本語 😀\u0000native signing".toByteArray()
                     assertTrue(PeerIdentityFormat.verify(public, bytes, checkNotNull(ProfileBridge.sign(handle, bytes))))
                     assertEquals(0, ProfileBridge.storageTest(handle, 0))
+                    // Native local history works before any authentication,
+                    // friend snapshot, presence lease, or peer TLS exists.
+                    val peer="b".repeat(64).toByteArray(Charsets.US_ASCII)
+                    val history=com.peerchat.android.application.messageSnapshots(checkNotNull(ReliableBridge.history(handle,peer,Long.MAX_VALUE)))
+                    assertEquals(1,history.size)
+                    assertFalse(com.peerchat.android.application.connectionSnapshot(checkNotNull(ReliableBridge.state(handle,peer))).ready)
+                    assertTrue(com.peerchat.android.application.relayExecutions(checkNotNull(ReliableBridge.requests(handle))).isEmpty())
+                    // An unverified identity cannot be used for offline enqueue.
+                    assertNull(ReliableBridge.queueLocal(handle,peer,"Test only".toByteArray()))
                     assertNull(ProfileBridge.sign(handle, ByteArray(70001)))
                 }
                 assertNull(ProfileBridge.publicKey(handle)); assertNull(ProfileBridge.sign(handle, byteArrayOf(1)))

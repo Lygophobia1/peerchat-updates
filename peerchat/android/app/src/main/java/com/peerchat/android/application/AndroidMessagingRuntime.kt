@@ -8,12 +8,16 @@ import android.content.Context
 object AndroidMessagingRuntime {
     private var backend:MessagingBackend?=null
     private val leases=mutableSetOf<Lease>()
-    @Synchronized fun acquire(context:Context):MessagingApplication {
+    @Synchronized fun acquire(context:Context,wakeDeadlineNanos:Long?=null):MessagingApplication {
         val owner=backend ?: MessagingBackend(context.applicationContext).also{backend=it}
-        return Lease(owner).also{leases.add(it);update()}
+        return Lease(owner,wakeDeadlineNanos).also{leases.add(it);update()}
     }
-    private fun update(){backend?.setInUse(leases.any{it.active})}
-    private class Lease(val owner:MessagingBackend):MessagingApplication by owner {
+    private fun update(){
+        val active=leases.filter{it.active}
+        val deadline=if(active.any{it.wakeDeadline==null})Long.MAX_VALUE else active.mapNotNull{it.wakeDeadline}.minOrNull() ?: Long.MAX_VALUE
+        backend?.setInUse(active.isNotEmpty(),deadline)
+    }
+    private class Lease(val owner:MessagingBackend,val wakeDeadline:Long?):MessagingApplication by owner {
         var active=true;var closed=false
         override fun setForeground(active:Boolean)=synchronized(AndroidMessagingRuntime){
             if(!closed){this.active=active;update()}

@@ -12,7 +12,8 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList(),
     val incomingRequests:List<AccountRequestSnapshot> = emptyList(),
     // Authentication alone is not evidence of a currently refreshed device lease.
-    val serverPresenceLive:Boolean=false)
+    val serverPresenceLive:Boolean=false,val mailboxStorageAllowed:Boolean=false,
+    val localHistoryReady:Boolean=false)
 
 internal fun expiredServerSession(failure:Exception):Boolean = failure is com.peerchat.android.platform.ServerRejected &&
     failure.code in setOf("session_invalid","session_superseded","event_session_superseded")
@@ -26,6 +27,22 @@ internal fun serverRefreshFailure(failure:Exception):String = when(failure) {
 }
 data class AccountRequestSnapshot(val accountId:Long,val username:String)
 
+/** Network quiescence never destroys the local-history projection. */
+internal fun localOfflineSnapshot(snapshot:MessagingSnapshot,status:String):MessagingSnapshot = snapshot.copy(
+    authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),status=status,
+    conversations=snapshot.conversations.map{it.copy(friend=it.friend.copy(online=false),connection=ConnectionSnapshot())})
+
+/** Shared application projection. Reads native truth; no UI/presenter required,
+ * no locally invented conversations, history, ACKs or delivery state. */
+internal fun nativeConversationProjection(friends:List<FriendIdentity>,connection:(String)->ByteArray,
+    history:(String)->ByteArray):List<ConversationSnapshot> = friends.map {friend ->
+    ConversationSnapshot(friend,connectionSnapshot(connection(friend.peerId)),messageSnapshots(history(friend.peerId)).toList())
+}
+
+internal fun nativeWakeOutputComplete(receivedNanos:Long,wakeStartedNanos:Long,
+    attached:Boolean,finished:Boolean,outputIdleNanos:Long):Boolean =
+    receivedNanos>=wakeStartedNanos&&attached&&!finished&&outputIdleNanos>receivedNanos
+
 internal fun connectionSnapshot(bytes: ByteArray): ConnectionSnapshot {
     val record=NativeRecord(bytes,4)
     fun flag(): Boolean=record.number().also {require(it in 0..1)}==1L
@@ -38,7 +55,7 @@ internal fun messageSnapshots(bytes: ByteArray): List<MessageSnapshot> {
         val id=record.text();val sender=record.text();val recipient=record.text()
         require(id.matches(Regex("[0-9a-f]{32}"))&&sender.matches(Regex("[0-9a-f]{64}"))&&recipient.matches(Regex("[0-9a-f]{64}")))
         val timestamp=record.number();val order=record.number();val sequence=record.number();val delivery=record.number()
-        require(sequence>0&&delivery in 0..2)
+        require(sequence>0&&delivery in 0..3)
         MessageSnapshot(id,sender,recipient,timestamp,order,sequence,delivery,record.text())
     };record.end();return result
 }

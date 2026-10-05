@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,9 @@ struct Contact {
     std::vector<Endpoint> endpoints;
     bool verified=false;
 };
-enum class Delivery : unsigned char { Queued, Sent, Delivered };
+// Preserve existing persisted/C ABI values. Stored is not a recipient ACK.
+enum class Delivery : unsigned char { Queued=0, Sent=1, Delivered=2, Stored=3 };
+inline unsigned deliveryRank(Delivery value){return value==Delivery::Delivered?3:value==Delivery::Stored?2:static_cast<unsigned>(value);}
 struct StoredMessage {
     std::string id, sender, recipient;
     std::wstring text;
@@ -66,7 +69,15 @@ public:
     void removeContact(const std::string& peerId);
     // False means an identical ID/payload is already durable; mismatched reuse throws.
     bool append(const std::string& conversation, const StoredMessage& message);
+    std::optional<StoredMessage> message(const std::string& messageId);
     void acknowledge(const std::string& messageId, Delivery delivery);
+    Blob mailboxEnvelope(const std::string& messageId,const std::string& recipientDevice);
+    void saveMailboxEnvelope(const std::string& messageId,const std::string& recipientDevice,const Blob& envelope);
+    void mailboxStored(const std::string& messageId,const std::string& recipientDevice,const Blob& expectedEnvelope);
+    std::vector<StoredMessage> pendingMailboxUploads(int limit=64);
+    bool mailboxUploadAccepted(const std::string& messageId,const std::string& recipientDevice);
+    Blob mailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& envelopeDigest);
+    void saveMailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& receipt);
     std::uint64_t nextLogicalOrder();
     void observeLogicalOrder(std::uint64_t remoteOrder);
     std::vector<StoredMessage> history(const std::string& conversation,

@@ -35,7 +35,19 @@ class NativePresenterTest {
         var reject=true;var sends=0;var failSend=false;var closed=false
         var signIns=0;var endpoint:ServerEndpoint?=null
         var resume=false;var remembered=false
+        var resumeFailure:Exception?=null
+        var resumeDelay=0L
+        var localHistory=false
+        override suspend fun restoreLocalHistory(endpoint:ServerEndpoint):Boolean {
+            if(!localHistory)return false
+            state.value=MessagingSnapshot(19,"Jonah","a".repeat(64),false,"Offline; local history available",listOf(
+                ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),false),ConnectionSnapshot(),listOf(
+                    MessageSnapshot("c".repeat(32),"b".repeat(64),"a".repeat(64),1,1,1,2,"Persisted test history")))),localHistoryReady=true)
+            return true
+        }
         override suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean {
+            if(resumeDelay>0)kotlinx.coroutines.delay(resumeDelay)
+            resumeFailure?.let{throw it}
             if(!resume)return false
             state.value=MessagingSnapshot(19,"Jonah","a".repeat(64),true,"Authenticated",serverPresenceLive=false)
             return true
@@ -83,15 +95,66 @@ class NativePresenterTest {
         second.dispatch(UiAction.SignOut);dispatcher.scheduler.advanceUntilIdle()
         assertEquals("f".repeat(64),second.state.value.server.certificatePin)
     }
+    @Test fun coldStartHistoryRemainsVisibleWhenNetworkAuthenticationFails() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"f".repeat(64))}
+        val commands=Commands().apply{localHistory=true;resumeFailure=java.io.IOException("test-only unavailable network")}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("offline-history",p)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Home,p.state.value.route);assertNull(p.state.value.startupStatus)
+        assertEquals(ConnectionState.Offline,p.state.value.connection)
+        assertEquals("Persisted test history",p.state.value.conversations.single().messages.single().text)
+        assertFalse(p.state.value.conversations.single().online)
+        p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.PreviewMessage("Offline draft"))
+        dispatcher.scheduler.advanceUntilIdle();assertEquals(1,commands.sends)
+        // UI never promotes cached history/account metadata to authenticated presence.
+        assertFalse(commands.state.value.authenticated);assertFalse(commands.state.value.serverPresenceLive)
+    }
+    @Test fun slowAuthenticationDoesNotCoverLocalHistoryWithStartupScreen() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"f".repeat(64))}
+        val commands=Commands().apply{localHistory=true;resumeDelay=10000}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("slow-history",p)
+        dispatcher.scheduler.runCurrent()
+        assertEquals(Route.Home,p.state.value.route);assertNull(p.state.value.startupStatus)
+        assertEquals("Persisted test history",p.state.value.conversations.single().messages.single().text)
+        assertEquals(ConnectionState.Offline,p.state.value.connection);assertTrue(p.state.value.loginBusy)
+        dispatcher.scheduler.advanceUntilIdle()
+    }
     @Test fun rememberedAuthenticationIsNotOnlineUntilOwnerPublishesPresence() {
         val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
         val commands=Commands().apply {resume=true}
         val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("remember",p)
         dispatcher.scheduler.advanceUntilIdle()
-        assertEquals(Route.Home,p.state.value.route);assertTrue(p.state.value.rememberMe)
+        assertEquals("Connecting…",p.state.value.startupStatus);assertTrue(p.state.value.rememberMe)
+        assertNotEquals(Route.Home,p.state.value.route);assertEquals(0,commands.signIns)
         assertEquals(ConnectionState.Reconnecting,p.state.value.connection)
         commands.state.value=commands.state.value.copy(serverPresenceLive=true)
         dispatcher.scheduler.runCurrent();assertEquals(ConnectionState.Online,p.state.value.connection)
+        assertEquals(Route.Home,p.state.value.route);assertNull(p.state.value.startupStatus)
+    }
+    @Test fun savedSignInChecksImmediatelyWithoutShowingWelcome() {
+        val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),Commands(),settings,dispatcher,Preferences());store.put("startup",p)
+        assertNotNull(p.state.value.startupStatus)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertNull(p.state.value.startupStatus);assertEquals(Route.Welcome,p.state.value.route)
+    }
+    @Test fun rejectedSavedSignInReturnsToLoginWithoutClaimingOnline() {
+        val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val commands=Commands().apply{resumeFailure=ServerRejected("remember_revoked")}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("rejected",p)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertNull(p.state.value.startupStatus);assertEquals(Route.Login,p.state.value.route)
+        assertEquals(ConnectionState.Offline,p.state.value.connection);assertNotNull(p.state.value.loginError)
+    }
+    @Test fun temporaryUnavailableStartupRemainsReconnectableNotOnline() {
+        val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val commands=Commands().apply{resumeFailure=java.net.ConnectException()}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("network",p)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("Reconnecting…",p.state.value.startupStatus)
+        assertEquals(ConnectionState.Offline,p.state.value.connection);assertEquals(0,commands.signIns)
+        p.dispatch(UiAction.SignOut);dispatcher.scheduler.advanceUntilIdle()
+        assertNull(p.state.value.startupStatus);assertEquals(Route.Welcome,p.state.value.route)
     }
     @Test fun rememberChoiceIsPassedOnlyOnExplicitAuthentication() {
         val commands=Commands().apply{reject=false};val p=presenter(commands)

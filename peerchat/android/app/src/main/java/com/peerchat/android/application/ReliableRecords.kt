@@ -11,10 +11,13 @@ internal class NativeRecord(bytes: ByteArray, type: Int) {
     init { require(bytes.size in 4..262144 && input.get().toInt()==80 && input.get().toInt()==84 && input.get().toInt()==1 && input.get().toInt()==type) }
     fun number(): Long { require(input.remaining()>=8);return input.long.also { require(it>=0) } }
     fun text(): String {
-        val count=number();require(count<=65536 && count<=input.remaining())
-        val bytes=ByteArray(count.toInt());input.get(bytes)
+        val bytes=bytes()
         return Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
+    }
+    fun bytes(): ByteArray {
+        val count=number();require(count<=65536 && count<=input.remaining())
+        return ByteArray(count.toInt()).also { input.get(it) }
     }
     fun end() { require(!input.hasRemaining()) }
 }

@@ -49,7 +49,14 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     login: (String, String) -> Unit = { _, _ -> }) {
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
-        when (state.route) {
+        if(state.startupStatus!=null) {
+            Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
+                verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Text(state.startupStatus,Modifier.padding(top=16.dp).testTag("startup-status"))
+                TextButton({dispatch(UiAction.SignOut)}) {Text("Return to sign in")}
+            }
+        } else when (state.route) {
             Route.Welcome -> Welcome(state, dispatch)
             Route.Login -> Login(state, dispatch, login)
             Route.Server -> ServerSettings(state, dispatch)

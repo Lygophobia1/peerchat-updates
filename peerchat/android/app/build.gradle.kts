@@ -1,4 +1,5 @@
 plugins {
+    id("com.google.gms.google-services") apply false
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -13,6 +14,24 @@ val sourceVersion = Regex("Display\\s*=\\s*\"([^\"]+)\"")
     ?: error("Missing shared PeerChat version")
 val peerChatVersion = providers.gradleProperty("peerchatVersion").orElse(sourceVersion).get()
 require(Regex("[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+").matches(peerChatVersion))
+// Standard Google-services input, ignored by Git. No service-account keys belong
+// in this Android file; server credentials remain external to the app/package.
+val firebaseConfigPath = file("google-services.json").takeIf { it.isFile }?.absolutePath
+val firebaseConfig = firebaseConfigPath?.let {
+    @Suppress("UNCHECKED_CAST")
+    groovy.json.JsonSlurper().parse(file(it)) as Map<String, Any>
+}
+@Suppress("UNCHECKED_CAST")
+val firebaseProject = firebaseConfig?.get("project_info") as? Map<String, Any>
+@Suppress("UNCHECKED_CAST")
+val firebaseClient = (firebaseConfig?.get("client") as? List<Map<String, Any>>)?.singleOrNull { client ->
+    val info = client["client_info"] as Map<*, *>
+    (info["android_client_info"] as Map<*, *>)["package_name"] == "com.peerchat.android"
+}
+if(firebaseConfig != null) require(firebaseProject != null && firebaseClient != null) { "Firebase package configuration mismatch" }
+if(firebaseConfigPath != null) {
+    pluginManager.apply("com.google.gms.google-services")
+}
 android {
     namespace = "com.peerchat.android"
     compileSdk = 35
@@ -24,6 +43,7 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = peerChatVersion
+        buildConfigField("boolean", "FCM_CONFIGURED", (firebaseClient != null).toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         if (!uiOnly) {
             ndk { abiFilters += "arm64-v8a" }
@@ -52,6 +72,8 @@ android {
     }
 }
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:34.19.0"))
+    implementation("com.google.firebase:firebase-messaging")
     // Pure Java TLS only. No JSSE provider registration/global provider changes.
     implementation("org.bouncycastle:bctls-jdk18on:1.86.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.86")

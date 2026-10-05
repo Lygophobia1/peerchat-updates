@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
@@ -124,6 +125,11 @@ public:
                 auto publicKey = key->publicKey();
                 require(publicKey.size() == 65 && publicKey[0] == 4);
                 found->publicKey = std::move(publicKey); found->state = DeviceKeyState::Active;
+                if(!found->predecessorId.empty()) {
+                    auto predecessor=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==found->predecessorId;});
+                    require(predecessor!=entries.end()&&predecessor->state==DeviceKeyState::Active&&predecessor->generation+1==found->generation);
+                    predecessor->state=DeviceKeyState::Retired;
+                }
                 validate(entries); registry_.replace(entries);
             } else {
                 require(found->state == DeviceKeyState::Active);
@@ -133,6 +139,52 @@ public:
             result = *found;
         });
         return result;
+    }
+
+    std::vector<DeviceKeyMetadata> snapshot() {
+        std::lock_guard<std::mutex> local(mutex_);std::vector<DeviceKeyMetadata> entries;
+        registry_.locked([&]{registry_.read(entries);validate(entries);});return entries;
+    }
+
+    // Explicit rotation persists intent first. Interrupted provision resumes
+    // the same alias; never generates a replacement for a lost initialized key.
+    DeviceKeyMetadata rotateRecipient(const std::string& predecessorId,const std::string& id,
+                                      const std::string& alias,std::uint32_t generation,std::uint64_t createdUtc) {
+        {
+            std::lock_guard<std::mutex> local(mutex_);
+            registry_.locked([&]{
+                std::vector<DeviceKeyMetadata> entries;require(registry_.read(entries));validate(entries);
+                auto pending=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==id;});
+                if(pending!=entries.end()) {
+                    require(pending->predecessorId==predecessorId&&pending->providerAlias==alias&&pending->generation==generation);return;
+                }
+                auto predecessor=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==predecessorId;});
+                require(predecessor!=entries.end()&&predecessor->state==DeviceKeyState::Active&&
+                    predecessor->generation<std::numeric_limits<std::uint32_t>::max()&&generation==predecessor->generation+1&&
+                    std::none_of(entries.begin(),entries.end(),[](const auto& e){return e.state==DeviceKeyState::Provisioning;})&&
+                    !recipient_.exists(alias));
+                DeviceKeyMetadata intent;intent.id=id;intent.providerAlias=alias;intent.generation=generation;intent.createdUtcMilliseconds=createdUtc;
+                intent.algorithm=recipientSuite;intent.predecessorId=predecessorId;entries.push_back(intent);validate(entries);registry_.replace(entries);
+            });
+        }
+        return provisionRecipient(id,alias,generation,createdUtc);
+    }
+
+    // Called only by the authenticated registration coordinator. Pending wire
+    // is immutable and the server response must identify the exact same proof.
+    void recordRegistration(const std::string& id,const std::vector<unsigned char>& binding,bool accepted) {
+        std::lock_guard<std::mutex> local(mutex_);
+        registry_.locked([&]{
+            std::vector<DeviceKeyMetadata> entries;require(registry_.read(entries));validate(entries);
+            auto found=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==id;});
+            require(found!=entries.end()&&found->state==DeviceKeyState::Active&&!binding.empty()&&binding.size()<=8192);
+            require(found->signedBinding.empty()||found->signedBinding==binding);
+            require(!accepted||!found->signedBinding.empty());
+            found->signedBinding=binding;
+            if(accepted)found->registration=DeviceKeyRegistration::Accepted;
+            else if(found->registration!=DeviceKeyRegistration::Accepted)found->registration=DeviceKeyRegistration::Pending;
+            validate(entries);registry_.replace(entries);
+        });
     }
 
     std::shared_ptr<platform::RecipientKeyHandle> openRecipient(const std::string& id) {
@@ -147,6 +199,37 @@ public:
             require(result && result->publicKey() == found->publicKey);
         });
         return result;
+    }
+
+    // Authorization stays locked across a crypto operation. A cached bare
+    // handle is not an authorization lease: revocation must not race open().
+    // The operation must not reenter this manager or retain the handle.
+    void withRecipient(const std::string& id, bool allowRetired,
+                       const std::function<void(const DeviceKeyMetadata&,
+                           const std::shared_ptr<platform::RecipientKeyHandle>&)>& operation) {
+        std::lock_guard<std::mutex> local(mutex_);
+        registry_.locked([&] {
+            std::vector<DeviceKeyMetadata> entries;
+            require(registry_.read(entries));validate(entries);
+            auto found=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==id;});
+            require(found!=entries.end()&&(found->state==DeviceKeyState::Active||
+                (allowRetired&&found->state==DeviceKeyState::Retired)));
+            auto handle=recipient_.open(found->providerAlias);
+            require(handle&&handle->publicKey()==found->publicKey);
+            operation(*found,handle);
+        });
+    }
+
+    void revokeRecipient(const std::string& id) {
+        std::lock_guard<std::mutex> local(mutex_);
+        registry_.locked([&] {
+            std::vector<DeviceKeyMetadata> entries;
+            require(registry_.read(entries));validate(entries);
+            auto found=std::find_if(entries.begin(),entries.end(),[&](const auto& e){return e.id==id;});
+            require(found!=entries.end()&&found->state!=DeviceKeyState::Provisioning);
+            if(found->state==DeviceKeyState::Revoked)return;
+            found->state=DeviceKeyState::Revoked;validate(entries);registry_.replace(entries);
+        });
     }
 };
 }

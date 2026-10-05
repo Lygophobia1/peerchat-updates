@@ -82,6 +82,13 @@ function Invoke-ReleaseManifestSigning([string]$UnsignedManifest,[string]$Packag
     if($LASTEXITCODE -ne 0){Stop-Publish 'The reviewed Release manifest signing script failed.'}
 }
 function New-ClientZip([string]$ClientDirectory,[string]$ZipPath) {
+    if(Test-Path -LiteralPath (Join-Path $ClientDirectory 'HPKE-EVALUATION.json')) {
+        Stop-Publish 'Evaluation HPKE provider has no approved shipping license; updater packaging/publication is prohibited.'
+    }
+    $core=Join-Path $ClientDirectory 'PeerChat.Core.dll'
+    if((Test-Path -LiteralPath $core) -and [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($core)).Contains('PEERCHAT_HPKE_EVALUATION_UNLICENSED')) {
+        Stop-Publish 'Evaluation HPKE binary is not licensed for updater packaging/publication.'
+    }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     if(Test-Path -LiteralPath $ZipPath){Stop-Publish "Refusing to overwrite an existing ZIP: $ZipPath"}
     [IO.Compression.ZipFile]::CreateFromDirectory($ClientDirectory,$ZipPath,[IO.Compression.CompressionLevel]::Optimal,$false)
@@ -91,6 +98,19 @@ function New-ClientZip([string]$ClientDirectory,[string]$ZipPath) {
     if(@(Compare-Object $diskEntries $zipEntries).Count -ne 0){Stop-Publish 'ZIP contents do not exactly match the staged Client runtime files.'}
 }
 function New-Manifest([string]$ZipPath,[string]$ManifestPath,[string]$ReleaseTag) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $licenseArchive=[IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        foreach($entry in $licenseArchive.Entries) {
+            if($entry.Name -eq 'HPKE-EVALUATION.json'){Stop-Publish 'Evaluation package cannot enter a normal updater channel.'}
+            if($entry.Name -eq 'PeerChat.Core.dll') {
+                if($entry.Length -gt 64MB){Stop-Publish 'Core binary exceeds packaging inspection bound.'}
+                $licenseInput=$entry.Open();$buffer=New-Object IO.MemoryStream
+                try{$licenseInput.CopyTo($buffer);if([Text.Encoding]::ASCII.GetString($buffer.ToArray()).Contains('PEERCHAT_HPKE_EVALUATION_UNLICENSED')){Stop-Publish 'Evaluation HPKE binary cannot enter a normal updater channel.'}}
+                finally{$licenseInput.Dispose();$buffer.Dispose()}
+            }
+        }
+    } finally {$licenseArchive.Dispose()}
     $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash.ToLowerInvariant()
     $size=(Get-Item -LiteralPath $ZipPath).Length
     if($size -le 0 -or $hash.Length -ne 64){Stop-Publish 'ZIP hash or size is invalid.'}

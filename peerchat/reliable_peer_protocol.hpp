@@ -96,6 +96,16 @@ class AuthenticatedFriendSnapshot {
     std::map<std::string,Friend> friends_;
 public:
     bool contains(const std::string& peer)const{return account_&&friends_.count(peer)!=0;}
+    std::uint64_t localAccount()const noexcept{return account_;}
+    std::uint64_t accountFor(const std::string& peer)const {
+        if(!account_)return 0;
+        std::uint64_t account=0;
+        for(const auto& value:friends_)if(value.second.knownPeerIds.count(peer)){
+            if(account&&account!=value.second.accountId)return 0;
+            account=value.second.accountId;
+        }
+        return account;
+    }
     std::uint64_t generation()const noexcept{return generation_;}
     void replace(std::uint64_t account,std::uint64_t generation,const std::vector<FriendIdentity>& values) {
         account_=account;generation_=generation;friends_.clear();
@@ -177,6 +187,10 @@ inline TextReceipt receiveText(protocol::Reader& reader,bool logicalOrdering,
     if(!text)return receipt;
     message.text=std::move(*text);message.sender=authenticatedSource;
     message.recipient=local.peerId;message.delivery=Delivery::Delivered;
+    // Legacy wire has no logical-order field. An identical authenticated retry
+    // must preserve the durable order, not pretend it explicitly changed to 0.
+    // Storage still compares identity, timestamp and content exactly.
+    if(!logicalOrdering){auto existing=storage.message(message.id);if(existing)message.logicalOrder=existing->logicalOrder;}
     storage.observeLogicalOrder(message.logicalOrder);
     receipt.inserted=deliveries.acceptIncomingMessage(authenticatedSource,message);
     receipt.message=std::move(message);

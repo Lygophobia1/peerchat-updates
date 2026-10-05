@@ -8,7 +8,14 @@ foreach($variant in @('debug','release')){
     $zip=[IO.Compression.ZipFile]::OpenRead((Join-Path $root $relative))
     try{
         $native=@($zip.Entries|Where-Object {$_.FullName -like 'lib/*'}|ForEach-Object {$_.FullName}|Sort-Object)
-        if(($native -join ';') -ne 'lib/arm64-v8a/libandroidx.graphics.path.so;lib/arm64-v8a/libpeerchat_jni.so;lib/arm64-v8a/libpeerchat_messaging.so'){throw 'Unexpected native component/ABI in APK'}
+        if(($native -join ';') -ne 'lib/arm64-v8a/libandroidx.graphics.path.so;lib/arm64-v8a/libdatastore_shared_counter.so;lib/arm64-v8a/libpeerchat_jni.so;lib/arm64-v8a/libpeerchat_messaging.so'){throw 'Unexpected native component/ABI in APK'}
+        # Firebase Messaging 25.1.3 / Installations 19.1.2 bring AndroidX
+        # DataStore 1.1.7. Compare against its upstream ARM64 AAR bytes, not
+        # a broad wildcard allowing arbitrary native libraries.
+        $counter=$zip.GetEntry('lib/arm64-v8a/libdatastore_shared_counter.so').Open()
+        $counterSha=[Security.Cryptography.SHA256]::Create()
+        try{$counterHash=[BitConverter]::ToString($counterSha.ComputeHash($counter)).Replace('-','')}finally{$counter.Dispose();$counterSha.Dispose()}
+        if($counterHash -ne 'D3E48717C9AA147E0AB21063BA0E8E0211CABF8BF40B222640829519EDBF58E1'){throw 'Pinned AndroidX DataStore native artifact changed'}
         # Existing Compose graphics-path 1.0.1 runtime, byte-for-byte identical
         # to its ARM64 AAR entry. Not a TLS dependency.
         $graphics=$zip.GetEntry('lib/arm64-v8a/libandroidx.graphics.path.so').Open()

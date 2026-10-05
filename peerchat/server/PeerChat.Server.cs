@@ -34,7 +34,7 @@ namespace PeerChat.Server {
 
     // SQLite owns durable account state. All writes use a process-wide lock because this starter
     // service deliberately uses one embedded database rather than introducing another service.
-    sealed class AccountDatabase : IDisposable {
+    sealed partial class AccountDatabase : IDisposable {
         readonly object gate = new object(); readonly IntPtr database;
         public AccountDatabase(string path) {
             string fullPath=Path.GetFullPath(path);Console.WriteLine("Discovery account database: "+fullPath);
@@ -328,10 +328,83 @@ namespace PeerChat.Server {
     internal enum PushResult { Sent, Unavailable, InvalidToken }
     internal interface IPushProvider { PushResult Wake(string destinationToken); }
     internal sealed class NullPushProvider:IPushProvider { public PushResult Wake(string destinationToken){return PushResult.Unavailable;} }
+    internal sealed class FcmHttpResponse {public int Status;public string Body;}
+    internal static class ReliableIoDiagnostics {
+        public static string RequestKind(string type){return new[]{"events","relay_attach","push_hint","push_register","push_remove","presence","messaging_bootstrap","login","logout","remember_resume"}.Contains(type)?type:"request";}
+        public static bool ExpectedDisconnect(Exception error,string kind){
+            if(kind!="events"&&kind!="relay_attach")return false;
+            var socket=error as SocketException??error.InnerException as SocketException;
+            return error is EndOfStreamException||socket!=null&&(socket.SocketErrorCode==SocketError.ConnectionReset||socket.SocketErrorCode==SocketError.ConnectionAborted||socket.SocketErrorCode==SocketError.OperationAborted||socket.SocketErrorCode==SocketError.Shutdown);
+        }
+    }
+    // FCM HTTP v1 + OAuth service-account JWT, using platform RSA/SHA256, not
+    // custom cryptography. Transport is injectable for deterministic host tests.
+    internal sealed class FcmPushProvider:IPushProvider {
+        readonly string project,email;readonly Func<byte[],byte[]> sign;
+        readonly Func<string,string,string,FcmHttpResponse> http;
+        readonly object gate=new object();string accessToken;long tokenExpires;
+        readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=65536};
+        const string TokenUrl="https://oauth2.googleapis.com/token";
+        public FcmPushProvider(string project,string email,Func<byte[],byte[]> sign,Func<string,string,string,FcmHttpResponse> http){
+            if(!System.Text.RegularExpressions.Regex.IsMatch(project??"","^[a-z][a-z0-9-]{4,62}$")||String.IsNullOrEmpty(email)||email.Length>254||!email.EndsWith(".iam.gserviceaccount.com",StringComparison.Ordinal)||sign==null||http==null)throw new InvalidOperationException("Invalid FCM provider configuration.");
+            this.project=project;this.email=email;this.sign=sign;this.http=http;
+        }
+        public static IPushProvider Create(ServerConfiguration config){
+            if(!config.FcmEnabled)return new NullPushProvider();
+            try{
+                if(!Path.IsPathRooted(config.FcmServiceAccountPath)||new FileInfo(config.FcmServiceAccountPath).Length>65536)throw new InvalidOperationException();
+                var fields=new JavaScriptSerializer{MaxJsonLength=65536}.Deserialize<Dictionary<string,object>>(File.ReadAllText(config.FcmServiceAccountPath));
+                if((string)fields["type"]!="service_account"||(string)fields["project_id"]!=config.FcmProjectId||(string)fields["token_uri"]!=TokenUrl)throw new InvalidOperationException();
+                string pem=(string)fields["private_key"];if(!pem.StartsWith("-----BEGIN PRIVATE KEY-----",StringComparison.Ordinal)||!pem.TrimEnd().EndsWith("-----END PRIVATE KEY-----",StringComparison.Ordinal))throw new InvalidOperationException();
+                byte[] key=Convert.FromBase64String(pem.Replace("-----BEGIN PRIVATE KEY-----","").Replace("-----END PRIVATE KEY-----",""));
+                Func<byte[],byte[]> signer=input=>{using(var imported=CngKey.Import(key,CngKeyBlobFormat.Pkcs8PrivateBlob))using(var rsa=new RSACng(imported))return rsa.SignData(input,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);};
+                // Validate key/type before accepting enabled configuration.
+                signer(Encoding.ASCII.GetBytes("PeerChat FCM provider startup validation"));
+                return new FcmPushProvider(config.FcmProjectId,(string)fields["client_email"],signer,Post);
+            }catch{throw new InvalidOperationException("FCM is enabled but its external service-account configuration is invalid or unavailable.");}
+        }
+        static string B64(byte[] bytes){return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');}
+        string AccessToken(){lock(gate){
+            long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(accessToken!=null&&tokenExpires>now+60)return accessToken;
+            var claims=new Dictionary<string,object>{{"iss",email},{"scope","https://www.googleapis.com/auth/firebase.messaging"},{"aud",TokenUrl},{"iat",now},{"exp",now+3600}};
+            string unsigned=B64(Encoding.UTF8.GetBytes("{\"alg\":\"RS256\",\"typ\":\"JWT\"}"))+"."+B64(Encoding.UTF8.GetBytes(json.Serialize(claims)));
+            string assertion=unsigned+"."+B64(sign(Encoding.ASCII.GetBytes(unsigned)));
+            var response=http(TokenUrl,null,"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion="+Uri.EscapeDataString(assertion));
+            if(response.Status!=200)return null;
+            var fields=json.Deserialize<Dictionary<string,object>>(response.Body);object value,seconds;
+            if(!fields.TryGetValue("access_token",out value)||!(value is string)||String.IsNullOrEmpty((string)value)||((string)value).Length>8192||!fields.TryGetValue("expires_in",out seconds))return null;
+            int expiry=Convert.ToInt32(seconds);if(expiry<120||expiry>3600)return null;
+            accessToken=(string)value;tokenExpires=now+expiry;return accessToken;
+        }}
+        public PushResult Wake(string destinationToken){try{
+            if(String.IsNullOrEmpty(destinationToken)||destinationToken.Length>2048)return PushResult.Unavailable;
+            string auth=AccessToken();if(auth==null)return PushResult.Unavailable;
+            var body=new Dictionary<string,object>{{"message",new Dictionary<string,object>{{"token",destinationToken},{"data",new Dictionary<string,string>{{"event","peerchat_pending"},{"version","1"}}},{"android",new Dictionary<string,object>{{"priority","HIGH"},{"ttl","60s"},{"collapse_key","peerchat_pending"}}}}}};
+            var response=http("https://fcm.googleapis.com/v1/projects/"+project+"/messages:send",auth,json.Serialize(body));
+            if(response.Status==200)return PushResult.Sent;
+            if(response.Status==401){lock(gate){accessToken=null;tokenExpires=0;}return PushResult.Unavailable;}
+            var fields=json.Deserialize<Dictionary<string,object>>(response.Body);object error,details;
+            if(fields.TryGetValue("error",out error)){var e=error as Dictionary<string,object>;if(e!=null&&e.TryGetValue("details",out details))foreach(var item in details as System.Collections.IEnumerable??new object[0]){
+                var d=item as Dictionary<string,object>;object type,code;if(d!=null&&d.TryGetValue("@type",out type)&&(string)type=="type.googleapis.com/google.firebase.fcm.v1.FcmError"&&d.TryGetValue("errorCode",out code)&&(string)code=="UNREGISTERED")return PushResult.InvalidToken;
+            }}return PushResult.Unavailable;
+        }catch{return PushResult.Unavailable;}}
+        static FcmHttpResponse Post(string url,string bearer,string body){
+            var request=(HttpWebRequest)WebRequest.Create(url);request.Method="POST";request.AllowAutoRedirect=false;request.Timeout=10000;request.ReadWriteTimeout=10000;
+            request.ContentType=bearer==null?"application/x-www-form-urlencoded":"application/json";
+            if(bearer!=null)request.Headers[HttpRequestHeader.Authorization]="Bearer "+bearer;
+            byte[] bytes=Encoding.UTF8.GetBytes(body);request.ContentLength=bytes.Length;using(var stream=request.GetRequestStream())stream.Write(bytes,0,bytes.Length);
+            HttpWebResponse response;try{response=(HttpWebResponse)request.GetResponse();}catch(WebException error){response=error.Response as HttpWebResponse;if(response==null)throw;}
+            using(response)using(var stream=response.GetResponseStream())using(var output=new MemoryStream()){
+                byte[] buffer=new byte[4096];int read;while((read=stream.Read(buffer,0,buffer.Length))>0){if(output.Length+read>65536)throw new InvalidDataException("FCM response exceeds bound.");output.Write(buffer,0,read);}
+                return new FcmHttpResponse{Status=(int)response.StatusCode,Body=Encoding.UTF8.GetString(output.ToArray())};
+            }
+        }
+    }
     internal sealed class PushWakeDispatcher {
         readonly AccountDatabase accounts;readonly IPushProvider provider;readonly object gate=new object();
         readonly Dictionary<string,long> last=new Dictionary<string,long>();int pending;bool stopped;
-        public PushWakeDispatcher(AccountDatabase accounts,IPushProvider provider){this.accounts=accounts;this.provider=provider;}
+        readonly Action<long,string,PushResult> report;
+        public PushWakeDispatcher(AccountDatabase accounts,IPushProvider provider,Action<long,string,PushResult> report=null){this.accounts=accounts;this.provider=provider;this.report=report;}
         public bool Hint(long account,string device) {
             string token;
             lock(gate){if(stopped||provider is NullPushProvider)return false;token=accounts.PushToken(account,device);if(token==null)return false;long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();foreach(var key in last.Where(p=>p.Value<now-30).Select(p=>p.Key).ToArray())last.Remove(key);
@@ -341,6 +414,7 @@ namespace PeerChat.Server {
             ThreadPool.QueueUserWorkItem(_=>{try{
                 lock(gate){if(stopped||accounts.PushToken(account,device)!=token)return;}
                 var result=provider.Wake(token);
+                if(report!=null)try{report(account,device,result);}catch{}
                 if(result==PushResult.InvalidToken)lock(gate){if(!stopped)accounts.RemovePush(account,device,token);}
             }catch{/* Push failure is never message/transport failure; no token logging. */}
             finally{lock(gate)pending--;}});return true;
@@ -349,10 +423,10 @@ namespace PeerChat.Server {
         public void Stop(){lock(gate){stopped=true;last.Clear();}}
     }
 
-        sealed class DiscoveryServer {
+        sealed partial class DiscoveryServer {
         readonly RememberedDeviceProofs rememberedProofs=new RememberedDeviceProofs();
         readonly PushWakeDispatcher pushWakes;
-        const int ProtocolVersion=1, MaxRequestBytes=4096, MaxRelayPayloadBytes=64*1024, TurnCredentialRateWindowSeconds=60, TurnCredentialRateLimit=6; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=MaxRequestBytes}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly Dictionary<string,long> supersededEventSessions=new Dictionary<string,long>(StringComparer.Ordinal); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
+        const int ProtocolVersion=1, MaxRequestBytes=4096, MaxRelayPayloadBytes=64*1024, TurnCredentialRateWindowSeconds=60, TurnCredentialRateLimit=6; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=16384}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly Dictionary<string,long> supersededEventSessions=new Dictionary<string,long>(StringComparer.Ordinal); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
         const int EventHeartbeatSeconds=20, EventLeaseSeconds=75;
         readonly GroupCiphertextFanout groupFanout;
         readonly GroupMediaRooms groupRooms;
@@ -410,7 +484,7 @@ namespace PeerChat.Server {
         bool PermitPeopleSearch(long accountId){lock(peopleSearchGate){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();Queue<long> times;if(!peopleSearchTimes.TryGetValue(accountId,out times)){times=new Queue<long>();peopleSearchTimes[accountId]=times;}while(times.Count>0&&times.Peek()<=now-60)times.Dequeue();if(times.Count>=20)return false;times.Enqueue(now);return true;}}
         // A certificate can be loaded from a PFX for ordinary deployment or from CurrentUser\My
         // during local development. Neither path ever exposes its private key to clients.
-        public DiscoveryServer(ServerConfiguration c,IPushProvider pushProvider=null){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);certificate=LoadCertificate(c);groupFanout=new GroupCiphertextFanout(accounts);groupRooms=new GroupMediaRooms(accounts);pushWakes=new PushWakeDispatcher(accounts,pushProvider??new NullPushProvider());}
+        public DiscoveryServer(ServerConfiguration c,IPushProvider pushProvider=null){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);accounts.InitializeMailbox();certificate=LoadCertificate(c);groupFanout=new GroupCiphertextFanout(accounts);groupRooms=new GroupMediaRooms(accounts);pushWakes=new PushWakeDispatcher(accounts,pushProvider??FcmPushProvider.Create(c),(account,device,result)=>Log("DEBUG","Opaque push attempt account="+account+" device="+device.Substring(0,12)+" result="+result+" (provider acceptance is not message delivery)."));Log("INFO",c.FcmEnabled?"FCM opaque wake provider configured.":"FCM opaque wake provider disabled (no delivery claimed).");}
         static X509Certificate2 LoadCertificate(ServerConfiguration config){if(!String.IsNullOrWhiteSpace(config.CertificateThumbprint)){var store=new X509Store(StoreName.My,StoreLocation.CurrentUser);store.Open(OpenFlags.ReadOnly);try{var found=store.Certificates.Find(X509FindType.FindByThumbprint,config.CertificateThumbprint.Replace(" ",""),false);if(found.Count==0||!found[0].HasPrivateKey)throw new InvalidOperationException("Configured certificate thumbprint was not found with a private key in CurrentUser\\My.");return found[0];}finally{store.Close();}}return new X509Certificate2(config.CertificatePath,config.CertificatePassword,X509KeyStorageFlags.UserKeySet|X509KeyStorageFlags.PersistKeySet);}
         static bool ValidUsername(string value){if(String.IsNullOrEmpty(value)||value.Length<3||value.Length>32)return false;foreach(char c in value)if(!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))return false;return true;}
         static bool ValidIdentity(string value){return !String.IsNullOrEmpty(value)&&value.Length>=32&&value.Length<=2048;}
@@ -459,6 +533,19 @@ namespace PeerChat.Server {
             long accountId=accounts.Authenticate(TokenHash(token)); if(accountId==0)return Error("session_invalid");
             if(!String.IsNullOrEmpty(identity)&&!accounts.SessionAllowsDevice(TokenHash(token),identity))return Error("device_session_mismatch");
             if(type=="remember_enroll_challenge"||type=="remember_enroll")return EnrollRemembered(request,type,accountId,identity,TokenHash(token));
+            if(type=="messaging_bootstrap"){
+                object bootstrapVersion;
+                if(!request.TryGetValue("bootstrapVersion",out bootstrapVersion)||!(bootstrapVersion is int)||Convert.ToInt32(bootstrapVersion)!=1)return Error("bootstrap_version_unsupported");
+                if(!ValidIdentity(identity)||!accounts.OwnsDevice(accountId,identity))return Error("device_account_mismatch");
+                var state=accounts.FriendState(accountId);
+                var result=Ok(new Dictionary<string,object>{{"bootstrapVersion",1},{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"registeredPublicIdentity",identity},{"relayOnlyPresence",true},{"presenceLive",true},{"friendState",state}});
+                // Bound before publishing presence. No history, message content,
+                // credentials, group keys or TLS/session secrets in this snapshot.
+                var boundedJson=new JavaScriptSerializer{MaxJsonLength=16384};
+                try{if(Encoding.UTF8.GetByteCount(boundedJson.Serialize(result))>16384)return Error("bootstrap_too_large");}catch(InvalidOperationException){return Error("bootstrap_too_large");}
+                var presence=Handle(new Dictionary<string,object>{{"version",1},{"type","presence"},{"sessionToken",token},{"publicIdentity",identity},{"directCandidates",false}},observedHost,observedPort);
+                return (bool)presence["ok"]?result:presence;
+            }
             if(type=="push_register"||type=="push_remove"){
                 if(!ValidIdentity(identity)||accounts.SessionDevice(TokenHash(token))!=identity)return Error("push_device_session_required");
                 if(type=="push_remove"){accounts.RemovePush(accountId,identity);return Ok();}
@@ -543,7 +630,7 @@ namespace PeerChat.Server {
             if(type=="friend_block"||type=="friend_unblock"){var result=accounts.SetBlocked(accountId,other,type=="friend_block");if(result=="blocked"||result=="unblocked"){if(result=="blocked")InvalidateDirectProbes(accountId,other);Broadcast(accountId,other,"friendship_changed");}return result=="blocked"||result=="unblocked"?Ok(new Dictionary<string,object>{{"state",result}}):Error(result);}
             return Error("unsupported_request");
         }
-        Dictionary<string,object> Session(long accountId){string token=RandomToken();accounts.CreateSession(TokenHash(token),accountId,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds());return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true}});}
+        Dictionary<string,object> Session(long accountId){string token=RandomToken();accounts.CreateSession(TokenHash(token),accountId,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds());return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true},{"messagingBootstrapVersion",1}});}
         static bool ValidCredential(string value){return value!=null&&value.Length==43&&value.All(c=>Char.IsLetterOrDigit(c)||c=='-'||c=='_');}
         Dictionary<string,object> ProofChallenge(long account,string device,string action,string binding){
             try{var proof=rememberedProofs.Issue(account,device,action,binding);return Ok(new Dictionary<string,object>{{"challengeId",proof.Id},{"signatureInput",Convert.ToBase64String(proof.Input)},{"accountId",account},{"publicIdentity",device},{"purpose",action}});}
@@ -570,7 +657,7 @@ namespace PeerChat.Server {
             if(!VerifyRemembered(request,account,device,action,hash))return Error("remember_proof_invalid");
             if(action=="revoke"){accounts.RevokeRememberedDevice(account,device);RetireRememberedRoutes(account,device);return Ok();}
             string token=RandomToken();try{accounts.CreateDeviceSession(TokenHash(token),account,device,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds(),hash);}catch(InvalidOperationException){return Error("remember_revoked");}
-            return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",account},{"username",accounts.Username(account)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true}});
+            return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",account},{"username",accounts.Username(account)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true},{"messagingBootstrapVersion",1}});
         }
         static string Text(Dictionary<string,object> r,string key){object value;return r.TryGetValue(key,out value)?value as string:null;} static bool Flag(Dictionary<string,object> r,string key,bool fallback){object value;if(!r.TryGetValue(key,out value)||value==null)return fallback;try{return Convert.ToBoolean(value);}catch{return fallback;}} static Dictionary<string,object> Ok(Dictionary<string,object> data=null){var result=new Dictionary<string,object>{{"ok",true},{"version",ProtocolVersion}};if(data!=null)foreach(var p in data)result[p.Key]=p.Value;return result;} static Dictionary<string,object> Error(string code){return new Dictionary<string,object>{{"ok",false},{"version",ProtocolVersion},{"error",code}};}
         readonly object logGate=new object();
@@ -633,13 +720,15 @@ namespace PeerChat.Server {
                 while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
             }finally{RemoveRelay(endpoint);Log("DEBUG","Authenticated opaque relay channel closed for account "+accountId+".");}
         }
-        void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);Log("DEBUG","Discovery client connected.");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");
-                if(requestType=="relay_attach"){ServeRelay(client,tls,request);return;}
+        void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);string correlation=Guid.NewGuid().ToString("N").Substring(0,12),kind="unknown",stage="tls_handshake";long diagnosticAccount=0;Log("DEBUG","Discovery client connected request_id="+correlation+".");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);stage="request_read";var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");kind=ReliableIoDiagnostics.RequestKind(requestType);string diagnosticToken=Text(request,"sessionToken");if(!String.IsNullOrEmpty(diagnosticToken))diagnosticAccount=accounts.Authenticate(TokenHash(diagnosticToken));
+                if(requestType=="relay_attach"){stage="relay";ServeRelay(client,tls,request);return;}
+                if(requestType=="mailbox_rpc"){stage="mailbox";ServeMailboxRpc(tls,request);return;}
                 // Event subscriptions are authenticated with the same short-lived session token
                 // as ordinary requests. The server sends notifications only; clients fetch the
                 // authoritative friend snapshot after each notification. This keeps the channel
                 // useful for presence and request updates without making it a second data store.
                 if(requestType=="events"){
+                    stage="event_channel";
                     string eventTokenHash=TokenHash(Text(request,"sessionToken"));long eventAccount=accounts.Authenticate(eventTokenHash);string eventIdentity=Text(request,"publicIdentity");
                     if(eventAccount==0||!ValidIdentity(eventIdentity)||!accounts.SessionAllowsDevice(eventTokenHash,eventIdentity)||!accounts.OwnsDevice(eventAccount,eventIdentity)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
                     if(IsSupersededEventSession(eventTokenHash)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("event_session_superseded"))));return;}
@@ -647,11 +736,11 @@ namespace PeerChat.Server {
                     bool clientHeartbeats=Flag(request,"clientHeartbeats",false);tls.ReadTimeout=5000;tls.WriteTimeout=1000;var subscription=new EventClient(client,tls,eventAccount,eventIdentity,eventTokenHash,clientHeartbeats);ReplaceEventSubscription(subscription);accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease");BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);Log("DEBUG","Authenticated discovery event channel opened.");
                     // Presence is a client-renewed lease. An open-but-half-dead TCP connection
                     // cannot keep the account online because the server never renews it itself.
-try{long nextLegacyLease=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+30;while(!stopping){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(subscription.ClientHeartbeats&&now-subscription.LastHeartbeatUtc>=EventLeaseSeconds)break;if(!subscription.ClientHeartbeats&&now>=nextLegacyLease){accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Legacy authenticated event-channel lease");BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);nextLegacyLease=now+30;}if(client.Client.Poll(500000,SelectMode.SelectRead)){if(client.Available==0)break;var heartbeat=groupJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,GroupCiphertextFanout.MaxFrame)));if(Text(heartbeat,"type")=="group_room"||Text(heartbeat,"type")=="group_media"){HandleGroupRooms(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_send"||Text(heartbeat,"type")=="group_ack"){HandleGroupChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")!="event_heartbeat"||accounts.Authenticate(subscription.SessionTokenHash)!=eventAccount)break;subscription.Heartbeat();accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease");}}}
+try{long nextLegacyLease=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+30;while(!stopping){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();if(subscription.ClientHeartbeats&&now-subscription.LastHeartbeatUtc>=EventLeaseSeconds)break;if(!subscription.ClientHeartbeats&&now>=nextLegacyLease){accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Legacy authenticated event-channel lease");BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);nextLegacyLease=now+30;}if(client.Client.Poll(500000,SelectMode.SelectRead)){if(client.Available==0)break;var heartbeat=groupJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,GroupCiphertextFanout.MaxFrame)));if((Text(heartbeat,"type")??"").StartsWith("mailbox_",StringComparison.Ordinal)){HandleMailboxChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_room"||Text(heartbeat,"type")=="group_media"){HandleGroupRooms(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_send"||Text(heartbeat,"type")=="group_ack"){HandleGroupChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")!="event_heartbeat"||accounts.Authenticate(subscription.SessionTokenHash)!=eventAccount)break;subscription.Heartbeat();accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease");}}}
                     finally{EndEventSubscription(subscription);Log("DEBUG","Discovery event channel closed.");}
                     return;
                 }
-                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}var response=Encoding.UTF8.GetBytes(json.Serialize(Handle(request,observedHost,0)));WriteFrame(tls,response);}catch(Exception error){Log("WARNING","Client request failed: "+error.GetType().Name);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected.");}}}
+                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}stage="request_handle";var response=Encoding.UTF8.GetBytes(json.Serialize(Handle(request,observedHost,0)));stage="response_write";WriteFrame(tls,response);}catch(Exception error){bool expected=ReliableIoDiagnostics.ExpectedDisconnect(error,kind);Log(expected?"DEBUG":"WARNING",(expected?"Reliable channel disconnected":"Client request failed")+": "+error.GetType().Name+" request_id="+correlation+" request="+kind+" stage="+stage+" authenticated_account="+diagnosticAccount);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected request_id="+correlation+".");}}}
         public static int Main(string[] args){try{string configPath=ServerConfiguration.DefaultConfigPath;for(int i=0;i+1<args.Length;i++)if(args[i]=="--config")configPath=args[++i];var c=ServerConfiguration.Load(configPath);for(int i=0;i+1<args.Length;i++){if(args[i]=="--port")c.Port=Int32.Parse(args[++i],CultureInfo.InvariantCulture);else if(args[i]=="--database")c.DatabasePath=args[++i];else if(args[i]=="--certificate")c.CertificatePath=args[++i];else if(args[i]=="--certificate-password")c.CertificatePassword=args[++i];else if(args[i]=="--certificate-thumbprint")c.CertificateThumbprint=args[++i];else if(args[i]=="--management-pipe")c.ManagementPipe=args[++i];}c.Validate();new DiscoveryServer(c).Run();return 0;}catch(Exception error){Console.Error.WriteLine("PeerChat server startup failed: "+error.GetType().Name+": "+error.Message);return 1;}}
     }
 }

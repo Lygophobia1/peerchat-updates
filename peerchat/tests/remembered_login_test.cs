@@ -46,6 +46,15 @@ static class RememberedLoginTest {
                 Denied(Call(server,request),"Resume replay accepted");
                 Denied(Call(server,Fields("presence","sessionToken",boundSession,"publicIdentity",Hash(wrong.Key.Export(CngKeyBlobFormat.EccPublicBlob)))),"Bound session changed device");
                 Check((bool)Call(server,Fields("presence","sessionToken",boundSession,"publicIdentity",device))["ok"],"Bound presence failed");
+                var bootstrap=Fields("messaging_bootstrap","sessionToken",boundSession,"publicIdentity",device);bootstrap["bootstrapVersion"]=1;
+                var snapshot=Call(server,bootstrap);
+                Check((bool)snapshot["ok"]&&Convert.ToInt64(snapshot["accountId"])==account&&(string)snapshot["registeredPublicIdentity"]==device,"Bootstrap account/device binding failed");
+                Check((bool)snapshot["presenceLive"]&&(bool)snapshot["relayOnlyPresence"]&&db.IsPresent(account),"Bootstrap did not establish real presence");
+                var friendship=(Dictionary<string,object>)snapshot["friendState"];
+                Check(friendship.ContainsKey("friends")&&friendship.ContainsKey("incoming")&&!snapshot.ContainsKey("sessionToken")&&!snapshot.ContainsKey("credential")&&!snapshot.ContainsKey("history"),"Bootstrap shape leaked optional/sensitive state");
+                bootstrap["publicIdentity"]=Hash(wrong.Key.Export(CngKeyBlobFormat.EccPublicBlob));Denied(Call(server,bootstrap),"Bootstrap accepted wrong device");
+                bootstrap["publicIdentity"]=device;bootstrap["bootstrapVersion"]=2;Denied(Call(server,bootstrap),"Bootstrap accepted unsupported version");
+                bootstrap.Remove("bootstrapVersion");Denied(Call(server,bootstrap),"Bootstrap accepted missing version");
             }
             db.Execute("UPDATE sessions SET expires_utc=0 WHERE token_hash='"+Hash(boundSession)+"';");
             Denied(Call(server,Fields("session_info","sessionToken",boundSession)),"Expired access session accepted");

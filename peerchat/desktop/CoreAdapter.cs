@@ -12,6 +12,17 @@ namespace PeerChatDesktop {
 // and are copied before another native call. Never pass C++ objects across ABI.
 public sealed class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
+    readonly object mailboxGate=new object();
+    [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();
+    [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_mailbox(IntPtr handle,uint operation,byte[] input,uint length,string messageId,int allowed,[Out] byte[] output,uint capacity);
+    public bool MailboxSupported {get{return ui_mailbox_supported()!=0;}}
+    public byte[] Mailbox(uint operation,byte[] input=null,string messageId="",bool allowed=false){lock(mailboxGate){
+        if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
+        input=input??new byte[0];if(input.Length>70000)throw new ArgumentException("Mailbox input exceeds bound.");
+        var output=new byte[262144];int size=ui_mailbox(handle,operation,input,(uint)input.Length,messageId,allowed?1:0,output,(uint)output.Length);
+        if(size<0||size>output.Length)throw new InvalidOperationException("Native mailbox operation rejected.");
+        Array.Resize(ref output,size);return output;
+    }}
     const uint LoadLibrarySearchDllLoadDir=0x00000100;
     const uint LoadLibrarySearchSystem32=0x00000800;
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string fileName,IntPtr file,uint flags);
@@ -190,7 +201,7 @@ public sealed class CoreAdapter : IDisposable {
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}
     public string Add(string invite,string ownPeer){return Marshal.PtrToStringUni(ui_add(handle,invite,ownPeer));}
     public CoreEvent[] Poll(){return serializer.Deserialize<CoreEvent[]>(Marshal.PtrToStringUni(ui_poll(handle)));}
-    public void Dispose(){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}
+    public void Dispose(){lock(mailboxGate){if(handle!=IntPtr.Zero){ui_destroy(handle);handle=IntPtr.Zero;}GC.KeepAlive(nativeModule);}}
 }
 public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails,screenFailureDomain,screenFailureReason,screenRecoveryTrigger,authorizationGroupId; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration,screenRecoveryGenerationFrom,screenRecoveryGenerationTo,authorizationRosterGeneration,authorizationTargetAccountId; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight,screenFps; public double screenBitrateMbps; public bool connected,callMuted,callDeafened,callControlAvailable,screenMediaFailed; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }

@@ -45,13 +45,34 @@ unaccepted sends preserve the draft and allow retry using the existing Send acti
 
 ## Explicit deployment gaps
 
-No Firebase project/configuration or cached Firebase messaging SDK was available.
-Production push provider remains Null/disabled. The vendor-neutral receiver entry,
-protected token holder, server registration/provider contracts and bounded wake
-consumer are implemented and tested, but **actual FCM delivery is not implemented
-or validated**. A configured Firebase SDK service and concrete server FCM adapter
-remain a follow-up deployment/integration gate. No credentials were invented or
-packaged and no dependencies were downloaded to pretend this gate passed.
+### Post-push QOL backlog (not part of FCM debugging)
+
+Android optimistic/local-echo sending: after **native durable outbox acceptance**,
+project the message immediately with Sending/Pending state. Session establishment
+and delivery remain asynchronous under SessionTransportManager/DeliveryManager.
+Only a real ACK changes it to Delivered. Failed local enqueue preserves the draft
+and reports failure. Do not fabricate delivery or create a Kotlin outbox.
+
+The initial candidate had no concrete/configured Firebase provider. The current
+follow-up adds Google Services 4.5.0, Firebase BoM 34.19.0, Messaging 25.1.3 only
+(no Analytics), a FirebaseMessagingService and concrete HTTP-v1/OAuth provider.
+Android uses an ignored local `google-services.json`; server service-account
+credentials remain external and are read in place, never copied or packaged.
+FCM stays disabled by default; the actual development server must explicitly
+configure `FcmEnabled`, `FcmProjectId` and `FcmServiceAccountPath`.
+
+A real opaque HTTP-v1 send was accepted and received on the authorized Motorola
+(Android 16/API 36), producing `fcm_received` and `wake_scheduled` breadcrumbs.
+This proves provider/device delivery, **not full background notification acceptance**.
+The active development server still needs the new provider configuration and the
+Windows-message → native receive → notification/tap/ACK/dedupe physical test.
+The historical unclassified IOException cannot be diagnosed retroactively; new
+bounded request/stage correlation must be collected from that updated server.
+
+Firebase introduces AndroidX DataStore 1.1.7's ARM64 shared counter library. Its
+packaged bytes are checked against the exact upstream hash, with unchanged peer
+TLS/native ABI allowlists. The external credential file is excluded from all
+client/server packages.
 
 There is no new server offline DM mailbox. The existing sender-owned encrypted
 native outbox is authoritative; wake/reconnect can drain it while a sender is

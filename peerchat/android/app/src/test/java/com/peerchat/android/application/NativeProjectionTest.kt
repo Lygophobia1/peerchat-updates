@@ -68,4 +68,39 @@ class NativeProjectionTest {
         assertEquals(listOf(c),second.single().knownPeerIds)
         assertEquals(9L,second.single().accountId)
     }
+    @Test fun headlessBootstrapProjectsPeersBeforeDeliveryWithoutPresenter() {
+        val friend=FriendIdentity(8,"Jonah",a,true)
+        val connection=NativeRecordWriter(4).apply{number(0);number(1);number(0);number(0);number(1);text("none")}.bytes()
+        val empty=NativeRecordWriter(2).apply{number(0)}.bytes()
+        var reads=0
+        val before=nativeConversationProjection(listOf(friend),{assertEquals(a,it);reads++;connection},{assertEquals(a,it);empty})
+        assertEquals(1,before.size);assertTrue(before.single().connection.pending);assertTrue(before.single().messages.isEmpty());assertEquals(1,reads)
+        val id="f".repeat(32)
+        val committed=NativeRecordWriter(2).apply{number(1);text(id);text(a);text(b);number(100);number(1);number(1);number(2);text("test message")}.bytes()
+        repeat(3){
+            val after=nativeConversationProjection(listOf(friend),{connection},{committed})
+            assertEquals(id,after.single().messages.single().id)
+            assertEquals(1,after.single().messages.size)
+        }
+        // Wire-storage regression is exercised separately by the actual JNI/
+        // isolated-server proof; these are native snapshot fixtures, not fake ACKs.
+    }
+    @Test fun oldUnreadHistoryCannotCompleteNewWakeBeforeNativeReceiveAndOutput() {
+        assertFalse(nativeWakeOutputComplete(10,20,true,false,30))
+        assertFalse(nativeWakeOutputComplete(25,20,true,false,24))
+        assertFalse(nativeWakeOutputComplete(25,20,false,false,30))
+        assertFalse(nativeWakeOutputComplete(25,20,true,true,30))
+        assertTrue(nativeWakeOutputComplete(25,20,true,false,30))
+    }
+    @Test fun backgroundQuiescenceKeepsNativeHistoryButRetiresEveryLiveStateClaim() {
+        val messages=listOf(MessageSnapshot("f".repeat(32),a,b,100,1,1,3,"Test fixture"))
+        val live=MessagingSnapshot(19,"Jonah",b,true,"Online",listOf(ConversationSnapshot(
+            FriendIdentity(8,"Other",a,true),ConnectionSnapshot(ready=true,pending=true),messages)),serverPresenceLive=true,localHistoryReady=true)
+        val offline=localOfflineSnapshot(live,"Offline")
+        assertFalse(offline.authenticated);assertFalse(offline.serverPresenceLive)
+        assertTrue(offline.localHistoryReady);assertEquals(live.localPeerId,offline.localPeerId)
+        assertFalse(offline.conversations.single().connection.ready);assertFalse(offline.conversations.single().friend.online)
+        assertSame(messages,offline.conversations.single().messages)
+        assertEquals(3L,offline.conversations.single().messages.single().delivery) // Stored is NOT invented Delivered.
+    }
 }

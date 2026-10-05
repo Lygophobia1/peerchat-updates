@@ -15,7 +15,7 @@ enum class Tab { Chats, Calls, You }
 enum class ChatKind { Direct, Group }
 enum class LoadState { Ready, Loading, Empty, Error }
 enum class ConnectionState { Online, Offline, Reconnecting }
-enum class MessageStatus { Received, Queued, Sent, Delivered, Read, Failed, Preview }
+enum class MessageStatus { Received, Queued, Sent, Stored, Delivered, Read, Failed, Preview }
 enum class ThemeChoice { System, Dark, Light }
 data class MemberUi(val accountId: String, val name: String, val online: Boolean, val role: String = "Member")
 data class MessageUi(
@@ -58,8 +58,10 @@ data class PeerChatUiState(
     val load: LoadState = LoadState.Ready, val connection: ConnectionState = ConnectionState.Online,
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
     val rememberMe:Boolean=false,
+    val startupStatus:String?=null,
     val drafts:Map<String,String> = emptyMap(),val notificationsEnabled:Boolean=true,
     val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,
+    val mailboxStorageAllowed:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
     val diagnosticsReturn: Route = Route.Details,
     val theme: ThemeChoice = ThemeChoice.System, val incomingCallPreview: Boolean = false,
@@ -102,6 +104,7 @@ sealed interface UiAction {
     data class RememberMe(val enabled:Boolean):UiAction
     data class Draft(val conversationId:String,val text:String):UiAction
     data class NotificationSettings(val enabled:Boolean,val preview:NotificationPreview):UiAction
+    data class MailboxStorage(val allowed:Boolean):UiAction
     data class PreviewMessage(val text: String) : UiAction
     data object Older : UiAction
     data object ToggleNotifications : UiAction
@@ -152,6 +155,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.RememberMe -> state.copy(rememberMe=action.enabled)
         is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
+        is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

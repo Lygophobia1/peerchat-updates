@@ -199,6 +199,21 @@ public sealed class DiscoveryClient {
         var tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});
         try{tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);if(longLived)tcp.ReceiveTimeout=0;return tls;}catch{tls.Dispose();tcp.Close();throw;}
     }
+    public Dictionary<string,object> Mailbox(string operation,string device,Dictionary<string,object> payload){
+        if(!new[]{"mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"}.Contains(operation))throw new ArgumentException("Unsupported mailbox operation.");
+        string requestId=Guid.NewGuid().ToString("N");var wireJson=new JavaScriptSerializer{MaxJsonLength=100000};
+        TcpClient tcp;using(var tls=OpenAuthenticatedStream(out tcp))using(tcp){
+            tls.ReadTimeout=10000;tls.WriteTimeout=10000;
+            WriteFrame(tls,Encoding.UTF8.GetBytes(wireJson.Serialize(new Dictionary<string,object>{{"version",1},{"type","mailbox_rpc"},{"requestId",requestId},{"sessionToken",SessionToken},{"publicIdentity",device}})));
+            var ready=wireJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,16384)));
+            object ok;if(!ready.TryGetValue("ok",out ok)||!Boolean.Equals(ok,true)||Text(ready,"type")!="mailbox_ready"||Text(ready,"requestId")!=requestId)throw new InvalidOperationException("Mailbox authorization rejected.");
+            payload=new Dictionary<string,object>(payload);payload["type"]=operation;payload["requestId"]=requestId;
+            var bytes=Encoding.UTF8.GetBytes(wireJson.Serialize(payload));if(bytes.Length>100000)throw new InvalidDataException("Mailbox request exceeds bound.");
+            WriteFrame(tls,bytes);var reply=wireJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,100000)));
+            if(Text(reply,"type")!="mailbox_result"||Text(reply,"requestId")!=requestId||Text(reply,"operation")!=operation)throw new InvalidDataException("Mailbox response correlation failed.");
+            return reply;
+        }
+    }
     Dictionary<string,object> Request(string type,Dictionary<string,object> fields) {
         if(String.IsNullOrWhiteSpace(Host)||Port<1||Port>65535)throw new InvalidOperationException("The configured PeerChat server endpoint is invalid.");
         fields["version"]=1;fields["type"]=type;

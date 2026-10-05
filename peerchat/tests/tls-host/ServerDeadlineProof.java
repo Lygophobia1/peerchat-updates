@@ -27,11 +27,12 @@ public final class ServerDeadlineProof {
                 if(worker.isAlive()||!released.get()||scope.activeSocketCount()!=0||failure.get()==null)
                     throw new AssertionError("Deadline left an inner operation/resource alive");
                 if(System.nanoTime()-started>TimeUnit.SECONDS.toNanos(2))throw new AssertionError("Deadline exceeded tolerance");
+                if(scope.providerInitializationCount()!=1)throw new AssertionError("Provider registry rebuilt across the same backend lifetime");
                 try{scope.check();throw new AssertionError("Expired scope accepted work");}catch(SocketTimeoutException expected){}
             } finally {scope.configure(false,Long.MAX_VALUE);worker.join(2000);}
         }
         scope.configure(true,Long.MAX_VALUE);scope.check();scope.configure(false,Long.MAX_VALUE);
         try{scope.check();throw new AssertionError("Released lifetime accepted work");}catch(SocketTimeoutException expected){}
-        System.out.println("PASS: 3 silent-peer TLS reads interrupted by socket-close deadline; inner worker exited, resources released, expired scope fails closed, later lifetime reopens. No outer-timeout-only claim.");
+        System.out.println("PASS: 3 silent-peer TLS reads interrupted by socket-close deadline; inner worker exited, resources released, expired scope fails closed, later lifetime reopens; exactly one scoped provider initialization. No outer-timeout-only claim.");
     }
 }

@@ -17,11 +17,27 @@ public final class OpaqueRecipientHpke {
         byte[] agree(byte[] validatedPoint);
     }
     private OpaqueRecipientHpke() {}
+    /** One-shot sender; only the recipient's public point crosses this boundary.
+     * Return is canonical SEC1 encapsulation (65 bytes), then ciphertext/tag. */
+    public static byte[] seal(byte[] recipientPublic, byte[] info, byte[] aad, byte[] plaintext)
+            throws InvalidCipherTextException {
+        if (info == null || aad == null || plaintext == null || info.length > 8192
+                || aad.length > 8192 || plaintext.length > 1048576)
+            throw new IllegalArgumentException("Invalid bounded HPKE input");
+        HPKE hpke = new HPKE(HPKE.mode_base, HPKE.kem_P256_SHA256,
+                HPKE.kdf_HKDF_SHA256, HPKE.aead_AES_GCM128);
+        var sender = hpke.setupBaseS(hpke.deserializePublicKey(RecipientPublicKey.validate(recipientPublic)), info);
+        byte[] enc = sender.getEncapsulation(), ciphertext = sender.seal(aad, plaintext);
+        byte[] result = new byte[enc.length + ciphertext.length];
+        System.arraycopy(enc, 0, result, 0, enc.length);
+        System.arraycopy(ciphertext, 0, result, enc.length, ciphertext.length);
+        return result;
+    }
     public static byte[] open(Recipient recipient, byte[] expectedPublicKey,
             byte[] enc, byte[] info, byte[] aad, byte[] ciphertext)
             throws InvalidCipherTextException {
         if (recipient == null || info == null || aad == null || ciphertext == null
-                || info.length > 65536 || aad.length > 65536
+                || info.length > 8192 || aad.length > 8192
                 || ciphertext.length < 16 || ciphertext.length > 1048576)
             throw new IllegalArgumentException("Invalid bounded HPKE input");
         final byte[] expected = RecipientPublicKey.validate(expectedPublicKey);

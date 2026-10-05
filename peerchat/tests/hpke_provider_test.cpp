@@ -1,0 +1,97 @@
+#include "../platform/hpke_provider.hpp"
+#include "../platform/windows_recipient_key.hpp"
+#include <future>
+#include <iostream>
+#include <thread>
+#include <sstream>
+#include <iomanip>
+
+using namespace peerchat::platform;
+using Bytes=HpkeProvider::Bytes;
+static void check(bool ok){if(!ok)throw std::runtime_error("HPKE provider regression failed");}
+template<class F> static void rejects(F f){bool rejected=false;try{f();}catch(const std::exception&){rejected=true;}check(rejected);}
+struct TestKey {
+    std::string alias;std::shared_ptr<RecipientKeyHandle> key;bool owned=false;
+    explicit TestKey(unsigned suffix){
+        alias="PeerChat.Recipient.test.provider."+std::to_string(GetCurrentProcessId())+"."+std::to_string(GetTickCount64())+"."+std::to_string(suffix);
+        WindowsRecipientKeyProvider provider;key=provider.create(alias);owned=true;
+    }
+    ~TestKey(){key.reset();if(!owned)return;recipient_cng::Object p,k;
+        if(NCryptOpenStorageProvider(&p.value,MS_KEY_STORAGE_PROVIDER,0)!=0)return;
+        auto name=recipient_cng::alias(alias);
+        if(NCryptOpenKey(p.value,&k.value,name.c_str(),0,0)==0&&NCryptDeleteKey(k.value,0)==0)k.value=0;
+    }
+};
+struct FailingKey : RecipientKeyHandle {
+    Bytes point;explicit FailingKey(Bytes p):point(std::move(p)){}
+    Bytes publicKey()override{return point;}
+    Bytes agreeP256(const Bytes&)override{throw std::runtime_error("synthetic provider failure");}
+};
+struct GatedKey : RecipientKeyHandle {
+    std::shared_ptr<RecipientKeyHandle> key;
+    std::promise<void> entered;std::shared_future<void> released;
+    GatedKey(std::shared_ptr<RecipientKeyHandle> k,std::shared_future<void> r):key(std::move(k)),released(r){}
+    Bytes publicKey()override{return key->publicKey();}
+    Bytes agreeP256(const Bytes& p)override{entered.set_value();released.wait();return key->agreeP256(p);}
+};
+static Bytes readHex(){
+    std::string input;check(bool(std::getline(std::cin,input))&&input.size()%2==0&&input.size()<=140000);Bytes result;
+    for(std::size_t i=0;i<input.size();i+=2){auto digit=[](char c){return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:-1;};
+        int a=digit(input[i]),b=digit(input[i+1]);check(a>=0&&b>=0);result.push_back(static_cast<unsigned char>(16*a+b));}return result;
+}
+static std::string hex(const Bytes& value){std::ostringstream out;out<<std::hex<<std::setfill('0');for(auto c:value)out<<std::setw(2)<<int(c);return out.str();}
+static Bytes text(const char* value){return Bytes(value,value+std::char_traits<char>::length(value));}
+static int interoperability(){
+    TestKey key(9);auto provider=createWolfCryptEvaluationHpke();auto publicKey=key.key->publicKey();
+    std::cout<<hex(publicKey)<<std::endl;auto remote=readHex();
+    auto info=text("PeerChat evaluation RFC9180 Base"),aad=text("synthetic-account/device/message-v1"),plain=text("Synthetic HPKE test fixture only");
+    for(unsigned i=0;i<200;++i){HpkeEnvelope envelope;envelope.enc=readHex();envelope.ciphertext=readHex();check(provider->open(key.key,publicKey,info,aad,envelope)==plain);std::cout<<"PASS"<<std::endl;}
+    for(unsigned i=0;i<200;++i){auto envelope=provider->seal(remote,info,aad,plain);std::cout<<hex(envelope.enc)<<'\n'<<hex(envelope.ciphertext)<<std::endl;check(readHex()==Bytes{1});}
+    std::cout<<"PASS: hardened provider interoperates both directions with stock and patched host BC; physical Android pending"<<std::endl;return 0;
+}
+int main(int argc,char** argv){try{
+    if(argc==2&&std::string(argv[1])=="--interop")return interoperability();
+    rejects([]{createShippingHpke();});
+    TestKey first(1),second(2);auto provider=createWolfCryptEvaluationHpke();
+    Bytes info{1,0,2},aad{3,4},plain{5,0,6,7};
+    auto envelope=provider->seal(first.key->publicKey(),info,aad,plain);
+    auto empty=provider->seal(first.key->publicKey(),info,aad,{});check(provider->open(first.key,first.key->publicKey(),info,aad,empty).empty());
+    check(provider->open(first.key,first.key->publicKey(),info,aad,envelope)==plain);
+    rejects([&]{provider->open(second.key,second.key->publicKey(),info,aad,envelope);});
+    rejects([&]{provider->open(second.key,first.key->publicKey(),info,aad,envelope);});
+    auto bad=envelope;bad.ciphertext[0]^=1;rejects([&]{provider->open(first.key,first.key->publicKey(),info,aad,bad);});
+    bad=envelope;bad.ciphertext.resize(15);rejects([&]{provider->open(first.key,first.key->publicKey(),info,aad,bad);});
+    bad=envelope;bad.enc=Bytes(65);bad.enc[0]=4;rejects([&]{provider->open(first.key,first.key->publicKey(),info,aad,bad);});
+    auto failing=std::make_shared<FailingKey>(first.key->publicKey());rejects([&]{provider->open(failing,first.key->publicKey(),info,aad,envelope);});
+    std::atomic<bool> cancelled{true};rejects([&]{provider->seal(first.key->publicKey(),info,aad,plain,&cancelled);});
+    rejects([&]{provider->open(first.key,first.key->publicKey(),info,aad,envelope,&cancelled);});
+    rejects([&]{provider->seal(first.key->publicKey(),Bytes(8193),aad,plain);});
+    rejects([&]{provider->seal(first.key->publicKey(),info,aad,Bytes(1024*1024+1));});
+    // Warm provider/CNG caches before measuring resource growth.
+    DWORD before=0,after=0;check(GetProcessHandleCount(GetCurrentProcess(),&before));
+    std::atomic<unsigned> completed{0};std::vector<std::future<void>> tasks;
+    for(unsigned t=0;t<8;++t)tasks.push_back(std::async(std::launch::async,[&,t]{
+        auto instance=createWolfCryptEvaluationHpke();auto key=t%2?first.key:second.key;auto publicKey=key->publicKey();
+        for(unsigned i=0;i<125;++i){auto value=plain;value.push_back(static_cast<unsigned char>(t));
+            auto sealed=instance->seal(publicKey,info,aad,value);check(instance->open(key,publicKey,info,aad,sealed)==value);++completed;
+        }
+        instance->shutdown();rejects([&]{instance->seal(publicKey,info,aad,plain);});
+    }));
+    for(auto& task:tasks)task.get();
+    check(completed==1000);
+    check(GetProcessHandleCount(GetCurrentProcess(),&after));check(after<=before+4);
+    for(unsigned i=0;i<100;++i){auto instance=createWolfCryptEvaluationHpke();auto sealed=instance->seal(first.key->publicKey(),info,aad,plain);
+        check(instance->open(first.key,first.key->publicKey(),info,aad,sealed)==plain);}
+    auto stopping=createWolfCryptEvaluationHpke();std::promise<void> release;
+    auto gate=std::make_shared<GatedKey>(first.key,release.get_future().share());
+    auto started=gate->entered.get_future();
+    auto operation=std::async(std::launch::async,[&]{rejects([&]{stopping->open(gate,first.key->publicKey(),info,aad,envelope);});});
+    const bool began=started.wait_for(std::chrono::seconds(10))==std::future_status::ready;
+    if(!began){release.set_value();operation.get();check(false);}
+    auto stop=std::async(std::launch::async,[&]{stopping->shutdown();});
+    // New calls fail as soon as shutdown begins, not only after DH completes.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));release.set_value();operation.get();stop.get();
+    rejects([&]{stopping->seal(first.key->publicKey(),info,aad,plain);});
+    std::cout<<"PASS: 1000 concurrent round trips, two CNG keys/eight providers, repeated initialization, cancellation, shutdown during DH, bounds/tamper/provider failures, bounded process handles\n";
+    return 0;
+}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

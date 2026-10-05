@@ -77,9 +77,9 @@ import kotlinx.coroutines.delay
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                 ActionIcon(Icons.Default.Add, "Attachments", { dispatch(UiAction.Notice("File sharing is not available in this preview.")) })
                 OutlinedTextField(draft, { if (it.length <= 4096){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    enabled = state.connection == ConnectionState.Online && !sending, minLines = 1, maxLines = 5,
+                    enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
-                IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && state.connection == ConnectionState.Online) {
+                IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
                     if (sending) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                     else Icon(Icons.AutoMirrored.Filled.Send, if(state.demo) "Send local preview" else "Send message", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -89,7 +89,7 @@ import kotlinx.coroutines.delay
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             if(state.demo) DemoNote()
             if (state.connection != ConnectionState.Online) Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-                Text(if (state.connection == ConnectionState.Offline) "Offline${if(state.demo) " preview" else ""} · sending disabled" else "Reconnecting${if(state.demo) " preview" else ""} · sending disabled",
+                Text(if(state.demo) "Offline preview · sending disabled" else "${if(state.connection==ConnectionState.Offline) "Offline" else "Reconnecting"} · messages queue locally until delivery is available",
                     Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodySmall)
             }
             state.notice?.let { notice -> Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -144,6 +144,7 @@ import kotlinx.coroutines.delay
                 Text("${m.time}" + if (m.outgoing) " · ${when (m.status) {
                     MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
                     MessageStatus.Queued -> "Queued";
+                    MessageStatus.Stored -> "Stored · awaiting recipient";
                     MessageStatus.Preview -> "Local preview · not sent"; else -> "Sent"
                 }}" else "", style = MaterialTheme.typography.labelSmall,
                     color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

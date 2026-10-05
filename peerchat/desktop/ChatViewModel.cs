@@ -75,8 +75,9 @@ public class MessageModel : ObservableModel {
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
-    public string Stamp {get{return LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":"  ◷ Queued"):"");}}
+    public string Stamp {get{return LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":"  ◷ Queued"):"");}}
     public void Delivered(){Data.delivery=2;Changed("Stamp");}
+    public void ProjectNativeDelivery(int value){Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}}
     public void GroupStatus(string status){Data.status=status;Changed("Stamp");}
 }
 // Dispatcher-confined presentation state. Core events, never the GUI, determine
@@ -156,6 +157,7 @@ public class ChatViewModel {
         for(int index=0;index<ordered.Count;index++){int current=messages.IndexOf(ordered[index]);if(current!=index)messages.Move(current,index);}
     }
     public void Apply(CoreEvent e){
+        if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery);}
         // Media-device failures do not change the authenticated text session.
         if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){Status=e.text;return;}
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}

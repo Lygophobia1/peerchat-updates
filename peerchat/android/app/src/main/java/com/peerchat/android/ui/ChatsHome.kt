@@ -104,6 +104,7 @@ import androidx.compose.ui.tooling.preview.Preview
             if (c.unread > 0) Badge { Text(c.unread.toString()) }
             else if (c.messages.lastOrNull()?.outgoing == true) Text(when (c.messages.last().status) {
                 MessageStatus.Failed -> "Failed"; MessageStatus.Read -> "✓✓"; MessageStatus.Delivered -> "✓";
+                MessageStatus.Stored -> "Stored"; MessageStatus.Queued -> "Queued";
                 MessageStatus.Preview -> "Local"; else -> "Sent"
             }, style = MaterialTheme.typography.labelSmall)
         }

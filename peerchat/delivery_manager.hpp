@@ -1,6 +1,9 @@
 #pragma once
 #include "session_transport_types.hpp"
 #include "storage.hpp"
+#include "group.hpp"
+#include "mailbox_key_coordinator.hpp"
+#include "portable/utf8.hpp"
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -55,6 +58,81 @@ public:
     std::vector<StoredMessage> pendingMessages(const std::string& destination,
                                                 int limit = 100) {
         return storage_.pending(destination, limit);
+    }
+
+    // Called by the existing application/channel servicing loop, not a new
+    // retry owner. Authorization arguments must come from its current verified
+    // account/device friend snapshot, never from mailbox message metadata.
+    Blob prepareMailbox(const std::string& id,std::uint64_t localAccount,std::uint64_t recipientAccount,
+                        const mailbox::RecipientBinding& binding,const Contact& verifiedRecipient,
+                        platform::IdentityProvider& identity,platform::HpkeProvider& hpke,
+                        std::uint64_t now,bool serverStorageAllowed,bool liveRouteUsable,const Contact* canonicalRecipient=nullptr) {
+        if(!serverStorageAllowed||liveRouteUsable)return {};
+        auto message=storage_.message(id);
+        mailbox::require(message&&message->sender==localDeviceId_&&
+            (message->recipient==verifiedRecipient.peerId||(canonicalRecipient&&canonicalRecipient->verified&&canonicalRecipient->peerId==message->recipient&&Storage::publicKeyId(canonicalRecipient->publicKey)==message->recipient))&&
+            verifiedRecipient.verified&&Storage::publicKeyId(verifiedRecipient.publicKey)==verifiedRecipient.peerId&&
+            identity.publicKey().size()>0&&Storage::publicKeyId(identity.publicKey())==localDeviceId_);
+        mailbox::require(mailbox::verifyBinding(binding,recipientAccount,verifiedRecipient.peerId,verifiedRecipient.publicKey,verifyDevicePayload,Storage::publicKeyId)&&binding.storageAllowed);
+        auto existing=storage_.mailboxEnvelope(id,verifiedRecipient.peerId);
+        if(!existing.empty()) {
+            auto header=mailbox::parse(existing).header;
+            mailbox::require(header.senderAccount==localAccount&&header.recipientAccount==recipientAccount&&header.expiresUtc>now);
+            return existing; // Reconnect preserves HPKE ciphertext and logical ID.
+        }
+        if(message->delivery==Delivery::Delivered)return {};
+        mailbox::require(now>0&&now<=std::uint64_t(INT64_MAX)-mailbox::MaxTtlMilliseconds&&message->logicalOrder>0);
+        mailbox::Header header;header.senderAccount=localAccount;header.recipientAccount=recipientAccount;header.senderDevice=localDeviceId_;
+        header.recipientDevice=verifiedRecipient.peerId;header.keyId=binding.keyId;header.keyGeneration=binding.generation;
+        header.messageId=id;header.createdUtc=now;header.expiresUtc=now+mailbox::MaxTtlMilliseconds;header.logicalOrder=message->logicalOrder;header.storageAllowed=true;
+        auto text=unicode::encode(message->text);Blob body=mailbox::textBody(Blob(text.begin(),text.end()),message->utcMilliseconds);
+        struct Erase {Blob& bytes;~Erase(){volatile unsigned char* p=bytes.data();for(std::size_t i=0;i<bytes.size();++i)p[i]=0;}} erase{body};
+        auto envelope=mailbox::seal(header,body,binding,verifiedRecipient.publicKey,verifyDevicePayload,Storage::publicKeyId,identity,hpke);
+        auto wire=mailbox::serialize(envelope);storage_.saveMailboxEnvelope(id,verifiedRecipient.peerId,wire);return wire;
+    }
+    void mailboxStored(const std::string& id,const std::string& destination,const Blob& exactSubmittedEnvelope) {
+        storage_.mailboxStored(id,destination,exactSubmittedEnvelope);
+    }
+    static Blob mailboxDigest(const Blob& wire) {
+        const auto text=Storage::publicKeyId(wire);Blob digest;
+        for(std::size_t i=0;i<text.size();i+=2)digest.push_back(static_cast<unsigned char>(std::stoul(text.substr(i,2),nullptr,16)));
+        return digest;
+    }
+    bool acknowledgeMailbox(const Blob& receiptWire,std::uint64_t verifiedRecipientAccount,const Contact& verifiedRecipient) {
+        auto receipt=mailbox::parseReceipt(receiptWire);auto wire=storage_.mailboxEnvelope(receipt.messageId,verifiedRecipient.peerId);
+        if(wire.empty()||!verifiedRecipient.verified)return false;
+        auto envelope=mailbox::parse(wire);
+        if(envelope.header.recipientAccount!=verifiedRecipientAccount||!mailbox::verifyReceipt(receipt,verifiedRecipientAccount,verifiedRecipient.peerId,
+            localDeviceId_,envelope.header.messageId,mailboxDigest(wire),verifiedRecipient.publicKey,verifyDevicePayload,Storage::publicKeyId))return false;
+        auto message=storage_.message(receipt.messageId);
+        if(!message||message->sender!=localDeviceId_||message->delivery==Delivery::Delivered)return false;
+        storage_.acknowledge(receipt.messageId,Delivery::Delivered);submissions_.erase(Key{Kind::Message,message->recipient,receipt.messageId});return true;
+    }
+    struct MailboxReceive {bool inserted=false;Blob receipt;};
+    MailboxReceive acceptMailbox(const Blob& wire,std::uint64_t verifiedSenderAccount,const Contact& verifiedSender,
+                                const mailbox::RecipientBinding& localBinding,DeviceKeyManager& keys,
+                                platform::IdentityProvider& identity,platform::HpkeProvider& hpke,std::uint64_t now) {
+        auto envelope=mailbox::parse(wire);mailbox::require(verifiedSender.verified&&verifiedSender.peerId==envelope.header.senderDevice&&
+            Storage::publicKeyId(verifiedSender.publicKey)==verifiedSender.peerId&&Storage::publicKeyId(identity.publicKey())==localDeviceId_&&localBinding.device==localDeviceId_);
+        MailboxReceive result;const auto digest=mailboxDigest(wire);
+        keys.withRecipient(localBinding.keyId,true,[&](const DeviceKeyMetadata& metadata,const auto& handle){
+            mailbox::require(metadata.registration==DeviceKeyRegistration::Accepted&&metadata.signedBinding==mailbox::serializeBinding(localBinding));
+            auto plain=mailbox::open(envelope,localBinding,verifiedSenderAccount,verifiedSender.publicKey,verifyDevicePayload,Storage::publicKeyId,handle,hpke,now);
+            // Erase transient decrypted buffers even on malformed text/storage failure.
+            struct Erase {Blob& bytes;~Erase(){volatile unsigned char* p=bytes.data();for(std::size_t i=0;i<bytes.size();++i)p[i]=0;}} erase{plain};
+            auto body=mailbox::parseTextBody(plain);Erase eraseText{body.utf8};
+            StoredMessage message;message.id=envelope.header.messageId;message.sender=envelope.header.senderDevice;message.recipient=localDeviceId_;
+            message.text=unicode::decode(std::string(body.utf8.begin(),body.utf8.end()));message.utcMilliseconds=body.messageUtc;
+            message.logicalOrder=envelope.header.logicalOrder;message.delivery=Delivery::Delivered;
+            result.inserted=acceptIncomingMessage(verifiedSender.peerId,message);storage_.observeLogicalOrder(message.logicalOrder);
+            result.receipt=storage_.mailboxReceipt(message.id,verifiedSender.peerId,digest);
+            if(result.receipt.empty()) {
+                mailbox::Receipt receipt;receipt.recipientAccount=localBinding.accountId;receipt.recipientDevice=localDeviceId_;
+                receipt.senderDevice=verifiedSender.peerId;receipt.messageId=message.id;receipt.envelopeDigest=digest;
+                receipt.signature=identity.sign(mailbox::receiptPayload(receipt));result.receipt=mailbox::serializeReceipt(receipt);
+                storage_.saveMailboxReceipt(message.id,verifiedSender.peerId,result.receipt);
+            }
+        });return result;
     }
 
     std::vector<GroupEvent> pendingGroupEvents(const std::string& destination,
@@ -133,6 +211,14 @@ public:
         if (authenticatedSource.empty() || message.sender != authenticatedSource ||
             message.recipient != localDeviceId_)
             throw std::runtime_error("Incoming message destination is not authenticated");
+        auto previous=storage_.message(message.id);
+        if(previous&&previous->delivery==Delivery::Delivered&&previous->logicalOrder==0&&message.logicalOrder>0){
+            // A previously accepted legacy frame did not carry an order. Keep
+            // that already-durable history position on a modern/mailbox retry;
+            // exact content/time/source/destination checks remain in Storage.
+            auto compatible=message;compatible.logicalOrder=0;
+            return storage_.append(authenticatedSource,compatible);
+        }
         return storage_.append(authenticatedSource, message);
     }
 

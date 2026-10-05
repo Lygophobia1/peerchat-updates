@@ -4,18 +4,55 @@ import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
+import android.os.Build
 
 /** Entry point for a future vendor SDK adapter. A hint contains no identity,
  * conversation or content. It cannot authenticate or create a notification. */
 object OpaquePushWake {
-    const val JOB_ID=7341
+    // Keep the old identity for its durable, possibly backed-off reconciliation.
+    const val RETRY_JOB_ID=7341
+    const val JOB_ID=7342
+    private val running=mutableSetOf<Int>()
+    @Synchronized internal fun started(id:Int){running.add(id)}
+    @Synchronized internal fun finished(id:Int){running.remove(id)}
+    internal fun equivalentImmediate(running:Boolean,pending:Boolean,minimumLatency:Long,delayedBySystem:Boolean)=
+        running||(pending&&minimumLatency==0L&&!delayedBySystem)
+    private fun delayed(scheduler:JobScheduler):Boolean {
+        if(Build.VERSION.SDK_INT<34)return false
+        return try {
+            val reasons=if(Build.VERSION.SDK_INT>=36)
+                JobScheduler::class.java.getMethod("getPendingJobReasons",Int::class.javaPrimitiveType).invoke(scheduler,JOB_ID) as IntArray
+            else intArrayOf(scheduler.getPendingJobReason(JOB_ID))
+            reasons.any{it!=JobScheduler.PENDING_JOB_REASON_UNDEFINED&&it!=JobScheduler.PENDING_JOB_REASON_EXECUTING}
+        }catch(_:Exception){true} // Unknown pending state must not suppress a fresh hint.
+    }
+    @Synchronized internal fun reconcile(context:Context):Boolean {
+        val scheduler=context.getSystemService(JobScheduler::class.java)
+        if(scheduler.getPendingJob(RETRY_JOB_ID)!=null||running.contains(RETRY_JOB_ID))return true
+        return scheduler.schedule(JobInfo.Builder(RETRY_JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setMinimumLatency(30000)
+            .setBackoffCriteria(30000,JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())==JobScheduler.RESULT_SUCCESS
+    }
     fun valid(data:Map<String,String>)=data==mapOf("event" to "peerchat_pending","version" to "1")
-    fun schedule(context:Context,data:Map<String,String>):Boolean {
+    @Synchronized fun schedule(context:Context,data:Map<String,String>):Boolean {
         if(!valid(data))return false
         val scheduler=context.getSystemService(JobScheduler::class.java)
-        if(scheduler.allPendingJobs.any{it.id==JOB_ID})return true // Coalesce repeated hints.
-        val job=JobInfo.Builder(JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
+        val pending=scheduler.getPendingJob(JOB_ID)
+        if(equivalentImmediate(running.contains(JOB_ID),pending!=null,pending?.minLatencyMillis ?: 0L,pending!=null&&delayed(scheduler))){
+            android.util.Log.i("PeerChatWake","stage=wake_coalesced")
+            return true
+        }
+        val builder=JobInfo.Builder(JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+        if(Build.VERSION.SDK_INT>=31)builder.setExpedited(true) else builder.setOverrideDeadline(30000)
+        if(scheduler.schedule(builder.build())==JobScheduler.RESULT_SUCCESS){
+            android.util.Log.i("PeerChatWake","stage=wake_schedule_accepted expedited=${Build.VERSION.SDK_INT>=31}")
+            return true
+        }
+        android.util.Log.i("PeerChatWake","stage=wake_expedited_rejected")
+        // Quota exhaustion is not permission to hold an immortal socket.
+        val ordinary=JobInfo.Builder(JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setOverrideDeadline(30000).build()
-        return scheduler.schedule(job)==JobScheduler.RESULT_SUCCESS
+        return scheduler.schedule(ordinary)==JobScheduler.RESULT_SUCCESS
     }
 }

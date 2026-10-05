@@ -7,7 +7,7 @@ import java.security.MessageDigest
 enum class NotificationPreview { SenderAndMessage, SenderOnly, HideContent }
 data class ConversationPreference(val draft:String="",val readSequence:Long=0,val notifiedSequence:Long=0)
 data class AndroidQolState(val preview:NotificationPreview=NotificationPreview.SenderOnly,
-    val notifications:Boolean=true,val conversations:Map<String,ConversationPreference> = emptyMap())
+    val notifications:Boolean=true,val conversations:Map<String,ConversationPreference> = emptyMap(),val mailboxStorageAllowed:Boolean=false)
 interface AndroidQolRepository {
     fun load():AndroidQolState
     fun save(value:AndroidQolState)
@@ -31,7 +31,7 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
             require(key.matches(Regex("[0-9a-f]{64}:account:[1-9][0-9]{0,18}")))
             val r=rows.getJSONObject(key);ConversationPreference(r.getString("draft"),r.getLong("read"),r.getLong("notified")).also{require(it.draft.length<=4096&&it.readSequence>=0&&it.notifiedSequence>=0)}
         }
-        return AndroidQolState(NotificationPreview.valueOf(json.getString("preview")),json.getBoolean("notifications"),values)
+        return AndroidQolState(NotificationPreview.valueOf(json.getString("preview")),json.getBoolean("notifications"),values,json.optBoolean("mailboxStorageAllowed",false))
     }
     override fun save(value:AndroidQolState) {
         require(value.conversations.size<=128)
@@ -39,7 +39,7 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
             require(key.matches(Regex("[0-9a-f]{64}:account:[1-9][0-9]{0,18}"))&&r.draft.length<=4096&&r.readSequence>=0&&r.notifiedSequence>=0)
             rows.put(key,JSONObject().put("draft",r.draft).put("read",r.readSequence).put("notified",r.notifiedSequence))
         }
-        val plain=JSONObject().put("version",1).put("preview",value.preview.name).put("notifications",value.notifications).put("conversations",rows).toString().toByteArray(Charsets.UTF_8)
+        val plain=JSONObject().put("version",1).put("preview",value.preview.name).put("notifications",value.notifications).put("mailboxStorageAllowed",value.mailboxStorageAllowed).put("conversations",rows).toString().toByteArray(Charsets.UTF_8)
         require(plain.size<=1000000);write(protector().protect(plain,label))
     }
 }

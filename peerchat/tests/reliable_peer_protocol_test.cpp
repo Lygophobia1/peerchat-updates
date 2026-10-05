@@ -112,10 +112,20 @@ int main(){using namespace peerchat;try{
     require(sending.acknowledgeMessage(b.peerId,{9},id)&&sender.pending(b.peerId).empty(),"ACK durability failed");
     auto legacy=reliable::textPacket(message,false);protocol::Reader oldInput(legacy.data);
     require(!reliable::receiveText(oldInput,false,a.peerId,b,receiver,receiving).inserted,"Legacy retry changed dedupe");
+    auto changedOrder=message;changedOrder.logicalOrder++;auto changedWire=reliable::textPacket(changedOrder,true);bool changedRejected=false;
+    try{protocol::Reader changed(changedWire.data);reliable::receiveText(changed,true,a.peerId,b,receiver,receiving);}catch(...){changedRejected=true;}
+    require(changedRejected,"Explicit changed order accepted");
+    auto changedContent=message;changedContent.text+=L"forged";auto changedLegacy=reliable::textPacket(changedContent,false);changedRejected=false;
+    try{protocol::Reader changed(changedLegacy.data);reliable::receiveText(changed,false,a.peerId,b,receiver,receiving);}catch(...){changedRejected=true;}
+    require(changedRejected,"Changed legacy content accepted");
     auto damaged=encoded.data;damaged.pop_back();bool rejected=false;
     try{protocol::Reader bad(damaged);reliable::receiveText(bad,true,a.peerId,b,receiver,receiving);}catch(...){rejected=true;}
     require(rejected&&receiver.history(a.peerId).size()==1,"Truncated packet accepted");
     require(receiver.nextLogicalOrder()>42,"Ordering observation lost");
+    message.id=Storage::newMessageId();auto firstLegacy=reliable::textPacket(message,false);protocol::Reader firstLegacyInput(firstLegacy.data);
+    require(reliable::receiveText(firstLegacyInput,false,a.peerId,b,receiver,receiving).inserted,"Initial legacy receive failed");
+    auto modernRetry=reliable::textPacket(message,true);protocol::Reader modernRetryInput(modernRetry.data);
+    require(!reliable::receiveText(modernRetryInput,true,a.peerId,b,receiver,receiving).inserted&&receiver.history(a.peerId).size()==2,"Legacy-first modern retry duplicated history");
     std::cout<<"PASS: 1000 shared Hello/identity/Accepted lifecycles, malformed rejection, wire compatibility, Unicode, history, retry dedupe and scoped ACK\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}}

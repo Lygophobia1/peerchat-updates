@@ -32,7 +32,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
             MessageUi(m.id,m.senderDevice,if(outgoing)snapshot.username else c.friend.username,m.text,outgoing,
                 SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
                 date=SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
-                status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;1L->MessageStatus.Sent;else->MessageStatus.Queued})
+                status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;3L->MessageStatus.Stored;1L->MessageStatus.Sent;else->MessageStatus.Queued})
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8)
@@ -51,7 +51,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
     }
     return previous.copy(demo=false,conversations=conversations,diagnostics=diagnostics,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
-        account=if(snapshot.authenticated)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
+        account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
             snapshot.authenticated->ConnectionState.Reconnecting
             else->ConnectionState.Offline},
@@ -63,7 +63,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val configurationDispatcher:CoroutineDispatcher=Dispatchers.IO,
     private val qol:AndroidQolRepository=AndroidQolStore(application)):AndroidViewModel(application),PeerChatPresenter {
     constructor(application:Application):this(application,AndroidMessagingRuntime.acquire(application))
-    private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList()))
+    private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList(),startupStatus="Checking saved sign-in…"))
     override val state:StateFlow<PeerChatUiState> = mutable.asStateFlow()
     private var current=MessagingSnapshot()
     private var configurationReady=false
@@ -131,25 +131,47 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
         }
     }
-    init {viewModelScope.launch {
+    init {
+    // Collect during authentication, rather than only after restore completes.
+    viewModelScope.launch {backend.state.collect {snapshot ->
+        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
+        current=snapshot
+        mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed)
+        if(snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
+            mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
+        }
+        if(mutable.value.startupStatus!=null) {
+            mutable.value=when {
+                snapshot.authenticated&&snapshot.serverPresenceLive -> mutable.value.copy(startupStatus=null,route=Route.Home,rememberMe=true)
+                snapshot.authenticated -> mutable.value.copy(startupStatus="Connecting…")
+                snapshot.status.startsWith("Reconnecting") -> mutable.value.copy(startupStatus="Reconnecting…")
+                else -> mutable.value
+            }
+        }
+        project()
+    }}
+    viewModelScope.launch {
         try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true}
         catch(_:Exception){mutable.value=mutable.value.copy(notificationsEnabled=false,notice="Local preferences could not be verified; notifications remain unavailable.")}
         try {
             val saved=withContext(configurationDispatcher){serverConfiguration.load()}
             if(saved!=null){
-                mutable.value=mutable.value.copy(server=ServerUi(saved.host,saved.port.toString(),saved.certificatePin),loginBusy=true)
-                try{if(backend.restoreRemembered(saved))mutable.value=mutable.value.copy(route=Route.Home,rememberMe=true)}
-                catch(_:Exception){mutable.value=mutable.value.copy(loginError="Remembered sign-in unavailable. Verify the server or sign in again.")}
+                mutable.value=mutable.value.copy(server=ServerUi(saved.host,saved.port.toString(),saved.certificatePin),loginBusy=true,startupStatus="Signing in…")
+                if(backend.restoreLocalHistory(saved))mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
+                try{if(backend.restoreRemembered(saved)) {
+                    mutable.value=mutable.value.copy(rememberMe=true,startupStatus=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)null else "Connecting…",route=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)Route.Home else mutable.value.route)
+                } else mutable.value=mutable.value.copy(startupStatus=null)}
+                catch(failure:Exception){mutable.value=mutable.value.copy(
+                    startupStatus=if(isRememberedNetworkFailure(failure)&&!backend.state.value.localHistoryReady)"Reconnecting…" else null,
+                    route=if(isRememberedNetworkFailure(failure))mutable.value.route else Route.Login,
+                    loginError=if(failure is ServerRejected)"Saved sign-in was rejected. Please sign in again." else "Unable to connect. Verify the server and trusted fingerprint.")}
                 finally{mutable.value=mutable.value.copy(loginBusy=false)}
-            }
+            } else mutable.value=mutable.value.copy(startupStatus=null)
         }catch(_:Exception){
             configurationInvalid=true
-            mutable.value=mutable.value.copy(notice="Saved server configuration could not be verified. Re-enter trusted server settings before signing in.")
-        }finally{configurationReady=true}
-        backend.state.collect {snapshot ->
-        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
-        current=snapshot;project()
-    }}}
+            mutable.value=mutable.value.copy(startupStatus=null,notice="Saved server configuration could not be verified. Re-enter trusted server settings before signing in.")
+        }finally{configurationReady=true;project()}
+    }}
     override fun login(username:String,password:String) {
         val s=mutable.value
         if(s.loginBusy)return
@@ -200,6 +222,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 viewModelScope.launch{try{qolState=withContext(configurationDispatcher){qol.update{it.copy(notifications=action.enabled,preview=action.preview)};qol.load()}}
                     catch(_:Exception){mutable.value=mutable.value.copy(notice="Notification settings could not be saved securely.")}}
             }
+            is UiAction.MailboxStorage -> viewModelScope.launch {
+                try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
+                catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
+            }
             is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()}
             is UiAction.RequestFriend -> viewModelScope.launch {
                 try {backend.requestFriend(action.username);mutable.value=mutable.value.copy(notice="Friend request sent through authenticated server.")}
@@ -245,8 +271,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     finally {mutable.value=mutable.value.copy(olderLoading=false)}
                 }
             }
-            UiAction.SignOut -> viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome)}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Sign-out cleanup failed; restart the application.")}}
+            UiAction.SignOut -> viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome,startupStatus=null,rememberMe=false)}
+                catch(_:Exception){mutable.value=mutable.value.copy(route=Route.Login,startupStatus=null,notice="Sign-out revocation is pending; saved sign-in will not be reused.")}}
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
             is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen,
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,

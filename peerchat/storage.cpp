@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include "storage.hpp"
 #include "group.hpp"
+#include "mailbox_protocol.hpp"
 #include "platform/identity_provider.hpp"
 #include "platform/storage_backend.hpp"
 #include "portable/utf8.hpp"
@@ -10,6 +11,7 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include "platform/windows_record_protection.hpp"
+#include "platform/windows_sql_database.hpp"
 #include <bcrypt.h>
 #endif
 #if !defined(_WIN32) || defined(PEERCHAT_PORTABLE_CRYPTO)
@@ -198,7 +200,7 @@ StoredMessage decodeMessage(const Blob& plain) {
     // position; accepting the old shape keeps existing history readable.
     if(r.remaining()>=8)m.logicalOrder=r.number();
     r.end();
-    require(identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&state<=2&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384,"Invalid stored message");m.delivery=static_cast<Delivery>(state);return m;
+    require(identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&state<=3&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384,"Invalid stored message");m.delivery=static_cast<Delivery>(state);return m;
 }
 void encodeMessage(Writer& w,const StoredMessage& m){w.string(m.id);w.string(m.sender);w.string(m.recipient);w.text(m.text);w.number(m.utcMilliseconds);w.number(static_cast<unsigned char>(m.delivery));w.number(m.logicalOrder);}
 }
@@ -249,6 +251,7 @@ struct Storage::Impl {
     }
 };
 #if defined(_WIN32)
+std::shared_ptr<platform::SqlDatabase> platform::openWindowsSqlDatabase(const std::wstring& directory){return std::make_shared<WindowsSqlDatabase>(directory);}
 Storage::Storage(const std::wstring& directory):Storage(std::make_shared<WindowsSqlDatabase>(directory)){}
 Storage::Storage(std::shared_ptr<platform::SqlDatabase> database):Storage(std::move(database),std::make_shared<platform::WindowsRecordProtector>()){}
 #else
@@ -328,28 +331,87 @@ std::vector<Contact> Storage::contacts() {
 }
 bool Storage::append(const std::string& conversation,const StoredMessage& m) {
     require(identifier(conversation)&&identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&
-        (conversation==m.sender||conversation==m.recipient)&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384&&static_cast<unsigned char>(m.delivery)<=2,"Invalid message");
+        (conversation==m.sender||conversation==m.recipient)&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384&&static_cast<unsigned char>(m.delivery)<=3,"Invalid message");
     Transaction transaction(impl_->sql);
     Statement existing(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");existing.text(1,m.id);
     if(existing.row()) {
         require(existing.text(0)==conversation,"Message ID reused in another conversation");
         Secret plain{impl_->protect(existing.bytes(1),"PeerChat.v1/message/"+m.id+"/"+conversation,false)};auto old=decodeMessage(plain.data);
-        require(old.id==m.id&&old.sender==m.sender&&old.recipient==m.recipient&&old.text==m.text&&old.utcMilliseconds==m.utcMilliseconds,"Conflicting duplicate message ID");transaction.commit();return false;
+        require(old.id==m.id&&old.sender==m.sender&&old.recipient==m.recipient&&old.text==m.text&&old.utcMilliseconds==m.utcMilliseconds&&old.logicalOrder==m.logicalOrder,"Conflicting duplicate message ID");transaction.commit();return false;
     }
     Writer plain;encodeMessage(plain,m);Blob encrypted=impl_->protect(plain.data,"PeerChat.v1/message/"+m.id+"/"+conversation,true);
     Statement insert(impl_->sql,"INSERT INTO messages(id,peer,b) VALUES(?,?,?)");insert.text(1,m.id);insert.text(2,conversation);insert.blob(3,encrypted);insert.row();
     if(m.delivery!=Delivery::Delivered){Statement pending(impl_->sql,"INSERT INTO outbox(id,peer) VALUES(?,?)");pending.text(1,m.id);pending.text(2,conversation);pending.row();}
     transaction.commit();return true;
 }
+std::optional<StoredMessage> Storage::message(const std::string& id){
+    require(identifier(id,32),"Invalid message identity");Statement query(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");query.text(1,id);
+    if(!query.row())return std::nullopt;
+    auto peer=query.text(0);Secret plain{impl_->protect(query.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};
+    auto message=decodeMessage(plain.data);require(message.id==id,"Stored message ID mismatch");return message;
+}
 void Storage::acknowledge(const std::string& id,Delivery delivery) {
-    require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=2,"Invalid delivery acknowledgement");
+    require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=3,"Invalid delivery acknowledgement");
     Transaction transaction(impl_->sql);
     Statement s(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");s.text(1,id);if(!s.row()){transaction.commit();return;}
     std::string peer=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);
-    require(m.id==id,"Stored message ID mismatch");if(delivery<=m.delivery){transaction.commit();return;}m.delivery=delivery;
+    require(m.id==id,"Stored message ID mismatch");if(deliveryRank(delivery)<=deliveryRank(m.delivery)){transaction.commit();return;}m.delivery=delivery;
     Writer writer;encodeMessage(writer,m);Blob encrypted=impl_->protect(writer.data,"PeerChat.v1/message/"+id+"/"+peer,true);
     Statement update(impl_->sql,"UPDATE messages SET b=? WHERE id=?");update.blob(1,encrypted);update.text(2,id);update.row();
     if(delivery==Delivery::Delivered){Statement remove(impl_->sql,"DELETE FROM outbox WHERE id=?");remove.text(1,id);remove.row();}
+    transaction.commit();
+}
+Blob Storage::mailboxEnvelope(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid mailbox submission identity");
+    return impl_->get("mailbox-envelope/"+id+"/"+device);
+}
+void Storage::saveMailboxEnvelope(const std::string& id,const std::string& device,const Blob& wire){
+    auto envelope=mailbox::parse(wire);
+    require(envelope.header.messageId==id&&envelope.header.recipientDevice==device,"Mailbox envelope destination mismatch");
+    Transaction transaction(impl_->sql);Statement message(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");message.text(1,id);
+    require(message.row(),"Mailbox requires durable local message");const auto canonicalPeer=message.text(0);
+    Secret plain{impl_->protect(message.bytes(1),"PeerChat.v1/message/"+id+"/"+canonicalPeer,false)};auto stored=decodeMessage(plain.data);
+    // DeliveryManager authorizes every additional device against the same
+    // authenticated account. History keeps its original canonical conversation.
+    require(stored.sender==envelope.header.senderDevice&&stored.recipient==canonicalPeer&&stored.logicalOrder==envelope.header.logicalOrder,"Mailbox logical message mismatch");
+    auto key="mailbox-envelope/"+id+"/"+device;auto previous=impl_->get(key);
+    require(previous.empty()||previous==wire,"Conflicting durable mailbox envelope");
+    if(previous.empty())impl_->put(key,wire);
+    transaction.commit();
+}
+void Storage::mailboxStored(const std::string& id,const std::string& device,const Blob& expected){
+    require(!expected.empty()&&mailboxEnvelope(id,device)==expected,"Mailbox store response has no matching submission");
+    acknowledge(id,Delivery::Stored);
+    // Mark only after real server acceptance. A crash between advancement and
+    // this protected marker safely retries the identical ciphertext.
+    impl_->put("mailbox-uploaded/"+id+"/"+device,expected);
+}
+std::vector<StoredMessage> Storage::pendingMailboxUploads(int limit){
+    require(limit>0&&limit<=64,"Invalid mailbox upload page");
+    Statement query(impl_->sql,"SELECT m.id,m.peer,m.b FROM messages m WHERE EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18))) ORDER BY m.rowid LIMIT ?");query.number(1,limit);
+    std::vector<StoredMessage> result;
+    while(query.row()){const auto id=query.text(0),peer=query.text(1);Secret plain{impl_->protect(query.bytes(2),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox upload identity mismatch");result.push_back(std::move(m));}
+    return result;
+}
+bool Storage::mailboxUploadAccepted(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid mailbox upload identity");auto accepted=impl_->get("mailbox-uploaded/"+id+"/"+device);
+    if(accepted.empty())return false;
+    require(accepted==mailboxEnvelope(id,device),"Mailbox upload acceptance mismatch");return true;
+}
+Blob Storage::mailboxReceipt(const std::string& id,const std::string& device,const Blob& digest){
+    require(identifier(id,32)&&identifier(device)&&digest.size()==32,"Invalid mailbox receipt identity");return impl_->get("mailbox-receipt/"+id+"/"+device+"/"+hex(digest));
+}
+void Storage::saveMailboxReceipt(const std::string& id,const std::string& sender,const Blob& wire){
+    auto receipt=mailbox::parseReceipt(wire);require(receipt.messageId==id&&receipt.senderDevice==sender,"Mailbox receipt destination mismatch");
+    Transaction transaction(impl_->sql);Statement message(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");message.text(1,id);
+    require(message.row()&&message.text(0)==sender,"Mailbox receipt requires durable receive");
+    Secret plain{impl_->protect(message.bytes(1),"PeerChat.v1/message/"+id+"/"+sender,false)};auto stored=decodeMessage(plain.data);
+    require(stored.sender==sender&&stored.recipient==receipt.recipientDevice&&stored.delivery==Delivery::Delivered,"Mailbox receipt requires verified durable receive");
+    auto prefix="mailbox-receipt/"+id+"/"+sender+"/";auto key=prefix+hex(receipt.envelopeDigest);auto previous=impl_->get(key);
+    if(!previous.empty())require(mailbox::receiptPayload(mailbox::parseReceipt(previous))==mailbox::receiptPayload(receipt),"Conflicting mailbox receipt");
+    else {
+        Statement count(impl_->sql,"SELECT COUNT(*) FROM objects WHERE k LIKE ?");count.text(1,prefix+"%");require(count.row()&&count.number(0)<32,"Mailbox receipt retention limit reached");impl_->put(key,wire);
+    }
     transaction.commit();
 }
 std::uint64_t Storage::nextLogicalOrder() {
@@ -377,6 +439,8 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
 void Storage::eraseHistory(const std::string& conversation) {
     require(identifier(conversation),"Invalid conversation identity");
     Transaction transaction(impl_->sql);
+    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%'))");
+    mailboxRecords.text(1,conversation);mailboxRecords.row();
     Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE peer=?");removeOutbox.text(1,conversation);removeOutbox.row();
     Statement removeMessages(impl_->sql,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();
     transaction.commit();

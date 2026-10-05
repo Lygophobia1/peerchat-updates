@@ -11,6 +11,7 @@ import java.util.regex.*;
 public final class ServerRelayProof {
     static {System.loadLibrary("peerchat_messaging");System.loadLibrary("peerchat_jni");}
     static final byte[] EMPTY=new byte[0];
+    static final ServerChannel.OperationScope REQUEST_SCOPE=new ServerChannel.OperationScope();
     static String string(String json,String name)throws IOException{
         Matcher value=Pattern.compile("\""+name+"\"\\s*:\\s*\"([A-Za-z0-9_-]{1,80})\"").matcher(json);
         if(!value.find())throw new IOException("Incomplete host relay fixture response");return value.group(1);
@@ -61,13 +62,38 @@ public final class ServerRelayProof {
         record.end();return result;
     }
     static String request(String host,int port,String pin,String json)throws Exception{
-        try(var channel=new ServerChannel(host,port,pin,false)){
+        try(var channel=new ServerChannel(host,port,pin,false,REQUEST_SCOPE)){
             channel.write(json.getBytes(StandardCharsets.UTF_8),4096);
             return new String(channel.read(16384),StandardCharsets.UTF_8);
         }
     }
     static String login(String host,int port,String pin,String user,String password)throws Exception{
         String response=request(host,port,pin,"{\"version\":1,\"type\":\"login\",\"username\":\""+user+"\",\"password\":\""+password+"\"}");
+        PeerTlsProof.check(flag(response,"ok"));return string(response,"sessionToken");
+    }
+    static String encoded(String json,String name)throws IOException {
+        Matcher value=Pattern.compile("\""+name+"\"\\s*:\\s*\"([A-Za-z0-9+/=_-]{1,2048})\"").matcher(json);
+        if(!value.find())throw new IOException("Incomplete bounded host proof field");return value.group(1);
+    }
+    static String keyProof(String challenge,PeerTlsProof.Identity identity)throws Exception {
+        String device=PeerTls.peerId(identity.pub);
+        PeerTlsProof.check(string(challenge,"publicIdentity").equals(device));
+        byte[] input=java.util.Base64.getDecoder().decode(encoded(challenge,"signatureInput"));
+        return "\"publicIdentity\":\""+device+"\",\"challengeId\":\""+string(challenge,"challengeId")+
+            "\",\"publicKey\":\""+java.util.Base64.getEncoder().encodeToString(identity.pub)+
+            "\",\"signature\":\""+java.util.Base64.getEncoder().encodeToString(identity.sign(input))+"\"";
+    }
+    static String enrollRemembered(String host,int port,String pin,String token,PeerTlsProof.Identity identity)throws Exception {
+        String device=PeerTls.peerId(identity.pub);
+        String challenge=request(host,port,pin,"{\"version\":1,\"type\":\"remember_enroll_challenge\",\"sessionToken\":\""+token+"\",\"publicIdentity\":\""+device+"\"}");
+        PeerTlsProof.check(flag(challenge,"ok"));
+        String response=request(host,port,pin,"{\"version\":1,\"type\":\"remember_enroll\",\"sessionToken\":\""+token+"\","+keyProof(challenge,identity)+"}");
+        PeerTlsProof.check(flag(response,"ok"));return string(response,"credential");
+    }
+    static String resumeRemembered(String host,int port,String pin,String credential,PeerTlsProof.Identity identity)throws Exception {
+        String challenge=request(host,port,pin,"{\"version\":1,\"type\":\"remember_challenge\",\"credential\":\""+credential+"\",\"publicIdentity\":\""+PeerTls.peerId(identity.pub)+"\",\"purpose\":\"resume\"}");
+        PeerTlsProof.check(flag(challenge,"ok"));
+        String response=request(host,port,pin,"{\"version\":1,\"type\":\"remember_resume\",\"credential\":\""+credential+"\","+keyProof(challenge,identity)+"}");
         PeerTlsProof.check(flag(response,"ok"));return string(response,"sessionToken");
     }
     static ServerChannel events(String host,int port,String pin,String token,String device)throws Exception{
@@ -106,7 +132,23 @@ public final class ServerRelayProof {
             userA=input.readLine();passwordA=input.readLine();userB=input.readLine();passwordB=input.readLine();
             PeerTlsProof.check(fixture.waitFor(30,TimeUnit.SECONDS)&&fixture.exitValue()==0);
         }finally{if(fixture.isAlive())fixture.destroyForcibly();}
+        // A warmed/shared algorithm registry must never cache pin acceptance.
+        // Fresh contexts still reject a changed pin and untrusted system chain.
+        request(host,port,pin,"{\"version\":1,\"type\":\"session_info\",\"sessionToken\":\""+at+"\"}");
+        for(String rejectedPin:new String[]{pin.equals("0".repeat(64))?"1".repeat(64):"0".repeat(64),""}){
+            boolean rejected=false;
+            try(var channel=new ServerChannel(host,port,rejectedPin,false,REQUEST_SCOPE)){}
+            catch(IOException expected){
+                for(Throwable cause=expected;cause!=null;cause=cause.getCause())
+                    if(cause instanceof java.security.cert.CertificateException)rejected=true;
+            }
+            PeerTlsProof.check(rejected&&REQUEST_SCOPE.activeSocketCount()==0);
+        }
+        request(host,port,pin,"{\"version\":1,\"type\":\"session_info\",\"sessionToken\":\""+at+"\"}");
+        PeerTlsProof.check(REQUEST_SCOPE.providerInitializationCount()==1);
+        System.out.println("PASS: reused scoped TLS provider retains fresh-context pin/chain validation; wrong pin and untrusted certificate rejected, correct pin still succeeds.");
         ExecutorService connections=Executors.newFixedThreadPool(2);
+        String rememberedB=enrollRemembered(host,port,pin,bt,b);
         String queued=null;
         try{
             for(int cycle=0;cycle<3;cycle++){
@@ -117,7 +159,7 @@ public final class ServerRelayProof {
                     observedPresence(host,port,pin,bt,aid,true);
                     String oldToken=at;
                     at=login(host,port,pin,userA,passwordA);
-                    bt=login(host,port,pin,userB,passwordB);
+                    bt=resumeRemembered(host,port,pin,rememberedB,b);
                     try(var freshEvents=events(host,port,pin,at,aid)){
                         presence(host,port,pin,at,aid,true);
                         presence(host,port,pin,oldToken,aid,false);
@@ -126,8 +168,17 @@ public final class ServerRelayProof {
                     observedPresence(host,port,pin,bt,aid,false);
                 }
                 presence(host,port,pin,at,aid,true);
-                presence(host,port,pin,bt,bid,true);
+                long bootstrapStarted=System.nanoTime();
+                String bootstrap=request(host,port,pin,"{\"version\":1,\"type\":\"messaging_bootstrap\",\"bootstrapVersion\":1,\"sessionToken\":\""+bt+"\",\"publicIdentity\":\""+bid+"\"}");
+                PeerTlsProof.check(flag(bootstrap,"ok")&&flag(bootstrap,"presenceLive")&&string(bootstrap,"registeredPublicIdentity").equals(bid));
+                long bootstrapMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-bootstrapStarted);
+                PeerTlsProof.check(bootstrapMillis<10000);
+                System.out.println("METRIC: authenticated bootstrap round_trips=1 elapsed_ms="+bootstrapMillis);
                 observedPresence(host,port,pin,bt,aid,true);
+                // No MainActivity, presenter, selected conversation, or Flow
+                // collector. Server authorizes the friend/device before delivery.
+                String contacts=bootstrap;
+                PeerTlsProof.check(flag(contacts,"ok")&&contacts.contains(aid));
                 final String activeA=at,activeB=bt;
                 try(var left=new ReliableProfileProof.Side(a,args[0]+"/a",bid,accountA,accountB);
                     var right=new ReliableProfileProof.Side(b,args[0]+"/b",aid,accountB,accountA)){
@@ -148,6 +199,6 @@ public final class ServerRelayProof {
                 }
             }
         }finally{connections.shutdownNow();}
-        System.out.println("PASS: actual server fresh authenticated session/device presence replacement and heartbeat subscription; superseded presence rejected; 3 native runtime/profile reopen + pinned TLS/relay cycles, 6 bidirectional deliveries, 2 offline durable queued IDs drained once, exact ACK/dedupe history, nonfriend rejection. HOST ONLY; no physical reconnect claim.");
+        System.out.println("PASS: UI-free remembered device resume and authoritative friendship snapshot before delivery; fresh session/device presence replacement, superseded presence rejected; 3 native runtime/profile reopen + pinned TLS/relay cycles, 6 bidirectional deliveries, 2 offline durable queued IDs drained once, exact ACK/dedupe history, nonfriend rejection. HOST ONLY, plus separate application-projection unit coverage; not a physical claim.");
     }
 }

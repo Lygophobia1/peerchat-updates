@@ -11,10 +11,12 @@ import java.nio.charset.CodingErrorAction
 
 // Platform execution/crypto only. Native Storage retains ALL schema, record,
 // history/outbox, ordering, dedupe and transaction policy.
-class AndroidStoragePlatform(context: Context, private val profile: String) : AutoCloseable {
+class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false) : AutoCloseable {
+    private val applicationContext = context.applicationContext
     private val state = ProfileSecurity(context.applicationContext, profile)
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
-    private val file = File(directory, "peerchat.sqlite")
+    private val file = File(directory, if (registryOnly) "device-key-registry.sqlite" else "peerchat.sqlite")
+    private val recipient by lazy { AndroidRecipientKeyProvider(applicationContext, profile) }
     private val identity: AndroidIdentityProvider
     private val records: AndroidRecordProtector
     private val database: SQLiteDatabase
@@ -44,6 +46,28 @@ class AndroidStoragePlatform(context: Context, private val profile: String) : Au
     fun scope(): ByteArray = profile.toByteArray(Charsets.UTF_8)
     fun publicKey(): ByteArray = identity.publicRepresentation()
     fun sign(bytes: ByteArray): ByteArray = identity.sign(bytes)
+    // Separate DB file avoids self-contention while a KeyManager lease spans
+    // decryption and durable message acceptance on the normal profile database.
+    fun keyRegistryProvider(): Any {
+        checkOpen(); invalid(!registryOnly)
+        return AndroidStoragePlatform(applicationContext, profile, true)
+    }
+    private fun recipientAliasText(alias: ByteArray): String {
+        checkOpen(); invalid(alias.size in 1..256)
+        return text(alias)
+    }
+    fun recipientSupported(): Boolean { checkOpen(); return recipient.supported() }
+    fun recipientAlias(generation: Int): ByteArray { checkOpen(); return recipient.alias(generation).toByteArray(Charsets.US_ASCII) }
+    fun recipientExists(alias: ByteArray): Boolean = recipient.exists(recipientAliasText(alias))
+    fun recipientCreate(alias: ByteArray): ByteArray = recipient.create(recipientAliasText(alias))
+    fun recipientPublic(alias: ByteArray): ByteArray = recipient.publicKey(recipientAliasText(alias))
+    fun recipientAgree(alias: ByteArray, point: ByteArray): ByteArray = recipient.agreeP256(recipientAliasText(alias), point)
+    fun hpkeSeal(publicKey: ByteArray, info: ByteArray, aad: ByteArray, plaintext: ByteArray): ByteArray {
+        checkOpen(); invalid(plaintext.size <= 1048495)
+        return OpaqueRecipientHpke.seal(publicKey, info, aad, plaintext)
+    }
+    fun hpkeOpen(alias: ByteArray, expected: ByteArray, enc: ByteArray, info: ByteArray, aad: ByteArray, ciphertext: ByteArray): ByteArray =
+        AndroidRecipientHpke.open(recipient, recipientAliasText(alias), expected, enc, info, aad, ciphertext)
     fun createPeerTls(incoming: Boolean, expectedPeer: ByteArray): com.peerchat.android.platform.tls.PeerTls {
         checkOpen()
         invalid(expectedPeer.size == 64 && expectedPeer.all { it in 48..57 || it in 97..102 })

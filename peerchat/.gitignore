@@ -7,3 +7,5 @@ build/
 releases/
 *.sqlite*
 .tools/
+google-services.json
+*service-account*.json

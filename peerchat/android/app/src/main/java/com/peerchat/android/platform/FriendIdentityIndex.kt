@@ -29,6 +29,9 @@ internal class FriendIdentityIndex(context: Context,profile: String,endpoint: Se
             }.also {reconcileFriends(it,it)}
         }
     }
+    // Display/history recovery only. Includes historical removed bindings and
+    // therefore MUST NOT be installed as authenticated friendship authority.
+    fun localHistoryBindings():List<FriendIdentity> = previous.map{it.copy(online=false)}
     fun reconcile(current: List<FriendIdentity>): List<FriendIdentity> {
         val active=reconcileFriends(previous,current)
         // Retain removed account public bindings so re-adding it cannot bypass

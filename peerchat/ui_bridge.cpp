@@ -17,6 +17,21 @@ static std::wstring quote(const std::wstring& value){
 }
 UI_API void* ui_create(){try{return new UiBridge;}catch(...){return nullptr;}}
 UI_API void ui_destroy(void* handle){delete static_cast<UiBridge*>(handle);}
+UI_API int ui_mailbox(void* handle,unsigned operation,const unsigned char* bytes,unsigned length,const wchar_t* messageId,int allowed,unsigned char* output,unsigned capacity){try{
+    if(!handle||length>70000||(!bytes&&length)||!output||capacity<1||capacity>262144)return -1;
+    peerchat::Blob input;if(length)input.assign(bytes,bytes+length);
+    auto result=static_cast<UiBridge*>(handle)->node.mailbox(operation,input,identity(messageId),allowed!=0);
+    if(result.size()>capacity)return -1;
+    if(!result.empty())memcpy(output,result.data(),result.size());
+    return static_cast<int>(result.size());
+}catch(...){return -1;}}
+UI_API int ui_mailbox_supported(){
+#if defined(PEERCHAT_HPKE_EVALUATION)
+    return 1;
+#else
+    return 0;
+#endif
+}
 // Profile maintenance deliberately has no Node/session ownership.  It opens two closed
 // SQLite stores only while the managed bootstrap has verified the profile lock is free,
 // and copies just the durable device identity into a brand-new current-schema store.

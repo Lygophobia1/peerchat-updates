@@ -41,6 +41,24 @@ credential-reset/admin-device-management UI remains a separate product surface.
 
 ## No-phone validation
 
+### Startup / push follow-up
+
+The native presenter checks saved authorization immediately at launch, showing
+Checking saved sign-in / Signing in / Connecting rather than requiring a Sign In
+tap. Chats opens only after the backend publishes authenticated live presence.
+The UI and FCM wake job call the same `restoreRemembered` coordinator. Temporary
+socket/DNS/timeout/EOF failures retain the protected credential and use that
+coordinator's existing scheduled executor with 1–30 second backoff, only while
+an application execution lease is active. Certificate, malformed-frame and other
+validation failures are not retried as network outages. Explicit remembered
+credential rejection retires the credential; manual logout retains its durable
+revocation-pending behavior if the server is unavailable.
+
+Host coverage includes initial loading, no-credential welcome, remembered auth
+without presence, presence-gated Chats, rejected credential, transient startup
+failure, and manual sign-out from startup. These are not a substitute for physical
+cold-start and interrupted-network acceptance.
+
 - `tests/test-remembered-login.ps1`: production server dispatcher, CNG original
   signing, wrong signer/device/replay, 32 resumes, durable DB reopen,
   replacement/revocation and unchanged Windows account-token behavior.
