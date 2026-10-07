@@ -63,6 +63,10 @@ string peerTwo=new string('c',64),wrongPeer=new string('d',64);var second=view.B
             Require(!model.CanQueueDirectText(false,false),"Signed-out account conversation can send");
             conversation.IsFriend=false;Require(!model.CanQueueDirectText(true,false),"Revoked friend can send");conversation.IsFriend=true;
             conversation.Contact.verified=false;Require(model.CanQueueDirectText(true,false),"Valid account cannot locally queue while device verification is pending");
+            conversation.ServerOnline=true;conversation.Online=false;
+            Require(((System.Windows.Media.SolidColorBrush)conversation.Presence).Color==System.Windows.Media.Color.FromRgb(54,216,115),"Idle peer transport hid server Online presence");
+            conversation.ServerOnline=false;conversation.Online=true;
+            Require(((System.Windows.Media.SolidColorBrush)conversation.Presence).Color!=System.Windows.Media.Color.FromRgb(54,216,115),"Peer TLS fabricated server Online presence");
             Require(!conversation.Contact.verified,"Local admission promoted device trust");
             conversation.AccountId=0;Require(!model.CanQueueDirectText(true,false),"Unknown unverified direct peer can queue");conversation.AccountId=8;conversation.Contact.verified=true;
             model.Listening=false;Require(!model.CanQueueDirectText(true,false),"Unavailable profile can send");model.Listening=true;

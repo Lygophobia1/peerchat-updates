@@ -1205,7 +1205,7 @@ public class DesktopApplication {
 		bool flag2 = model.Groups && model.SelectedGroup != null;
 		Find<TextBlock>("LocalProfile").Text = ((localProfile == null) ? model.Name : localProfile.Name) + ((accountLink == null) ? " · Unlinked" : (" · @" + accountLink.Username));
 		profileName.Text = ((localProfile == null) ? model.Name : localProfile.Name);
-		profileHandle.Text = ((discovery != null) ? ("@" + discovery.Username + " · Online") : ((accountLink != null) ? ("@" + accountLink.Username + " · Offline / Server Relay") : (accountStore.Exists ? "Account link unavailable · Offline / Server Relay" : "Unlinked · Offline")));
+		profileHandle.Text = ((discovery != null) ? ("@" + discovery.Username + (discovery.EventChannelConnected?" · Online":" · Connecting")) : ((accountLink != null) ? ("@" + accountLink.Username + " · Offline / Server Relay") : (accountStore.Exists ? "Account link unavailable · Offline / Server Relay" : "Unlinked · Offline")));
 		Find<TextBlock>("OwnId").Text = ((model.OwnId.Length == 0) ? "Waiting for identity" : model.OwnId);
 		Find<TextBlock>("OwnId").ToolTip = model.OwnId;
 		bool reliableListenerActive = model.Listening && model.Port > 0;
@@ -1297,6 +1297,7 @@ public class DesktopApplication {
 
 	private static string ConnectionStatusText(ConversationModel conversation)
 	{
+		if(conversation.IsFriend)return (conversation.ServerOnline==true?"● Online":"○ Offline")+" · Peer session: "+(conversation.Online?"Connected":conversation.ConnectionState=="Offline"?"Idle":conversation.ConnectionState);
 		string text = conversation.ConnectionState ?? "Offline";
 		if (!(text == "Ready"))
 		{
@@ -1641,7 +1642,7 @@ public class DesktopApplication {
         groupInvites.Clear();
 		friendRequestStates.Clear();
 		friendDirectory.Clear();
-		friendPresence.Clear();
+		friendPresence.Clear();foreach(var conversation in model.Conversations.Values)conversation.ServerOnline=null;
 		try
 		{
 			if (File.Exists(DiscoverySessionPath))
@@ -1710,6 +1711,10 @@ public class DesktopApplication {
 				if(notification!=null&&notification.Event=="group_invite_changed"){RefreshGroupInvites();return;}
 				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
 				if(notification!=null&&(notification.Event=="p2p_accepted"||notification.Event=="p2p_candidates_ready"||notification.Event=="p2p_declined"||notification.Event=="p2p_cancelled")){HandleP2pEvent(notification);return;}
+                if(notification!=null&&notification.Event=="channel_disconnected"){
+                    foreach(var conversation in model.Conversations.Values){conversation.ServerOnline=null;conversation.Refresh();}
+                    model.Status="Reconnecting authenticated server presence…";Refresh();return;
+                }
                 if (notification != null && notification.Event == "channel_connected")
                 {
                     model.Status = "Discovery reconnected · reconciling friend state…";
@@ -1723,6 +1728,7 @@ public class DesktopApplication {
 				}
 				else if(notification!=null&&(notification.Event=="presence_changed"||notification.Event=="friend_request"||notification.Event=="friend_request_updated"||notification.Event=="friendship_changed"))
 				{
+                    if(notification.Event=="presence_changed"&&!String.IsNullOrEmpty(notification.ServerEpoch)&&notification.ServerEpoch!=discovery.PresenceEpoch)return;
 					model.Status = "Friend state changed · refreshing…";
 					Refresh();
 					RefreshFriendState();
@@ -2069,6 +2075,7 @@ public class DesktopApplication {
 			bool value;
 			bool flag3 = !friendPresence.TryGetValue(item.AccountId, out value) || value != item.Online;
 			friendPresence[item.AccountId] = item.Online;
+			conversationModel.ServerOnline = item.Online;
 			if (flag2 && !conversationModel.Online && contact != null && !string.IsNullOrEmpty(contact.peer))
 			{
 				core.InvalidateRoute(contact.peer, flag ? contact.host : "", (ushort)(flag ? contact.port : 0), false, networkGeneration);

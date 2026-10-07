@@ -296,6 +296,7 @@ struct Node::Impl {
             if(groupKeys){const auto* roster=groupKeys->roster(event.authorizationGroupId);if(roster)event.authorizationRosterGeneration=roster->generation;}
         }
         if(snapshot->connected){event.text=L"Ready";event.candidate=widenUtf8(snapshot->activeRoute.endpointUtf8);event.candidateSource=widenUtf8(snapshot->activeRoute.sourceUtf8);event.route=widenUtf8(snapshot->activeRoute.routeUtf8);event.detail=snapshot->activeRoute.incoming?L"inbound":L"outbound";}
+        else if(!sessionTransports->liveRouteDemanded(peer,nowMilliseconds())&&!snapshot->pending)event.text=L"Idle";
         else if(snapshot->retrySuspended)event.text=L"Identity verification required";
         else if(snapshot->retryScheduled)event.text=L"Retrying with backoff";
         else if(snapshot->pending)event.text=L"Connecting";

@@ -14,6 +14,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     private val operations:ServerChannel.OperationScope=ServerChannel.OperationScope()) {
     @Volatile var session: AccountSession? = null
         private set
+    @Volatile internal var presenceEpoch=""
+        private set
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
     private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","friend_request","friend_respond"))type else "other"
     private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
@@ -155,9 +157,10 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         try {
             fields.put("version",1).put("type",type).put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
             channel.write(fields.toString().toByteArray(Charsets.UTF_8),4096)
-            val ready=JSONObject(channel.read(16384).toString(Charsets.UTF_8))
+            val ready=JSONObject(channel.read(100000).toString(Charsets.UTF_8))
             if(!ready.optBoolean("ok"))throw ServerRejected(ready.optString("error","subscription_failed"))
             check(ready.getString("type")=="events_ready") { "Unexpected subscription response" }
+            presenceEpoch=ready.optString("serverEpoch")
             channel.readTimeout(0)
             return channel
         } catch(failure: Exception){channel.close();throw failure}

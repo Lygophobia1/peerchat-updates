@@ -17,15 +17,18 @@ internal class ForegroundEvents(accounts:ServerAccounts):AutoCloseable {
     @Volatile var failure:Exception?=null
         private set
     private var nextHeartbeat=0L
+    private val presenceSequence=PresenceSequence()
     init {Thread({
         try {
             val opened=accounts.openEvents()
+            presenceSequence.reset(accounts.presenceEpoch)
             channel=opened
             if(closed){opened.close();return@Thread}
             connected=true
             while(!closed){
                 val event=JSONObject(opened.read(100000).toString(Charsets.UTF_8))
                 require(event.getInt("version")==1&&event.getString("type")=="friend_event")
+                if(event.optString("event")=="presence_changed"&&!presenceSequence.accept(event.optString("serverEpoch"),event.optLong("accountId"),event.optLong("presenceRevision")))continue
                 check(queue.offer(event)){"Event projection gap"}
             }
         }catch(error:Exception){if(!closed)failure=error}

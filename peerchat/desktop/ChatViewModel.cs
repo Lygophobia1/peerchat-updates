@@ -24,6 +24,7 @@ public class ConversationModel : ObservableModel {
     public readonly ObservableCollection<MessageModel> Messages=new ObservableCollection<MessageModel>();
     public string Draft="";
     public bool Online,RequestedHistory,HistoryLoading,HistoryExhausted;
+    public bool? ServerOnline;
     public string LoadingHistoryPeer="";
     public long WinningConnectionId;
     public int ReliableRoute;
@@ -36,7 +37,7 @@ public class ConversationModel : ObservableModel {
     public int Unread;
     public string Name {get{return !String.IsNullOrEmpty(AccountName)?AccountName:Contact.name;}}
     public string Initial {get{return String.IsNullOrEmpty(Name)?"?":System.Globalization.StringInfo.GetNextTextElement(Name).ToUpperInvariant();}}
-    public Brush Presence {get{return new SolidColorBrush(Online?Color.FromRgb(54,216,115):Color.FromRgb(107,121,135));}}
+    public Brush Presence {get{return new SolidColorBrush((IsFriend?ServerOnline==true:Online)?Color.FromRgb(54,216,115):Color.FromRgb(107,121,135));}}
     public string Preview {get{return Messages.Count>0?Messages.Last().Preview:(Contact.verified?"Start a conversation":"Awaiting verification");}}
     public string When {get{return Messages.Count>0?Messages.Last().ShortTime:"";}}
     public string UnreadLabel {get{return Unread>0?Unread+" unread":"";}}
