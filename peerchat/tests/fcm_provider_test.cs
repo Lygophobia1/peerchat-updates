@@ -12,7 +12,11 @@ internal static class FcmProviderTest {
     static byte[] Decode(string value){value=value.Replace('-','+').Replace('_','/');return Convert.FromBase64String(value.PadRight((value.Length+3)/4*4,'='));}
     public static int Main(){try{
         var json=new JavaScriptSerializer();int oauth=0,sends=0,status=200;
+#if PEERCHAT_PORTABLE
+        using(var rsa=RSA.Create(2048)){
+#else
         using(var rsa=new RSACng(2048)){
+#endif
             var provider=new FcmPushProvider("peerchat-development","test@peerchat-development.iam.gserviceaccount.com",
                 input=>rsa.SignData(input,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1),
                 (url,bearer,body)=>{

@@ -1,3 +1,6 @@
+#if PEERCHAT_PORTABLE
+using ECDsaCng = PortableTestKey;
+#endif
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -32,7 +35,15 @@ class ServerJsonFixtures {
                 File.WriteAllBytes(Path.Combine(root,"signature.bin"),key.SignData(input));
                 File.WriteAllBytes(Path.Combine(root,"group-proof.bin"),GroupRosterProofTest.CreateProof(key,new string('a',32),1));
             }
-        }else Validate(File.ReadAllText(Path.Combine(root,"modern.json")));
+        }else{
+            Validate(File.ReadAllText(Path.Combine(root,"modern.json")));
+            var publicBlob=File.ReadAllBytes(Path.Combine(root,"portable-identity.bin"));
+            var input=File.ReadAllBytes(Path.Combine(root,"signature-input.bin"));
+            var signature=File.ReadAllBytes(Path.Combine(root,"portable-signature.bin"));
+            Check(MailboxProtocol.Verify(input,signature,publicBlob,MailboxProtocol.Digest(publicBlob)),"Portable -> Windows canonical CNG/P1363 signature");
+            signature[0]^=1;
+            Check(!MailboxProtocol.Verify(input,signature,publicBlob,MailboxProtocol.Digest(publicBlob)),"Portable signature tamper");
+        }
         Console.WriteLine("PASS: Framework JSON compatibility fixture and canonical CNG/P1363/group fixture.");return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }
