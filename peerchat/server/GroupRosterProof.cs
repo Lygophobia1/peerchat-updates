@@ -47,9 +47,13 @@ namespace PeerChat.Server {
                 byte[] digest=sha.ComputeHash(unsigned);
                 if(Hex(digest)!=eventId||Hex(sha.ComputeHash(publicKey))!=actorIdentity)throw new InvalidOperationException("Invalid group creation proof.");
                 try{
+#if PEERCHAT_PORTABLE
+                    if(!PortablePlatform.VerifyHash(publicKey,digest,signature))throw new InvalidOperationException("Invalid group creation proof.");
+#else
                     using(var key=CngKey.Import(publicKey,CngKeyBlobFormat.EccPublicBlob))
                     using(var verifier=new ECDsaCng(key))
                         if(!verifier.VerifyHash(digest,signature))throw new InvalidOperationException("Invalid group creation proof.");
+#endif
                 }catch(CryptographicException){throw new InvalidOperationException("Invalid group creation proof.");}
                 string serverId=Hex(sha.ComputeHash(Encoding.ASCII.GetBytes("PeerChat group roster v1|"+legacyId+"|"+actorIdentity))).Substring(0,32);
                 return new GroupRosterProof{LegacyGroupId=legacyId,OwnerIdentity=actorIdentity,OwnerAccountId=(long)actor,ServerGroupId=serverId,CreateEventId=eventId};

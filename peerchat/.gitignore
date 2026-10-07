@@ -9,3 +9,7 @@ releases/
 .tools/
 google-services.json
 *service-account*.json
+/server/portable/bin/
+/server/portable/obj/
+/tests/portable/bin/
+/tests/portable/obj/

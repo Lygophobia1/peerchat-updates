@@ -27,6 +27,7 @@ try {
         $currentServer=Join-Path (Resolve-Path -LiteralPath $ServerDirectory).Path 'PeerChat.Server.exe'
         if(-not(Test-Path -LiteralPath $currentServer)){throw 'Current-worktree Server executable missing.'}
         Copy-Item -LiteralPath $currentServer -Destination (Join-Path $outputDirectory 'PeerChat.Server.exe') -Force
+        foreach($runtime in @("PeerChat.Server.dll","PeerChat.Server.deps.json","PeerChat.Server.runtimeconfig.json")){if(Test-Path -LiteralPath (Join-Path $ServerDirectory $runtime)){Copy-Item -LiteralPath (Join-Path $ServerDirectory $runtime) -Destination (Join-Path $outputDirectory $runtime) -Force}}
     }else{& (Join-Path $projectRoot 'scripts\build-server.ps1') -OutputDirectory $outputDirectory}
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $references=@('System.dll','System.Core.dll','System.Xaml.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }

@@ -26,10 +26,17 @@ using PeerChat;
 
 namespace PeerChat.Server {
     static class Sqlite {
+#if PEERCHAT_PORTABLE
+        static Sqlite(){PortablePlatform.InitializeSqlite();}
+#endif
         [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] internal static extern int sqlite3_open16(string filename, out IntPtr database);
         [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_close(IntPtr database);
-        [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_exec(IntPtr database, string sql, IntPtr callback, IntPtr argument, out IntPtr error);
-        [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_free(IntPtr value);
+        [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_exec(IntPtr database,
+#if PEERCHAT_PORTABLE
+        [MarshalAs(UnmanagedType.LPUTF8Str)]
+#endif
+        string sql, IntPtr callback, IntPtr argument, out IntPtr error);
+        [DllImport("winsqlite3.dll", CallingConvention=CallingConvention.Cdecl)] internal static extern void sqlite3_free(IntPtr value);
     }
 
     // SQLite owns durable account state. All writes use a process-wide lock because this starter
@@ -302,14 +309,24 @@ namespace PeerChat.Server {
         public void Dispose(){Sqlite.sqlite3_close(database);}
     }
     static class SqliteNative {
-        [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_prepare_v2(IntPtr d,string q,int n,out IntPtr s,IntPtr tail);
+        [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_prepare_v2(IntPtr d,
+#if PEERCHAT_PORTABLE
+        [MarshalAs(UnmanagedType.LPUTF8Str)]
+#endif
+        string q,int n,out IntPtr s,IntPtr tail);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_step(IntPtr s);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_finalize(IntPtr s);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern long sqlite3_column_int64(IntPtr s,int c);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern IntPtr sqlite3_column_text(IntPtr s,int c);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern IntPtr sqlite3_column_blob(IntPtr s,int c);
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_column_bytes(IntPtr s,int c);
-        internal static int prepare(IntPtr d,string q,out IntPtr s){return sqlite3_prepare_v2(d,q,-1,out s,IntPtr.Zero);} internal static int step(IntPtr s){return sqlite3_step(s);} internal static void finalize(IntPtr s){sqlite3_finalize(s);} internal static long columnLong(IntPtr s,int c){return sqlite3_column_int64(s,c);} internal static string columnText(IntPtr s,int c){var p=sqlite3_column_text(s,c);return p==IntPtr.Zero?null:Marshal.PtrToStringAnsi(p);} internal static byte[] columnBlob(IntPtr s,int c){int n=sqlite3_column_bytes(s,c);var p=sqlite3_column_blob(s,c);var b=new byte[n];if(n>0)Marshal.Copy(p,b,0,n);return b;}
+        internal static int prepare(IntPtr d,string q,out IntPtr s){return sqlite3_prepare_v2(d,q,-1,out s,IntPtr.Zero);} internal static int step(IntPtr s){return sqlite3_step(s);} internal static void finalize(IntPtr s){sqlite3_finalize(s);} internal static long columnLong(IntPtr s,int c){return sqlite3_column_int64(s,c);} internal static string columnText(IntPtr s,int c){var p=sqlite3_column_text(s,c);
+#if PEERCHAT_PORTABLE
+        return p==IntPtr.Zero?null:Marshal.PtrToStringUTF8(p);
+#else
+        return p==IntPtr.Zero?null:Marshal.PtrToStringAnsi(p);
+#endif
+} internal static byte[] columnBlob(IntPtr s,int c){int n=sqlite3_column_bytes(s,c);var p=sqlite3_column_blob(s,c);var b=new byte[n];if(n>0)Marshal.Copy(p,b,0,n);return b;}
     }
     // One-shot proof challenges, not a session/reconnect owner. Original-message
     // SHA256/ECDSA preserves the accepted device signature representation.
@@ -332,7 +349,11 @@ namespace PeerChat.Server {
             if(value.Expires<DateTimeOffset.UtcNow.ToUnixTimeSeconds()||value.Account!=account||value.Device!=device||value.Action!=action||value.Binding!=binding||publicKey==null||publicKey.Length!=72||signature==null||signature.Length!=64)return false;
             try{using(var sha=SHA256.Create()){
                 if(BitConverter.ToString(sha.ComputeHash(publicKey)).Replace("-","").ToLowerInvariant()!=device)return false;
+#if PEERCHAT_PORTABLE
+                return PortablePlatform.VerifyHash(publicKey,sha.ComputeHash(value.Input),signature);
+#else
                 using(var key=CngKey.Import(publicKey,CngKeyBlobFormat.EccPublicBlob))using(var verifier=new ECDsaCng(key))return verifier.VerifyHash(sha.ComputeHash(value.Input),signature);
+#endif
             }}catch(CryptographicException){return false;}
         }
     }
@@ -367,11 +388,21 @@ namespace PeerChat.Server {
             if(!config.FcmEnabled)return new NullPushProvider();
             try{
                 if(!Path.IsPathRooted(config.FcmServiceAccountPath)||new FileInfo(config.FcmServiceAccountPath).Length>65536)throw new InvalidOperationException();
-                var fields=new JavaScriptSerializer{MaxJsonLength=65536}.Deserialize<Dictionary<string,object>>(File.ReadAllText(config.FcmServiceAccountPath));
+                var fields=new JavaScriptSerializer{MaxJsonLength=65536}.Deserialize<Dictionary<string,object>>(
+#if PEERCHAT_PORTABLE
+                    PortablePlatform.ReadSecret(config.FcmServiceAccountPath)
+#else
+                    File.ReadAllText(config.FcmServiceAccountPath)
+#endif
+);
                 if((string)fields["type"]!="service_account"||(string)fields["project_id"]!=config.FcmProjectId||(string)fields["token_uri"]!=TokenUrl)throw new InvalidOperationException();
                 string pem=(string)fields["private_key"];if(!pem.StartsWith("-----BEGIN PRIVATE KEY-----",StringComparison.Ordinal)||!pem.TrimEnd().EndsWith("-----END PRIVATE KEY-----",StringComparison.Ordinal))throw new InvalidOperationException();
                 byte[] key=Convert.FromBase64String(pem.Replace("-----BEGIN PRIVATE KEY-----","").Replace("-----END PRIVATE KEY-----",""));
+#if PEERCHAT_PORTABLE
+                Func<byte[],byte[]> signer=input=>PortablePlatform.RsaSign(key,input);
+#else
                 Func<byte[],byte[]> signer=input=>{using(var imported=CngKey.Import(key,CngKeyBlobFormat.Pkcs8PrivateBlob))using(var rsa=new RSACng(imported))return rsa.SignData(input,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);};
+#endif
                 // Validate key/type before accepting enabled configuration.
                 signer(Encoding.ASCII.GetBytes("PeerChat FCM provider startup validation"));
                 return new FcmPushProvider(config.FcmProjectId,(string)fields["client_email"],signer,Post);

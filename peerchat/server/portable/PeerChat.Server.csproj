@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+    <AssemblyName>PeerChat.Server</AssemblyName>
+    <StartupObject>PeerChat.Server.DiscoveryServer</StartupObject>
+    <DefineConstants>$(DefineConstants);PEERCHAT_PORTABLE</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;../../shared/VersionInfo.cs;PortableJson.cs;PortablePlatform.cs" />
+  </ItemGroup>
+</Project>

@@ -30,9 +30,13 @@ internal static class MailboxProtocol {
             if(identity==null||identity.Length!=72||signature==null||signature.Length!=64||Digest(identity)!=device)return false;
             // Existing PeerChat identity is ECDSA P-256 CNG public blob / P1363 signature.
             if(BitConverter.ToUInt32(identity,0)!=0x31534345||BitConverter.ToUInt32(identity,4)!=32)return false;
+#if PEERCHAT_PORTABLE
+            using(var sha=SHA256.Create())return PortablePlatform.VerifyHash(identity,sha.ComputeHash(original),signature);
+#else
             using(var key=CngKey.Import(identity,CngKeyBlobFormat.EccPublicBlob))
             using(var verify=new ECDsaCng(key))
             using(var sha=SHA256.Create())return verify.VerifyHash(sha.ComputeHash(original),signature);
+#endif
         }catch(CryptographicException){return false;}
     }
     internal sealed class Binding {
@@ -47,7 +51,11 @@ internal static class MailboxProtocol {
             Require(Id(b.Device,64)&&Id(b.Key,32)&&(b.Predecessor.Length==0||Id(b.Predecessor,32))&&b.Public.Length==65&&b.Public[0]==4&&b.Signature.Length==64);
             // Validate on-curve before accepting the signed encryption descriptor.
             var publicBlob=new byte[72];Buffer.BlockCopy(BitConverter.GetBytes(0x314b4345u),0,publicBlob,0,4);Buffer.BlockCopy(BitConverter.GetBytes(32u),0,publicBlob,4,4);Buffer.BlockCopy(b.Public,1,publicBlob,8,64);
+#if PEERCHAT_PORTABLE
+            PortablePlatform.ValidateAgreementPublic(publicBlob);
+#else
             using(var publicKey=CngKey.Import(publicBlob,CngKeyBlobFormat.EccPublicBlob)){}
+#endif
             return b;
         }
     }
