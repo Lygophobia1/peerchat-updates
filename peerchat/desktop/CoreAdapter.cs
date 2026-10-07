@@ -13,6 +13,15 @@ namespace PeerChatDesktop {
 public sealed class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
+    public sealed class FileTransferData {public string id,peer,name,error,path;public long size,done;public int state;public bool sending;}
+    [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr handle,uint operation,string peer,string id,string path);
+    public string FileTransfer(uint operation,string peer="",string id="",string path=""){lock(mailboxGate){
+        if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
+        var result=ui_file_transfer(handle,operation,peer,id,path);
+        if(result==IntPtr.Zero)throw new InvalidOperationException("File operation failed. Check that the recipient is verified, the offer is current, and the selected file/folder is accessible.");
+        return Marshal.PtrToStringUni(result);
+    }}
+    public FileTransferData[] FileTransfers(){return new JavaScriptSerializer().Deserialize<FileTransferData[]>(FileTransfer(0))??new FileTransferData[0];}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_mailbox(IntPtr handle,uint operation,byte[] input,uint length,string messageId,int allowed,[Out] byte[] output,uint capacity);
     public bool MailboxSupported {get{return ui_mailbox_supported()!=0;}}

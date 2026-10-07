@@ -11,6 +11,7 @@
 #include "group_message_envelope.hpp"
 #include "group_text.hpp"
 #include "delivery_manager.hpp"
+#include "windows_transfer_io.hpp"
 #include "windows_mailbox.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
@@ -86,7 +87,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,FileTransfer,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0,noiseSuppressionStrength=1,automaticGainStrength=1;screen::Backend screenBackend=screen::Backend::NativeWindows;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;
         bool mailbox=false;std::shared_ptr<std::promise<Blob>> bytesResponse;
     };
@@ -99,6 +100,62 @@ struct Node::Impl {
     std::map<std::string,Contact> contacts;
     std::set<std::string> liveOutboxPeers;
     std::uint64_t demandCheckAt=0;
+    std::unique_ptr<transfer::TransferManager> transfers;
+    std::map<std::string,std::wstring> transferPaths;
+    std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
+    Connection* transferConnection(const std::string& peer){
+        if(!sessionTransports)return nullptr;
+        auto state=sessionTransports->snapshot(peer);auto contact=contacts.find(peer);
+        if(!state||!state->connected||contact==contacts.end()||!contact->second.verified)return nullptr;
+        for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->peerId==peer&&c->online&&!c->dead&&c->approved&&c->authorization.permitsDirectMessage()&&(c->remoteCapabilities&protocol::CapabilityFileTransfer))return c.get();
+        return nullptr;
+    }
+    void serviceTransfers(){
+        if(!transfers)return;
+        for(auto& peer:transfers->demandedPeers()){
+            auto state=sessionTransports->snapshot(peer);if(!state||!state->connected)continue;
+            for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->online&&!c->dead&&!(c->remoteCapabilities&protocol::CapabilityFileTransfer))transfers->unsupportedPeer(peer);
+        }
+        transfers->tick(nowMilliseconds(),[&](const std::string& peer){auto c=transferConnection(peer);return c?c->attemptId:0;},
+            [&](const std::string& peer,const Blob& bytes){
+                auto c=transferConnection(peer);if(!c||c->output.size()-c->sent>MaxQueue/4)return false;
+                if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
+                try{packet(*c,bytes);return true;}
+                catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
+            });
+    }
+    static std::wstring transferQuote(const std::wstring& value){
+        std::wstring result=L"\"";for(auto ch:value){if(ch==L'\\'||ch==L'"')result+=L'\\';if(ch<32)result+=L' ';else result+=ch;}return result+L"\"";
+    }
+    std::wstring transferOperation(const Command& command){
+        if(!transfers)throw std::runtime_error("File transfers unavailable");
+        if(command.sourceKind==1){
+            auto contact=contacts.find(command.peer);
+            if(!protocol::id(command.peer)||contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify the recipient device before sending a file");
+            transfers->offer(command.peer,command.id,std::make_unique<transfer::windows::FileSource>(command.text),nowMilliseconds());
+            sessionTransports->demandLiveRoute(command.peer,nowMilliseconds()+2000,nowMilliseconds());
+            return widenUtf8(command.id);
+        }
+        if(command.sourceKind==2){
+            auto snapshots=transfers->snapshots();auto found=std::find_if(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==command.id&&!s.sending&&s.state==transfer::State::AwaitingAcceptance;});
+            if(found==snapshots.end())throw std::runtime_error("File offer unavailable");
+            for(auto i=transferPaths.begin();i!=transferPaths.end();)if(std::none_of(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==i->first;}))i=transferPaths.erase(i);else ++i;
+            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,transferCleanup.get());auto path=sink->path();
+            transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;return L"ok";
+        }
+        if(command.sourceKind==3){transfers->cancel(command.id);return L"ok";}
+        if(command.sourceKind!=0)throw std::runtime_error("Invalid file operation");
+        std::wostringstream out;out<<L"[";bool first=true;
+        for(auto& s:transfers->snapshots()){
+            if(!first)out<<L",";
+            first=false;
+            out<<L"{\"id\":"<<transferQuote(widenUtf8(s.metadata.id))<<L",\"peer\":"<<transferQuote(widenUtf8(s.peer))<<L",\"name\":"<<transferQuote(widenUtf8(s.metadata.name))
+                <<L",\"size\":"<<s.metadata.size<<L",\"done\":"<<s.done<<L",\"state\":"<<static_cast<unsigned>(s.state)<<L",\"sending\":"<<(s.sending?L"true":L"false")
+                <<L",\"error\":"<<transferQuote(widenUtf8(s.error))<<L",\"path\":"<<transferQuote(s.state==transfer::State::Complete&&!s.sending?transferPaths[s.metadata.id]:L"")<<L"}";
+        }
+        out<<L"]";return out.str();
+    }
+
     reliable::AuthenticatedFriendSnapshot authenticatedFriends;
     std::map<std::string,GroupLedger> groups;
     GroupAccount groupAccount;
@@ -775,6 +832,12 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
             throw std::runtime_error("Group-control session rejected an unrelated payload");
         }
+        if(r.type()==protocol::FileTransfer){
+            protocol::check(transfers&&transferConnection(c.peerId)==&c);
+            auto before=transfers->snapshots().size();transfers->receive(c.peerId,frame,nowMilliseconds());
+            if(transfers->snapshots().size()>before){NodeEvent event;event.kind=NodeEvent::Kind::FileTransfer;event.peerId=c.peerId;event.text=L"Incoming file offer";emit(std::move(event));}
+            return;
+        }
         if(r.type()==protocol::ScreenBackendRequest){
             const auto id=r.string();const auto generation=r.number(),rawRequirement=r.number();r.end();
             protocol::check(c.screenShare&&c.screenBackendNegotiation&&protocol::id(id,32)&&generation==1&&rawRequirement<=1);
@@ -934,7 +997,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         // Voice capability describes authenticated call control. The media
         // path remains independent ICE/DTLS-SRTP and is never put on relay.
         capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
-        capabilities|=protocol::CapabilityGroupKeyHandoff;
+        capabilities|=protocol::CapabilityGroupKeyHandoff;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
         if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
         if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
         bool live=c.reliable::SharedPeerRuntime::receive(*c.tls,encrypted,profile,capabilities,profile.listenPort,
@@ -1105,6 +1168,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 auto contact=reliable::persistAuthenticatedContact(*store,*c,known==contacts.end()?nullptr:&known->second,c->tls->remotePublicKey(),c->relay?std::optional<Endpoint>{}:Endpoint{c->host,c->port});
                 contacts[c->peerId]=contact;publishContacts();approve(*c);
             }}
+            else if(command.action==Action::FileTransfer){if(command.response)command.response->set_value(transferOperation(command));}
             else if(command.action==Action::Send){
                 const auto requested=command.peer;
                 command.peer=reliable::queueRecipient(requested,store->contacts(),authenticatedFriends);
@@ -1298,6 +1362,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
+            transfers.reset();transferCleanup.reset();transferPaths.clear();
+            try{transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();});}
+            catch(...){notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected partial-file cleanup requires attention");}
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
@@ -1336,6 +1403,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                         if(contact==contacts.end()||!contact->second.verified){++it;continue;} // Verification has a bounded demand window.
                         sessionTransports->demandLiveRoute(*it,now+2000,now);++it;
                     }
+                    if(transfers)for(auto& peer:transfers->demandedPeers()){auto contact=contacts.find(peer);if(contact!=contacts.end()&&contact->second.verified)sessionTransports->demandLiveRoute(peer,now+2000,now);}
                     if(calls.active())sessionTransports->demandLiveRoute(calls.peer(),now+2000);
                     if(screenShares.active())sessionTransports->demandLiveRoute(screenShares.active()->peer,now+2000);
                     auto retired=sessionTransports->retireIdleRoutes(now);
@@ -1345,7 +1413,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 // Relay-only idle iterations skip the direct-socket select below, so retire
                 // relay EOFs here before that early sleep/continue can bypass manager cleanup.
-                reapDeadConnections();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
+                reapDeadConnections();resolved();serviceTransfers();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
                 if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}
                 if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 if(calls.mediaTimedOut(nowMilliseconds())||calls.controlAndMediaTimedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Voice connection could not be restored",true);}
@@ -1383,7 +1451,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -1418,6 +1486,12 @@ int Node::takeRelayOutput(std::uint64_t attempt,unsigned char* bytes,std::size_t
 void Node::saveContact(const Contact& contact){Impl::Command c{};c.action=Impl::Action::SaveContact;c.contact=contact;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::removeContact(const std::string& peer){Impl::Command c{};c.action=Impl::Action::RemoveContact;c.peer=peer;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}
 void Node::approve(const std::string& peer,bool accepted){Impl::Command c{};c.action=Impl::Action::Approve;c.peer=peer;c.accepted=accepted;impl_->command(std::move(c));}
+std::wstring Node::fileTransfer(unsigned operation,const std::string& peer,const std::string& id,const std::wstring& path){
+    auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();
+    Impl::Command c{};c.action=Impl::Action::FileTransfer;c.sourceKind=operation;c.peer=peer;c.id=operation==1?Storage::newMessageId():id;c.text=path;c.response=response;
+    if(!impl_->command(std::move(c)))throw std::runtime_error("Peer node unavailable");
+    response.reset();return result.get(); // Local bounded operation; desktop calls off its dispatcher.
+}
 std::string Node::send(const std::string& peer,const std::wstring& text){
     if(!protocol::id(peer)||text.empty()||text.size()>protocol::MaxChatCharacters)return {};
     auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();

@@ -17,7 +17,7 @@ struct AuthenticatedFriend {
     std::vector<std::string> knownPeerIds;
 };
 struct NodeEvent {
-    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare, GroupCiphertext, GroupCiphertextAck };
+    enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare, GroupCiphertext, GroupCiphertextAck, FileTransfer };
     Kind kind=Kind::Error;
     std::string peerId;
     std::string expectedPeerId;
@@ -99,6 +99,7 @@ public:
     void removeContact(const std::string& peerId);
     void approve(const std::string& peerId,bool accepted);
     std::string send(const std::string& peerId,const std::wstring& text);
+    std::wstring fileTransfer(unsigned operation,const std::string& peer={},const std::string& id={},const std::wstring& path={});
     void loadHistory(const std::string& peerId,std::int64_t before=INT64_MAX);
     bool eraseHistory(const std::string& peerId);
     void setName(const std::wstring& name);

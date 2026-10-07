@@ -320,6 +320,70 @@ public class DesktopApplication {
     }
     T Find<T>(string name) where T:FrameworkElement {return (T)window.FindName(name);}
     void Click(string name,Action action){Find<Button>(name).Click+=(s,e)=>{var started=Stopwatch.StartNew();TraceUi(name+" action started");try{action();}catch(Exception error){Notify(error.Message);}finally{TraceUi(name+" action returned after "+started.ElapsedMilliseconds+" ms");}};}
+        Window fileTransferWindow;
+    StackPanel fileTransferRows;
+    bool fileTransferRefreshing,fileTransferOperating;
+    async Task FileOperation(uint operation,string peer,string id,string path){
+        if(closing||fileTransferOperating)return;
+        fileTransferOperating=true;
+        try{await Task.Run(()=>core.FileTransfer(operation,peer,id,path));}
+        catch(Exception error){if(!closing)MessageBox.Show(fileTransferWindow??window,error.Message,"File transfer",MessageBoxButton.OK,MessageBoxImage.Warning);}
+        finally{fileTransferOperating=false;await RefreshFileTransfers();}
+    }
+    async Task RefreshFileTransfers(){
+        if(closing||fileTransferWindow==null||fileTransferRefreshing||fileTransferOperating)return;
+        fileTransferRefreshing=true;var current=fileTransferWindow;
+        try{
+            var rows=await Task.Run(()=>core.FileTransfers());
+            if(closing||fileTransferWindow!=current)return;
+            fileTransferRows.Children.Clear();
+            foreach(var item in rows){
+                var card=new StackPanel{Margin=new Thickness(0,6,0,10)};
+                var contact=model.FindByPeer(item.peer);
+                card.Children.Add(new TextBlock{Text=(item.sending?"To ":"From ")+(contact==null?item.peer:contact.Name)+" · "+item.name,Foreground=Brush("#E5EDF5"),TextWrapping=TextWrapping.Wrap});
+                string[] states={"Preparing / hashing","Waiting for recipient / route","Incoming — acceptance required","Transferring / resumes on reconnect","Complete — SHA-256 verified","Cancelled","Failed"};
+                card.Children.Add(new TextBlock{Text=states[Math.Max(0,Math.Min(6,item.state))]+" · "+item.done.ToString("N0")+" / "+item.size.ToString("N0")+" bytes",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap});
+                if(!String.IsNullOrEmpty(item.error))card.Children.Add(new TextBlock{Text=item.error,Foreground=Brush("#FFB4AB")});
+                card.Children.Add(new ProgressBar{Minimum=0,Maximum=Math.Max(1,item.size),Value=item.done,Height=5,Margin=new Thickness(0,6,0,6)});
+                var actions=new StackPanel{Orientation=Orientation.Horizontal};
+                if(!item.sending&&item.state==2){
+                    var accept=new Button{Content="Accept…",Margin=new Thickness(0,0,8,0)};
+                    accept.Click+=async(s,e)=>{
+                        var choose=new Microsoft.Win32.SaveFileDialog{Title="Choose destination folder — received file gets a unique ID prefix",FileName=item.name,OverwritePrompt=false};
+                        if(choose.ShowDialog(fileTransferWindow)==true)await FileOperation(2,"",item.id,Path.GetDirectoryName(choose.FileName));
+                    };actions.Children.Add(accept);
+                }
+                if(item.state<4){var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=async(s,e)=>await FileOperation(3,"",item.id,"");actions.Children.Add(cancel);}
+                if(item.state==4&&!item.sending&&!String.IsNullOrEmpty(item.path)){
+                    var folder=new Button{Content="Open containing folder"};folder.Click+=(s,e)=>{try{Process.Start("explorer.exe","/select,\""+item.path+"\"");}catch{}};actions.Children.Add(folder);
+                }
+                card.Children.Add(actions);fileTransferRows.Children.Add(card);
+            }
+            if(rows.Length==0)fileTransferRows.Children.Add(new TextBlock{Text="No file transfers. Select a verified direct conversation to send a file.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap});
+        }catch(Exception error){if(!closing&&fileTransferWindow==current){fileTransferRows.Children.Clear();fileTransferRows.Children.Add(new TextBlock{Text=error.Message,Foreground=Brush("#FFB4AB"),TextWrapping=TextWrapping.Wrap});}}
+        finally{fileTransferRefreshing=false;}
+    }
+    async void ShowFileTransfers(){
+        if(fileTransferWindow!=null){fileTransferWindow.Activate();return;}
+        var root=new DockPanel{Margin=new Thickness(18)};
+        var header=new StackPanel();DockPanel.SetDock(header,Dock.Top);root.Children.Add(header);
+        header.Children.Add(new TextBlock{Text="File transfers",FontSize=22,Foreground=Brush("#E5EDF5")});
+        header.Children.Add(new TextBlock{Text="Live encrypted transfer · up to 256 MiB · 4 active transfers\nReconnect resumes in this app session. Closing the app cancels partial transfers.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,12)});
+        var send=new Button{Content="Send file to selected conversation…",HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,0,0,12)};
+        send.Click+=async(s,e)=>{
+            var selected=model.Groups?null:model.Selected;
+            if(selected==null||selected.Contact==null||String.IsNullOrEmpty(selected.Contact.peer)){MessageBox.Show(fileTransferWindow,"Select a verified direct conversation first.");return;}
+            var choose=new Microsoft.Win32.OpenFileDialog{Title="Send file",CheckFileExists=true,Multiselect=false};
+            if(choose.ShowDialog(fileTransferWindow)==true)await FileOperation(1,selected.Contact.peer,"",choose.FileName);
+        };header.Children.Add(send);
+        fileTransferRows=new StackPanel();root.Children.Add(new ScrollViewer{Content=fileTransferRows,VerticalScrollBarVisibility=ScrollBarVisibility.Auto});
+        fileTransferWindow=new Window{Title="PeerChat — File transfers",Owner=window,Width=660,Height=520,MinWidth=420,MinHeight=320,Background=Brush("#0B151E"),Foreground=Brush("#E5EDF5"),Content=root};
+        var refresh=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
+        refresh.Tick+=async(s,e)=>await RefreshFileTransfers();
+        fileTransferWindow.Closed+=(s,e)=>{refresh.Stop();fileTransferWindow=null;};
+        fileTransferWindow.Show();refresh.Start();await RefreshFileTransfers();
+    }
+
     void BindActions(){
         Find<Button>("ViewConnectionLog").Content="Connection & Diagnostics";Find<Button>("ViewConnectionLog").ToolTip="Open connection and transport diagnostics";
         Find<Button>("Details").Content="Shareable Endpoint";
@@ -335,6 +399,7 @@ public class DesktopApplication {
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
+        Click("Attachment",ShowFileTransfers);
         Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",SettingsPage);
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
@@ -475,6 +540,7 @@ public class DesktopApplication {
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
+                if(e.kind==22){ShowFileTransfers();continue;}
                 if(e.kind==20){
                     if(discovery==null||!discovery.QueueGroupMessage(e.expected,e.text,e.attempt,e.detail))core.GroupMessageStatus(e.expected,e.text,"Not sent: authenticated server channel unavailable");
                     continue;

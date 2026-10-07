@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <map>
 #define UI_API extern "C" __declspec(dllexport)
-struct UiBridge { peerchat::Node node; std::wstring output,screenDiagnosticsOutput; std::map<std::string,peerchat::Contact> contacts; };
+struct UiBridge { peerchat::Node node; std::wstring output,screenDiagnosticsOutput,transferOutput; std::map<std::string,peerchat::Contact> contacts; };
 static std::wstring widen(const std::string& value){return {value.begin(),value.end()};}
 static std::string identity(const wchar_t* value){std::wstring text=value?value:L"";std::string result;for(auto ch:text){if(ch>127)throw std::runtime_error("Invalid identity");result+=char(ch);}return result;}
 static std::wstring quote(const std::wstring& value){
@@ -71,6 +71,9 @@ UI_API int ui_relay_receive(void* handle,unsigned long long attempt,const unsign
 UI_API void ui_relay_closed(void* handle,unsigned long long attempt,const wchar_t* reason){try{static_cast<UiBridge*>(handle)->node.relayClosed(attempt,reason?reason:L"");}catch(...){}}
 UI_API int ui_relay_take_output(void* handle,unsigned long long attempt,unsigned char* bytes,unsigned capacity,unsigned waitMilliseconds){try{return static_cast<UiBridge*>(handle)->node.takeRelayOutput(attempt,bytes,capacity,waitMilliseconds);}catch(...){return -1;}}
 UI_API int ui_approve(void* handle,const wchar_t* peer,int accepted){try{static_cast<UiBridge*>(handle)->node.approve(identity(peer),accepted!=0);return 1;}catch(...){return 0;}}
+UI_API const wchar_t* ui_file_transfer(void* handle,unsigned operation,const wchar_t* peer,const wchar_t* id,const wchar_t* path){
+    try{if(!handle)return nullptr;auto bridge=static_cast<UiBridge*>(handle);bridge->transferOutput=bridge->node.fileTransfer(operation,identity(peer),identity(id),path?path:L"");return bridge->transferOutput.c_str();}catch(...){return nullptr;}
+}
 UI_API int ui_send(void* handle,const wchar_t* peer,const wchar_t* text){try{return !static_cast<UiBridge*>(handle)->node.send(identity(peer),text).empty();}catch(...){return 0;}}
 UI_API int ui_remove(void* handle,const wchar_t* peer){try{auto& bridge=*static_cast<UiBridge*>(handle);std::string id=identity(peer);bridge.node.removeContact(id);bridge.contacts.erase(id);return 1;}catch(...){return 0;}}
 UI_API int ui_history(void* handle,const wchar_t* peer,long long before){try{static_cast<UiBridge*>(handle)->node.loadHistory(identity(peer),before);return 1;}catch(...){return 0;}}

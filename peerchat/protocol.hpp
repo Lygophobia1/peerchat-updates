@@ -38,6 +38,10 @@ constexpr std::uint64_t CapabilityScreenShare=128;
 // stream with current authoritative group-roster authorization.
 constexpr std::uint64_t CapabilityGroupKeyHandoff=256;
 constexpr std::uint64_t CapabilityScreenBackendNegotiation=512;
+// Additive, explicitly negotiated. Old peers and Android do not receive file
+// frames unless they advertise this capability.
+constexpr std::uint64_t CapabilityFileTransfer=1024;
+constexpr Type FileTransfer=static_cast<Type>(30);
 inline Blob frame(const Blob& data){check(data.size()<=MaxPacket);Blob out;for(int i=3;i>=0;i--)out.push_back(static_cast<unsigned char>(data.size()>>(8*i)));out.insert(out.end(),data.begin(),data.end());return out;}
 struct Writer {
     Blob data;
