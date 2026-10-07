@@ -20,13 +20,13 @@ int main(int argc,char** argv){try{
     check(token.size()==32&&std::all_of(token.begin(),token.end(),[](char c){return(c>='0'&&c<='9')||(c>='a'&&c<='f');}));
     const auto alias="PeerChat.Recipient.test.physical."+token;
     if(mode=="--cleanup"){cleanup(alias);return 0;}
-    const std::filesystem::path root=argv[2];WindowsRecipientKeyProvider keys;auto hpke=createWolfCryptEvaluationHpke();
+    const std::filesystem::path root=argv[2];WindowsRecipientKeyProvider keys;auto hpke=createShippingHpke();
     const auto info=text("PeerChat/physical-HPKE-test/v1"),aad=text("test-only/account/device/message");
     if(mode=="--seal"){
         auto key=keys.create(alias);write(root/"windows-public.bin",key->publicKey());
         const auto android=read(root/"android-public.bin");Bytes output;
         for(unsigned i=0;i<100;++i){auto envelope=hpke->seal(android,info,aad,plain(i));output.insert(output.end(),envelope.enc.begin(),envelope.enc.end());output.insert(output.end(),envelope.ciphertext.begin(),envelope.ciphertext.end());}
-        write(root/"windows-cipher.bin",output);std::cout<<"PASS: 100 Windows wolfCrypt envelopes sealed for physical Keystore recipient\n";
+        write(root/"windows-cipher.bin",output);std::cout<<"PASS: 100 Windows Go envelopes sealed for physical Keystore recipient\n";
     }else{
         check(mode=="--open");auto key=keys.open(alias);const auto input=read(root/"android-cipher.bin");const auto size=65+plain(0).size()+16;check(input.size()==100*size);
         for(unsigned i=0;i<100;++i){auto begin=input.begin()+i*size;HpkeEnvelope e{Bytes(begin,begin+65),Bytes(begin+65,begin+size)};

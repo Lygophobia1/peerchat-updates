@@ -1,4 +1,4 @@
-param([string]$ClientDirectory='releases\v0.3-beta\Client',[switch]$RequireScreenMedia)
+param([string]$ClientDirectory='releases\v0.3-beta\Client',[switch]$RequireScreenMedia,[switch]$RequireHpke)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -9,6 +9,7 @@ try {
     if($missing.Count -ne 0){throw 'Packaged Client is missing required runtime file(s): '+($missing -join ', ')}
     $screenMedia=Join-Path $client 'PeerChat.ScreenMedia.dll'
     if($RequireScreenMedia -and -not (Test-Path -LiteralPath $screenMedia)){throw 'Packaged Client is missing PeerChat.ScreenMedia.dll.'}
+    if($RequireHpke){& (Join-Path $projectRoot 'tests\test-hpke-package-containment.ps1') -PackageDirectory $client}
     $desktop=Join-Path $client 'PeerChat.Desktop.exe'
     try {
         # Load metadata from bytes so the verifier neither depends on reflection-only support in

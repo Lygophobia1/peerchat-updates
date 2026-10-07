@@ -27,9 +27,6 @@ public:
     // Reject new operations and wait for in-flight cryptographic execution.
     virtual void shutdown() noexcept=0;
 };
-// Explicitly evaluation-only. Never selected by a shipping/default factory.
-std::shared_ptr<HpkeProvider> createWolfCryptEvaluationHpke();
-inline std::shared_ptr<HpkeProvider> createShippingHpke() {
-    throw std::runtime_error("No approved shipping HPKE provider configured");
-}
+// Production Windows provider; embedded runtime remains loaded until process exit.
+std::shared_ptr<HpkeProvider> createShippingHpke();
 }

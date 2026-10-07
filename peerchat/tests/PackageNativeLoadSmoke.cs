@@ -7,6 +7,7 @@ class PackageNativeLoadSmoke {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]delegate IntPtr Create();
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]delegate void Destroy(IntPtr handle);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]delegate IntPtr Snapshot(IntPtr handle);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]delegate int ProviderVersion();
     const uint LoadLibrarySearchDllLoadDir=0x00000100;
     const uint LoadLibrarySearchSystem32=0x00000800;
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string fileName,IntPtr file,uint flags);
@@ -15,6 +16,14 @@ class PackageNativeLoadSmoke {
     static int Main(string[] args){
         if(args.Length!=1){Console.Error.WriteLine("Usage: PackageNativeLoadSmoke <PeerChat.Core.dll>");return 2;}
         string path=Path.GetFullPath(args[0]);
+        string hpkePath=Path.Combine(Path.GetDirectoryName(path),"PeerChat.Hpke.dll");
+        if(File.Exists(hpkePath)){
+            IntPtr hpke=LoadLibraryEx(hpkePath,IntPtr.Zero,LoadLibrarySearchDllLoadDir|LoadLibrarySearchSystem32);
+            if(hpke==IntPtr.Zero){Console.Error.WriteLine("FAIL: packaged HPKE runtime failed to load");return 1;}
+            IntPtr ping=GetProcAddress(hpke,"pc_go_hpke_ping");
+            if(ping==IntPtr.Zero||((ProviderVersion)Marshal.GetDelegateForFunctionPointer(ping,typeof(ProviderVersion)))()!=12608)return 1;
+            Console.WriteLine("PASS: packaged Go HPKE initializes under restricted search without external Go installation.");
+        }
         IntPtr module=LoadLibraryEx(path,IntPtr.Zero,LoadLibrarySearchDllLoadDir|LoadLibrarySearchSystem32);
         if(module==IntPtr.Zero){int code=Marshal.GetLastWin32Error();Console.Error.WriteLine("FAIL: Windows loader error "+code+": "+new Win32Exception(code).Message);return 1;}
         IntPtr createAddress=GetProcAddress(module,"ui_create"),destroyAddress=GetProcAddress(module,"ui_destroy");

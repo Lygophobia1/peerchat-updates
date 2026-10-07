@@ -41,11 +41,7 @@ public:
         database_(platform::openWindowsSqlDatabase((std::filesystem::path(directory)/L"device-key-registry").wstring())),
         registryStore_(database_),registry_(registryStore_,records_,profile.peerId),
         keys_(identity_,provider_,registry_),coordinator_(keys_,identity_,verifyDevicePayload,Storage::publicKeyId),profile_(profile){
-#if defined(PEERCHAT_HPKE_EVALUATION)
-        hpke_=platform::createWolfCryptEvaluationHpke();
-#else
-        hpke_=platform::createShippingHpke(); // No licensed provider: fail closed.
-#endif
+        hpke_=platform::createShippingHpke();
     }
     Blob execute(unsigned operation,const Blob& input,const std::string& id,bool allowed,
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,

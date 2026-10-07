@@ -1,3 +1,5 @@
+> HISTORICAL ONLY — describes the dev.17 evaluation/proof, not the current provider or build instructions. The former provider, evaluation switch and dependency have been removed. See GO_HPKE_PRODUCTION_INTEGRATION.md for the current Go integration.
+
 # Encrypted mailbox evaluation runtime
 
 Status: **TECHNICALLY APPROVED provider / SHIPPING LICENSE UNRESOLVED**.

@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
 /** Three-phase public/ciphertext-only exchange. Never touches the normal profile. */
 @RunWith(AndroidJUnit4::class)
 class HpkeInteropDeviceTest {
-    @Test fun windowsWolfCryptAndNonExportableKeystore() {
+    @Test fun windowsHpkeAndNonExportableKeystore() {
         val arguments = InstrumentationRegistry.getArguments()
         val token = checkNotNull(arguments.getString("interopToken"))
         require(token.matches(Regex("[0-9a-f]{32}")))

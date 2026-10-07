@@ -36,7 +36,7 @@ int main(int argc,char** argv){try{
     Storage senderStore((root/L"sender").wstring()),recipientStore((root/L"recipient").wstring()),outsiderStore((root/L"outsider").wstring());
     Signing sender(senderStore.profile()),recipient(recipientStore.profile()),outsider(outsiderStore.profile());
     auto senderId=sender.profile.peerId,recipientId=recipient.profile.peerId;
-    RecipientFixture fixture;auto hpke=platform::createWolfCryptEvaluationHpke();
+    RecipientFixture fixture;auto hpke=platform::createShippingHpke();
     mailbox::Verify verify=verifyDevicePayload;mailbox::Fingerprint fingerprint=Storage::publicKeyId;
     mailbox::RecipientBinding binding;binding.accountId=8;binding.device=recipientId;binding.keyId=std::string(32,'a');binding.generation=1;
     binding.createdUtc=100;binding.publicKey=fixture.key->publicKey();binding.storageAllowed=true;binding.signature=recipient.sign(mailbox::bindingPayload(binding));

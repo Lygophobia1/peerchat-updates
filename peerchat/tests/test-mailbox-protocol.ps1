@@ -1,12 +1,11 @@
 param()
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
-$evaluation=Join-Path $root 'build\deps\wolfcrypt-evaluation'
-$source=Join-Path $evaluation 'wolfssl-3c5eead44904df64e6a5a1f4ebdce377d35a849a';$native=Join-Path $evaluation 'mingw-x64'
 $out=Join-Path $root ('build\tests\mailbox-protocol-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $out | Out-Null
+& (Join-Path $root 'scripts\build-go-hpke.ps1') -OutputDirectory $out
 Push-Location $root
 try {
-    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -D_WIN32_WINNT=0x0601 -DWOLFCRYPT_ONLY -DNO_CERTS -DPEERCHAT_HPKE_EVALUATION -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I $native -I $source tests/mailbox_protocol_test.cpp platform/wolfcrypt_evaluation_hpke.cpp group.cpp storage.cpp (Join-Path $native 'libwolfssl.a') -o "$out\mailbox-protocol-test.exe" -lncrypt -lbcrypt -lcrypt32
+    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -D_WIN32_WINNT=0x0601 -Wno-cast-function-type -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ tests/mailbox_protocol_test.cpp platform/go_hpke_provider.cpp group.cpp storage.cpp -o "$out\mailbox-protocol-test.exe" -lncrypt -lbcrypt -lcrypt32
     if($LASTEXITCODE -ne 0){throw "Mailbox protocol build failed: $LASTEXITCODE"}
     & "$out\mailbox-protocol-test.exe" "$out\profiles"
     if($LASTEXITCODE -ne 0){throw "Mailbox protocol tests failed: $LASTEXITCODE"}

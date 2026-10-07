@@ -1,3 +1,5 @@
+> HISTORICAL ONLY — describes the dev.17 evaluation/proof, not the current provider or build instructions. The former provider, evaluation switch and dependency have been removed. See GO_HPKE_PRODUCTION_INTEGRATION.md for the current Go integration.
+
 # Windows native opaque-recipient HPKE evaluation
 
 Status: **evaluation only, not approved for production**. Date: 2026-10-04.

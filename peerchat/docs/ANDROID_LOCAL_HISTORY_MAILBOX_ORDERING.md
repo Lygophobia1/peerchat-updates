@@ -1,3 +1,5 @@
+> HISTORICAL ONLY — describes the dev.17 evaluation/proof, not the current provider or build instructions. The former provider, evaluation switch and dependency have been removed. See GO_HPKE_PRODUCTION_INTEGRATION.md for the current Go integration.
+
 # Android local-history / mailbox startup correction
 
 Evidence date: 2026-10-04. Branch: `codex/windows-android-unified`.

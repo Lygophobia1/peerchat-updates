@@ -26,11 +26,7 @@ UI_API int ui_mailbox(void* handle,unsigned operation,const unsigned char* bytes
     return static_cast<int>(result.size());
 }catch(...){return -1;}}
 UI_API int ui_mailbox_supported(){
-#if defined(PEERCHAT_HPKE_EVALUATION)
     return 1;
-#else
-    return 0;
-#endif
 }
 // Profile maintenance deliberately has no Node/session ownership.  It opens two closed
 // SQLite stores only while the managed bootstrap has verified the profile lock is free,

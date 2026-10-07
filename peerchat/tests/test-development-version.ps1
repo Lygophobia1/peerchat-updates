@@ -1,4 +1,5 @@
-param([string]$Version='4.0.2-dev.1',[string]$PreviousVersion='4.0.1-dev.64',
+param([string]$Version='4.0.2-dev.18',[string]$PreviousVersion='4.0.2-dev.17',
+      [string]$ArtifactDirectory='DevelopmentUpdater',
       [string]$AndroidSdkRoot="$env:LOCALAPPDATA\Android\Sdk")
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
@@ -24,13 +25,14 @@ foreach($relative in @('debug\app-debug.apk','release\app-release-unsigned.apk')
 }
 Write-Host "PASS: shared/generated sources, Windows About/diagnostic version constants and Android APK versions match $Version."
 $package=Join-Path $output 'Package'
-$allowed=@('PeerChat.Desktop.exe','PeerChat.Core.dll','PeerChat.Desktop.exe.config','peerchat-client.ico',
+$allowed=@('PeerChat.Hpke.dll','PeerChat.Desktop.exe','PeerChat.Core.dll','PeerChat.Desktop.exe.config','peerchat-client.ico',
  'PeerChat.Updater.Core.dll','PeerChat.Updater.exe','PeerChat.Updater.exe.config','PeerChat.ScreenMedia.dll',
  'PeerChat.AudioProcessing.dll','PeerChat.AudioReceive.dll','service-bootstrap.json','update-feeds.json')
-$files=@(Get-ChildItem -LiteralPath $package -File -Recurse)
+$files=@(Get-ChildItem -LiteralPath $package -File)
+& (Join-Path $root 'tests\test-hpke-package-containment.ps1') -PackageDirectory $package
 if($files.Count -ne $allowed.Count -or @($files | Where-Object {$_.DirectoryName -ne $package -or $_.Name -notin $allowed}).Count){throw 'Unexpected package runtime files'}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$prepared=Join-Path $output 'DevelopmentUpdater'
+$prepared=Join-Path $output $ArtifactDirectory
 if(Test-Path -LiteralPath $prepared){throw 'Prepared artifact directory already exists; never overwrite a candidate'}
 New-Item -ItemType Directory -Path $prepared | Out-Null
 $zip=Join-Path $prepared "PeerChat-$Version.zip"
@@ -55,7 +57,7 @@ try{
     $downloaded=[PeerChat.Updater.DownloadedUpdate]::new();$downloaded.Manifest=$parsed;$downloaded.PackagePath=$zip
     $extracted=$service.PrepareUpdate($downloaded)
     Assert-Version (Join-Path $extracted.StagedDirectory 'PeerChat.Desktop.exe')
-    foreach($file in $files){if((Get-FileHash -LiteralPath $file.FullName).Hash -ne (Get-FileHash -LiteralPath (Join-Path $extracted.StagedDirectory $file.Name)).Hash){throw 'Extracted runtime hash mismatch'}}
+    foreach($file in Get-ChildItem -LiteralPath $package -File -Recurse){$relative=$file.FullName.Substring($package.Length).TrimStart('\');if((Get-FileHash -LiteralPath $file.FullName).Hash -ne (Get-FileHash -LiteralPath (Join-Path $extracted.StagedDirectory $relative)).Hash){throw 'Extracted runtime hash mismatch'}}
 }finally{$service.Dispose()}
 Write-Host "PASS: $PreviousVersion -> $Version ordering, Development manifest, SHA256, production updater safe extraction and exact runtime hashes."
 Write-Host 'Unsigned Development policy only; no release signature claimed; no upload/feed publication performed.'

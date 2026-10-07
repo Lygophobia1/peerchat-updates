@@ -4,9 +4,7 @@ $root=Split-Path $PSScriptRoot -Parent
 $token=[Guid]::NewGuid().ToString('N')
 $out=Join-Path $root ('build\tests\hpke-physical-'+$token)
 New-Item -ItemType Directory -Path $out|Out-Null
-$cache=Join-Path $root 'build\deps\wolfcrypt-evaluation'
-$native=Join-Path $cache 'mingw-x64'
-$source=Join-Path $cache 'wolfssl-3c5eead44904df64e6a5a1f4ebdce377d35a849a'
+& (Join-Path $root 'scripts\build-go-hpke.ps1') -OutputDirectory $out
 $exe=Join-Path $out 'physical-interop.exe'
 $remote='/sdcard/Android/data/com.peerchat.android/files/mailbox-interop/'+$token
 function DevicePhase([string]$phase){
@@ -18,7 +16,7 @@ Push-Location $root
 try {
     & $Adb get-state
     if($LASTEXITCODE -ne 0){throw 'Authorized Android device required'}
-    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -D_WIN32_WINNT=0x0601 -DWOLFCRYPT_ONLY -DNO_CERTS -DPEERCHAT_HPKE_EVALUATION -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ -I $native -I $source .\tests\hpke_device_interop_test.cpp .\platform\wolfcrypt_evaluation_hpke.cpp (Join-Path $native 'libwolfssl.a') -o $exe -lncrypt -lcrypt32
+    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -D_WIN32_WINNT=0x0602 -Wno-cast-function-type -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ .\tests\hpke_device_interop_test.cpp .\platform\go_hpke_provider.cpp -o $exe -lncrypt -lcrypt32
     if($LASTEXITCODE -ne 0){throw 'Physical HPKE native harness compilation failed'}
     # APKs must already have been rebuilt with the current adapter/test. Replace,
     # never uninstall or clear the app; normal profile/identity are untouched.
