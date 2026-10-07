@@ -15,4 +15,8 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Presence/composer model compile failed'}
     & "$out\AdapterTest.exe" --offline-composer-only
     if($LASTEXITCODE -ne 0){throw 'Presence/composer model regression failed'}
+    & "$fx\csc.exe" /nologo /target:exe /platform:x64 /main:MailboxLifecycleTest "/out:$out\MailboxLifecycleTest.exe" $references .\shared\VersionInfo.cs .\desktop\CoreAdapter.cs .\desktop\MailboxExecution.cs .\desktop\ChatViewModel.cs .\desktop\DiscoveryClient.cs .\desktop\FriendConversations.cs .\desktop\ProfileAccounts.cs .\desktop\VoicePreferences.cs .\desktop\LocalProfiles.cs .\desktop\Diagnostics.cs .\tests\mailbox_lifecycle_test.cs
+    if($LASTEXITCODE -ne 0){throw 'Mailbox lifecycle compile failed'}
+    & "$out\MailboxLifecycleTest.exe"
+    if($LASTEXITCODE -ne 0){throw 'Mailbox lifecycle regression failed'}
 } finally {Pop-Location}

@@ -94,12 +94,13 @@ public class DesktopApplication {
     bool mailboxRequested=true;
     void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
     MailboxExecution mailboxExecution;DiscoveryClient mailboxService;
+    long mailboxContextAccount;
     bool mailboxStorageAllowed;
     string MailboxPolicyPath {get{return Path.Combine(directory,"mailbox-policy.dat");}}
     bool LoadMailboxPolicy(){try{return File.Exists(MailboxPolicyPath)&&Encoding.ASCII.GetString(ProtectedData.Unprotect(File.ReadAllBytes(MailboxPolicyPath),null,DataProtectionScope.CurrentUser))=="PeerChat/mailbox-policy/v1/ALLOWED";}catch{return false;}}
     void SaveMailboxPolicy(bool allowed){var data=ProtectedData.Protect(Encoding.ASCII.GetBytes("PeerChat/mailbox-policy/v1/"+(allowed?"ALLOWED":"FORBIDDEN")),null,DataProtectionScope.CurrentUser);string temporary=MailboxPolicyPath+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,data);if(File.Exists(MailboxPolicyPath))File.Replace(temporary,MailboxPolicyPath,null);else File.Move(temporary,MailboxPolicyPath);mailboxStorageAllowed=allowed;}
     void PumpMailbox(){
-        if(closing||busy||discovery==null||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||(!mailboxRequested&&DateTime.UtcNow<mailboxNextUtc))return;
+        if(closing||busy||discovery==null||!MailboxExecution.CanStart(discovery.AccountId,mailboxContextAccount,closing)||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||(!mailboxRequested&&DateTime.UtcNow<mailboxNextUtc))return;
         var service=discovery;var peer=model.OwnId;bool allowed=mailboxStorageAllowed;
         if(mailboxService!=service){mailboxService=service;mailboxExecution=new MailboxExecution(core);}
         var execution=mailboxExecution;
@@ -312,7 +313,7 @@ public class DesktopApplication {
         BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
         window.Loaded+=(s,e)=>{if(startupUncleanOperations.Count>0)window.Dispatcher.BeginInvoke((Action)(()=>ShowFailureNotification(startupUncleanOperations[0])));};
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}await Task.Run(()=>{if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}if(mailboxExecution!=null)mailboxExecution.Stop();try{await mailboxTask;}catch(OperationCanceledException){}await Task.Run(()=>{if(discovery!=null)discovery.CloseRpc();if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -1621,6 +1622,10 @@ public class DesktopApplication {
 	private async void SignOut()
 	{
 		DiscoveryClient signedOut = discovery;
+        mailboxContextAccount=0;
+        if(mailboxExecution!=null)mailboxExecution.Stop();
+        try{await mailboxTask;}catch(OperationCanceledException){}
+        mailboxExecution=null;mailboxService=null;
 		var knownFriends=friendDirectory.Values.ToArray();
 			if (signedOut != null)
 			{
@@ -2054,7 +2059,11 @@ public class DesktopApplication {
 		}
 		conversationIndex.Reconcile(state.Friends);
 		authenticatedFriendSnapshotGeneration++;
-		core.SetAuthenticatedFriends(discovery == null ? 0 : discovery.AccountId, authenticatedFriendSnapshotGeneration, conversationIndex.Records.Where(binding => binding.ActiveFriend));
+        var account=discovery == null ? 0 : discovery.AccountId;
+        // Native commands are serialized on the Node worker: publish the
+        // authenticated context before any mailbox command can be enqueued.
+		mailboxContextAccount=core.SetAuthenticatedFriends(account, authenticatedFriendSnapshotGeneration, conversationIndex.Records.Where(binding => binding.ActiveFriend))?account:0;
+        RequestMailbox("authenticated account context published");
 		HashSet<long> hashSet = new HashSet<long>();
 		foreach (DiscoverySearchResult item in state.Friends)
 		{
@@ -2594,6 +2603,10 @@ public class DesktopApplication {
 
 		private void StopProfileServices()
 		{
+            mailboxContextAccount=0;
+            if(mailboxExecution!=null)mailboxExecution.Stop();
+            try{mailboxTask.GetAwaiter().GetResult();}catch(OperationCanceledException){}
+            if(discovery!=null)discovery.CloseRpc();
 			// The maintenance/bootstrap process performs filesystem work only after this
 			// profile owner, its relays, timers and native SQLite owner have stopped.
 			timer.Stop();

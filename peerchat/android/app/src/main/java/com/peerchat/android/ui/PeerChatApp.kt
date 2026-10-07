@@ -49,6 +49,20 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     login: (String, String) -> Unit = { _, _ -> }) {
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
+        state.serverTrust?.let { trust ->
+            fun fingerprint(pin:String)=pin.chunked(2).joinToString(":").uppercase()
+            AlertDialog(onDismissRequest={dispatch(UiAction.CancelServerTrust)},
+                title={Text(if(trust.expected.isEmpty())"Trust this PeerChat server?" else "Server identity changed")},
+                text={Column(verticalArrangement=Arrangement.spacedBy(12.dp)){
+                    Text("Server: "+trust.server.host+":"+trust.server.port)
+                    if(trust.expected.isNotEmpty())Text("Expected SHA-256:\n"+fingerprint(trust.expected))
+                    Text("Certificate SHA-256:\n"+fingerprint(trust.observed))
+                    Text(if(trust.expected.isEmpty())"Verify this fingerprint with the server operator before trusting."
+                        else "Connection rejected. The stored pin has not been changed; explicit reconfiguration is required.")
+                }},
+                confirmButton={if(trust.expected.isEmpty())TextButton({dispatch(UiAction.TrustServer)}){Text("Trust Server")}},
+                dismissButton={TextButton({dispatch(UiAction.CancelServerTrust)}){Text(if(trust.expected.isEmpty())"Cancel" else "Close")}})
+        }
         if(state.startupStatus!=null) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
                 verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
@@ -157,18 +171,20 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     var port by rememberSaveable { mutableStateOf(state.server.port) }
     var pin by rememberSaveable { mutableStateOf(state.server.certificatePin) }
     var error by remember { mutableStateOf<String?>(null) }
+    var advanced by rememberSaveable { mutableStateOf(false) }
     Scaffold(topBar = { PageBar("Server & trust", dispatch) }) { padding ->
         Column(Modifier.padding(padding).imePadding().padding(24.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Advanced connection", style = MaterialTheme.typography.titleLarge)
+            Text("Connect to your server", style = MaterialTheme.typography.titleLarge)
             Text("Changes apply to the next sign-in. Certificate verification cannot be disabled.")
-            OutlinedTextField(host, { host = it.take(253) }, label = { Text("Discovery host") }, placeholder = { Text("Enter your server hostname") },
+            OutlinedTextField(host, { host = it.take(253);pin="" }, label = { Text("Discovery host") }, placeholder = { Text("Enter your server hostname") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(port, { port = it.take(5) }, label = { Text("Port") }, singleLine = true,
+            OutlinedTextField(port, { port = it.take(5);pin="" }, label = { Text("Port") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(pin,{pin=it.take(64)},label={Text("Explicit server certificate SHA-256 pin (optional)")},modifier=Modifier.fillMaxWidth())
+            TextButton({advanced=!advanced}){Text(if(advanced)"Hide advanced pin entry" else "Advanced: enter certificate pin manually")}
+            if(advanced)OutlinedTextField(pin,{pin=it.take(64)},label={Text("Explicit server certificate SHA-256 pin")},modifier=Modifier.fillMaxWidth())
             if(state.demo) Text("Server certificate: Not connected\nTrust/pin: Not established",color=MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("Leave blank for system certificate/hostname validation. Obtain development pins through a trusted independent channel.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("New server fingerprints require your explicit approval. Trusted identities cannot be replaced automatically.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("The secure backend will verify the server identity. Certificate verification cannot be disabled here.", style = MaterialTheme.typography.bodySmall)
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button({

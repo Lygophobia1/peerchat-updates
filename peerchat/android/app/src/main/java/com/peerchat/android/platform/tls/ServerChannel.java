@@ -11,6 +11,30 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 /** Outer discovery/opaque-relay socket adapter only. Never authenticates a peer
  * device, promotes friend trust, or owns reliable delivery/reconnect decisions. */
 public final class ServerChannel implements AutoCloseable {
+    /** Public certificate identity only. A mismatch always aborts the handshake. */
+    public static final class ServerIdentityChanged extends CertificateException {
+        public final String expected,observed;
+        ServerIdentityChanged(String expected,String observed){
+            super("Server certificate pin mismatch");this.expected=expected;this.observed=observed;
+        }
+    }
+    public static ServerIdentityChanged identityChange(Throwable error){
+        for(int depth=0;error!=null&&depth<16;depth++,error=error.getCause())
+            if(error instanceof ServerIdentityChanged)return (ServerIdentityChanged)error;
+        return null;
+    }
+    /** Inspection REJECTS in the trust callback, before any application data.
+     * Expired/malformed certificates fail before a pin can be offered. */
+    public static String inspectCertificate(String host,int port)throws Exception {
+        try(ServerChannel ignored=new ServerChannel(host,port,
+                "0000000000000000000000000000000000000000000000000000000000000000",false)){
+            throw new CertificateException("Certificate inspection did not reject handshake");
+        }catch(Exception error){
+            ServerIdentityChanged change=identityChange(error);
+            if(change==null)throw error;
+            return change.observed;
+        }
+    }
     /** Platform I/O lifetime, not a session/retry owner. Closing raw sockets
      * interrupts connect, TLS, read AND write without waiting for close_notify. */
     public static final class OperationScope {
@@ -88,13 +112,17 @@ public final class ServerChannel implements AutoCloseable {
                 if(chain == null || chain.length == 0) throw new CertificateException("Missing server certificate");
                 chain[0].checkValidity();
                 if(pin.isEmpty()) { platform.checkServerTrusted(chain,type); return; }
-                // Explicit out-of-band developer pin, as on Windows. Never TOFU,
-                // never accept a replacement automatically; no trust-all mode.
+                // A pin may be manually supplied or explicitly confirmed by
+                // first-use UI. Never accept a replacement automatically.
                 try {
                     byte[] observed=MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
                     byte[] expected=new byte[32];
                     for(int i=0;i<32;i++) expected[i]=(byte)Integer.parseInt(pin.substring(i*2,i*2+2),16);
-                    if(!MessageDigest.isEqual(expected,observed)) throw new CertificateException("Server certificate pin mismatch");
+                    if(!MessageDigest.isEqual(expected,observed)){
+                        StringBuilder fingerprint=new StringBuilder();
+                        for(byte b:observed)fingerprint.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
+                        throw new ServerIdentityChanged(pin,fingerprint.toString());
+                    }
                 } catch(CertificateException error){throw error;}
                   catch(Exception error){throw new CertificateException("Server certificate validation failed",error);}
             }

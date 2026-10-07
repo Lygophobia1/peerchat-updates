@@ -3,16 +3,27 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace PeerChatDesktop {
 // Executes opaque native mailbox commands from the existing application pump.
 // No socket/session, durable queue, delivery or retry policy is owned here.
 internal sealed class MailboxExecution {
-    readonly CoreAdapter core;
+    readonly Func<uint,byte[],string,bool,byte[]> invoke;
+    readonly CancellationTokenSource lifetime=new CancellationTokenSource();
+    public void Stop(){lifetime.Cancel();}
+    internal static bool CanStart(long account,long publishedAccount,bool stopping){
+        return !stopping&&account>0&&account==publishedAccount;
+    }
+    byte[] Native(uint operation,byte[] input=null,string id="",bool allowed=false){
+        lifetime.Token.ThrowIfCancellationRequested();
+        return invoke(operation,input,id,allowed);
+    }
     string receiptCursor="";
     bool registered;
     public bool NeedsContinuation {get;private set;}
-    public MailboxExecution(CoreAdapter core){this.core=core;}
+    public MailboxExecution(CoreAdapter core):this((operation,input,id,allowed)=>core.Mailbox(operation,input,id,allowed)){}
+    internal MailboxExecution(Func<uint,byte[],string,bool,byte[]> invoke){this.invoke=invoke;}
     public void Reset(){registered=false;receiptCursor="";}
     static void Require(bool value){if(!value)throw new InvalidOperationException("Mailbox result rejected.");}
     static string Text(Dictionary<string,object> item,string key){object value;return item.TryGetValue(key,out value)?value as string:null;}
@@ -29,31 +40,36 @@ internal sealed class MailboxExecution {
     }
     public void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged){
         NeedsContinuation=false;
-        var identity=core.Mailbox(7);
-        Func<string,Dictionary<string,object>,Dictionary<string,object>> request=(operation,body)=>accounts.Mailbox(operation,device,body);
+        var identity=Native(7);
+        Func<string,Dictionary<string,object>,Dictionary<string,object>> request=(operation,body)=>{
+            lifetime.Token.ThrowIfCancellationRequested();
+            var result=accounts.Mailbox(operation,device,body);
+            lifetime.Token.ThrowIfCancellationRequested();
+            return result;
+        };
         Func<Dictionary<string,object>> signing=()=>new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(identity)}};
-        if(!registered){var binding=core.Mailbox(0,null,"",allowed);
+        if(!registered){var binding=Native(0,null,"",allowed);
             for(int pass=0;pass<2&&!registered;pass++){var body=signing();body["binding"]=Convert.ToBase64String(binding);
-                Require(Text(request("mailbox_register",body),"state")=="accepted");Require(core.Mailbox(1,binding).SequenceEqual(new byte[]{1}));
-                var current=core.Mailbox(0,null,"",allowed);registered=current.SequenceEqual(binding);binding=current;}
+                Require(Text(request("mailbox_register",body),"state")=="accepted");Require(Native(1,binding).SequenceEqual(new byte[]{1}));
+                var current=Native(0,null,"",allowed);registered=current.SequenceEqual(binding);binding=current;}
             Require(registered);}
         var fetched=request("mailbox_fetch",new Dictionary<string,object>());Require(Text(fetched,"state")=="ready");
         var envelopes=Rows(fetched,"envelopes").ToArray();Require(envelopes.Length<=64);
         NeedsContinuation=envelopes.Length>4;
         foreach(var item in envelopes.Take(4)){
             var wire=Decode(Text(item,"envelope"),70000);byte[] receipt;bool inserted;string peer;
-            using(var record=new Record(core.Mailbox(5,wire),3)){long flag=record.Number();Require(flag<=1);inserted=flag==1;receipt=record.Bytes();peer=record.Text();record.Text();record.End();}
+            using(var record=new Record(Native(5,wire),3)){long flag=record.Number();Require(flag<=1);inserted=flag==1;receipt=record.Bytes();peer=record.Text();record.Text();record.End();}
             var body=signing();body["receipt"]=Convert.ToBase64String(receipt);Require(Text(request("mailbox_ack",body),"state")=="acknowledged");
             acknowledged(peer,inserted);
         }
         var reconciled=request("mailbox_receipts",new Dictionary<string,object>{{"afterMessageId",receiptCursor}});Require(Text(reconciled,"state")=="ready");
         var receipts=Rows(reconciled,"receipts").ToArray();Require(receipts.Length<=64);
         NeedsContinuation|=receipts.Length==64;
-        foreach(var receipt in receipts){Require(core.Mailbox(6,Decode(Text(receipt,"receipt"),2048)).SequenceEqual(new byte[]{1}));receiptCursor=Text(receipt,"messageId");}
+        foreach(var receipt in receipts){Require(Native(6,Decode(Text(receipt,"receipt"),2048)).SequenceEqual(new byte[]{1}));receiptCursor=Text(receipt,"messageId");}
         if(receipts.Length<64)receiptCursor="";
         if(!allowed)return;
         var pending=new List<Tuple<string,string,long>>();
-        using(var record=new Record(core.Mailbox(2),4)){long count=record.Number();Require(count<=64);for(long i=0;i<count;i++)pending.Add(Tuple.Create(record.Text(),record.Text(),record.Number()));record.End();}
+        using(var record=new Record(Native(2),4)){long count=record.Number();Require(count<=64);for(long i=0;i<count;i++)pending.Add(Tuple.Create(record.Text(),record.Text(),record.Number()));record.End();}
         NeedsContinuation|=pending.Count>4;
         foreach(var message in pending.Take(4)){
             var reply=request("mailbox_keys",new Dictionary<string,object>{{"recipientAccountId",message.Item3.ToString(System.Globalization.CultureInfo.InvariantCulture)}});Require(Text(reply,"state")=="ready");
@@ -66,12 +82,12 @@ internal sealed class MailboxExecution {
                 batch=output.ToArray();
             }
             var prepared=new List<byte[]>();
-            using(var record=new Record(core.Mailbox(8,batch,message.Item1,true),4)){long count=record.Number();Require(count<=32);for(long i=0;i<count;i++)prepared.Add(record.Bytes());record.End();}
+            using(var record=new Record(Native(8,batch,message.Item1,true),4)){long count=record.Number();Require(count<=32);for(long i=0;i<count;i++)prepared.Add(record.Bytes());record.End();}
             NeedsContinuation|=prepared.Count>4;
             foreach(var binding in prepared.Take(4)){
-                var wire=core.Mailbox(3,binding,message.Item1,true);if(wire.Length==0)continue;
+                var wire=Native(3,binding,message.Item1,true);if(wire.Length==0)continue;
                 var body=signing();body["envelope"]=Convert.ToBase64String(wire);
-                if(Text(request("mailbox_store",body),"state")=="stored")Require(core.Mailbox(4,wire).SequenceEqual(new byte[]{1}));
+                if(Text(request("mailbox_store",body),"state")=="stored")Require(Native(4,wire).SequenceEqual(new byte[]{1}));
             }
         }
     }

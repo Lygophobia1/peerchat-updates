@@ -72,7 +72,8 @@ class NativePresenterTest {
     @Before fun start(){Dispatchers.setMain(dispatcher)}
     @After fun stop(){store.clear();Dispatchers.resetMain()}
     private fun presenter(commands:Commands):NativePresenter {
-        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,Settings(),dispatcher,Preferences())
+        val settings=Settings().apply{saved=ServerEndpoint("localhost",7443,"a".repeat(64))}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){"a".repeat(64)}
         store.put("native",p);dispatcher.scheduler.runCurrent()
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
         dispatcher.scheduler.advanceUntilIdle()
@@ -80,7 +81,7 @@ class NativePresenterTest {
     }
     @Test fun savedEndpointAndPinAreUsedAfterPresenterRestartAndSignOut() {
         val settings=Settings();val application=ApplicationProvider.getApplicationContext<Application>()
-        val first=NativePresenter(application,Commands(),settings,dispatcher,Preferences());store.put("first",first)
+        val first=NativePresenter(application,Commands(),settings,dispatcher,Preferences()){"f".repeat(64)};store.put("first",first)
         dispatcher.scheduler.advanceUntilIdle()
         first.dispatch(UiAction.SaveServer(ServerUi("server.example","8443","F".repeat(64))))
         dispatcher.scheduler.advanceUntilIdle()
@@ -164,11 +165,19 @@ class NativePresenterTest {
     }
     @Test fun rememberDoesNotPermitAnUnpinnedServerOrSendThePassword() {
         val commands=Commands().apply{reject=false};val p=presenter(commands)
-        p.dispatch(UiAction.RememberMe(true));p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
-        assertEquals(0,commands.signIns);assertTrue(p.state.value.loginError!!.contains("fingerprint"))
+        p.dispatch(UiAction.SaveServer(ServerUi("unknown.example","7443")));dispatcher.scheduler.advanceUntilIdle()
+        assertNotNull(p.state.value.serverTrust)
+        p.dispatch(UiAction.CancelServerTrust)
+        // The pending untrusted endpoint never replaced the trusted one.
+        assertEquals("localhost",p.state.value.server.host)
+        val emptySettings=Settings().apply{saved=ServerEndpoint("unknown.example",7443)}
+        val untrusted=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,emptySettings,dispatcher,Preferences()){"b".repeat(64)}
+        store.put("untrusted",untrusted);dispatcher.scheduler.advanceUntilIdle()
+        untrusted.dispatch(UiAction.RememberMe(true));untrusted.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.signIns);assertTrue(untrusted.state.value.loginError!!.contains("fingerprint"))
     }
     @Test fun draftsReopenAndNotificationTapRequiresMatchingAccount() {
-        val preferences=Preferences();val settings=Settings().apply{saved=ServerEndpoint("localhost",7443)}
+        val preferences=Preferences();val settings=Settings().apply{saved=ServerEndpoint("localhost",7443,"a".repeat(64))}
         val commands=Commands().apply{reject=false}
         val application=ApplicationProvider.getApplicationContext<Application>()
         val first=NativePresenter(application,commands,settings,dispatcher,preferences);store.put("draft-first",first)
@@ -197,9 +206,10 @@ class NativePresenterTest {
     }
     @Test fun corruptSavedConfigurationBlocksLoginAndFailedSaveKeepsTrustedPin() {
         val settings=Settings().apply {invalid=true}
-        val commands=Commands();val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences())
+        val commands=Commands();val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){"a".repeat(64)}
         store.put("blocked",p);dispatcher.scheduler.advanceUntilIdle()
         p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle();assertEquals(0,commands.signIns)
+        settings.invalid=false // Explicit fixture repair; production never drops a corrupt record.
         p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443","a".repeat(64))))
         dispatcher.scheduler.advanceUntilIdle()
         settings.failSave=true
@@ -208,6 +218,25 @@ class NativePresenterTest {
         assertEquals("a".repeat(64),p.state.value.server.certificatePin)
         p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
         assertEquals("a".repeat(64),commands.endpoint!!.certificatePin)
+    }
+    @Test fun firstUseCancelTrustReconnectAndMismatchNeverReplacePin(){
+        val settings=Settings();val commands=Commands()
+        var observed="a".repeat(64)
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){observed}
+        store.put("trust",p);dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443")));dispatcher.scheduler.advanceUntilIdle()
+        assertNotNull(p.state.value.serverTrust);assertNull(settings.saved);assertEquals(0,commands.signIns)
+        p.dispatch(UiAction.CancelServerTrust);assertNull(settings.saved)
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443")));dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(observed,settings.saved!!.certificatePin);assertNull(p.state.value.serverTrust)
+        p.dispatch(UiAction.SaveServer(ServerUi("SERVER.EXAMPLE","7443")));dispatcher.scheduler.advanceUntilIdle()
+        assertNull(p.state.value.serverTrust);assertEquals(observed,settings.saved!!.certificatePin)
+        observed="b".repeat(64)
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443")));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("a".repeat(64),p.state.value.serverTrust!!.expected)
+        p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("a".repeat(64),settings.saved!!.certificatePin);assertEquals(0,commands.signIns)
     }
     @Test fun failedLoginNeverAuthenticatesOrEntersDemo() {
         val commands=Commands();val p=presenter(commands)

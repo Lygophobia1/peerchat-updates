@@ -37,6 +37,7 @@ data class ConversationUi(
     val memberAudio: List<MemberAudioUi> = emptyList()
 )
 data class ServerUi(val host: String = "", val port: String = "7443", val certificatePin: String = "")
+data class ServerTrustUi(val server: ServerUi, val observed: String, val expected: String = "")
 fun validServerDraft(server: ServerUi): Boolean = server.host.trim().let { host ->
     host.isNotEmpty() && host.length <= 253 && host.none { it.isWhitespace() || it == '/' || it == '\\' } &&
         server.port.toIntOrNull() in 1..65535 && (server.certificatePin.isEmpty() || server.certificatePin.matches(Regex("[0-9a-fA-F]{64}")))
@@ -58,6 +59,7 @@ data class PeerChatUiState(
     val load: LoadState = LoadState.Ready, val connection: ConnectionState = ConnectionState.Online,
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
     val rememberMe:Boolean=false,
+    val serverTrust:ServerTrustUi?=null,
     val startupStatus:String?=null,
     val drafts:Map<String,String> = emptyMap(),val notificationsEnabled:Boolean=true,
     val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,
@@ -101,6 +103,8 @@ sealed interface UiAction {
     data class SetLoad(val load: LoadState) : UiAction
     data class SetConnection(val connection: ConnectionState) : UiAction
     data class SaveServer(val server: ServerUi) : UiAction
+    data object TrustServer : UiAction
+    data object CancelServerTrust : UiAction
     data class RememberMe(val enabled:Boolean):UiAction
     data class Draft(val conversationId:String,val text:String):UiAction
     data class NotificationSettings(val enabled:Boolean,val preview:NotificationPreview):UiAction
@@ -152,6 +156,8 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.SetLoad -> state.copy(load = action.load)
         is UiAction.SetConnection -> state.copy(connection = action.connection)
         is UiAction.SaveServer -> state.copy(server = action.server)
+        UiAction.TrustServer -> state // Only the real presenter may persist trust.
+        UiAction.CancelServerTrust -> state.copy(serverTrust=null)
         is UiAction.RememberMe -> state.copy(rememberMe=action.enabled)
         is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)

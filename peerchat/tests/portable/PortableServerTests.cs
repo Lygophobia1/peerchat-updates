@@ -8,6 +8,7 @@ using PeerChat.ServerShared;
 class PortableServerTests {
     public static int Main(string[] args){try{
         if(args.Length>0&&args[0]=="--discovery")return PeerChat.ServerTests.DiscoveryIntegrationTest.Main(args[1..]);
+        if(args.Length==2&&args[0]=="--fcm-live-config")return LiveFcmConfiguration(args[1]);
         string root=args[0];ServerLifecycleTests.Run(root);var json=new JavaScriptSerializer();
         string fixture=File.ReadAllText(Path.Combine(root,"framework.json"));ServerJsonFixtures.Validate(fixture);
         var value=json.Deserialize<System.Collections.Generic.Dictionary<string,object>>(fixture);
@@ -42,4 +43,23 @@ class PortableServerTests {
         if(args.Length>1)ServerJsonFixtures.Check(EncryptedMailboxServerTest.Main(new[]{args[1],Path.Combine(root,"lifecycle-test.pfx"),"test-only"})==0,"mailbox");
         Console.WriteLine("PASS: shared server JSON, identity/signatures, configuration, presence, groups and durable mailbox compatibility on "+System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier);return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
+    // Explicit operator-invoked validation only. Never included in server/client
+    // packages. No device push is sent, and no credential/token is printed.
+    static int LiveFcmConfiguration(string path){
+        try{
+            var config=ServerConfiguration.Load(path);
+            if(!config.FcmEnabled)throw new InvalidOperationException();
+            var provider=FcmPushProvider.Create(config);
+            var method=typeof(FcmPushProvider).GetMethod("AccessToken",
+                System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance);
+            var token=method.Invoke(provider,null) as string;
+            if(String.IsNullOrEmpty(token))throw new InvalidOperationException();
+            if(!String.Equals(token,method.Invoke(provider,null) as string,StringComparison.Ordinal))throw new InvalidOperationException();
+            Console.WriteLine("PASS: production Linux FCM credential parsing, platform RSA/JWT, real Google OAuth access-token acquisition and cache reuse; no push/secret output.");
+            return 0;
+        }catch{
+            Console.Error.WriteLine("FAIL: live FCM configuration/OAuth validation; credential and response contents withheld.");
+            return 1;
+        }
+    }
 }

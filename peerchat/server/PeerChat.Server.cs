@@ -503,6 +503,7 @@ namespace PeerChat.Server {
             startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);
             try{
                 listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");
+                using(var sha=SHA256.Create())Log("INFO","Server certificate SHA-256: "+BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-",""));
                 Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled.":"TURN media credential issuer disabled.");
                 QueueWorker(PresenceMonitor);if(!String.IsNullOrEmpty(managementPipe))QueueWorker(ManagementLoop);
                 while(!stopping){try{var client=listener.AcceptTcpClient();QueueWorker(()=>Serve(client),client);}

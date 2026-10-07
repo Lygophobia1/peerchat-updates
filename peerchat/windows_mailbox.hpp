@@ -46,7 +46,8 @@ public:
     Blob execute(unsigned operation,const Blob& input,const std::string& id,bool allowed,
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
                  session::SessionTransportManager& sessions){
-        require(friends.localAccount()>0&&input.size()<=MaxWire);
+        if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
+        require(input.size()<=MaxWire);
         if(operation==0){
             auto binding=coordinator_.prepare(friends.localAccount(),allowed,[&](std::uint32_t generation){
                 return "PeerChat.Recipient."+profile_.peerId+".v"+std::to_string(generation);
