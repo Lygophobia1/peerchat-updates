@@ -12,6 +12,18 @@ import org.junit.Test
 /** UI-only: does not create native handles, identities, aliases or secure records. */
 abstract class UiFlowChecks {
     @get:Rule val compose = createComposeRule()
+    @Test fun serverSettingsRefreshesSavedPinAndDistinguishesCertificateChange() {
+        var state by mutableStateOf(PeerChatUiState(route=Route.Server,
+            server=ServerUi("server.example","7443")))
+        compose.setContent { PeerChatTheme(true) { PeerChatShell(state,{}) } }
+        compose.onNodeWithTag("server-trust-status").assertTextEquals("Server trust: Untrusted")
+        compose.runOnIdle {state=state.copy(server=state.server.copy(certificatePin="a".repeat(64)))}
+        compose.onNodeWithTag("server-trust-status").assertTextEquals("Server trust: Trusted")
+        compose.onNodeWithText("Advanced: enter certificate pin manually").performScrollTo().performClick()
+        compose.onNodeWithText("a".repeat(64)).assertExists()
+        compose.runOnIdle {state=state.copy(serverIdentityChanged=state.server)}
+        compose.onNodeWithTag("server-trust-status").assertTextEquals("Server trust: Certificate changed")
+    }
     @Test fun onlineColorUsesPresenceAndComposerRemainsVisibleWhileEditing() {
         var onlineColor=Color.Unspecified;var offlineColor=Color.Unspecified
         compose.setContent { PeerChatTheme(true) {

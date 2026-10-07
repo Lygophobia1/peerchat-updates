@@ -60,6 +60,7 @@ data class PeerChatUiState(
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
     val rememberMe:Boolean=false,
     val serverTrust:ServerTrustUi?=null,
+    val serverIdentityChanged:ServerUi?=null,
     val startupStatus:String?=null,
     val drafts:Map<String,String> = emptyMap(),val notificationsEnabled:Boolean=true,
     val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,

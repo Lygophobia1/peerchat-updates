@@ -17,6 +17,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ServerTrustTest {
+    @Test fun visibleTrustIsBoundToEndpointAndReportsMismatchWithoutReplacingPin() {
+        val saved=ServerEndpoint("192.168.1.6",7443,"a".repeat(64))
+        assertEquals(ServerTrustState.Trusted,serverTrustState(saved,saved,null))
+        assertEquals(ServerTrustState.Trusted,serverTrustState(saved.copy(host=" 192.168.1.6 "),saved,null))
+        assertEquals(ServerTrustState.Untrusted,serverTrustState(saved.copy(host="173.225.14.37"),saved,null))
+        assertEquals(ServerTrustState.Untrusted,serverTrustState(saved.copy(port=7444),saved,null))
+        assertEquals(ServerTrustState.CertificateChanged,serverTrustState(saved,saved,saved))
+        assertEquals("a".repeat(64),saved.certificatePin)
+    }
     @Test fun endpointPinCannotBeErasedOrReplacedByBlankEdits() {
         val saved=ServerEndpoint("Server.example",7443,"a".repeat(64))
         assertEquals(saved.certificatePin,serverTrustExpected(saved,ServerEndpoint("server.example",7443)))
@@ -28,6 +37,14 @@ class ServerTrustTest {
         assertThrows(IllegalArgumentException::class.java){validateObservedServer(saved.certificatePin,"b".repeat(64))}
     }
     @Test fun realTlsInspectionAbortsBeforeAuthenticationAndPinnedReconnectWorks() {
+        // Robolectric may leave Android Conscrypt first in this shared JVM.
+        // SunJSSE's named-group initialization needs JDK EC parameters as well
+        // as JDK sockets. Restore the exact provider order after this fixture.
+        val providers=java.security.Security.getProviders()
+        providers.filter{it.name.contains("Conscrypt",ignoreCase=true)}.forEach{
+            java.security.Security.removeProvider(it.name)
+        }
+        try {
         val pair=KeyPairGenerator.getInstance("RSA").apply{initialize(2048)}.generateKeyPair()
         val bc=BouncyCastleProvider()
         val name=X500Name("CN=localhost")
@@ -72,5 +89,11 @@ class ServerTrustTest {
                 assertNotNull(change);assertEquals(pin,change!!.observed);assertEquals("a".repeat(64),change.expected)
             }
         })
+        } finally {
+            providers.forEachIndexed{index,provider->
+                if(java.security.Security.getProvider(provider.name)==null)
+                    java.security.Security.insertProviderAt(provider,index+1)
+            }
+        }
     }
 }

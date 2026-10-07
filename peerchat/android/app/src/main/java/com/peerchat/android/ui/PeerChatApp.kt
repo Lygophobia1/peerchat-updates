@@ -22,6 +22,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
+import com.peerchat.android.platform.ServerEndpoint
+import com.peerchat.android.platform.ServerTrustState
+import com.peerchat.android.platform.serverTrustState
 
 private val Dark = darkColorScheme(primary = Color(0xFF85BBFF), onPrimary = Color(0xFF002F64),
     primaryContainer = Color(0xFF1E4773), onPrimaryContainer = Color(0xFFD6E6FF),
@@ -167,9 +170,9 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun ServerSettings(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
-    var host by rememberSaveable { mutableStateOf(state.server.host) }
-    var port by rememberSaveable { mutableStateOf(state.server.port) }
-    var pin by rememberSaveable { mutableStateOf(state.server.certificatePin) }
+    var host by rememberSaveable(state.server) { mutableStateOf(state.server.host) }
+    var port by rememberSaveable(state.server) { mutableStateOf(state.server.port) }
+    var pin by rememberSaveable(state.server) { mutableStateOf(state.server.certificatePin) }
     var error by remember { mutableStateOf<String?>(null) }
     var advanced by rememberSaveable { mutableStateOf(false) }
     Scaffold(topBar = { PageBar("Server & trust", dispatch) }) { padding ->
@@ -177,12 +180,20 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Connect to your server", style = MaterialTheme.typography.titleLarge)
             Text("Changes apply to the next sign-in. Certificate verification cannot be disabled.")
+            val trust=serverTrustState(ServerEndpoint(host,port.toIntOrNull() ?: 0),
+                ServerEndpoint(state.server.host,state.server.port.toIntOrNull() ?: 0,state.server.certificatePin),
+                state.serverIdentityChanged?.let{ServerEndpoint(it.host,it.port.toIntOrNull() ?: 0,it.certificatePin)})
+            Text("Server trust: "+when(trust){
+                ServerTrustState.Trusted->"Trusted"
+                ServerTrustState.CertificateChanged->"Certificate changed"
+                else->"Untrusted"
+            },Modifier.testTag("server-trust-status"))
             OutlinedTextField(host, { host = it.take(253);pin="" }, label = { Text("Discovery host") }, placeholder = { Text("Enter your server hostname") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(port, { port = it.take(5);pin="" }, label = { Text("Port") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
             TextButton({advanced=!advanced}){Text(if(advanced)"Hide advanced pin entry" else "Advanced: enter certificate pin manually")}
-            if(advanced)OutlinedTextField(pin,{pin=it.take(64)},label={Text("Explicit server certificate SHA-256 pin")},modifier=Modifier.fillMaxWidth())
+            if(advanced)OutlinedTextField(pin,{pin=it.filterNot{c->c==':'||c.isWhitespace()}.take(64)},label={Text("Explicit server certificate SHA-256 pin")},modifier=Modifier.fillMaxWidth())
             if(state.demo) Text("Server certificate: Not connected\nTrust/pin: Not established",color=MaterialTheme.colorScheme.onSurfaceVariant)
             Text("New server fingerprints require your explicit approval. Trusted identities cannot be replaced automatically.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("The secure backend will verify the server identity. Certificate verification cannot be disabled here.", style = MaterialTheme.typography.bodySmall)

@@ -72,6 +72,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var configurationReady=false
     private var configurationInvalid=false
     private var configurationSaving=false
+    // In-memory continuation only; never persists or logs a password.
+    private var loginAfterTrust:(()->Unit)?=null
     private var foreground=true
     private var qolState=AndroidQolState()
     private var qolReady=false
@@ -165,7 +167,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 } else mutable.value=mutable.value.copy(startupStatus=null)}
                 catch(failure:Exception){
                     val changed=ServerChannel.identityChange(failure)
-                    if(changed!=null)mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(mutable.value.server,changed.observed,changed.expected))
+                    if(changed!=null)mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(mutable.value.server,changed.observed,changed.expected),serverIdentityChanged=mutable.value.server)
                     mutable.value=mutable.value.copy(
                     startupStatus=if(changed==null&&isRememberedNetworkFailure(failure)&&!backend.state.value.localHistoryReady)"Reconnecting…" else null,
                     route=if(changed==null&&isRememberedNetworkFailure(failure))mutable.value.route else Route.Login,
@@ -186,6 +188,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
         if(!validServerDraft(s.server)) {mutable.value=s.copy(loginError="Configure a valid server first.");return}
         if(s.server.certificatePin.isEmpty()){
+            loginAfterTrust={login(username,password)}
             mutable.value=s.copy(loginError="Confirm the server fingerprint before signing in.")
             dispatch(UiAction.SaveServer(s.server));return
         }
@@ -199,7 +202,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 mutable.value=mutable.value.copy(loginBusy=false,loginError=null,route=Route.Home)
             } catch(failure:Exception) {
                 ServerChannel.identityChange(failure)?.let { changed ->
-                    mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(s.server,changed.observed,changed.expected))
+                    mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(s.server,changed.observed,changed.expected),serverIdentityChanged=s.server)
                 }
                 mutable.value=mutable.value.copy(loginBusy=false,loginError=if(failure is ServerRejected)
                     "Sign-in rejected by server." else "Sign-in failed; check server and certificate configuration.")
@@ -289,7 +292,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen,
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,
             is UiAction.PreviewLoginFailure,is UiAction.RetryPreview -> mutable.value=mutable.value.copy(notice="This capability is unavailable in Android messaging.")
-            UiAction.CancelServerTrust -> mutable.value=mutable.value.copy(serverTrust=null,notice="Server trust unchanged.")
+            UiAction.CancelServerTrust -> {
+                loginAfterTrust=null
+                mutable.value=mutable.value.copy(serverTrust=null,notice="Server trust unchanged.")
+            }
             UiAction.TrustServer -> {
                 val prompt=mutable.value.serverTrust
                 if(prompt!=null&&prompt.expected.isEmpty()){
@@ -301,28 +307,45 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 else if(configurationReady&&!configurationSaving&&validServerDraft(action.server)) {
                     configurationSaving=true
                     viewModelScope.launch {
+                    var savedSuccessfully=false
+                    var written=false
                     try {
                         val draft=ServerEndpoint(action.server.host.trim(),action.server.port.toInt(),action.server.certificatePin.lowercase())
                         val saved=withContext(configurationDispatcher){serverConfiguration.load()}
                         val expected=serverTrustExpected(saved,draft)
                         val observed=withContext(configurationDispatcher){inspectServer(draft)}
                         if(expected.isEmpty()||expected!=observed){
+                            if(expected.isNotEmpty())loginAfterTrust=null
                             mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(action.server,observed,expected),
+                                serverIdentityChanged=if(expected.isNotEmpty())action.server else mutable.value.serverIdentityChanged,
                                 notice=if(expected.isEmpty())"Confirm the server identity before signing in." else "Server identity changed; connection rejected.")
                             return@launch
                         }
                         validateObservedServer(expected,observed)
-                        val endpoint=draft.copy(certificatePin=expected)
-                        withContext(configurationDispatcher){serverConfiguration.save(endpoint)}
+                        // Preserve the existing endpoint spelling used by account/history
+                        // indexes when only host casing or surrounding space was edited.
+                        val endpoint=draft.copy(host=if(saved!=null&&sameServer(saved,draft))saved.host else draft.host,certificatePin=expected)
+                        withContext(configurationDispatcher){
+                            serverConfiguration.save(endpoint);written=true
+                            check(serverConfiguration.load()==endpoint)
+                        }
                         configurationInvalid=false
                         mutable.value=mutable.value.copy(server=ServerUi(endpoint.host,endpoint.port.toString(),endpoint.certificatePin),
-                            notice="Server configuration saved securely for future sign-ins.",loginError=null)
-                    }catch(_:Exception){mutable.value=mutable.value.copy(notice="Server configuration was not saved. Existing trusted settings are unchanged.")}
+                            serverIdentityChanged=null,serverTrust=null,notice="Server trusted and saved securely for future sign-ins.",loginError=null)
+                        savedSuccessfully=true
+                    }catch(_:Exception){
+                        loginAfterTrust=null
+                        if(written)configurationInvalid=true
+                        mutable.value=mutable.value.copy(notice=if(written)
+                            "Saved server configuration could not be verified. Verify trusted settings before signing in."
+                            else "Server configuration was not saved. Existing trusted settings are unchanged.")
+                    }
                     finally{configurationSaving=false}
+                    if(savedSuccessfully){val resume=loginAfterTrust;loginAfterTrust=null;resume?.invoke()}
                     }
                 }
             else -> mutable.value=reduceUi(mutable.value,action)
         }
     }
-    override fun onCleared() {backend.close();super.onCleared()}
+    override fun onCleared() {loginAfterTrust=null;backend.close();super.onCleared()}
 }

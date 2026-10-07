@@ -26,9 +26,9 @@ class NativePresenterTest {
         override fun save(value:com.peerchat.android.platform.AndroidQolState){this.value=value}
     }
     private class Settings:ServerConfigurationRepository {
-        var saved:ServerEndpoint?=null;var invalid=false;var failSave=false
+        var saved:ServerEndpoint?=null;var invalid=false;var failSave=false;var failReadback=false
         override fun load():ServerEndpoint? {if(invalid)error("corrupted settings");return saved}
-        override fun save(endpoint:ServerEndpoint) {if(failSave)error("write failed");saved=endpoint}
+        override fun save(endpoint:ServerEndpoint) {if(failSave)error("write failed");saved=endpoint;if(failReadback)invalid=true}
     }
     private class Commands:MessagingApplication {
         override val state=MutableStateFlow(MessagingSnapshot())
@@ -232,11 +232,48 @@ class NativePresenterTest {
         assertEquals(observed,settings.saved!!.certificatePin);assertNull(p.state.value.serverTrust)
         p.dispatch(UiAction.SaveServer(ServerUi("SERVER.EXAMPLE","7443")));dispatcher.scheduler.advanceUntilIdle()
         assertNull(p.state.value.serverTrust);assertEquals(observed,settings.saved!!.certificatePin)
+        assertEquals("server.example",settings.saved!!.host)
         observed="b".repeat(64)
         p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443")));dispatcher.scheduler.advanceUntilIdle()
         assertEquals("a".repeat(64),p.state.value.serverTrust!!.expected)
         p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
         assertEquals("a".repeat(64),settings.saved!!.certificatePin);assertEquals(0,commands.signIns)
+        assertNotNull(p.state.value.serverIdentityChanged)
+        p.dispatch(UiAction.CancelServerTrust)
+        assertNotNull(p.state.value.serverIdentityChanged)
+    }
+    @Test fun firstUseLoginWaitsForDurableTrustThenContinuesExactlyOnce() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443)}
+        val commands=Commands().apply{reject=false}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){"a".repeat(64)}
+        store.put("continue-trust",p);dispatcher.scheduler.advanceUntilIdle()
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.signIns);assertNotNull(p.state.value.serverTrust)
+        p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1,commands.signIns)
+        assertEquals(settings.saved,commands.endpoint)
+        assertEquals("a".repeat(64),p.state.value.server.certificatePin)
+        p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1,commands.signIns)
+    }
+    @Test fun cancelledTrustAndFailedProtectedReadbackNeverAuthenticate() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443)}
+        val commands=Commands().apply{reject=false}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){"a".repeat(64)}
+        store.put("cancel-trust",p);dispatcher.scheduler.advanceUntilIdle()
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.CancelServerTrust)
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443","a".repeat(64))))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.signIns)
+        settings.saved=ServerEndpoint("server.example",7443)
+        p.dispatch(UiAction.SaveServer(ServerUi("server.example","7443")))
+        dispatcher.scheduler.advanceUntilIdle()
+        settings.failReadback=true
+        p.dispatch(UiAction.TrustServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.signIns);assertNotNull(p.state.value.notice)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.signIns)
     }
     @Test fun failedLoginNeverAuthenticatesOrEntersDemo() {
         val commands=Commands();val p=presenter(commands)
