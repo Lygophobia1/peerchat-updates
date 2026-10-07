@@ -1,5 +1,10 @@
 # Network cleanup Phase 2
 
+Subsequent physical ARM32 server milestone: dev.33 / source checkpoint
+7cc8f159c44b23c3b1aa4ab825c1c3a01fed6d0a. Manual Raspbian 12 ARMv7 execution
+and automated production parity passed; see LINUX_ARM32_VALIDATION.md.
+True ARM64/x64 execution and user Windows/Android physical acceptance remain pending.
+
 ## Phase 2A: authoritative live presence
 
 Baseline: e5d04dc256b744a9d47853d40e0385524b91f388 / 4.0.2-dev.22.

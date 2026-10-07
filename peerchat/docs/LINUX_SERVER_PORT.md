@@ -1,5 +1,11 @@
 # Linux server portability
 
+Current ARM32 runtime milestone: 4.0.2-dev.33, source checkpoint
+7cc8f159c44b23c3b1aa4ab825c1c3a01fed6d0a. The actual Raspbian 12 ARMv7 Pi
+passed startup/TLS/SQLite/signatures/presence/mailbox/groups/RPC/shutdown parity.
+See LINUX_ARM32_VALIDATION.md for hashes, commands, results and limitations.
+Linux x64/ARM64 remain build-only candidates awaiting their own execution gates.
+
 ## Stage 3 prerequisite candidate: 4.0.2-dev.28
 
 Parent checkpoint: 316bfc9 (bounded authenticated RPC reuse).

@@ -1,13 +1,20 @@
 # Raspberry Pi deployment draft
 
-NOT DEPLOYMENT ACCEPTANCE. Linux x64/ARM64 runtime parity and signal/permission
-tests must pass first. Nothing has been installed on a Pi.
+NOT PRIVILEGED DEPLOYMENT ACCEPTANCE. ARM32 dev.33 manual runtime/parity passes
+on the restricted Pi test account; see LINUX_ARM32_VALIDATION.md. No systemd
+service was installed. True Linux x64/ARM64 runtime validation remains pending.
 
-Use a supported 64-bit glibc Linux distribution on ARM64 hardware, .NET runtime
+For a future ARM64 deployment, use a supported 64-bit glibc Linux distribution on ARM64 hardware, .NET runtime
 10.0.12 (or a subsequently tested security update), libsqlite3.so.0 and the
 distribution's required .NET/OpenSSL/ICU dependencies. The candidate package is
 framework-dependent; it does not contain .NET itself. Follow the official distro
 installation instructions: https://learn.microsoft.com/dotnet/core/install/linux.
+
+The existing useful Pi runs 32-bit Raspbian; do not reimage it. Its linux-arm
+dev.33 package is self-contained and uses existing ARM32 OS libraries. For a
+future self-contained service use its apphost in ExecStart, not /usr/bin/dotnet.
+The generic service template below remains framework-dependent. Privileged
+service installation requires separate approval; coturn stays independent.
 
 Suggested administrator-managed layout:
 - /opt/peerchat/releases/4.0.2-dev.32: root-owned immutable runtime files

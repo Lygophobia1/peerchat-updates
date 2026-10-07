@@ -1,6 +1,8 @@
 # Linux x64 / ARM64 candidate validation
 
-Status: CROSS-BUILD AND WINDOWS-HOST PARITY ONLY. Not deployed or accepted on Linux.
+Status for x64/ARM64: CROSS-BUILD AND WINDOWS-HOST PARITY ONLY.
+ARM32 Pi execution is separately validated at dev.33; see LINUX_ARM32_VALIDATION.md.
+This does not establish x64 or ARM64 runtime acceptance.
 Candidate: 4.0.2-dev.32, based on Stage 3 checkpoint 9c07df7.
 
 Build with scripts/build-linux-server.ps1 using .NET SDK 10.0.401. It refuses
