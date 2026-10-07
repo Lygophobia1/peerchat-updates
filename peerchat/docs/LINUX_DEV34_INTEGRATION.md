@@ -88,14 +88,56 @@ Robolectric installs Conscrypt globally during the full JVM suite; selecting an
 implicit provider caused JDK 22 reflective java.net access failures in the fixture.
 No production TLS behavior/module-access policy was weakened to fix this.
 
-## Pending runtime/physical evidence
+## Deployment and real provider evidence
 
-Real discovery-issued coturn allocation/DTLS-SRTP proof and dev.34 deployment
-results are recorded after the source/build checkpoint.
-No Android device is currently detected in ADB. Replacement install only when
-available; preserve app data, identity, recipient keys, Remember Me and history.
-Normal login to this Pi must register its current FCM token; do not copy tokens
-from an old server DB or treat successful OAuth as proof of an Android wake.
+Source/build checkpoint: c2a4e4d63f20243d6587831441d689dea1cfc9cb.
+The existing tooling cleanly stopped only dev.33 and started dev.34 (PID 15754)
+at 192.168.1.6:7443. Port 17443 is closed. Existing SQLite path and account,
+device, push-registration and mailbox row counts were preserved; integrity_check
+returned ok. The PFX and public pin are unchanged. Coturn remains PID 2718.
+Dev.33 artifacts/configuration are retained.
+
+The existing Windows discovery TURN harness passed against Linux dev.34:
+anonymous/logged-out issuance rejected, real temporary credentials accepted by
+existing public coturn, relay-only ICE/DTLS data and DTLS-SRTP media passed,
+bad and genuinely expired credentials rejected, and fresh reissue passed.
+The configured 600-second TTL was not shortened to accelerate this test.
+This proves a usable Windows media relay path, not physical voice/screen quality.
+
+Actual Linux certificate inspection and pinned reconnect also passed using the
+production Android ServerChannel/Bouncy Castle code on the host JVM. This is
+not substituted for a physical Android trust-dialog test.
+
+FCM configured successfully at Linux startup. Credential transfer hashes match;
+secret contents/hashes were withheld. Dev.34 logs were checked against actual
+secret/private-key material and credential-bearing patterns with no matches.
+At handoff the existing Pi DB has zero push registrations. Android must log in
+normally to register its current token; no old registration was copied and
+successful OAuth is not claimed as proof of an actual Android opaque wake.
+
+The Motorola reconnected during handoff: moto g power (2025), ADB authorized.
+The old installed version was dev.22 (explaining its old manual-pin error).
+Dev.34 was replacement-installed with adb install -r and launched successfully.
+firstInstallTime remained unchanged; no uninstall, data clear, identity/key
+rotation, protected-record deletion or Remember Me/history reset was performed.
+Physical identity/history continuity and trust/FCM acceptance remain user checks.
+
+## Preserved artifacts
+
+- Windows: build/development/4.0.2-dev.34/Client/PeerChat.Desktop.exe
+- Development ZIP: build/development/4.0.2-dev.34/DevelopmentUpdater/PeerChat-4.0.2-dev.34.zip
+  SHA-256 4421e0f5ac2e446a9acea89f5750920962c2c37e02485d9253864123b4e09ab6
+- Android: build/android/4.0.2-dev.34/app-debug.apk
+  SHA-256 86f9b8c10b7a2f6749e2207c04b2d8a87c3c9cf547d38325ae356d798359bc5d
+- ARM32: build/linux/4.0.2-dev.34/PeerChat.Server-4.0.2-dev.34-linux-arm.zip
+  SHA-256 d279eb1e3432fe32aa210f512f09c5f967508a7cc4c32ee3a4485cf601ecbc42
+- Pi runtime: /opt/peerchat-test/server/4.0.2-dev.34/
+- Pi configuration: /opt/peerchat-test/config/4.0.2-dev.34/server-config.json
+
+Development-only, not published. Only the pre-existing three untracked object
+files remain excluded from source checkpoints.
+
+## Remaining physical checks
 
 User physical checks: Windows login/close/reopen, Android first-use Trust/Cancel
 and mismatch rejection, messaging, Stored then sender-exit mailbox delivery,
