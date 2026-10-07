@@ -97,6 +97,8 @@ struct Node::Impl {
     std::unique_ptr<mailbox::WindowsMailbox> mailboxApplication;
     std::wstring mailboxProfileDirectory;
     std::map<std::string,Contact> contacts;
+    std::set<std::string> liveOutboxPeers;
+    std::uint64_t demandCheckAt=0;
     reliable::AuthenticatedFriendSnapshot authenticatedFriends;
     std::map<std::string,GroupLedger> groups;
     GroupAccount groupAccount;
@@ -999,6 +1001,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 resolve(command.text,command.port,command.peer,command.source,command.route);
             }
             else if(command.action==Action::Candidates){
+                if(command.forceImmediate)sessionTransports->demandLiveRoute(command.peer,nowMilliseconds()+45000);
                 std::vector<session::RouteObservation> routes;
                 if(!command.text.empty()&&command.port){auto value=routeObservation(command.text,command.port,L"Discovery LAN candidate",L"same-subnet direct candidate",false,{nextRouteRevision++});value.networkRevision=command.accountId;routes.push_back(std::move(value));}
                 auto publicPort=static_cast<std::uint16_t>(command.before);
@@ -1108,6 +1111,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 // The caller may clear its draft only after queueText committed
                 // the existing history/outbox transaction, never on command admission.
                 if(command.response)command.response->set_value(std::wstring(m.id.begin(),m.id.end()));
+                liveOutboxPeers.insert(command.peer);
+                sessionTransports->demandLiveRoute(command.peer,nowMilliseconds()+45000);
                 NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
@@ -1292,6 +1297,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
+            sessionTransports->setDemandDriven(true);
 #ifdef PEERCHAT_TEST_MEDIA_DIRECT
             // Existing deterministic core fixtures do not contact discovery. Their
             // explicit build flag is the only place direct test ICE is permitted.
@@ -1302,6 +1308,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
+            liveOutboxPeers.clear();for(const auto& c:contacts)if(!store->pending(c.first,1).empty())liveOutboxPeers.insert(c.first);
             groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
             startupDirectListener=startDirectListener;
@@ -1316,6 +1323,20 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // create a new route attempt.
             while(running){
                 drain();
+                if(nowMilliseconds()>=demandCheckAt){
+                    const auto now=nowMilliseconds();demandCheckAt=now+1000;
+                    for(auto it=liveOutboxPeers.begin();it!=liveOutboxPeers.end();){
+                        auto pending=deliveries->pendingMessages(*it,1000);
+                        if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=Delivery::Stored;})){it=liveOutboxPeers.erase(it);continue;}
+                        sessionTransports->demandLiveRoute(*it,now+2000,now);++it;
+                    }
+                    if(calls.active())sessionTransports->demandLiveRoute(calls.peer(),now+2000);
+                    if(screenShares.active())sessionTransports->demandLiveRoute(screenShares.active()->peer,now+2000);
+                    auto retired=sessionTransports->retireIdleRoutes(now);
+                    for(auto& c:connections)if(std::any_of(retired.begin(),retired.end(),[&](auto id){return id.value==c->attemptId;})){
+                        c->closeReason=L"No live route demand — relay idle";c->dead=true;
+                    }
+                }
                 // Relay-only idle iterations skip the direct-socket select below, so retire
                 // relay EOFs here before that early sleep/continue can bypass manager cleanup.
                 reapDeadConnections();resolved();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();

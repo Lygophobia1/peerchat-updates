@@ -36,6 +36,30 @@ public:
     // DirectOnly is deliberately opt-in for the retained diagnostic path.
     void setDirectOnly(bool value) { directOnly_ = value; }
 
+    // Observations are not demand. Platform adapters enable this policy for
+    // server-assisted profiles; explicit direct/manual transports are unchanged.
+    void setDemandDriven(bool value) { demandDriven_ = value; }
+    void demandLiveRoute(const std::string& peer,std::uint64_t untilMilliseconds,std::uint64_t now=0) {
+        auto& until=liveDemand_[peer];const bool newlyDemanded=until<=now;until=std::max(until,untilMilliseconds);
+        auto plan=plans_.find(peer);
+        if(newlyDemanded&&plan!=plans_.end()&&plan->second.relayAvailable&&!plan->second.suspended&&!hasActiveWinner(peer))plan->second.relayDueMilliseconds=now;
+    }
+    bool liveRouteDemanded(const std::string& peer,std::uint64_t now) const {
+        auto found=liveDemand_.find(peer);
+        return !demandDriven_||directOnly_||(found!=liveDemand_.end()&&found->second>now);
+    }
+    std::vector<TransportInstanceId> retireIdleRoutes(std::uint64_t now) {
+        std::vector<TransportInstanceId> result;
+        for(auto& item:transports_) {
+            auto& record=item.second;
+            if(record.closed||record.cancelled||record.authorization.scope!=ReliableAuthorizationScope::Friend||
+               record.route.kind!=TransportKind::Relay||p2p_.count(record.continuityKey())||liveRouteDemanded(record.continuityKey(),now))continue;
+            record.cancelled=true;result.push_back(record.instance);
+            closeTransport(epoch_,record.instance,"no live route demand",false);
+        }
+        return result;
+    }
+
     bool registerAttempt(SessionEpoch epoch, TransportInstanceId instance,
                          std::string expectedRemoteDeviceId,
                          RouteObservation route, std::uint64_t nowMilliseconds) {
@@ -625,6 +649,7 @@ public:
     std::vector<RelayAttempt> takeDueRelayAttempts(std::uint64_t nowMilliseconds) {
         std::vector<RelayAttempt> result;
         for(auto& item:plans_){auto& plan=item.second;
+            if(!liveRouteDemanded(item.first,nowMilliseconds))continue;
             auto activeKind=activeTransportKind(item.first);
             if(plan.suspended||!plan.relayAvailable||plan.networkRevision<networkRevision_||
                (activeKind&&*activeKind==TransportKind::Direct)||
@@ -667,6 +692,7 @@ public:
     }
 
     void removePeer(const std::string& peer) {
+        liveDemand_.erase(peer);
         retries_.erase(peer);
         plans_.erase(peer);
         p2p_.erase(peer);
@@ -918,6 +944,8 @@ private:
     std::map<std::string, ContinuityState> continuities_;
     std::map<std::string, RetryState> retries_;
     std::map<std::string, CandidatePlan> plans_;
+    bool demandDriven_=false;
+    std::map<std::string,std::uint64_t> liveDemand_;
     std::map<std::string, ScopedP2pState> p2p_;
     DirectHandoff handoff_;
     bool directOnly_ = false;

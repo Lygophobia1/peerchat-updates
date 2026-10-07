@@ -31,6 +31,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var generation=0L
     private var network=0L
     private var refreshAt=0L
+    private var events:ForegroundEvents?=null
+    private var eventRetryAt=0L
+    private var eventRetryDelay=1000L
+    private var eventWasConnected=false
+    private var contactsDirty=false
+    private var authorizationSnapshotInstalled=false
     private var rememberedRetryEndpoint:ServerEndpoint?=null
     private var rememberedRetryAt=0L
     private var rememberedRetryDelay=1000L
@@ -119,7 +125,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
                 mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,device,true,"Authenticated; refreshing contacts")
-                refresh();refreshAt=System.nanoTime()/1_000_000+5000
+                refresh();refreshAt=System.nanoTime()/1_000_000+900000
                 if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
                     try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}
                     // Enrollment leaves the password-login bearer unbound. Push
@@ -193,7 +199,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // refresh below performs validated presence before friend/device setup.
             accounts=connection;index=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId);pushRegisteredToken=null;network++
             mutable.value=mutable.value.copy(status="Authenticated; refreshing contacts")
-            refresh();refreshAt=System.nanoTime()/1_000_000+5000
+            refresh();refreshAt=System.nanoTime()/1_000_000+900000
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000;return true
         }catch(failure:Exception){
             accounts=null;index=null;generation++;clearAuthorization()
@@ -214,6 +220,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             check(!stopped&&friends.any {it.peerId==peerId}&&(accounts?.session!=null||mutable.value.localHistoryReady))
             val result=checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),text.toByteArray(Charsets.UTF_8)))
             val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
+            mailboxAt=0L
             publish()
             val friend=friends.first{it.peerId==peerId};val owner=accounts
             // Best effort after native durable queueing. Not another retry policy.
@@ -243,6 +250,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        authorizationSnapshotInstalled=false
+        events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
         mailboxExecution.reset();lastMailboxAcknowledgedNanos=0L;mailboxAt=0L
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
@@ -259,9 +268,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
             Unit
         }
     }
-    private fun refresh() {
+    private fun refresh(bootstrap:Boolean=true) {
         val accounts=checkNotNull(accounts);val active=checkNotNull(accounts.session)
-        val state=accounts.bootstrap()
+        val state=if(bootstrap)accounts.bootstrap() else accounts.friends()
         val pending=state.getJSONArray("incoming");require(pending.length()<=128)
         val requests=List(pending.length()){i->val item=pending.getJSONObject(i)
             val id=item.getLong("accountId");val name=item.getString("username");require(id>0&&name.length<=64)
@@ -271,18 +280,23 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val projected=List(list.length()) {i->val item=list.getJSONObject(i)
             FriendIdentity(item.getLong("accountId"),item.getString("username"),item.getString("publicIdentity"),item.getBoolean("online"))
         };require(projected.none {it.accountId==active.accountId})
-        val authoritative=checkNotNull(index).reconcile(projected)
+        val authoritative=if(projected.map{it.copy(knownPeerIds=emptyList())}==friends.map{it.copy(knownPeerIds=emptyList())})friends else checkNotNull(index).reconcile(projected)
         android.util.Log.i("PeerChatWake","stage=friend_devices_restored contacts=${authoritative.size} devices=${authoritative.sumOf{it.knownPeerIds.size}}")
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
         authoritative.forEach {friend->writer.number(friend.accountId);writer.text(friend.peerId);writer.number(friend.knownPeerIds.size.toLong());friend.knownPeerIds.forEach {writer.text(it)}}
-        generation++;val native=checkNotNull(profile).handle
-        check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
+        val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
+        if(identityChanged)generation++
+        val native=checkNotNull(profile).handle
+        if(identityChanged)check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
+        authorizationSnapshotInstalled=true
+        val changed=authoritative!=friends
         friends=authoritative
         localEndpoint=accounts.endpoint
-        localContexts.save(accounts.endpoint,LocalConversationContext(active.accountId,active.username,mutable.value.localPeerId,authoritative))
+        if(changed||bootstrap)localContexts.save(accounts.endpoint,LocalConversationContext(active.accountId,active.username,mutable.value.localPeerId,authoritative))
         mutable.value=mutable.value.copy(incomingRequests=requests.toList())
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
-        mutable.value=mutable.value.copy(serverPresenceLive=true,localHistoryReady=true,status="Authenticated device presence refreshed; native delivery state active")
+        val presenceLive=!livePeerWorkAllowed||events?.connected==true
+        mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated device presence live; native delivery state active" else "Connecting authenticated server events; local history available")
         // Complete application projection as part of backend bootstrap, not a
         // later UI collector/tick or optional vendor registration side effect.
         publish()
@@ -299,13 +313,35 @@ class MessagingBackend(context: Context,private val profileName: String="default
             return
         }
         val native=checkNotNull(profile).handle
+        if(livePeerWorkAllowed||!mailboxAllowed()){
+            if(events==null&&now>=eventRetryAt){events=ForegroundEvents(checkNotNull(accounts));android.util.Log.i("PeerChatNetwork","event=connecting")}
+            events?.let {stream->
+                if(stream.connected&&!eventWasConnected){
+                    eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L
+                    android.util.Log.i("PeerChatNetwork","event=connected repair=requested")
+                }
+                if(stream.finished){
+                    val failure=stream.failure;stream.close();events=null;eventWasConnected=false
+                    mutable.value=mutable.value.copy(serverPresenceLive=false,status="Reconnecting authenticated server events; local history available")
+                    eventRetryAt=now+eventRetryDelay;eventRetryDelay=(eventRetryDelay*2).coerceAtMost(30000)
+                    refreshAt=minOf(refreshAt,now+120000)
+                    android.util.Log.i("PeerChatNetwork","event=disconnected repair=bounded")
+                    if(failure!=null&&expiredServerSession(failure))throw failure
+                }else {
+                    try{stream.heartbeat(now)}catch(_:java.io.IOException){stream.close()}
+                    repeat(32){stream.poll()?.let{event->handleServerEvent(event)}}
+                }
+            }
+        }else {events?.close();events=null;eventWasConnected=false}
         // Server authorization and stored delivery precede NEW peer attempts.
         // Existing peer executions remain independent platform workers.
-        if(now>=refreshAt) {
-            try {refresh()}catch(failure:Exception){
+        if(now>=refreshAt||contactsDirty) {
+            val repair=now>=refreshAt
+            contactsDirty=false
+            try {refresh(repair)}catch(failure:Exception){
                 if(failure !is java.io.IOException)throw failure
                 mutable.value=mutable.value.copy(serverPresenceLive=false,status=serverRefreshFailure(failure)+"; local history retained")
-            }finally {refreshAt=System.nanoTime()/1_000_000+5000}
+            }finally {refreshAt=System.nanoTime()/1_000_000+if(events?.connected==true)900000 else 120000}
         }
         if(mutable.value.authenticated&&now>=mailboxAt) {
             try {
@@ -321,11 +357,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 // No plaintext/error message. An unavailable/rejected mailbox
                 // does not manufacture a peer route or invalidate local history.
                 android.util.Log.i("PeerChatWake","stage=mailbox_service_pending result=${failure.javaClass.simpleName}")
-            } finally {mailboxAt=System.nanoTime()/1_000_000+5000}
+            } finally {mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000}
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
-        if(!livePeerWorkAllowed){publish();return}
+        if(!livePeerWorkAllowed&&mailboxAllowed()){publish();return}
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.
         val iterator=executions.iterator()
@@ -358,6 +394,19 @@ class MessagingBackend(context: Context,private val profileName: String="default
             executions[request.attempt]=execution;execution.start()
         }
         publish()
+    }
+    private fun handleServerEvent(event:org.json.JSONObject){
+        when(val kind=event.optString("event")){
+            "mailbox_ready","mailbox_receipt_ready"->{mailboxAt=0L;android.util.Log.i("PeerChatNetwork","mailbox_trigger=$kind")}
+            "presence_changed","friend_request","friend_request_updated","friendship_changed"->{contactsDirty=true}
+            "relay_demand"->{
+                if(event.optString("purpose")!="friend"||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
+                val peer=event.optString("publicIdentity")
+                val friend=friends.singleOrNull{it.accountId==event.optLong("accountId")&&it.peerId==peer} ?: run{contactsDirty=true;return}
+                check(ReliableBridge.demand(checkNotNull(profile).handle,friend.peerId.toByteArray(Charsets.US_ASCII))==0)
+                android.util.Log.i("PeerChatNetwork","route_demand=authorized_incoming")
+            }
+        }
     }
     private fun publish() {
         val native=checkNotNull(profile).handle

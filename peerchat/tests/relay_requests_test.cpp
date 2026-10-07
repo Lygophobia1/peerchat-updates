@@ -11,6 +11,8 @@ int main(){using namespace peerchat;try{
         check(!requests.presence(other,true,1,1,10),"nonfriend presence accepted");
         check(!requests.presence(bob,true,0,1,10),"stale friend snapshot accepted");
         check(requests.presence(bob,true,1,1,10),"presence rejected");
+        check(requests.take(10,0,32).empty(),"idle online friend created route demand");
+        owner.demandLiveRoute(bob,45000);
         auto first=requests.take(10,0,32);check(first.size()==1&&first[0].peer==bob,"manager relay request missing");
         check(requests.take(11,0,32).empty(),"duplicate pending request");
         check(!requests.attach(first[0].id,other),"wrong-device attachment accepted");
@@ -34,6 +36,22 @@ int main(){using namespace peerchat;try{
         check(requests.take(99999,0,32).empty(),"logout reopened relay");
         check(!requests.presence(bob,true,2,3,99999),"logout accepted presence");
     }
-    std::cout<<"PASS: 1000 manager-owned relay request/retry lifecycles; current friendship/device/network binding, bounded timeout, stale attempt, logout, and no presence-driven backoff bypass. HOST ONLY\n";
+    {
+        session::SessionTransportManager owner(alice,alice,{1},100,1000);
+        reliable::AuthenticatedFriendSnapshot friends;friends.replace(10,1,{{20,bob,{bob}},{30,other,{other}}});
+        std::uint64_t next=1;portable::RelayRequests requests(owner,friends,{1},next);
+        check(requests.presence(bob,true,1,1,10),"demand fixture presence");
+        owner.demandLiveRoute(bob,100,10);
+        auto first=requests.take(10,0,32);check(first.size()==1,"explicit incoming demand missing");
+        check(requests.close(first[0].id,20,0,true),"demand fixture close");
+        check(requests.presence(other,true,1,1,21),"unrelated presence rejected");
+        check(requests.take(21,0,32).empty(),"unrelated presence created route or reset backoff");
+        check(requests.take(200,0,32).empty(),"expired demand kept retrying");
+        owner.demandLiveRoute(bob,500,200);
+        check(requests.take(200,0,32).size()==1,"new incoming demand could not revive idle route");
+        auto retired=owner.retireIdleRoutes(501);check(retired.size()==1,"idle route was not retired");
+        check(requests.take(502,0,32).empty(),"idle retirement created route demand");
+    }
+    std::cout<<"PASS: 1000 manager-owned relay lifecycles plus idle, incoming demand, expiry, unrelated-presence/backoff and idle retirement. HOST ONLY\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}}

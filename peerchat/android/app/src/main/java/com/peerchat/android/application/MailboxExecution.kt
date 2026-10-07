@@ -14,6 +14,8 @@ import java.io.DataOutputStream
 internal class MailboxExecution {
     private var registeredBinding: ByteArray? = null
     private var receiptCursor = ""
+    var needsContinuation=false
+        private set
     private fun encoded(value: ByteArray) = Base64.encodeToString(value, Base64.NO_WRAP)
     private fun decoded(value: String, maximum: Int): ByteArray {
         require(value.length <= ((maximum + 2) / 3) * 4)
@@ -27,6 +29,7 @@ internal class MailboxExecution {
     // still drain their ACK but do not invent another message/notification.
     fun service(accounts: ServerAccounts, handle: Long, storageAllowed: Boolean,
                 acknowledged: (Boolean) -> Unit) {
+        needsContinuation=true
         val identity = checkNotNull(ProfileBridge.publicKey(handle))
         val signing = JSONObject().put("signingPublicKey", encoded(identity))
         if (registeredBinding == null) {
@@ -74,11 +77,13 @@ internal class MailboxExecution {
         // Sweep periodically from the beginning: a late receipt may sort before
         // the last cursor. Native verification/dedupe makes reconciliation safe.
         if (receipts.length() < 64) receiptCursor = ""
+        needsContinuation=(accepted>=4&&envelopes.length()>accepted)||receipts.length()==64
         if (!storageAllowed) return
         val pending = NativeRecord(checkNotNull(MailboxBridge.pending(handle)), 4)
         val count = pending.number(); require(count <= 64)
         val candidates = List(count.toInt()) { Triple(pending.text(), pending.text(), pending.number()) }
         pending.end()
+        needsContinuation=needsContinuation||count>4
         for ((id, _, account) in candidates.take(4)) {
             val keysReply = request(accounts, "mailbox_keys", JSONObject().put("recipientAccountId", account))
             check(keysReply.getString("state") == "ready")
@@ -91,6 +96,7 @@ internal class MailboxExecution {
             val prepared = NativeRecord(checkNotNull(MailboxBridge.prepareDevices(handle, id.toByteArray(Charsets.US_ASCII), batch.toByteArray(), true)), 4)
             val devices = prepared.number().also { require(it <= 32) }
             val bindings = List(devices.toInt()) { prepared.bytes() }; prepared.end()
+            needsContinuation=needsContinuation||devices>4
             for (binding in bindings.take(4)) {
                 val wire = MailboxBridge.prepare(handle, id.toByteArray(Charsets.US_ASCII),
                     binding, true) ?: continue

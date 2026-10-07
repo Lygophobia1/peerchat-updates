@@ -34,6 +34,9 @@ struct Instance {
     std::map<uint64_t,std::unique_ptr<peerchat::TlsSession>> tls;
     peerchat::reliable::AuthenticatedFriendSnapshot friends;
     std::unique_ptr<peerchat::portable::RelayRequests> relayRequests;
+    std::set<std::string> liveOutboxPeers;
+    std::uint64_t demandCheckAt=0;
+    bool outboxDemandLoaded=false;
     // Concrete platform executions only; the one existing sessions/deliveries
     // above remain route/winner/ACK/retry/history authorities.
     std::map<uint64_t,std::unique_ptr<peerchat::portable::ReliableEndpoint>> peers;
@@ -160,8 +163,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
         for(auto& message:instance->storage->pendingMailboxUploads())if(instance->friends.accountFor(message.recipient)>0){seen.insert(message.id);pending.push_back(std::move(message));}
         for(const auto& contact:instance->storage->contacts())if(contact.verified&&instance->friends.accountFor(contact.peerId)>0){
             auto route=instance->sessions.snapshot(contact.peerId);if(route&&route->connected)continue;
-            auto messages=instance->deliveries->pendingMessages(contact.peerId,16);
-            for(auto& message:messages){if(pending.size()==64)break;if(seen.insert(message.id).second)pending.push_back(std::move(message));}
+            auto messages=instance->deliveries->pendingMessages(contact.peerId,1000);
+            for(auto& message:messages){if(pending.size()==64)break;if(message.delivery!=peerchat::Delivery::Stored&&seen.insert(message.id).second)pending.push_back(std::move(message));}
             if(pending.size()==64)break;
         }
         peerchat::protocol::Writer record(peerchat::protocol::Accepted);record.number(pending.size());
@@ -274,12 +277,34 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_prese
         return instance->relayRequests->presence(expected,online==JNI_TRUE,generation,network,runtimeNow())?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
     });
 }
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_demand(JNIEnv* env,jobject,jlong handle,jbyteArray pin){
+    return guarded([&]()->pc_core_status{
+        auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(!instance->friends.contains(expected))return PC_CORE_INVALID_ARGUMENT;
+        const auto now=runtimeNow();instance->sessions.demandLiveRoute(expected,now+45000,now);
+        return PC_CORE_OK;
+    });
+}
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_requests(JNIEnv* env,jobject,jlong handle){
     try{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->relayRequests)return nullptr;
         // Poll execution commands, not a Kotlin retry/session policy.
         auto now=runtimeNow();
+        if(!instance->outboxDemandLoaded){
+            for(const auto& contact:instance->storage->contacts())if(!instance->storage->pending(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
+            instance->outboxDemandLoaded=true;
+        }
+        if(now>=instance->demandCheckAt){
+            instance->demandCheckAt=now+1000;
+            for(auto it=instance->liveOutboxPeers.begin();it!=instance->liveOutboxPeers.end();){
+                auto pending=instance->deliveries->pendingMessages(*it,1000);
+                if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=peerchat::Delivery::Stored;})){it=instance->liveOutboxPeers.erase(it);continue;}
+                instance->sessions.demandLiveRoute(*it,now+2000,now);++it;
+            }
+            instance->sessions.retireIdleRoutes(now);
+        }
         for(auto& peer:instance->peers){
             if(peer.second->closed()||!instance->sessions.attachablePeer({1},{peer.first})||
                (!peer.second->ready()&&peer.second->authenticationExpired(now))){
@@ -389,6 +414,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         auto bytes=peerchat::platform::android::Context::output(env,text);
         auto content=peerchat::unicode::decode(std::string(bytes.begin(),bytes.end()));auto id=peerchat::Storage::newMessageId();
         peerchat::reliable::queueText(*instance->storage,instance->profile,&*known,peer,id,content,mailboxNow());
+        instance->liveOutboxPeers.insert(peer);
+        const auto now=runtimeNow();instance->sessions.demandLiveRoute(peer,now+45000,now);
         return peerchat::platform::android::Context::input(env,peerchat::Blob(id.begin(),id.end()));
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }

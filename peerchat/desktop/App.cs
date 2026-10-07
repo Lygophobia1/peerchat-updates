@@ -91,23 +91,25 @@ public class DesktopApplication {
     ushort firewallConfiguredPort;
     Task startupTask=Task.FromResult(0);
     Task mailboxTask=Task.FromResult(0);DateTime mailboxNextUtc=DateTime.MinValue;
+    bool mailboxRequested=true;
+    void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
     MailboxExecution mailboxExecution;DiscoveryClient mailboxService;
     bool mailboxStorageAllowed;
     string MailboxPolicyPath {get{return Path.Combine(directory,"mailbox-policy.dat");}}
     bool LoadMailboxPolicy(){try{return File.Exists(MailboxPolicyPath)&&Encoding.ASCII.GetString(ProtectedData.Unprotect(File.ReadAllBytes(MailboxPolicyPath),null,DataProtectionScope.CurrentUser))=="PeerChat/mailbox-policy/v1/ALLOWED";}catch{return false;}}
     void SaveMailboxPolicy(bool allowed){var data=ProtectedData.Protect(Encoding.ASCII.GetBytes("PeerChat/mailbox-policy/v1/"+(allowed?"ALLOWED":"FORBIDDEN")),null,DataProtectionScope.CurrentUser);string temporary=MailboxPolicyPath+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,data);if(File.Exists(MailboxPolicyPath))File.Replace(temporary,MailboxPolicyPath,null);else File.Move(temporary,MailboxPolicyPath);mailboxStorageAllowed=allowed;}
     void PumpMailbox(){
-        if(closing||busy||discovery==null||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||DateTime.UtcNow<mailboxNextUtc)return;
+        if(closing||busy||discovery==null||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||(!mailboxRequested&&DateTime.UtcNow<mailboxNextUtc))return;
         var service=discovery;var peer=model.OwnId;bool allowed=mailboxStorageAllowed;
         if(mailboxService!=service){mailboxService=service;mailboxExecution=new MailboxExecution(core);}
         var execution=mailboxExecution;
-        mailboxNextUtc=DateTime.UtcNow.AddSeconds(5);
+        mailboxRequested=false;mailboxNextUtc=DateTime.UtcNow.AddMinutes(service.EventChannelConnected?15:2);
         mailboxTask=Task.Run(()=>execution.Service(service,peer,allowed,(sender,inserted)=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=service)return;
             var conversation=model.FindByPeer(sender);if(conversation!=null){core.History(sender,Int64.MaxValue);}
         })))).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=service)return;
-            mailboxNextUtc=DateTime.UtcNow.AddSeconds(5);
+            mailboxNextUtc=task.IsFaulted?DateTime.UtcNow.AddSeconds(30):execution.NeedsContinuation?DateTime.UtcNow.AddSeconds(1):mailboxNextUtc;
             if(task.IsFaulted)TraceUi("mailbox servicing failed: "+task.Exception.GetBaseException().GetType().Name);
             else if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);
         })));
@@ -462,7 +464,7 @@ public class DesktopApplication {
             // Events own the normal presence path. A snapshot is only missed-event repair,
             // never a short-lived online probe.
             TimeSpan snapshotCadence=discovery!=null&&discovery.EventChannelConnected?TimeSpan.FromMinutes(15):TimeSpan.FromMinutes(3);
-            if(discovery!=null&&!friendRefreshInFlight&&DateTime.UtcNow-lastFriendRefreshUtc>=snapshotCadence){TraceUi("friend snapshot refresh dispatched");RefreshFriendState();}
+            if(discovery!=null&&!friendRefreshInFlight&&DateTime.UtcNow-lastFriendRefreshUtc>=snapshotCadence){TraceUi("bounded domain repair dispatched");RefreshFriendState();RefreshGroupInvites();groupStateRevision++;RefreshGroupState();}
             // Presence is a small authenticated heartbeat. It updates only this device's
             // presence/candidates and never fetches or rebuilds the friend snapshot.
             if(discovery!=null&&!mediaTurnRefreshInFlight&&(model.VoiceStateCode!=0||activeScreenState!=0)&&
@@ -1269,8 +1271,9 @@ public class DesktopApplication {
 		Find<Button>("Reconnect").IsEnabled = flag && model.Listening && !busy;
 		bool flag6 = model.VoiceStateCode != 0;
 		Find<Button>("VoiceCall").Visibility = ((!flag || flag6) ? Visibility.Collapsed : Visibility.Visible);
-		Find<Button>("VoiceCall").IsEnabled = flag && model.Selected.Online && model.Selected.Contact.verified && !flag6 && !busy;
-		if(screenStartButton!=null){screenStartButton.Visibility=flag&&activeScreenState==0?Visibility.Visible:Visibility.Collapsed;screenStartButton.IsEnabled=flag&&model.Selected.Online&&model.Selected.Contact!=null&&model.Selected.Contact.verified&&!busy;}
+        bool availableFriend=flag&&friendPresence.ContainsKey(model.Selected.AccountId)&&friendPresence[model.Selected.AccountId];
+		Find<Button>("VoiceCall").IsEnabled = flag && (model.Selected.Online||availableFriend) && model.Selected.Contact.verified && !flag6 && !busy;
+		if(screenStartButton!=null){screenStartButton.Visibility=flag&&activeScreenState==0?Visibility.Visible:Visibility.Collapsed;screenStartButton.IsEnabled=flag&&(model.Selected.Online||availableFriend)&&model.Selected.Contact!=null&&model.Selected.Contact.verified&&!busy;}
 		Find<Button>("PeerInfo").Visibility = ((!flag) ? Visibility.Collapsed : Visibility.Visible);
 		string[] array2 = new string[10] { "CopyId", "QuickCopy", "CopyCompact", "AddFriend", "QuickAdd", "Manual", "QuickManual", "Details", "CopyConnectionDetails", "ViewConnectionLog" };
 		foreach (string name2 in array2)
@@ -1676,7 +1679,14 @@ public class DesktopApplication {
 			if (discovery != null)
 			{
                 if(notification!=null&&(notification.Event=="mailbox_ready"||notification.Event=="mailbox_receipt_ready")){
-                    mailboxNextUtc=DateTime.MinValue;PumpMailbox();return;
+                    RequestMailbox(notification.Event);PumpMailbox();return;
+                }
+                if(notification!=null&&notification.Event=="relay_demand"){
+                    DiscoverySearchResult friend;
+                    if(notification.Purpose=="friend"&&notification.TargetPublicIdentity==model.OwnId&&friendDirectory.TryGetValue(notification.AccountId,out friend)&&friend.PublicIdentity==notification.PublicIdentity){
+                        var conversation=model.FindByPeer(friend.PublicIdentity);if(conversation!=null)ConnectFriendCandidate(friend,conversation,true,"authorized incoming demand");
+                    }
+                    return;
                 }
                 if(notification!=null&&(notification.Event=="group_room_snapshot"||notification.Event=="group_room_result"||notification.Event=="group_media_signal"||notification.Event=="group_media_result")){
                     RefreshGroupDetails(true);PumpGroupVoice();PumpGroupScreen();return;
@@ -1695,7 +1705,7 @@ public class DesktopApplication {
                     return;
                 }
 				if(notification!=null&&notification.Event=="group_roster_changed"){groupStateRevision++;RefreshGroupState();return;}
-				if(notification!=null&&notification.Event=="group_invite_changed"){RefreshFriendState();return;}
+				if(notification!=null&&notification.Event=="group_invite_changed"){RefreshGroupInvites();return;}
 				if(notification!=null&&notification.Event=="p2p_request"){HandleIncomingP2p(notification);return;}
 				if(notification!=null&&(notification.Event=="p2p_accepted"||notification.Event=="p2p_candidates_ready"||notification.Event=="p2p_declined"||notification.Event=="p2p_cancelled")){HandleP2pEvent(notification);return;}
                 if (notification != null && notification.Event == "channel_connected")
@@ -1706,9 +1716,10 @@ public class DesktopApplication {
                     // itself owns the relay-only presence lease; it must not restart direct
                     // routing or perform a one-shot presence probe.
                     RefreshFriendState();
+					RefreshGroupInvites();RequestMailbox("event channel repair");
 					groupStateRevision++;RefreshGroupState();
 				}
-				else
+				else if(notification!=null&&(notification.Event=="presence_changed"||notification.Event=="friend_request"||notification.Event=="friend_request_updated"||notification.Event=="friendship_changed"))
 				{
 					model.Status = "Friend state changed · refreshing…";
 					Refresh();
@@ -1951,7 +1962,7 @@ public class DesktopApplication {
 			DiscoverySearchResult value;
 			if (friendDirectory.TryGetValue(item2.AccountId, out value) && value.Online)
 			{
-				ConnectFriendCandidate(value, item2, true, "network change");
+				ConnectFriendCandidate(value, item2, false, "affected network observation");
 			}
 			else
 			{
@@ -1992,13 +2003,11 @@ public class DesktopApplication {
 			try
 			{
 				FriendState state = await Task.Run(() => source.GetFriendState());
-				List<GroupInviteResult> invites = await Task.Run(() => source.GroupInvites());
 				if (discovery != source || closing || closed)
 				{
 					return false;
 				}
 				ApplyFriendSnapshot(state);
-                groupInvites=invites;
                 UpdateFriendRequestsButton();
 				return true;
 			}
@@ -2014,6 +2023,12 @@ public class DesktopApplication {
 			friendRefreshInFlight = false;
 		}
 	}
+
+    async void RefreshGroupInvites(){
+        var source=discovery;if(source==null)return;
+        try{var invites=await Task.Run(()=>source.GroupInvites());if(discovery!=source||closing)return;groupInvites=invites;UpdateFriendRequestsButton();}
+        catch(Exception error){TraceUi("group invite repair failed: "+error.GetType().Name);}
+    }
 
 	private void ApplyFriendSnapshot(FriendState state)
 	{
@@ -2069,7 +2084,7 @@ public class DesktopApplication {
 			};
 			conversationModel.Refresh();
             TraceUi("Friend conversation " + (reused ? "reused" : "created") + ": account=" + item.AccountId + "; username=" + item.Username + "; device Peer ID=" + item.PublicIdentity + "; local conversation=" + conversationModel.ConversationId + "; ordinary route=server relay");
-			ConnectFriendCandidate(item,conversationModel,false,(flag2||flag3)?"candidate update":"authoritative refresh");
+			if(flag2||flag3)ConnectFriendCandidate(item,conversationModel,false,"affected presence/device observation");
 		}
 		model.ReconcileFriends(hashSet);
 		RefreshList();
@@ -3385,7 +3400,7 @@ public class DesktopApplication {
 		// The manager receives only its relay route on ordinary presence/manual reconnect.
 		// P2P candidates enter solely through BeginScopedP2p after mutual consent.
 		core.UpdateCandidates(friend.PublicIdentity,"",0,"",0,relayAvailable,networkGeneration,force);
-			if(conversation.SessionRevision==0){conversation.ConnectionState="Finding server relay";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · secure server relay"+(connectionPreferences.AllowDirectP2p?", manual P2P available":"")+"…";Refresh();
+        if(force){TraceUi("live route demand: "+trigger);if(conversation.SessionRevision==0){conversation.ConnectionState="Finding server relay";conversation.Refresh();}model.Status="Connecting to "+friend.Username+" · secure server relay…";Refresh();}
 	}
 
     void ClearScopedP2p(bool notifyServer){
@@ -3496,7 +3511,7 @@ public class DesktopApplication {
 		ShowConversation();
 		RefreshList();
 		Refresh();
-		ConnectFriendCandidate(friend, conversationModel, force, trigger);
+		if(force)ConnectFriendCandidate(friend, conversationModel, true, trigger);
 	}
 
     async void InvitePersonToGroup(DiscoverySearchResult person){
@@ -3969,7 +3984,22 @@ public class DesktopApplication {
 
 
 
-    async void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before calling.");return;}if(!model.Selected.Online){Notify("This friend is currently unavailable for call control. Messaging history remains available.");return;}if(model.VoiceStateCode!=0){Notify("Only one voice call can be active in this profile.");return;}string peer=model.Selected.Contact.peer;if(!await EnsureMediaIceConfigurationAsync()){Notify("Voice media relay is unavailable. Messaging remains connected.");return;}if(model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||model.VoiceStateCode!=0)return;string call=core.StartVoiceCall(peer);if(String.IsNullOrEmpty(call))Notify("Call control is unavailable for this peer. Messaging may still remain connected.");}
+    // Wait only for the existing owner's projection; never create/retry a
+    // transport here. Explicit media actions may demand an otherwise idle route.
+    async Task<bool> DemandReadyRoute(ConversationModel conversation,string reason){
+        if(conversation==null||conversation.Contact==null)return false;
+        DiscoverySearchResult friend;if(!friendDirectory.TryGetValue(conversation.AccountId,out friend)||!friend.Online)return conversation.Online;
+        var service=discovery;string peer=conversation.Contact.peer;
+        ConnectFriendCandidate(friend,conversation,true,reason);
+        var timeout=Stopwatch.StartNew();
+        while(!closing&&discovery==service&&timeout.ElapsedMilliseconds<25000){
+            if(conversation.Contact==null||conversation.Contact.peer!=peer)return false;
+            if(conversation.Online)return true;
+            await Task.Delay(100);
+        }
+        return false;
+    }
+    async void StartVoiceCall(){if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before calling.");return;}if(!await DemandReadyRoute(model.Selected,"voice-call command")){Notify("Voice control route could not be established.");return;}if(model.VoiceStateCode!=0){Notify("Only one voice call can be active in this profile.");return;}string peer=model.Selected.Contact.peer;if(!await EnsureMediaIceConfigurationAsync()){Notify("Voice media relay is unavailable. Messaging remains connected.");return;}if(model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||model.VoiceStateCode!=0)return;string call=core.StartVoiceCall(peer);if(String.IsNullOrEmpty(call))Notify("Call control is unavailable for this peer. Messaging may still remain connected.");}
     void BuildScreenShareControls(){
         var actions=Find<Button>("VoiceCall").Parent as StackPanel;
         screenStartButton=new Button{Content="Share Screen",Padding=new Thickness(11,8,11,8),Margin=new Thickness(6,0,0,0),ToolTip="Share a monitor or window with this verified friend"};
@@ -3998,7 +4028,7 @@ public class DesktopApplication {
         var context=Find<StackPanel>("ConnectionPanelContent");context.Children.Insert(context.Children.IndexOf(Find<TextBlock>("MediaConnectionState"))+1,screenConnectionPanel);
     }
     async void StartScreenShare(){
-        if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified||!model.Selected.Online){Notify("Choose a connected, verified direct-message friend before sharing.");return;}
+        if(model.Groups||model.Selected==null||model.Selected.Contact==null||!model.Selected.Contact.verified){Notify("Choose a verified direct-message friend before sharing.");return;}
         if(activeScreenState!=0){Notify("Only one screen share can be active in this profile.");return;}
         string peer=model.Selected.Contact.peer;
         ScreenSource[] sources;
@@ -4020,7 +4050,8 @@ public class DesktopApplication {
         buttons.Children.Add(cancel);buttons.Children.Add(share);panel.Children.Add(buttons);
         if(dialog.ShowDialog()!=true)return;
         var chosen=sourceList.SelectedItem as ScreenSource;if(chosen==null)return;
-        if(activeScreenState!=0||model.Groups||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer||!model.Selected.Online){Notify("That conversation is no longer ready for sharing.");return;}
+        if(activeScreenState!=0||model.Groups||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer){Notify("That conversation is no longer ready for sharing.");return;}
+        if(!await DemandReadyRoute(model.Selected,"screen-share command")){Notify("Screen-share control route could not be established.");return;}
         if(!await EnsureMediaIceConfigurationAsync()){Notify("Screen-share media relay is unavailable. Messaging remains connected.");return;}
         if(activeScreenState!=0||model.Selected==null||model.Selected.Contact==null||model.Selected.Contact.peer!=peer)return;
         string id=core.StartScreenShare(peer,chosen.kind,chosen.handle,(uint)screenPreferences.FramesPerSecond,(uint)screenPreferences.BitrateBitsPerSecond,cursor.IsChecked==true,screenPreferences.Backend);
@@ -4241,6 +4272,7 @@ public class DesktopApplication {
         catch(Exception){/* Preserve draft; the native write did not confirm acceptance. */}
         finally{directSendInFlight=false;}
         if(!queued){Notify("Message could not be durably queued. Your draft was kept.");return;}
+        RequestMailbox("native durable outbox acceptance");
         // Message projection comes from the native committed Message event. No
         // UI-only queue or fabricated Delivered state. Preserve edits/selection
         // changes made while the local storage operation was finishing.

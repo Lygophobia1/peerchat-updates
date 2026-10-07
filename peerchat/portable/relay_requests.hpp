@@ -23,7 +23,7 @@ private:
     std::map<std::string,bool> presence_;
 public:
     RelayRequests(session::SessionTransportManager& owner,const reliable::AuthenticatedFriendSnapshot& friends,
-                  session::SessionEpoch epoch,std::uint64_t& next):owner_(owner),friends_(friends),epoch_(epoch),next_(next){}
+                  session::SessionEpoch epoch,std::uint64_t& next):owner_(owner),friends_(friends),epoch_(epoch),next_(next){owner_.setDemandDriven(true);}
     std::uint64_t network()const noexcept{return network_;}
     bool presence(const std::string& peer,bool online,std::uint64_t generation,std::uint64_t network,std::uint64_t now){
         if(!friends_.contains(peer)||generation!=friends_.generation()||!network||network<network_)return false;

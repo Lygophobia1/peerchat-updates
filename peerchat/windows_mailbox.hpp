@@ -58,7 +58,7 @@ public:
             for(auto& message:storage.pendingMailboxUploads())if(friends.accountFor(message.recipient)>0){seen.insert(message.id);pending.push_back(std::move(message));}
             for(const auto& known:storage.contacts())if(known.verified&&friends.accountFor(known.peerId)>0){
                 auto route=sessions.snapshot(known.peerId);if(route&&route->connected)continue;
-                for(auto& message:deliveries.pendingMessages(known.peerId,16)){if(pending.size()==64)break;if(seen.insert(message.id).second)pending.push_back(std::move(message));}
+                for(auto& message:deliveries.pendingMessages(known.peerId,1000)){if(pending.size()==64)break;if(message.delivery!=Delivery::Stored&&seen.insert(message.id).second)pending.push_back(std::move(message));}
                 if(pending.size()==64)break;
             }
             protocol::Writer result(protocol::Accepted);result.number(pending.size());

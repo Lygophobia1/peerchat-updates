@@ -708,6 +708,9 @@ namespace PeerChat.Server {
             bool authorized=scope=="friend"&&groupId.Length==0&&rosterGeneration==0&&accounts.RelayAuthorized(accountId,targetAccountId)
                 ||scope=="group_key"&&accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration);
             if(!authorized){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
+            // An authorized route request is demand, not friendship/presence.
+            // The recipient's existing session owner still authenticates peer TLS.
+            Notify(targetAccountId,new Dictionary<string,object>{{"event","relay_demand"},{"accountId",accountId},{"publicIdentity",device},{"targetPublicIdentity",targetDevice},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}});
             // Supplement native sender-owned retry/outbox; this is not a mailbox.
             // A hint carries no TLS records or plaintext and cannot authorize delivery.
             pushWakes.Hint(targetAccountId,targetDevice);
