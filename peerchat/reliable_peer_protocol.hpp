@@ -154,10 +154,26 @@ struct TextReceipt {
     std::optional<StoredMessage> message;
     bool inserted=false;
 };
+// Local account admission is not device trust. An existing pin of the same
+// account remains usable when presence selects a different, unverified device.
+inline std::string queueRecipient(const std::string& requested,const std::vector<Contact>& contacts,
+                                  const AuthenticatedFriendSnapshot& friends) {
+    auto pinned=[&](const Contact& value){return value.verified&&protocol::id(value.peerId)&&
+        !value.publicKey.empty()&&Storage::publicKeyId(value.publicKey)==value.peerId;};
+    for(const auto& value:contacts)if(value.peerId==requested&&pinned(value))return requested;
+    const auto account=friends.accountFor(requested);
+    if(friends.contains(requested)&&account)for(const auto& value:contacts)
+        if(pinned(value)&&friends.accountFor(value.peerId)==account)return value.peerId;
+    return requested;
+}
 inline StoredMessage queueText(Storage& store,const Profile& local,const Contact* contact,
                               const std::string& destination,const std::string& messageId,
-                              const std::wstring& text,std::uint64_t utcMilliseconds) {
-    protocol::check(contact&&contact->peerId==destination&&contact->verified&&protocol::id(destination)&&
+                              const std::wstring& text,std::uint64_t utcMilliseconds,
+                              const AuthenticatedFriendSnapshot* friends=nullptr) {
+    const bool pinned=contact&&contact->peerId==destination&&contact->verified&&
+        !contact->publicKey.empty()&&Storage::publicKeyId(contact->publicKey)==destination;
+    const bool accountAdmitted=friends&&friends->contains(destination)&&friends->accountFor(destination)>0;
+    protocol::check((pinned||accountAdmitted)&&protocol::id(destination)&&
         protocol::id(messageId,32)&&!text.empty()&&unicode::utf16Units(text)<=protocol::MaxChatCharacters);
     StoredMessage message{messageId,local.peerId,destination,text,utcMilliseconds,Delivery::Queued,0,store.nextLogicalOrder()};
     store.append(destination,message);return message;

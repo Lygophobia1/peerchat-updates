@@ -5,6 +5,7 @@ public final class ReliableBridge {
     static { System.loadLibrary("peerchat_messaging");System.loadLibrary("peerchat_jni"); }
     public static native int friends(long profile,long account,long generation,byte[] snapshot);
     public static native int presence(long profile,byte[] expectedPeer,boolean online,long generation,long network);
+    public static native int demand(long profile,byte[] expectedPeer);
     public static native byte[] requests(long profile);
     public static native long open(long profile,long attempt,boolean incoming,byte[] expectedPeer);
     public static native byte[] exchange(long profile,long peer,int operation,byte[] input);

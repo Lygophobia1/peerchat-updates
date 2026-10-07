@@ -301,6 +301,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             for(auto it=instance->liveOutboxPeers.begin();it!=instance->liveOutboxPeers.end();){
                 auto pending=instance->deliveries->pendingMessages(*it,1000);
                 if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=peerchat::Delivery::Stored;})){it=instance->liveOutboxPeers.erase(it);continue;}
+                auto contacts=instance->storage->contacts();
+                if(std::none_of(contacts.begin(),contacts.end(),[&](const auto& contact){return contact.peerId==*it&&contact.verified;})){++it;continue;}
                 instance->sessions.demandLiveRoute(*it,now+2000,now);++it;
             }
             instance->sessions.retireIdleRoutes(now);
@@ -406,16 +408,18 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         if(!text||env->GetArrayLength(text)>16384)return nullptr;
         auto peer=peerArgument(env,destination);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return nullptr;
-        auto contacts=instance->storage->contacts();auto known=std::find_if(contacts.begin(),contacts.end(),[&](const auto& value){return value.peerId==peer;});
-        // Persisted cryptographic trust is required even for local queueing.
-        // This operation never edits the authenticated friend snapshot, creates
-        // an endpoint, pumps a transport, or grants server mailbox authority.
-        if(known==contacts.end()||!known->verified||peerchat::Storage::publicKeyId(known->publicKey)!=peer)return nullptr;
+        auto contacts=instance->storage->contacts();
+        const auto requested=peer;
+        peer=peerchat::reliable::queueRecipient(requested,contacts,instance->friends);
+        auto known=std::find_if(contacts.begin(),contacts.end(),[&](const auto& value){return value.peerId==peer;});
+        // Account authorization permits only protected local queueing. It does
+        // not pin a key, authorize encryption or establish an endpoint.
         auto bytes=peerchat::platform::android::Context::output(env,text);
         auto content=peerchat::unicode::decode(std::string(bytes.begin(),bytes.end()));auto id=peerchat::Storage::newMessageId();
-        peerchat::reliable::queueText(*instance->storage,instance->profile,&*known,peer,id,content,mailboxNow());
+        peerchat::reliable::queueText(*instance->storage,instance->profile,known==contacts.end()?nullptr:&*known,peer,id,content,mailboxNow(),&instance->friends);
         instance->liveOutboxPeers.insert(peer);
         const auto now=runtimeNow();instance->sessions.demandLiveRoute(peer,now+45000,now);
+        if(requested!=peer)instance->sessions.demandLiveRoute(requested,now+45000,now);
         return peerchat::platform::android::Context::input(env,peerchat::Blob(id.begin(),id.end()));
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }

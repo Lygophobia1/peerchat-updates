@@ -62,10 +62,12 @@ string peerTwo=new string('c',64),wrongPeer=new string('d',64);var second=view.B
             }
             Require(!model.CanQueueDirectText(false,false),"Signed-out account conversation can send");
             conversation.IsFriend=false;Require(!model.CanQueueDirectText(true,false),"Revoked friend can send");conversation.IsFriend=true;
-            conversation.Contact.verified=false;Require(!model.CanQueueDirectText(true,false),"Unverified device can send");conversation.Contact.verified=true;
+            conversation.Contact.verified=false;Require(model.CanQueueDirectText(true,false),"Valid account cannot locally queue while device verification is pending");
+            Require(!conversation.Contact.verified,"Local admission promoted device trust");
+            conversation.AccountId=0;Require(!model.CanQueueDirectText(true,false),"Unknown unverified direct peer can queue");conversation.AccountId=8;conversation.Contact.verified=true;
             model.Listening=false;Require(!model.CanQueueDirectText(true,false),"Unavailable profile can send");model.Listening=true;
             Require(!model.CanQueueDirectText(true,true),"Busy profile can send");model.Selected=null;Require(!model.CanQueueDirectText(true,false),"Missing conversation can send");
-            Console.WriteLine("PASS: offline composer independent of route state; signed-out/revoked/unverified/unavailable/busy/invalid states blocked.");return 0;
+            Console.WriteLine("PASS: offline/account composer independent of device trust; unknown direct, signed-out/revoked/unavailable/busy/invalid states blocked.");return 0;
         }
         if(args.Contains("--voice-preferences-only")){TestVoicePreferences(Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","voice-preferences-"+Guid.NewGuid().ToString("N")));Console.WriteLine("PASS: profile-local Voice Audio Processing settings and defaults.");return 0;}
         TestLocalSubnetTransition();if(args.Contains("--subnet-only")){Console.WriteLine("PASS: bidirectional same-LAN classification and runtime cross-subnet invalidation.");return 0;}

@@ -33,6 +33,25 @@ int main(){using namespace peerchat;try{
     auto root=std::filesystem::current_path()/L"build"/L"tests"/L"reliable-wire"/storage_detail::wide(Storage::newMessageId());
     Storage sender((root/L"sender").wstring()),receiver((root/L"receiver").wstring());
     auto a=sender.profile(),b=receiver.profile();
+    {
+        reliable::AuthenticatedFriendSnapshot account;
+        account.replace(7,1,{{8,b.peerId,{b.peerId}}});
+        bool blocked=false;
+        try{reliable::queueText(sender,a,nullptr,b.peerId,Storage::newMessageId(),L"local only",1);}catch(...){blocked=true;}
+        require(blocked,"Unknown unverified device was admitted without account authorization");
+        auto queued=reliable::queueText(sender,a,nullptr,b.peerId,Storage::newMessageId(),L"local only",1,&account);
+        require(queued.delivery==Delivery::Queued&&sender.message(queued.id).has_value(),"Account local queue failed");
+        require(sender.contacts().empty(),"Local queue silently created a device pin");
+        sender.acknowledge(queued.id,Delivery::Delivered); // Isolate subsequent wire fixture.
+        Contact pinned{a.peerId,L"same account device",a.publicKey,{},true};
+        account.replace(7,2,{{8,b.peerId,{b.peerId,a.peerId}}});
+        require(reliable::queueRecipient(b.peerId,{pinned},account)==a.peerId,"Presence-selected unverified device displaced durable same-account pin");
+        account.replace(7,3,{{9,b.peerId,{b.peerId}},{8,a.peerId,{a.peerId}}});
+        require(reliable::queueRecipient(b.peerId,{pinned},account)==b.peerId,"Queue crossed account identity boundary");
+        account.replace(0,4,{});
+        blocked=false;try{reliable::queueText(sender,a,nullptr,b.peerId,Storage::newMessageId(),L"revoked",1,&account);}catch(...){blocked=true;}
+        require(blocked,"Cleared account authorization admitted an unverified device");
+    }
     auto rejects=[&](const Blob& bytes,bool relay){
         bool failed=false;
         try{protocol::Reader reader(bytes);reliable::receiveHello(reader,relay);}catch(const std::exception&){failed=true;}

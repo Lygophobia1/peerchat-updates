@@ -1105,14 +1105,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 contacts[c->peerId]=contact;publishContacts();approve(*c);
             }}
             else if(command.action==Action::Send){
-                if(!contacts.count(command.peer)||!contacts[command.peer].verified)throw std::runtime_error("Verify this peer before sending");
-                auto m=reliable::queueText(*store,profile,&contacts.at(command.peer),command.peer,command.id,command.text,
-                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+                const auto requested=command.peer;
+                command.peer=reliable::queueRecipient(requested,store->contacts(),authenticatedFriends);
+                auto known=contacts.find(command.peer);
+                auto m=reliable::queueText(*store,profile,known==contacts.end()?nullptr:&known->second,command.peer,command.id,command.text,
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()),&authenticatedFriends);
                 // The caller may clear its draft only after queueText committed
                 // the existing history/outbox transaction, never on command admission.
                 if(command.response)command.response->set_value(std::wstring(m.id.begin(),m.id.end()));
                 liveOutboxPeers.insert(command.peer);
                 sessionTransports->demandLiveRoute(command.peer,nowMilliseconds()+45000);
+                if(requested!=command.peer)sessionTransports->demandLiveRoute(requested,nowMilliseconds()+45000);
                 NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
                 for(auto& c:connections)if(c->online&&!c->dead&&c->peerId==command.peer)outbox(*c);
             }else if(command.action==Action::History){NodeEvent e;e.kind=NodeEvent::Kind::History;e.peerId=command.peer;e.messages=store->history(command.peer,100,command.before);emit(std::move(e));}
@@ -1328,6 +1331,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     for(auto it=liveOutboxPeers.begin();it!=liveOutboxPeers.end();){
                         auto pending=deliveries->pendingMessages(*it,1000);
                         if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=Delivery::Stored;})){it=liveOutboxPeers.erase(it);continue;}
+                        auto contact=contacts.find(*it);
+                        if(contact==contacts.end()||!contact->second.verified){++it;continue;} // Verification has a bounded demand window.
                         sessionTransports->demandLiveRoute(*it,now+2000,now);++it;
                     }
                     if(calls.active())sessionTransports->demandLiveRoute(calls.peer(),now+2000);

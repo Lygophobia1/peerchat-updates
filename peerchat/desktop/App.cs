@@ -1272,6 +1272,8 @@ public class DesktopApplication {
 		bool flag6 = model.VoiceStateCode != 0;
 		Find<Button>("VoiceCall").Visibility = ((!flag || flag6) ? Visibility.Collapsed : Visibility.Visible);
         bool availableFriend=flag&&friendPresence.ContainsKey(model.Selected.AccountId)&&friendPresence[model.Selected.AccountId];
+        Find<Button>("Reconnect").Content=flag&&!model.Selected.Contact.verified?"Verify device":"Try Reconnect";
+        Find<Button>("Reconnect").ToolTip=flag&&!model.Selected.Contact.verified?"Request a bounded TLS handshake; transmission still requires verified identity.":"Request this peer's reliable route";
 		Find<Button>("VoiceCall").IsEnabled = flag && (model.Selected.Online||availableFriend) && model.Selected.Contact.verified && !flag6 && !busy;
 		if(screenStartButton!=null){screenStartButton.Visibility=flag&&activeScreenState==0?Visibility.Visible:Visibility.Collapsed;screenStartButton.IsEnabled=flag&&(model.Selected.Online||availableFriend)&&model.Selected.Contact!=null&&model.Selected.Contact.verified&&!busy;}
 		Find<Button>("PeerInfo").Visibility = ((!flag) ? Visibility.Collapsed : Visibility.Visible);
@@ -4273,6 +4275,10 @@ public class DesktopApplication {
         finally{directSendInFlight=false;}
         if(!queued){Notify("Message could not be durably queued. Your draft was kept.");return;}
         RequestMailbox("native durable outbox acceptance");
+        if(!conversation.Contact.verified){
+            DiscoverySearchResult friend;
+            if(friendDirectory.TryGetValue(conversation.AccountId,out friend))ConnectFriendCandidate(friend,conversation,true,"explicit send: bounded device verification");
+        }
         // Message projection comes from the native committed Message event. No
         // UI-only queue or fabricated Delivered state. Preserve edits/selection
         // changes made while the local storage operation was finishing.

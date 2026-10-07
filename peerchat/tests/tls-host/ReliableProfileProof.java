@@ -63,6 +63,8 @@ public final class ReliableProfileProof {
             Record record=new Record(1);record.num(1);record.num(remote);record.str(other);record.num(1);record.str(other);
             PeerTlsProof.check(com.peerchat.android.ReliableBridge.friends(handle,account,1,record.bytes())==0);
             PeerTlsProof.check(com.peerchat.android.ReliableBridge.presence(handle,utf8(other),true,1,1)==0);
+            // Explicit verification/control operation; presence alone is not demand.
+            PeerTlsProof.check(com.peerchat.android.ReliableBridge.demand(handle,utf8(other))==0);
             Reader request=new Reader(com.peerchat.android.ReliableBridge.requests(handle),1);
             PeerTlsProof.check(request.num()==1);peer=request.num();PeerTlsProof.check(request.str().equals(other)&&request.num()==1);request.end();
         }

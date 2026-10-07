@@ -115,8 +115,8 @@ public class ChatViewModel {
     // contacts retain their existing profile-local behavior.
     public bool CanQueueDirectText(bool accountAuthorized,bool busy){
         var selected=Selected;
-        return !Groups&&Listening&&!busy&&selected!=null&&selected.Contact!=null&&selected.Contact.verified&&
-            !String.IsNullOrEmpty(selected.Contact.peer)&&(selected.AccountId==0||(accountAuthorized&&selected.IsFriend));
+        return !Groups&&Listening&&!busy&&selected!=null&&selected.Contact!=null&&
+            !String.IsNullOrEmpty(selected.Contact.peer)&&(selected.AccountId==0?selected.Contact.verified:(accountAuthorized&&selected.IsFriend));
     }
     public string VoiceState="Idle",VoiceCallId="",VoicePeerId="";
     public int VoiceStateCode,VoiceCallType;

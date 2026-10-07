@@ -3,6 +3,7 @@
 #include "../platform/windows_recipient_key.hpp"
 #include "../platform/protected_key_registry.hpp"
 #include "../delivery_manager.hpp"
+#include "../reliable_peer_protocol.hpp"
 #include <filesystem>
 #include <chrono>
 #include <fstream>
@@ -104,10 +105,18 @@ int main(int argc,char** argv){try{
     platform::WindowsRecipientKeyProvider cng;DeviceKeyManager keys(recipient,cng,registry);
     Contact destination{recipientId,L"Synthetic recipient",recipient.publicKey(),{},true};
     Contact origin{senderId,L"Synthetic sender",sender.publicKey(),{},true};
-    StoredMessage message{Storage::newMessageId(),senderId,recipientId,L"Durable mailbox text \u2603",now,Delivery::Queued,0,17};
-    check(senderStore.append(recipientId,message));delivery::DeliveryManager outgoing(senderStore,senderId),incoming(recipientStore,recipientId);
+    reliable::AuthenticatedFriendSnapshot account;
+    account.replace(7,1,{{8,outsider.profile.peerId,{recipientId,outsider.profile.peerId}}});
+    senderStore.saveContact(destination);
+    const auto queuedRecipient=reliable::queueRecipient(outsider.profile.peerId,senderStore.contacts(),account);
+    check(queuedRecipient==recipientId); // Offline pinned recipient, no TLS winner.
+    auto message=reliable::queueText(senderStore,sender.profile,&destination,queuedRecipient,Storage::newMessageId(),L"Durable mailbox text \u2603",now,&account);
+    check(message.delivery==Delivery::Queued);
+    delivery::DeliveryManager outgoing(senderStore,senderId),incoming(recipientStore,recipientId);
     check(outgoing.prepareMailbox(message.id,7,8,binding,destination,sender,*hpke,now,false,false).empty());
     check(outgoing.prepareMailbox(message.id,7,8,binding,destination,sender,*hpke,now,true,true).empty());
+    auto unverified=destination;unverified.verified=false;
+    rejects([&]{outgoing.prepareMailbox(message.id,7,8,binding,unverified,sender,*hpke,now,true,false);});
     auto submitted=outgoing.prepareMailbox(message.id,7,8,binding,destination,sender,*hpke,now,true,false);
     RecipientFixture secondDeviceKey;auto secondBinding=binding;secondBinding.device=outsider.profile.peerId;secondBinding.keyId=std::string(32,'b');secondBinding.publicKey=secondDeviceKey.key->publicKey();secondBinding.signature=outsider.sign(mailbox::bindingPayload(secondBinding));
     Contact secondDevice{outsider.profile.peerId,L"Same-account authorized second device",outsider.publicKey(),{},true};
