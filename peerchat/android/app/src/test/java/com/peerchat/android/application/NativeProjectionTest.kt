@@ -8,6 +8,39 @@ class NativeProjectionTest {
     private val b="b".repeat(64)
     private val c="c".repeat(64)
     private fun rejected(body: ()->Unit){var rejected=false;try {body()}catch(_: Exception){rejected=true};assertTrue("Malformed local snapshot accepted",rejected)}
+    private fun historyWire(rows:List<MessageSnapshot>)=NativeRecordWriter(2).apply{
+        number(rows.size.toLong());rows.forEach{m->text(m.id);text(m.senderDevice);text(m.recipientDevice)
+            number(m.timestamp);number(m.logicalOrder);number(m.sequence);number(m.delivery);text(m.text)}
+    }.bytes()
+    @Test fun accountHistorySurvivesCurrentDeviceChangeAndFeedsNotifications() {
+        val message=MessageSnapshot("f".repeat(32),b,c,100,1,9,2,"Test fixture")
+        val friend=FriendIdentity(8,"Jonah",a,false,listOf(a,b))
+        val connection=NativeRecordWriter(4).apply{repeat(5){number(0)};text("none")}.bytes()
+        fun project(selected:String)=nativeConversationProjection(listOf(friend.copy(peerId=selected)),
+            {assertEquals(selected,it);connection},{peer->historyWire(if(peer==b)listOf(message)else emptyList())}).single()
+        val offline=project(a);assertEquals(listOf(message),offline.messages)
+        assertEquals(project(b).messages,offline.messages)
+        val snapshot=MessagingSnapshot(localPeerId=c,authenticated=true)
+        val prior=com.peerchat.android.platform.ConversationPreference(notifiedSequence=8)
+        assertEquals(1,planMessageNotification(snapshot,offline,prior,
+            com.peerchat.android.platform.NotificationPreview.SenderOnly)!!.count)
+        assertNull(planMessageNotification(snapshot,offline,prior.copy(notifiedSequence=9),
+            com.peerchat.android.platform.NotificationPreview.SenderOnly))
+    }
+    @Test fun combinedPaginationUsesGlobalNativeRowsWithoutSkippingAnotherDevice() {
+        val friend=FriendIdentity(8,"Jonah",a,false,listOf(a,b))
+        val rows=(1L..24L).map{n->MessageSnapshot(n.toString(16).padStart(32,'0'),if(n<=12)a else b,c,
+            100,1,n,2,"Test fixture")}
+        fun page(before:Long)=accountHistoryPage(friend,before){peer,cursor->
+            assertTrue(peer in friend.knownPeerIds)
+            historyWire(rows.filter{it.senderDevice==peer&&it.sequence<cursor}.takeLast(8))}
+        val first=page(Long.MAX_VALUE);val second=page(first.minOf{it.sequence});val third=page(second.minOf{it.sequence})
+        assertEquals(24,(first+second+third).map{it.id}.distinct().size)
+        assertEquals((1L..24L).toSet(),(first+second+third).map{it.sequence}.toSet())
+        assertTrue(page(third.minOf{it.sequence}).isEmpty())
+        assertEquals(first,chronologicalMessages(first.reversed()+first))
+        assertEquals(first.sortedBy{it.id},first) // equal timestamps/orders have a stable tie-breaker
+    }
     @Test fun currentBindingsRetainHistoricalDeviceWithoutPromotingTrust() {
         val old=FriendIdentity(8,"Jonah",a,false)
         val current=reconcileFriends(listOf(old),listOf(FriendIdentity(8,"Jonah",b,true)))

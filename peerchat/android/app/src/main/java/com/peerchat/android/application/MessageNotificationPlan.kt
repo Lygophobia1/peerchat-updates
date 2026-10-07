@@ -8,7 +8,7 @@ data class LocalMessageNotification(val conversationId:String,val title:String,v
 fun planMessageNotification(snapshot:MessagingSnapshot,conversation:ConversationSnapshot,
     prior:ConversationPreference?,preview:NotificationPreview):LocalMessageNotification? {
     if(!snapshot.authenticated||prior==null)return null // Establish existing-history baseline first.
-    val incoming=conversation.messages.filter{it.senderDevice!=snapshot.localPeerId&&it.sequence>maxOf(prior.readSequence,prior.notifiedSequence)}
+    val incoming=conversation.messages.filter{it.senderDevice!=snapshot.localPeerId&&it.sequence>maxOf(prior.readSequence,prior.notifiedSequence)}.distinctBy{it.id}
     if(incoming.isEmpty())return null
     val title=if(preview==NotificationPreview.HideContent)"PeerChat" else conversation.friend.username
     val body=when(preview){

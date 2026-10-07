@@ -36,8 +36,30 @@ internal fun localOfflineSnapshot(snapshot:MessagingSnapshot,status:String):Mess
  * no locally invented conversations, history, ACKs or delivery state. */
 internal fun nativeConversationProjection(friends:List<FriendIdentity>,connection:(String)->ByteArray,
     history:(String)->ByteArray):List<ConversationSnapshot> = friends.map {friend ->
-    ConversationSnapshot(friend,connectionSnapshot(connection(friend.peerId)),messageSnapshots(history(friend.peerId)).toList())
+    ConversationSnapshot(friend,connectionSnapshot(connection(friend.peerId)),
+        accountHistoryPage(friend,Long.MAX_VALUE){peer,_->history(peer)})
 }
+
+/** Native Storage.sequence is messages.rowid in ONE profile database, not a
+ * per-device counter. Page by that durable cursor, then order for presentation.
+ * No new identity authority: these IDs come only from the protected account index.
+ * At most 32 native eight-row reads; return eight logical messages per page. */
+internal fun accountHistoryPage(friend:FriendIdentity,before:Long,
+    history:(String,Long)->ByteArray):List<MessageSnapshot> {
+    val devices=friend.knownPeerIds.distinct().sorted()
+    require(before>0&&devices.size in 1..32&&friend.peerId in devices&&
+        devices.all{it.matches(Regex("[0-9a-f]{64}"))})
+    val rows=devices.flatMap{peer->messageSnapshots(history(peer,before)).also{page->require(page.all{it.sequence<before})}}
+    // Keep the newest native row for duplicate logical IDs. Delivery/identity
+    // fields remain native values; never renumber or rewrite stored messages.
+    return chronologicalMessages(rows.sortedByDescending{it.sequence}.distinctBy{it.id}.take(8))
+}
+
+internal fun chronologicalMessages(rows:List<MessageSnapshot>):List<MessageSnapshot> =
+    rows.sortedWith(compareByDescending<MessageSnapshot>{it.sequence}
+        .thenByDescending{when(it.delivery){2L->3;3L->2;1L->1;else->0}})
+        .distinctBy{it.id}.sortedWith(compareBy<MessageSnapshot>{it.timestamp}
+            .thenBy{it.logicalOrder}.thenBy{it.id}.thenBy{it.senderDevice}.thenBy{it.recipientDevice})
 
 internal fun nativeWakeOutputComplete(receivedNanos:Long,wakeStartedNanos:Long,
     attached:Boolean,finished:Boolean,outputIdleNanos:Long):Boolean =

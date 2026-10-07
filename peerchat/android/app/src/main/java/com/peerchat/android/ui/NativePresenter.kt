@@ -98,8 +98,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val exhausted=mutableSetOf<Long>()
     private fun project() {
         val combined=current.copy(conversations=current.conversations.map {c ->
-            c.copy(messages=((older[c.friend.accountId] ?: emptyList())+c.messages)
-                .associateBy {it.id}.values.sortedBy {it.sequence})
+            c.copy(messages=chronologicalMessages((older[c.friend.accountId] ?: emptyList())+c.messages))
         })
         // projectMessaging's paging hint is overridden by the actual native page result.
         mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->

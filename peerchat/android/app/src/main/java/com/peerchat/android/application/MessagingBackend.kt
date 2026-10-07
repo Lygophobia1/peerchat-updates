@@ -223,8 +223,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
         synchronized(gate) {
-            check(!stopped&&friends.any {it.knownPeerIds.contains(peerId)})
-            messageSnapshots(checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),before)))
+            check(!stopped)
+            val friend=friends.single{it.knownPeerIds.contains(peerId)}
+            accountHistoryPage(friend,before){peer,cursor->
+                checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
         }
     }
     override suspend fun requestFriend(username:String) = withContext(Dispatchers.IO) {synchronized(gate){

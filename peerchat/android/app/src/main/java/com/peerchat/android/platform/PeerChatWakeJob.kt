@@ -40,7 +40,6 @@ class PeerChatWakeJob:JobService() {
             var lease:MessagingApplication?=null
             var stage="configuration"
             var reschedule=true
-            var notificationAt=0L
             var lastOwnerState:String?=null
             fun recordOwnerState(final:Boolean=false) {
                 val snapshot=lease?.state?.value ?: return
@@ -74,6 +73,10 @@ class PeerChatWakeJob:JobService() {
                 val accountKey=accountPreferenceKey(config,credential.accountId)
                 while(isActive){
                     recordOwnerState()
+                    // Read completion BEFORE the snapshot used for notification
+                    // planning. The owner gate drains the servicing/publish pass;
+                    // an ACK arriving later must wait for the next iteration.
+                    val outputDrained=lease!!.backgroundOutputDrained(deadline-30_000_000_000L)
                     val snapshot=lease!!.state.value
                     if(snapshot.authenticated&&snapshot.serverPresenceLive&&snapshot.accountId==credential.accountId){
                         val saved=preferences.load()
@@ -87,12 +90,13 @@ class PeerChatWakeJob:JobService() {
                             }
                             val planned=planMessageNotification(snapshot,conversation,prior,saved.preview)
                             if(saved.notifications&&planned!=null&&show(accountKey,planned)){
-                                notificationAt=System.nanoTime()
                                 preferences.update{state->val row=state.conversations[key] ?: prior;state.copy(conversations=state.conversations+(key to row.copy(notifiedSequence=maxOf(row.notifiedSequence,incomingMax))))}
                             }
                         }
                     }
-                    if(notificationAt!=0L&&lease!!.backgroundOutputDrained(deadline-30_000_000_000L)){
+                    // Real native receive/ACK completion is independent of OS
+                    // notification permission, suppression or prior posting.
+                    if(outputDrained){
                         reschedule=false
                         android.util.Log.i("PeerChatWake","stage=wake_delivery_complete elapsed_ms="+(30_000_000_000L-(deadline-System.nanoTime()))/1_000_000)
                         return@withTimeout

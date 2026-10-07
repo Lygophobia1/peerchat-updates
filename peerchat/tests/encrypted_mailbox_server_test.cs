@@ -12,6 +12,12 @@ using PeerChat.Server;
 using PeerChat.ServerShared;
 using PeerChatDesktop;
 internal static class EncryptedMailboxServerTest {
+    // Hold only the disposable test provider, never a production FCM request.
+    // This proves queued recipient wake work is independent of sender teardown.
+    sealed class HeldPush : IPushProvider {
+        internal readonly ManualResetEvent Started=new ManualResetEvent(false),Release=new ManualResetEvent(false),Completed=new ManualResetEvent(false);
+        public PushResult Wake(string token){Started.Set();if(!Release.WaitOne(10000))return PushResult.Unavailable;Completed.Set();return PushResult.Sent;}
+    }
     static void Check(bool ok){if(!ok)throw new Exception("Encrypted mailbox server assertion failed.");}
     static void Reject(Action action){bool rejected=false;try{action();}catch{rejected=true;}Check(rejected);}
     static void Seed(AccountDatabase db,string a,string b){db.InitializeMailbox();db.Execute("INSERT INTO accounts(id,username,password_salt,password_hash,created_utc) VALUES(7,'synthetic-sender',X'00',X'00',1),(8,'synthetic-recipient',X'00',X'00',1);"+
@@ -50,7 +56,12 @@ internal static class EncryptedMailboxServerTest {
             var sending=new DiscoveryClient("localhost",port,pin);var receiving=new DiscoveryClient("localhost",port,pin);
             foreach(var pair in new[]{Tuple.Create(sending,7L),Tuple.Create(receiving,8L)}){pair.Item1.SessionToken=Guid.NewGuid().ToString("N");pair.Item1.AccountId=pair.Item2;
                 using(var sha=SHA256.Create())db.CreateSession(BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(pair.Item1.SessionToken))).Replace("-","").ToLowerInvariant(),pair.Item2,DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds());}
-            var server=new DiscoveryServer(config);Exception error=null;var worker=new Thread(()=>{try{server.Run();}catch(Exception failure){error=failure;}}){IsBackground=true};worker.Start();
+            // Recipient authorization and push registration are durable device
+            // state, not children of the sender's authenticated session.
+            db.RememberDevice(8,b,"synthetic-remembered-hash");
+            Check(db.RegisterPush(8,b,"synthetic-push-token"));
+            var push=new HeldPush();
+            var server=new DiscoveryServer(config,push);Exception error=null;var worker=new Thread(()=>{try{server.Run();}catch(Exception failure){error=failure;}}){IsBackground=true};worker.Start();
             try {
                 var end=DateTime.UtcNow.AddSeconds(10);bool ready=false;
                 while(DateTime.UtcNow<end&&!ready){try{using(var tcp=new TcpClient()){tcp.Connect("localhost",port);ready=true;}}catch(SocketException){Thread.Sleep(20);}}
@@ -60,10 +71,28 @@ internal static class EncryptedMailboxServerTest {
                 var registration=receiving.Mailbox("mailbox_register",b,new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(recipient)},{"binding",Convert.ToBase64String(binding)}});Check((string)registration["state"]=="accepted");
                 var upload=new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(sender)},{"envelope",Convert.ToBase64String(envelope)}};
                 Check((string)sending.Mailbox("mailbox_store",a,upload)["state"]=="stored");Check((string)sending.Mailbox("mailbox_store",a,upload)["state"]=="stored");
+                Check(push.Started.WaitOne(5000));
+                Action<string> snapshot=stage=>{
+                    Check(db.FetchMailbox(8,b).Count==1);
+                    var publicBindings=db.MailboxKeys(7,a,8);
+                    Check(publicBindings.Count==1&&Convert.FromBase64String((string)publicBindings[0]["binding"]).SequenceEqual(binding));
+                    Check(db.PushToken(8,b)=="synthetic-push-token");
+                    Check(db.MailboxReceipts(7,a).Count==0);
+                    Console.WriteLine("TRACE: "+stage+" sender_account=7 recipient_account=8 ciphertext=retained recipient_binding=unchanged fetch=eligible recipient_push=registered receipt=pending");
+                };
+                snapshot("before_sender_disconnect");
                 // Sender is gone after Stored: no event channel, presence lease,
                 // authenticated server session, or peer transport is available.
                 sending.StopEventChannel();sending.Logout();
+                snapshot("after_sender_event_disconnect_and_logout");
                 db.ClearPresence(7,a);
+                // The device remains authorized while the presence lease and
+                // authenticated session disappear. Exercise normal purge too.
+                db.InitializeMailbox();
+                snapshot("after_sender_presence_cleanup_and_mailbox_purge");
+                Check(!db.IsPresent(7));
+                push.Release.Set();
+                Check(push.Completed.WaitOne(5000));
                 Check(!sending.EventChannelConnected);
                 var fetched=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>());
                 var rows=(System.Collections.IEnumerable)fetched["envelopes"];var values=rows.Cast<object>().Cast<Dictionary<string,object>>().ToArray();Check(values.Length==1&&Convert.FromBase64String((string)values[0]["envelope"]).SequenceEqual(envelope));
@@ -80,7 +109,7 @@ internal static class EncryptedMailboxServerTest {
                 Reject(()=>sending.Mailbox("mailbox_fetch",b,new Dictionary<string,object>()));
                 var wrong=new DiscoveryClient("localhost",port,new string('0',64)){SessionToken=sending.SessionToken};Reject(()=>wrong.Mailbox("mailbox_fetch",a,new Dictionary<string,object>()));
                 Console.WriteLine("PASS: pinned TLS mailbox fetch/ACK with sender logged out, offline and unreachable; recipient cleanup precedes sender reopen/receipt reconciliation; duplicate/wrong-device/pin rejection.");
-            }finally{sending.StopEventChannel();receiving.StopEventChannel();typeof(DiscoveryServer).GetMethod("RequestStop",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(server,null);Check(worker.Join(6000));if(error!=null)throw error;}
+            }finally{push.Release.Set();sending.StopEventChannel();receiving.StopEventChannel();typeof(DiscoveryServer).GetMethod("RequestStop",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(server,null);Check(worker.Join(6000));if(error!=null)throw error;}
         }
     }
     public static int Main(string[] args){try{
