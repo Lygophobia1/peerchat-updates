@@ -7,7 +7,7 @@ using PeerChat.Server;
 using PeerChat.ServerShared;
 class PortableServerTests {
     public static int Main(string[] args){try{
-        string root=args[0];var json=new JavaScriptSerializer();
+        string root=args[0];ServerLifecycleTests.Run(root);var json=new JavaScriptSerializer();
         string fixture=File.ReadAllText(Path.Combine(root,"framework.json"));ServerJsonFixtures.Validate(fixture);
         var value=json.Deserialize<System.Collections.Generic.Dictionary<string,object>>(fixture);
         string modern=json.Serialize(value);for(int i=0;i<1000;i++)ServerJsonFixtures.Check(json.Serialize(value)==modern,"nondeterministic JSON");
@@ -27,11 +27,14 @@ class PortableServerTests {
             ServerJsonFixtures.Check(GroupRosterProofTest.Main()==0,"group signature regressions");
             ServerJsonFixtures.Check(GroupRosterDatabaseTest.Main(new[]{Path.Combine(root,"portable-roster.db")})==0,"group roster DB");
             ServerJsonFixtures.Check(FcmProviderTest.Main()==0,"FCM");
+            string pfx=Path.Combine(root,"lifecycle-test.pfx");
+            ServerJsonFixtures.Check(GroupCiphertextFanoutTest.Main(new[]{Path.Combine(root,"fanout"),pfx,"test-only"})==0,"modern three-client fanout");
+            ServerJsonFixtures.Check(GroupMediaRoomsTest.Main(new[]{Path.Combine(root,"rooms"),pfx,"test-only"})==0,"modern room authorization");
         }
         var config=new ServerConfiguration();config.SetTurnRestSharedSecret(OperatingSystem.IsWindows()?"test-only-storage-secret":"");
         ServerJsonFixtures.Check(!json.Serialize(config).Contains("\"TurnRestSharedSecret\":"),"secret serialized");
         ServerJsonFixtures.Check(ServerPresenceTest.Main(new[]{Path.Combine(root,"presence")})==0,"presence");
-        if(args.Length>1)ServerJsonFixtures.Check(EncryptedMailboxServerTest.Main(new[]{args[1]})==0,"mailbox");
+        if(args.Length>1)ServerJsonFixtures.Check(EncryptedMailboxServerTest.Main(new[]{args[1],Path.Combine(root,"lifecycle-test.pfx"),"test-only"})==0,"mailbox");
         Console.WriteLine("PASS: modern shared server JSON, identity/signatures, protected configuration, presence and durable storage compatibility. Host result, not Linux runtime acceptance.");return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }

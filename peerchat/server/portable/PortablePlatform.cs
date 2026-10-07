@@ -7,6 +7,21 @@ using System.Text;
 
 namespace PeerChat.Server {
     internal static class PortablePlatform {
+        sealed class Signals:IDisposable {
+            readonly Action stop;
+            readonly PosixSignalRegistration term,interrupt;
+            readonly ConsoleCancelEventHandler console;
+            internal Signals(Action stop){this.stop=stop;
+                if(OperatingSystem.IsWindows()){
+                    console=(sender,e)=>{e.Cancel=true;stop();};Console.CancelKeyPress+=console;
+                }else{
+                    term=PosixSignalRegistration.Create(PosixSignal.SIGTERM,c=>{c.Cancel=true;stop();});
+                    interrupt=PosixSignalRegistration.Create(PosixSignal.SIGINT,c=>{c.Cancel=true;stop();});
+                }
+            }
+            public void Dispose(){if(console!=null)Console.CancelKeyPress-=console;if(term!=null)term.Dispose();if(interrupt!=null)interrupt.Dispose();}
+        }
+        internal static IDisposable ShutdownSignals(Action stop){return new Signals(stop);}
         internal static void InitializeSqlite(){
             NativeLibrary.SetDllImportResolver(typeof(PortablePlatform).Assembly,(name,assembly,path)=>{
                 if(name!="winsqlite3.dll"||OperatingSystem.IsWindows())return IntPtr.Zero;
@@ -32,7 +47,7 @@ namespace PeerChat.Server {
                 if(consumed!=key.Length)throw new CryptographicException("Trailing RSA key data");
                 return rsa.SignData(message,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);}
         }
-        internal static string ReadSecret(string path,int maximum=65536){
+        internal static void ValidateSecretFile(string path,int maximum=65536){
             if(!Path.IsPathRooted(path)||new FileInfo(path).LinkTarget!=null)throw new InvalidOperationException("Secret requires an absolute non-symlink file");
             var info=new FileInfo(path);if(info.Length<1||info.Length>maximum)throw new InvalidOperationException("Invalid secret file size");
             if(!OperatingSystem.IsWindows()){
@@ -41,7 +56,8 @@ namespace PeerChat.Server {
                     UnixFileMode.OtherRead|UnixFileMode.OtherWrite|UnixFileMode.OtherExecute))!=0)
                     throw new InvalidOperationException("Secret file must be service-owned mode 0600 or stricter");
             }
-            return File.ReadAllText(path,new UTF8Encoding(false,true));
+            }
+        internal static string ReadSecret(string path,int maximum=65536){ValidateSecretFile(path,maximum);return File.ReadAllText(path,new UTF8Encoding(false,true));
         }
         // Modern Windows continues using the same CurrentUser DPAPI OS API.
         // Linux never accepts a DPAPI blob or silently substitutes plaintext.

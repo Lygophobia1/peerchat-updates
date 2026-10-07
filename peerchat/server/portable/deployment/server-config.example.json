@@ -1,0 +1,16 @@
+{
+  "DataDirectory": "/var/lib/peerchat",
+  "DatabasePath": "/var/lib/peerchat/peerchat-server.db",
+  "LogDirectory": "/var/log/peerchat",
+  "PublicHostname": "peerchat.example.invalid",
+  "Port": 7443,
+  "CertificatePath": "/etc/peerchat/secrets/server.pfx",
+  "CertificatePasswordFile": "/etc/peerchat/secrets/pfx-password",
+  "CertificateThumbprint": "",
+  "ManagementPipe": "",
+  "TurnEnabled": false,
+  "TurnRestSharedSecretFile": "/etc/peerchat/secrets/turn-rest-secret",
+  "FcmEnabled": false,
+  "FcmProjectId": "",
+  "FcmServiceAccountPath": ""
+}

@@ -213,7 +213,7 @@ internal static class GroupMediaRoomsTest {
             clients[2].StopEventChannel();
             Wait(()=>Room(clients[0].GroupRooms(group),"B").Members.Count==0&&Room(clients[0].GroupRooms(group),"S2").Sharer==null,"Disconnect did not clear participant/sharer/viewers.");
             clients[2].StartEventChannel(devices[2],e=>{});
-            Wait(()=>clients[2].EventChannelConnected&&clients[2].GroupRooms(group)!=null,"Reconnect did not get authoritative snapshot.");
+            try{Wait(()=>clients[2].EventChannelConnected&&clients[2].GroupRooms(group)!=null,"Reconnect did not get authoritative snapshot.");}catch(Exception error){throw new Exception(error.Message+" connected="+clients[2].EventChannelConnected+" result="+clients[2].GroupRoomResult(group),error);}
             Require(Room(clients[2].GroupRooms(group),"B").Members.Count==0&&Room(clients[2].GroupRooms(group),"S2").Sharer==null,"Reconnect resurrected membership.");
             op(2,"join_voice",vb,"","");op(2,"join_viewer",s1,"","");
             var roster=clients[0].GetGroupRoster(group,devices[0]);

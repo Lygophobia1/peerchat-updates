@@ -91,3 +91,60 @@ Android: build/android/4.0.2-dev.27/PeerChat-4.0.2-dev.27-debug.apk.
 Development updater ZIP SHA-256:
 d9c07b6af1be129d815baa9d818e2028a89ebef2abbe519fe2f68812258fe4af.
 No publication or merge.
+
+## Server portability checkpoints
+
+Stage 1 (presence): d423001 / dev.24.
+Stage 2 (bounded RPC): 316bfc9 / dev.27.
+Stage 3 (portable platform prerequisites): 9c07df7 / dev.28.
+Stage 4 candidate: dev.32. Linux runtime acceptance is still pending.
+
+The candidate adds Linux explicit-path/secret/PFX rules, POSIX signal handlers,
+shared bounded socket/worker/push drain and checked SQLite close, busy handling,
+FULL/WAL checks, and fail-closed migration/open errors without schema changes.
+Modern SslStream buffering exposed a real event-loop readiness assumption;
+the single pending framed-read correction passes the original room reconnect
+assertions. Desktop event stop closes its owned socket to unblock its worker.
+No messaging, session or media ownership has moved.
+
+Dev.32 host results: modern full discovery/auth/presence/RPC/restart PASS;
+portable fixtures and production mailbox/roster/group/room tests PASS;
+Framework mailbox/fanout/presence/remembered regressions PASS; full Windows
+build/package/import PASS; Android 87 JVM tests, debug/test/release and lint PASS;
+ARM64/JNI/TLS/HPKE artifact audits PASS; version/updater extraction/hash PASS.
+Framework full discovery compatibility PASS, including admin and restart.
+No physical-device success is inferred from these tests.
+
+Portable evidence: build/tests/server-portability-875dfd00171b4008aad4bfe8a40f3b43.
+Native/Framework mailbox evidence: build/tests/mailbox-protocol-6e8c86c2bcee45e688874f33cba7e7e8.
+
+Windows updater: build/development/4.0.2-dev.32/DevelopmentUpdater/PeerChat-4.0.2-dev.32.zip.
+SHA-256: e39ace7637c45a814fbf00f5d70723d3d4e15345e56398509087dfc4fce09598.
+Android: build/android/4.0.2-dev.32/PeerChat-4.0.2-dev.32-debug.apk.
+Linux x64: build/linux/4.0.2-dev.32/PeerChat.Server-4.0.2-dev.32-linux-x64.zip.
+SHA-256: 5972b9fdf7ff981f945130c38d9ae67212df83f62ceb57ec2258c0b050704e90.
+Linux ARM64: build/linux/4.0.2-dev.32/PeerChat.Server-4.0.2-dev.32-linux-arm64.zip.
+SHA-256: 37e02c0b1073c0195968fad245d029352a0412d6da9fb11fd6d6d6729d32f5e7.
+Linux packages contain only managed RID-targeted DLL/deps/runtimeconfig; .NET
+10.0.12 and libsqlite3.so.0 plus distro runtime dependencies are external.
+
+Earlier dev.29-.31 Linux artifacts are intermediate build/audit attempts, not
+accepted candidates. An ARM64 execution check on Windows x64 correctly failed
+architecture loading and was replaced with explicit static architecture/version
+inspection, not presented as runtime success. One native synthetic CNG fixture
+attempt failed; fresh reruns and the full native mailbox regression passed with
+no cryptographic production changes. Reusing an already-populated test directory
+also correctly hit fixture uniqueness; all final tests used fresh directories.
+
+No Linux runtime/WSL distribution/container/emulator is available here. Therefore
+actual Linux x64/ARM64 platform crypto, SQLite resolution, permissions, TLS,
+signals and end-to-end parity are not claimed. LINUX_ARM64_VALIDATION.md lists
+the exact remaining gates. RASPBERRY_PI_DEPLOYMENT.md and deployment templates
+are readiness drafts only, not completed Stage 5 deployment acceptance.
+
+Physical Windows/Android presence/RPC and foreground/background/locked mailbox
+must be repeated on the final source. The user's existing dev.22 server was left
+running unchanged; this is not evidence of dev.32 physical server acceptance.
+No user data/configuration/secrets/identities were modified. Authoritative main,
+accepted dev.22 and existing packages were preserved. The three pre-existing
+untracked screen .obj files remain excluded from all checkpoints.

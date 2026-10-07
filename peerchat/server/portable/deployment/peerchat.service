@@ -1,0 +1,33 @@
+# TEMPLATE ONLY: Linux runtime acceptance is pending.
+[Unit]
+Description=PeerChat headless server
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=peerchat
+Group=peerchat
+WorkingDirectory=/var/lib/peerchat
+ExecStart=/usr/bin/dotnet /opt/peerchat/current/PeerChat.Server.dll --config /etc/peerchat/server-config.json
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=peerchat
+StateDirectoryMode=0700
+LogsDirectory=peerchat
+LogsDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/peerchat /var/log/peerchat
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

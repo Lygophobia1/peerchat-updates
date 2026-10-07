@@ -19,6 +19,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Runtime.InteropServices;
 using PeerChat.ServerShared;
@@ -45,8 +46,8 @@ namespace PeerChat.Server {
         readonly object gate = new object(); readonly IntPtr database; internal readonly ServerPresence Live=new ServerPresence();
         public AccountDatabase(string path) {
             string fullPath=Path.GetFullPath(path);Console.WriteLine("Discovery account database: "+fullPath);
-            if (Sqlite.sqlite3_open16(fullPath, out database) != 0) throw new InvalidOperationException("Cannot open server database.");
-            Execute("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;" +
+            if (Sqlite.sqlite3_open16(fullPath, out database) != 0){if(database!=IntPtr.Zero)Sqlite.sqlite3_close(database);throw new InvalidOperationException("Cannot open server database.");}
+            try{Execute("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;" +
                 "CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password_salt BLOB NOT NULL, password_hash BLOB NOT NULL, discoverability TEXT NOT NULL DEFAULT 'public', created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), public_identity TEXT NOT NULL UNIQUE, created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), expires_utc INTEGER NOT NULL);" +
@@ -65,21 +66,22 @@ namespace PeerChat.Server {
                 "CREATE INDEX IF NOT EXISTS group_invites_recipient_state ON group_invites(recipient_account_id,state,updated_utc);");
             // Existing Milestone 1 databases predate privacy controls. Add the non-sensitive
             // default once; future Friends Only/Hidden settings use this same column.
-            try { Execute("ALTER TABLE accounts ADD COLUMN discoverability TEXT NOT NULL DEFAULT 'public';"); } catch { }
+            try { Execute("ALTER TABLE accounts ADD COLUMN discoverability TEXT NOT NULL DEFAULT 'public';"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
             // Endpoint candidates are deliberately optional. Older Milestone 1 databases receive
             // these nullable columns without changing their account/device identities.
-            try { Execute("ALTER TABLE presence ADD COLUMN endpoint_host TEXT;"); } catch { }
-            try { Execute("ALTER TABLE presence ADD COLUMN endpoint_port INTEGER;"); } catch { }
-            try { Execute("ALTER TABLE presence ADD COLUMN public_endpoint_host TEXT;"); } catch { }
-            try { Execute("ALTER TABLE presence ADD COLUMN public_endpoint_port INTEGER;"); } catch { }
-            try { Execute("ALTER TABLE presence ADD COLUMN public_candidate_source TEXT;"); } catch { }
-            try { Execute("ALTER TABLE presence ADD COLUMN observed_classification TEXT;"); } catch { }
-            try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_event_id TEXT NOT NULL DEFAULT '';"); } catch { }
+            try { Execute("ALTER TABLE presence ADD COLUMN endpoint_host TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE presence ADD COLUMN endpoint_port INTEGER;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE presence ADD COLUMN public_endpoint_host TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE presence ADD COLUMN public_endpoint_port INTEGER;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE presence ADD COLUMN public_candidate_source TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE presence ADD COLUMN observed_classification TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_event_id TEXT NOT NULL DEFAULT '';"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
             // Early group-roster databases predate the distributor field. CREATE TABLE IF NOT
             // EXISTS does not upgrade them; registration would otherwise fail on its first INSERT.
             try { Execute("ALTER TABLE group_rosters ADD COLUMN distributor_identity TEXT NOT NULL DEFAULT '';"); }
             catch(InvalidOperationException error) { if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw; }
             Execute("UPDATE group_rosters SET distributor_identity=owner_identity WHERE distributor_identity='';");
+            }catch{Sqlite.sqlite3_close(database);throw;}
         }
         public void Execute(string sql) { lock (gate) { IntPtr error; if (Sqlite.sqlite3_exec(database, sql, IntPtr.Zero, IntPtr.Zero, out error) != 0) { string message=error==IntPtr.Zero?"SQLite error":Marshal.PtrToStringAnsi(error); if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error); throw new InvalidOperationException(message); } } }
         // Parameter values are hex/base64url or validated identifiers, never interpolated raw user input.
@@ -306,7 +308,7 @@ namespace PeerChat.Server {
         }
         public string Username(long accountId){lock(gate)return ScalarText(database,"SELECT username FROM accounts WHERE id="+accountId);}
         static long UnixNow(){return DateTimeOffset.UtcNow.ToUnixTimeSeconds();}
-        public void Dispose(){Sqlite.sqlite3_close(database);}
+        bool disposed;public void Dispose(){lock(gate){if(disposed)return;if(Sqlite.sqlite3_close(database)!=0)throw new InvalidOperationException("SQLite close failed: outstanding statement or backup");disposed=true;}}
     }
     static class SqliteNative {
         [DllImport("winsqlite3.dll",CallingConvention=CallingConvention.Cdecl)] internal static extern int sqlite3_prepare_v2(IntPtr d,
@@ -462,13 +464,51 @@ namespace PeerChat.Server {
                 if(report!=null)try{report(account,device,result);}catch{}
                 if(result==PushResult.InvalidToken)lock(gate){if(!stopped)accounts.RemovePush(account,device,token);}
             }catch{/* Push failure is never message/transport failure; no token logging. */}
-            finally{lock(gate)pending--;}});return true;
+            finally{lock(gate){pending--;Monitor.PulseAll(gate);}}});return true;
         }
         // After Stop returns, queued callbacks cannot touch the account DB.
         public void Stop(){lock(gate){stopped=true;last.Clear();}}
+        public bool Drain(int milliseconds){var clock=System.Diagnostics.Stopwatch.StartNew();lock(gate){while(pending!=0){int left=milliseconds-(int)clock.ElapsedMilliseconds;if(left<=0)return false;Monitor.Wait(gate,left);}return true;}}
     }
 
         sealed partial class DiscoveryServer {
+        readonly object workerGate=new object();
+        readonly HashSet<TcpClient> workerClients=new HashSet<TcpClient>();
+        int workerCount;
+        NamedPipeServerStream managementStream;
+        void QueueWorker(Action work,TcpClient client=null){
+            lock(workerGate){if(stopping){if(client!=null)client.Close();return;}workerCount++;if(client!=null)workerClients.Add(client);}
+            ThreadPool.QueueUserWorkItem(_=>{
+                try{work();}catch(Exception error){if(!stopping)Log("WARNING","Server worker ended: "+error.GetType().Name);}
+                finally{lock(workerGate){if(client!=null){workerClients.Remove(client);client.Close();}workerCount--;Monitor.PulseAll(workerGate);}}
+            });
+        }
+        internal void RequestStop(){
+            lock(workerGate){if(stopping)return;stopping=true;}
+            Log("INFO","Graceful shutdown requested.");try{if(listener!=null)listener.Stop();}catch{}
+        }
+        void DrainWorkers(){
+            if(listener!=null)listener.Stop();pushWakes.Stop();
+            lock(workerGate){foreach(var client in workerClients)try{client.Close();}catch{}if(managementStream!=null)try{managementStream.Dispose();}catch{}}
+            // No database disposal until all application workers have retired.
+            // Relay pairing is bounded to 15 seconds; closing sockets unblocks IO.
+            var clock=System.Diagnostics.Stopwatch.StartNew();
+            lock(workerGate){while(workerCount!=0){int left=20000-(int)clock.ElapsedMilliseconds;
+                if(left<=0)throw new TimeoutException("Server workers did not drain; database deliberately left open for process termination.");Monitor.Wait(workerGate,left);}}
+            if(!pushWakes.Drain(10000))throw new TimeoutException("Push workers did not drain; database deliberately left open.");
+            lock(eventGate){eventClients.Clear();onlineAccounts.Clear();}
+            accounts.Dispose();certificate.Dispose();Log("INFO","Server shutdown complete; workers drained and SQLite closed.");
+        }
+        public void Run(){
+            startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);
+            try{
+                listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");
+                Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled.":"TURN media credential issuer disabled.");
+                QueueWorker(PresenceMonitor);if(!String.IsNullOrEmpty(managementPipe))QueueWorker(ManagementLoop);
+                while(!stopping){try{var client=listener.AcceptTcpClient();QueueWorker(()=>Serve(client),client);}
+                    catch(SocketException){if(!stopping)throw;}catch(ObjectDisposedException){if(!stopping)throw;}}
+            }finally{RequestStop();DrainWorkers();}
+        }
         readonly RememberedDeviceProofs rememberedProofs=new RememberedDeviceProofs();
         readonly PushWakeDispatcher pushWakes;
         const int ProtocolVersion=1, MaxRequestBytes=4096, MaxRelayPayloadBytes=64*1024, TurnCredentialRateWindowSeconds=60, TurnCredentialRateLimit=6; readonly ServerConfiguration config; readonly AccountDatabase accounts; readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=16384}; readonly X509Certificate2 certificate; TcpListener listener; volatile bool stopping; int connectedClients; DateTime startedUtc; string managementPipe; readonly object eventGate=new object(); readonly List<EventClient> eventClients=new List<EventClient>(); readonly Dictionary<string,long> supersededEventSessions=new Dictionary<string,long>(StringComparer.Ordinal); readonly HashSet<long> onlineAccounts=new HashSet<long>(); readonly Dictionary<long,string> onlineCandidateSignatures=new Dictionary<long,string>();
@@ -530,7 +570,18 @@ namespace PeerChat.Server {
         // A certificate can be loaded from a PFX for ordinary deployment or from CurrentUser\My
         // during local development. Neither path ever exposes its private key to clients.
         public DiscoveryServer(ServerConfiguration c,IPushProvider pushProvider=null){config=c;managementPipe=c.ManagementPipe;accounts=new AccountDatabase(c.DatabasePath);accounts.InitializeMailbox();certificate=LoadCertificate(c);groupFanout=new GroupCiphertextFanout(accounts);groupRooms=new GroupMediaRooms(accounts);pushWakes=new PushWakeDispatcher(accounts,pushProvider??FcmPushProvider.Create(c),(account,device,result)=>Log("DEBUG","Opaque push attempt account="+account+" device="+device.Substring(0,12)+" result="+result+" (provider acceptance is not message delivery)."));Log("INFO",c.FcmEnabled?"FCM opaque wake provider configured.":"FCM opaque wake provider disabled (no delivery claimed).");}
-        static X509Certificate2 LoadCertificate(ServerConfiguration config){if(!String.IsNullOrWhiteSpace(config.CertificateThumbprint)){var store=new X509Store(StoreName.My,StoreLocation.CurrentUser);store.Open(OpenFlags.ReadOnly);try{var found=store.Certificates.Find(X509FindType.FindByThumbprint,config.CertificateThumbprint.Replace(" ",""),false);if(found.Count==0||!found[0].HasPrivateKey)throw new InvalidOperationException("Configured certificate thumbprint was not found with a private key in CurrentUser\\My.");return found[0];}finally{store.Close();}}return new X509Certificate2(config.CertificatePath,config.CertificatePassword,X509KeyStorageFlags.UserKeySet|X509KeyStorageFlags.PersistKeySet);}
+        static X509Certificate2 LoadCertificate(ServerConfiguration config){
+#if PEERCHAT_PORTABLE
+            if(!OperatingSystem.IsWindows()){
+                if(!String.IsNullOrEmpty(config.CertificateThumbprint)||!Path.IsPathRooted(config.CertificatePath))throw new InvalidOperationException("Linux requires an explicit PFX file, not a Windows certificate store.");
+                PortablePlatform.ValidateSecretFile(config.CertificatePath,16*1024*1024);
+                string password=String.IsNullOrEmpty(config.CertificatePasswordFile)?config.CertificatePassword:PortablePlatform.ReadSecret(config.CertificatePasswordFile,4096).TrimEnd('\r','\n');
+                return X509CertificateLoader.LoadPkcs12FromFile(config.CertificatePath,password,X509KeyStorageFlags.EphemeralKeySet);
+            }
+#endif
+            if(!String.IsNullOrWhiteSpace(config.CertificateThumbprint)){var store=new X509Store(StoreName.My,StoreLocation.CurrentUser);store.Open(OpenFlags.ReadOnly);try{var found=store.Certificates.Find(X509FindType.FindByThumbprint,config.CertificateThumbprint.Replace(" ",""),false);if(found.Count==0||!found[0].HasPrivateKey)throw new InvalidOperationException("Configured certificate thumbprint was not found with a private key in CurrentUser\\My.");return found[0];}finally{store.Close();}}
+            return new X509Certificate2(config.CertificatePath,config.CertificatePassword,X509KeyStorageFlags.UserKeySet|X509KeyStorageFlags.PersistKeySet);
+        }
         static bool ValidUsername(string value){if(String.IsNullOrEmpty(value)||value.Length<3||value.Length>32)return false;foreach(char c in value)if(!(Char.IsLetterOrDigit(c)||c=='-'||c=='_'))return false;return true;}
         static bool ValidIdentity(string value){return !String.IsNullOrEmpty(value)&&value.Length>=32&&value.Length<=2048;}
         static bool ValidEndpoint(string host,int port){if(String.IsNullOrEmpty(host))return port==0;if(host.Length>253||port<1||port>65535)return false;return !host.Any(c=>Char.IsWhiteSpace(c)||Char.IsControl(c));}
@@ -725,15 +776,26 @@ namespace PeerChat.Server {
         // Operational logs stay in the configured Logs directory. Rotate a single old file so a
         // long-running home server cannot grow an unbounded log beside its executable.
         void Log(string level,string text){string line=DateTime.UtcNow.ToString("o")+" ["+level+"] "+text;Console.WriteLine(line);try{lock(logGate){Directory.CreateDirectory(config.LogDirectory);string file=Path.Combine(config.LogDirectory,"peerchat-server.log");if(File.Exists(file)&&new FileInfo(file).Length>1024*1024){string previous=file+".1";if(File.Exists(previous))File.Delete(previous);File.Move(file,previous);}File.AppendAllText(file,line+Environment.NewLine);}}catch{/* Logging must never prevent the server from accepting clients. */}}
-        public void Run(){startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled for "+config.TurnPublicHost+":"+config.TurnUdpPort+"/UDP; TTL="+config.TurnCredentialTtlSeconds+" seconds.":"TURN media credential issuer disabled.");ThreadPool.QueueUserWorkItem(_=>PresenceMonitor());if(!String.IsNullOrEmpty(managementPipe)){Log("INFO","Local management pipe ready: "+managementPipe);ThreadPool.QueueUserWorkItem(_=>ManagementLoop());}try{while(!stopping){try{var client=listener.AcceptTcpClient();ThreadPool.QueueUserWorkItem(_=>Serve(client));}catch(SocketException){if(!stopping)throw;}}}finally{if(listener!=null)listener.Stop();pushWakes.Stop();List<EventClient> subscribers;lock(eventGate){subscribers=new List<EventClient>(eventClients);eventClients.Clear();onlineAccounts.Clear();}foreach(var subscriber in subscribers)subscriber.Dispose();accounts.Dispose();Log("INFO","Server shutdown complete.");}}
+
         static string DecodeAdminText(string value){try{return String.IsNullOrEmpty(value)?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch{return null;}}
-        void ManagementLoop(){while(!stopping){try{using(var pipe=new NamedPipeServerStream(managementPipe,PipeDirection.InOut,4,PipeTransmissionMode.Byte,PipeOptions.None)){pipe.WaitForConnection();var encoding=new UTF8Encoding(false);var reader=new StreamReader(pipe,encoding,false,256,true);var writer=new StreamWriter(pipe,encoding,256,true);var command=reader.ReadLine()??"";Dictionary<string,object> response;if(command=="STATUS")response=Status();else if(command=="STOP"){response=new Dictionary<string,object>{{"ok",true}};RequestStop();}else if(command.StartsWith("ACCOUNT_LIST ",StringComparison.Ordinal)){var parts=command.Substring("ACCOUNT_LIST ".Length).Split(' ');int offset,limit;response=parts.Length==3&&Int32.TryParse(parts[0],out offset)&&Int32.TryParse(parts[1],out limit)?Ok(accounts.AdminAccounts(DecodeAdminText(parts[2]),offset,limit)):Error("invalid_account_search");}else if(command.StartsWith("ACCOUNT_LOOKUP ",StringComparison.Ordinal)){var account=accounts.AdminLookup(DecodeAdminText(command.Substring("ACCOUNT_LOOKUP ".Length)));response=account==null?Error("account_not_found"):Ok(account);}else if(command.StartsWith("DELETE_ACCOUNT ",StringComparison.Ordinal)){long id;response=Int64.TryParse(command.Substring("DELETE_ACCOUNT ".Length),out id)&&id>0?AdminDeleteAccount(id):Error("invalid_account_id");}else response=Error("unsupported_admin_command");writer.WriteLine(json.Serialize(response));writer.Flush();}}catch(Exception error){if(!stopping)Log("WARNING","Local admin pipe error: "+error.GetType().Name);}}}
+        void ManagementLoop(){while(!stopping){try{using(var pipe=new NamedPipeServerStream(managementPipe,PipeDirection.InOut,4,PipeTransmissionMode.Byte,PipeOptions.None)){lock(workerGate){if(stopping)return;managementStream=pipe;}pipe.WaitForConnection();var encoding=new UTF8Encoding(false);var reader=new StreamReader(pipe,encoding,false,256,true);var writer=new StreamWriter(pipe,encoding,256,true);var command=reader.ReadLine()??"";Dictionary<string,object> response;if(command=="STATUS")response=Status();else if(command=="STOP"){response=new Dictionary<string,object>{{"ok",true}};}else if(command.StartsWith("ACCOUNT_LIST ",StringComparison.Ordinal)){var parts=command.Substring("ACCOUNT_LIST ".Length).Split(' ');int offset,limit;response=parts.Length==3&&Int32.TryParse(parts[0],out offset)&&Int32.TryParse(parts[1],out limit)?Ok(accounts.AdminAccounts(DecodeAdminText(parts[2]),offset,limit)):Error("invalid_account_search");}else if(command.StartsWith("ACCOUNT_LOOKUP ",StringComparison.Ordinal)){var account=accounts.AdminLookup(DecodeAdminText(command.Substring("ACCOUNT_LOOKUP ".Length)));response=account==null?Error("account_not_found"):Ok(account);}else if(command.StartsWith("DELETE_ACCOUNT ",StringComparison.Ordinal)){long id;response=Int64.TryParse(command.Substring("DELETE_ACCOUNT ".Length),out id)&&id>0?AdminDeleteAccount(id):Error("invalid_account_id");}else response=Error("unsupported_admin_command");writer.WriteLine(json.Serialize(response));writer.Flush();if(command=="STOP")RequestStop();}}catch(Exception error){if(!stopping)Log("WARNING","Local admin pipe error: "+error.GetType().Name);}}}
         Dictionary<string,object> Status(){var data=accounts.Statistics();data["ok"]=true;data["running"]=!stopping;data["uptimeSeconds"]=(long)(DateTime.UtcNow-startedUtc).TotalSeconds;data["port"]=config.Port;data["address"]="0.0.0.0";data["tls"]=true;data["connectedClients"]=Interlocked.CompareExchange(ref connectedClients,0,0);data["turnEnabled"]=config.TurnEnabled;data["turnHost"]=config.TurnEnabled?config.TurnPublicHost:"";data["turnUdpPort"]=config.TurnEnabled?config.TurnUdpPort:0;data["turnCredentialTtlSeconds"]=config.TurnEnabled?config.TurnCredentialTtlSeconds:0;return data;}
-        void RequestStop(){if(stopping)return;stopping=true;Log("INFO","Graceful shutdown requested by local administration.");try{listener.Stop();}catch{}}
+
         // TLS is a byte stream, not a message transport. A four-byte big-endian length prefix
         // keeps partial reads from being mistaken for an entire JSON request.
         static byte[] ReadFrame(Stream stream,int maximum){var header=ReadExact(stream,4);if(header==null)return null;int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];return length<1||length>maximum?null:ReadExact(stream,length);}
         static byte[] ReadExact(Stream stream,int length){var bytes=new byte[length];int offset=0;while(offset<length){int read=stream.Read(bytes,offset,length-offset);if(read==0)return null;offset+=read;}return bytes;}
+        // Poll/Available observes encrypted socket bytes, not plaintext already
+        // buffered inside SslStream. One outstanding framed read also consumes
+        // buffered TLS data while the owner checks its lease/shutdown deadline.
+        static async Task<byte[]> ReadFrameAsync(Stream stream,int maximum){
+            var header=new byte[4];int offset=0;
+            while(offset<4){int n=await stream.ReadAsync(header,offset,4-offset).ConfigureAwait(false);if(n==0)return null;offset+=n;}
+            int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];if(length<1||length>maximum)return null;
+            var frame=new byte[length];offset=0;
+            while(offset<length){int n=await stream.ReadAsync(frame,offset,length-offset).ConfigureAwait(false);if(n==0)return null;offset+=n;}
+            return frame;
+        }
         static void WriteFrame(Stream stream,byte[] bytes){var header=new[]{(byte)(bytes.Length>>24),(byte)(bytes.Length>>16),(byte)(bytes.Length>>8),(byte)bytes.Length};stream.Write(header,0,header.Length);stream.Write(bytes,0,bytes.Length);}
         bool PairRelay(RelayEndpoint endpoint){
             lock(relayGate){
@@ -800,11 +862,21 @@ namespace PeerChat.Server {
                     bool clientHeartbeats=Flag(request,"clientHeartbeats",false);tls.ReadTimeout=5000;tls.WriteTimeout=1000;var subscription=new EventClient(client,tls,eventAccount,eventIdentity,eventTokenHash,clientHeartbeats);RegisterEventSubscription(subscription);BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);Log("DEBUG","Authenticated discovery event channel opened.");
                     // Presence is a client-renewed lease. An open-but-half-dead TCP connection
                     // cannot keep the account online because the server never renews it itself.
-try{long nextLegacyLease=leaseClock.ElapsedMilliseconds+30000;while(!stopping){long now=leaseClock.ElapsedMilliseconds;if(subscription.ClientHeartbeats&&now-subscription.LastHeartbeatUtc>=EventLeaseSeconds*1000L)break;if(!subscription.ClientHeartbeats&&now>=nextLegacyLease){accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Legacy authenticated event-channel lease",subscription.Binding,false);BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);nextLegacyLease=now+30000;}if(client.Client.Poll(500000,SelectMode.SelectRead)){if(client.Available==0)break;var heartbeat=groupJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(tls,GroupCiphertextFanout.MaxFrame)));if((Text(heartbeat,"type")??"").StartsWith("mailbox_",StringComparison.Ordinal)){HandleMailboxChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_room"||Text(heartbeat,"type")=="group_media"){HandleGroupRooms(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_send"||Text(heartbeat,"type")=="group_ack"){HandleGroupChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="event_goodbye"){accounts.ClearPresence(eventAccount,eventIdentity,subscription.Binding);BroadcastPresence(eventAccount,eventIdentity,"",0,"",0,false);break;}if(Text(heartbeat,"type")!="event_heartbeat"||accounts.Authenticate(subscription.SessionTokenHash)!=eventAccount)break;if(accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease",subscription.Binding,false)==null)break;subscription.Heartbeat();}}}
-                    finally{EndEventSubscription(subscription);Log("DEBUG","Discovery event channel closed.");}
+Task<byte[]> pendingEventRead=null;try{long nextLegacyLease=leaseClock.ElapsedMilliseconds+30000;while(!stopping){long now=leaseClock.ElapsedMilliseconds;if(subscription.ClientHeartbeats&&now-subscription.LastHeartbeatUtc>=EventLeaseSeconds*1000L)break;if(!subscription.ClientHeartbeats&&now>=nextLegacyLease){accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Legacy authenticated event-channel lease",subscription.Binding,false);BroadcastPresence(eventAccount,eventIdentity,"",0,"",0);nextLegacyLease=now+30000;}if(pendingEventRead==null)pendingEventRead=ReadFrameAsync(tls,GroupCiphertextFanout.MaxFrame);if(pendingEventRead.Wait(500)){var eventFrame=pendingEventRead.GetAwaiter().GetResult();pendingEventRead=null;if(eventFrame==null)break;var heartbeat=groupJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(eventFrame));if((Text(heartbeat,"type")??"").StartsWith("mailbox_",StringComparison.Ordinal)){HandleMailboxChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_room"||Text(heartbeat,"type")=="group_media"){HandleGroupRooms(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="group_send"||Text(heartbeat,"type")=="group_ack"){HandleGroupChannel(subscription,heartbeat);continue;}if(Text(heartbeat,"type")=="event_goodbye"){accounts.ClearPresence(eventAccount,eventIdentity,subscription.Binding);BroadcastPresence(eventAccount,eventIdentity,"",0,"",0,false);break;}if(Text(heartbeat,"type")!="event_heartbeat"||accounts.Authenticate(subscription.SessionTokenHash)!=eventAccount)break;if(accounts.TouchPresence(eventAccount,eventIdentity,"",0,"",0,"Relay-only presence","Authenticated event-channel lease",subscription.Binding,false)==null)break;subscription.Heartbeat();}}}
+                    finally{EndEventSubscription(subscription);if(pendingEventRead!=null)pendingEventRead.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted);Log("DEBUG","Discovery event channel closed.");}
                     return;
                 }
-                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}stage="request_handle";var response=Encoding.UTF8.GetBytes(json.Serialize(Handle(request,observedHost,0)));stage="response_write";WriteFrame(tls,response);}catch(Exception error){bool expected=ReliableIoDiagnostics.ExpectedDisconnect(error,kind);Log(expected?"DEBUG":"WARNING",(expected?"Reliable channel disconnected":"Client request failed")+": "+error.GetType().Name+" request_id="+correlation+" request="+kind+" stage="+stage+" authenticated_account="+diagnosticAccount);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected request_id="+correlation+".");}}}
-        public static int Main(string[] args){try{string configPath=ServerConfiguration.DefaultConfigPath;for(int i=0;i+1<args.Length;i++)if(args[i]=="--config")configPath=args[++i];var c=ServerConfiguration.Load(configPath);for(int i=0;i+1<args.Length;i++){if(args[i]=="--port")c.Port=Int32.Parse(args[++i],CultureInfo.InvariantCulture);else if(args[i]=="--database")c.DatabasePath=args[++i];else if(args[i]=="--certificate")c.CertificatePath=args[++i];else if(args[i]=="--certificate-password")c.CertificatePassword=args[++i];else if(args[i]=="--certificate-thumbprint")c.CertificateThumbprint=args[++i];else if(args[i]=="--management-pipe")c.ManagementPipe=args[++i];}c.Validate();new DiscoveryServer(c).Run();return 0;}catch(Exception error){Console.Error.WriteLine("PeerChat server startup failed: "+error.GetType().Name+": "+error.Message);return 1;}}
+                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}stage="request_handle";var response=Encoding.UTF8.GetBytes(json.Serialize(Handle(request,observedHost,0)));stage="response_write";WriteFrame(tls,response);}catch(Exception error){bool expected=stopping||ReliableIoDiagnostics.ExpectedDisconnect(error,kind);Log(expected?"DEBUG":"WARNING",(expected?"Reliable channel disconnected":"Client request failed")+": "+error.GetType().Name+" request_id="+correlation+" request="+kind+" stage="+stage+" authenticated_account="+diagnosticAccount);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected request_id="+correlation+".");}}}
+        public static int Main(string[] args){try{if(args.Length==1&&args[0]=="--version"){Console.WriteLine(VersionInfo.Display);return 0;}string configPath=ServerConfiguration.DefaultConfigPath;for(int i=0;i+1<args.Length;i++)if(args[i]=="--config")configPath=args[++i];
+#if PEERCHAT_PORTABLE
+            if(!OperatingSystem.IsWindows()&&(!Array.Exists(args,x=>x=="--config")||!Path.IsPathRooted(configPath)||!File.Exists(configPath)))throw new InvalidOperationException("Linux requires --config with an existing absolute configuration path.");
+#endif
+            var c=ServerConfiguration.Load(configPath);for(int i=0;i+1<args.Length;i++){if(args[i]=="--port")c.Port=Int32.Parse(args[++i],CultureInfo.InvariantCulture);else if(args[i]=="--database")c.DatabasePath=args[++i];else if(args[i]=="--certificate")c.CertificatePath=args[++i];else if(args[i]=="--certificate-password")c.CertificatePassword=args[++i];else if(args[i]=="--certificate-thumbprint")c.CertificateThumbprint=args[++i];else if(args[i]=="--management-pipe")c.ManagementPipe=args[++i];}c.Validate();var server=new DiscoveryServer(c);
+#if PEERCHAT_PORTABLE
+            using(var signals=PortablePlatform.ShutdownSignals(server.RequestStop)){server.Run();}
+#else
+            ConsoleCancelEventHandler cancel=(sender,e)=>{e.Cancel=true;server.RequestStop();};Console.CancelKeyPress+=cancel;try{server.Run();}finally{Console.CancelKeyPress-=cancel;}
+#endif
+return 0;}catch(Exception error){Console.Error.WriteLine("PeerChat server startup failed: "+error.GetType().Name+": "+error.Message);return 1;}}
     }
 }

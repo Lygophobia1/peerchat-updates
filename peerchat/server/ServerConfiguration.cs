@@ -25,7 +25,7 @@ public sealed class ServerConfiguration {
  public int TurnCredentialTtlSeconds=600;
  public string TurnRealm="peerchat";
  public string TurnRestSharedSecretProtected="";
- public string TurnRestSharedSecretFile="";
+ public string TurnRestSharedSecretFile="",CertificatePasswordFile="";
  [ScriptIgnore] public string TurnRestSharedSecret { get; private set; }
  public int Port=7443,SessionHours=336;
  public static string DefaultDataDirectory { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),"PeerChat","Server"); } }
@@ -50,8 +50,21 @@ public sealed class ServerConfiguration {
  TurnRestSharedSecret=Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(TurnRestSharedSecretProtected),null,DataProtectionScope.CurrentUser));
 #endif
 }catch(Exception error){throw new InvalidOperationException("TURN is enabled but its protected REST shared secret cannot be opened for this Windows server user.",error);}}
- public void Normalize(){if(String.IsNullOrWhiteSpace(DataDirectory))DataDirectory=DefaultDataDirectory;if(String.IsNullOrWhiteSpace(DatabasePath))DatabasePath=Path.Combine(DataDirectory,"Data","peerchat-server.db");if(String.IsNullOrWhiteSpace(LogDirectory))LogDirectory=Path.Combine(DataDirectory,"Logs");if(String.IsNullOrWhiteSpace(SelfHostedPublicP2PHost)&&!String.Equals(PublicHostname,"localhost",StringComparison.OrdinalIgnoreCase))SelfHostedPublicP2PHost=PublicHostname;LoadTurnRestSharedSecret();}
- public void Validate(){Normalize();if(Port<1||Port>65535)throw new InvalidOperationException("TLS port must be 1 through 65535.");if(String.IsNullOrWhiteSpace(CertificateThumbprint)&&String.IsNullOrWhiteSpace(CertificatePath))throw new InvalidOperationException("A TLS certificate must be configured.");if(!TurnEnabled)return;if(String.IsNullOrWhiteSpace(TurnPublicHost)||TurnPublicHost.Length>253||TurnPublicHost.IndexOfAny(new[]{' ', '\t', '\r', '\n', '/', '@'})>=0)throw new InvalidOperationException("TURN public host is invalid.");if(TurnUdpPort<1||TurnUdpPort>65535)throw new InvalidOperationException("TURN UDP port must be 1 through 65535.");if(TurnCredentialTtlSeconds<120||TurnCredentialTtlSeconds>3600)throw new InvalidOperationException("TURN credential TTL must be between 120 and 3600 seconds.");if(String.IsNullOrWhiteSpace(TurnRealm)||TurnRealm.Length>128||TurnRealm.Any(c=>Char.IsControl(c)))throw new InvalidOperationException("TURN realm is invalid.");if(String.IsNullOrWhiteSpace(TurnRestSharedSecret)||TurnRestSharedSecret.Length<16)throw new InvalidOperationException("TURN is enabled but its REST shared secret is missing or too short.");}
+ public void Normalize(){
+#if PEERCHAT_PORTABLE
+ if(!OperatingSystem.IsWindows()&&(String.IsNullOrWhiteSpace(DataDirectory)||!Path.IsPathRooted(DataDirectory)))throw new InvalidOperationException("Linux requires an explicit absolute data directory.");
+#endif
+if(String.IsNullOrWhiteSpace(DataDirectory))DataDirectory=DefaultDataDirectory;if(String.IsNullOrWhiteSpace(DatabasePath))DatabasePath=Path.Combine(DataDirectory,"Data","peerchat-server.db");if(String.IsNullOrWhiteSpace(LogDirectory))LogDirectory=Path.Combine(DataDirectory,"Logs");if(String.IsNullOrWhiteSpace(SelfHostedPublicP2PHost)&&!String.Equals(PublicHostname,"localhost",StringComparison.OrdinalIgnoreCase))SelfHostedPublicP2PHost=PublicHostname;LoadTurnRestSharedSecret();}
+ public void Validate(){
+#if PEERCHAT_PORTABLE
+ if(!OperatingSystem.IsWindows()){
+   if(String.IsNullOrEmpty(DataDirectory)||!Path.IsPathRooted(DataDirectory))throw new InvalidOperationException("Linux requires an explicit absolute data directory.");
+   foreach(var path in new[]{DatabasePath,LogDirectory,CertificatePath})if(String.IsNullOrEmpty(path)||!Path.IsPathRooted(path))throw new InvalidOperationException("Linux requires absolute database, log and PFX paths.");
+   if(!String.IsNullOrEmpty(CertificateThumbprint)||!String.IsNullOrEmpty(ManagementPipe))throw new InvalidOperationException("Windows certificate store/admin pipe are unavailable in the Linux daemon.");
+   if(!String.IsNullOrEmpty(CertificatePassword)&&!String.IsNullOrEmpty(CertificatePasswordFile))throw new InvalidOperationException("Configure only one certificate password source.");
+ }
+#endif
+Normalize();if(Port<1||Port>65535)throw new InvalidOperationException("TLS port must be 1 through 65535.");if(String.IsNullOrWhiteSpace(CertificateThumbprint)&&String.IsNullOrWhiteSpace(CertificatePath))throw new InvalidOperationException("A TLS certificate must be configured.");if(!TurnEnabled)return;if(String.IsNullOrWhiteSpace(TurnPublicHost)||TurnPublicHost.Length>253||TurnPublicHost.IndexOfAny(new[]{' ', '\t', '\r', '\n', '/', '@'})>=0)throw new InvalidOperationException("TURN public host is invalid.");if(TurnUdpPort<1||TurnUdpPort>65535)throw new InvalidOperationException("TURN UDP port must be 1 through 65535.");if(TurnCredentialTtlSeconds<120||TurnCredentialTtlSeconds>3600)throw new InvalidOperationException("TURN credential TTL must be between 120 and 3600 seconds.");if(String.IsNullOrWhiteSpace(TurnRealm)||TurnRealm.Length>128||TurnRealm.Any(c=>Char.IsControl(c)))throw new InvalidOperationException("TURN realm is invalid.");if(String.IsNullOrWhiteSpace(TurnRestSharedSecret)||TurnRestSharedSecret.Length<16)throw new InvalidOperationException("TURN is enabled but its REST shared secret is missing or too short.");}
  public void Save(string path){Normalize();Directory.CreateDirectory(Path.GetDirectoryName(path));Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath));Directory.CreateDirectory(LogDirectory);File.WriteAllText(path,new JavaScriptSerializer().Serialize(this));}
 }
 }
