@@ -155,5 +155,6 @@ public final class ServerChannel implements AutoCloseable {
         socket.setSoTimeout(milliseconds);
         arm(milliseconds);
     }
+    public boolean isOpen(){return !tcp.isClosed();}
     public void close()throws IOException {disarm();operations.detach(tcp);tcp.close();}
 }

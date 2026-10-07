@@ -16,6 +16,38 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         private set
     @Volatile internal var presenceEpoch=""
         private set
+    private var supportsRpc=false
+    private var rpcAuthorized=false
+    private val rpcOwner=com.peerchat.android.platform.tls.BoundedRpc<ServerChannel>({
+        val connection=channel("rpc")
+        try {
+            val hello=JSONObject().put("version",1).put("type","rpc_open")
+                .put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
+            connection.write(hello.toString().toByteArray(Charsets.UTF_8),4096)
+            val ready=JSONObject(connection.read(16384).toString(Charsets.UTF_8))
+            if(!ready.optBoolean("ok"))throw ServerRejected(ready.optString("error","session_invalid"))
+            check(ready.getString("type")=="rpc_ready"&&ready.getInt("rpcVersion")==1)
+            connection
+        }catch(error:Exception){connection.close();throw error}
+    },{it.isOpen})
+    fun closeRpc(){rpcOwner.close()}
+    private fun rpc(type:String,fields:JSONObject):JSONObject {
+        operations.check()
+        val token=checkNotNull(session).token
+        return rpcOwner.run(token){connection->
+            connection.readTimeout(10000)
+            val id=java.util.UUID.randomUUID().toString().replace("-","")
+            val request=JSONObject(fields.toString()).put("version",1).put("type",type)
+                .put("rpcRequestId",id).put("sessionToken",token).put("publicIdentity",device)
+            if(type.startsWith("mailbox_"))request.put("requestId",id)
+            connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_"))100000 else 4096)
+            val reply=JSONObject(connection.read(100000).toString(Charsets.UTF_8))
+            check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
+            val body=reply.getJSONObject("body")
+            if(!reply.optBoolean("more"))rpcOwner.close() else connection.readTimeout(10000)
+            body
+        }
+    }
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
     private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","friend_request","friend_respond"))type else "other"
     private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
@@ -29,18 +61,21 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         if(authenticated) fields.put("sessionToken", checkNotNull(session).token)
         val bytes = fields.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 4096)
-        val response=try {channel(safeOperation(type)).use { channel ->
+        val response=try {if(authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
             JSONObject(channel.read(16384).toString(Charsets.UTF_8))
         }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
         if(!response.optBoolean("ok")) throw ServerRejected(response.optString("error", "request_failed"))
+        if(response.optInt("rpcVersion")==1)supportsRpc=true
+        if(authenticated&&(type=="presence"||type=="messaging_bootstrap")&&response.optString("registeredPublicIdentity")==device)rpcAuthorized=true
         return response
     }
     private fun accept(response: JSONObject): AccountSession {
         val next = AccountSession(response.getLong("accountId"), response.getString("username"),
             response.getString("sessionToken"), response.optBoolean("relayOnlyPresence"),response.optInt("messagingBootstrapVersion",0))
         check(next.accountId > 0 && next.token.isNotEmpty() && next.relayOnly) { "Server lacks required relay-only capability" }
+        closeRpc();rpcAuthorized=false;supportsRpc=response.optInt("rpcVersion")==1
         session = next
         return next
     }
@@ -128,12 +163,13 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             return RelayConnection(channel,id,incoming)
         } catch(failure: Exception){channel.close();throw failure}
     }
-    fun logout() { try { if(session != null) request("logout") } finally { session=null } }
+    fun logout() { try { if(session != null) request("logout") } finally { closeRpc();session=null } }
     fun openEvents(): ServerChannel = openSubscription("events",JSONObject().put("clientHeartbeats",true))
     // Opaque mailbox application RPC over the existing authenticated/pinned
     // server TLS request adapter. No plaintext, local outbox, or retry owner here.
     fun mailbox(operation: String, payload: JSONObject): JSONObject {
         require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"))
+        if(supportsRpc&&rpcAuthorized)return rpc(operation,payload)
         val requestId=java.util.UUID.randomUUID().toString().replace("-","")
         val connection=channel("mailbox")
         try {

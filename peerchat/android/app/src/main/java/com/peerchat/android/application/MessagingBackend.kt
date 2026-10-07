@@ -72,7 +72,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(!value){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
             executor.execute {try{synchronized(gate){if(!inUse&&!stopped){
             generation++;clearAuthorization();try{if(remembered.load()==null)accounts?.logout()}catch(_:Exception){}
-            accounts=null;index=null;pushRegisteredToken=null
+            accounts?.closeRpc();accounts=null;index=null;pushRegisteredToken=null
             // Quiesce NETWORK ownership, not local Profile/Storage. The one
             // process-local backend retains its open profile and immutable
             // history projection; foreground resume must not rebuild them.
@@ -136,7 +136,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }
                 checkNotNull(accounts?.session)
             } catch(failure: Exception){
-                accounts=null;index=null;friends=emptyList();generation++
+                accounts?.closeRpc();accounts=null;index=null;friends=emptyList();generation++
                 clearAuthorization();try {connection.logout()}catch(_: Exception){}
                 mutable.value=MessagingSnapshot(localPeerId=device,status="Login setup failed closed")
                 throw failure
@@ -202,7 +202,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             refresh();refreshAt=System.nanoTime()/1_000_000+900000
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000;return true
         }catch(failure:Exception){
-            accounts=null;index=null;generation++;clearAuthorization()
+            accounts?.closeRpc();accounts=null;index=null;generation++;clearAuthorization()
             rememberedRetryEndpoint=null
             if(isRememberedNetworkFailure(failure)) {
                 rememberedRetryEndpoint=endpoint
@@ -426,7 +426,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // Do not block the UI waiting for an in-progress bounded server request.
         executor.execute {synchronized(gate){
             generation++;clearAuthorization();try {if(remembered.load()==null)accounts?.logout()}catch(_: Exception){}
-            accounts=null;friends=emptyList();index=null;profile?.close();profile=null
+            accounts?.closeRpc();accounts=null;friends=emptyList();index=null;profile?.close();profile=null
         }}
         executor.shutdown()
     }

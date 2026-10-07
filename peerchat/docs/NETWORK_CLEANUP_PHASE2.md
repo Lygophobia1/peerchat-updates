@@ -48,3 +48,46 @@ No feed publication, merge or device acceptance is claimed.
 Physical pending: already-online contact, idle route while Online, network loss,
 multi-device account aggregation and Windows/Android reconnect against this build.
 Existing dev.22 server/user profiles/keys were not modified.
+
+## Phase 2B: bounded authenticated RPC reuse
+
+Presence checkpoint: d423001. RPC candidate: 4.0.2-dev.27; dev.25/dev.26
+are preserved interim builds, not the completed RPC checkpoint.
+
+The server advertises rpcVersion=1 additively. Old clients retain one-shot
+requests; new clients retain that behavior against servers without capability.
+After device registration/bootstrap, each profile's existing DiscoveryClient or
+ServerAccounts owns one serialized request channel. The authenticated rpc_open
+binds account session and device. Every frame revalidates the session/device.
+Event, relay and peer-TLS channels remain separate. No authentication, event,
+relay or remembered-proof operation can be dispatched through this channel.
+Ordinary payloads retain 4 KiB limits; opaque mailbox frames retain 100,000-byte
+limits. RPC correlation uses rpcRequestId, never application requestId.
+
+Server limits: 15-second read/idle timeout, 64 requests, two-minute lifetime.
+Clients retire after 10 seconds idle, 60 requests or 100 seconds age. Operations
+and serialization waits are bounded; cancellation closes Android raw sockets
+through the existing OperationScope. Background quiescence, logout and backend
+disposal close RPC resources. A wake does not retain an idle background socket.
+No reconnect runs while idle, and ambiguous failures are never silently replayed.
+The existing delivery/ACK/dedupe owners decide any subsequent retry.
+
+Regression additions cover serialized reuse/connection count, profile binding,
+idle/count retirement, externally closed resources, failure invalidation, partial
+frames, wrong-device binding and reconnect on demand. The complete discovery
+suite retains P2P consent/request IDs, account/device authorization, logout and
+revocation checks. Eight sequential ordinary requests use one TLS connection;
+80 requests cross the count bound using at most two additional connections.
+This is a connection-count measurement, not a battery-saving claim.
+
+Android JVM/build/lint and ARM64/JNI/TLS/HPKE artifact audits, native mailbox
+crypto/store/fetch/ACK/restart/sender-independence, remembered-device authentication,
+route-demand tests, full Windows build/import audit and version/updater audit pass.
+Physical foreground/background/locked mailbox and presence/reconnect remain
+pending against the final source; no device success is inferred from host tests.
+
+Windows: build/development/4.0.2-dev.27/Package.
+Android: build/android/4.0.2-dev.27/PeerChat-4.0.2-dev.27-debug.apk.
+Development updater ZIP SHA-256:
+d9c07b6af1be129d815baa9d818e2028a89ebef2abbe519fe2f68812258fe4af.
+No publication or merge.
