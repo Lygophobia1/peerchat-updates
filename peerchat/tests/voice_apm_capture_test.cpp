@@ -4,6 +4,23 @@
 #include <iostream>
 
 int main() {
+    for(unsigned generation=0;generation<8;++generation){
+        peerchat::VoiceApmCapture apm;
+        const bool aec=generation%2==0;
+        if(!apm.open(true,true,peerchat::NoiseSuppressionStrength::Medium,
+            peerchat::AutomaticGainStrength::Balanced,aec)||apm.echoCancellation()!=aec)return 10;
+        std::array<std::int16_t,320> reference{},capture{};
+        for(unsigned frame=0;frame<150;++frame){
+            for(unsigned i=0;i<320;++i){reference[i]=static_cast<std::int16_t>((i+frame)%40*100-2000);capture[i]=reference[i]/3;}
+            if(apm.processRender20ms(reference.data(),320,80)!=aec||!apm.processFrame(capture.data()))return 11;
+        }
+        if(apm.captureCalls()!=300||apm.renderCalls()!=(aec?300u:0u)||apm.referenceUnderruns()!=0)return 12;
+        apm.requestReset();apm.processRender20ms(reference.data(),320,80);
+        if(!apm.processFrame(capture.data())||apm.resets()!=(aec?1u:0u))return 13;
+        if(apm.processRender20ms(reference.data(),319,80))return 14;
+        apm.bypassForTest();auto raw=capture;
+        if(apm.processRender20ms(reference.data(),320,80)||apm.processFrame(capture.data())||capture!=raw)return 15;
+    }
     for (int generation = 0; generation != 12; ++generation) {
         peerchat::VoiceApmCapture apm;
         const bool ns = (generation & 1) != 0;

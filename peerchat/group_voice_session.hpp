@@ -9,8 +9,9 @@ class IVoiceAudioDevice {
 public:
     using Capture=std::function<void(const std::vector<unsigned char>&)>;
     using Playout=std::function<bool(std::int16_t*,std::size_t)>;
+    using Render=Audio::RenderReference;
     virtual ~IVoiceAudioDevice()=default;
-    virtual bool start(int input,int output,float inputGain,float outputGain,Capture,Playout,std::wstring& error)=0;
+    virtual bool start(int input,int output,float inputGain,float outputGain,Capture,Playout,Render,std::wstring& error)=0;
     virtual bool mute(bool,std::wstring&)=0;
     virtual void stop()=0;
     virtual std::wstring takeError(){return {};}
@@ -39,6 +40,9 @@ public:
     struct Snapshot {
         VoiceRoomBinding binding;
         bool active=false,muted=false,deafened=false,apmActive=false;
+        bool aecEnabled=false,referenceActive=false;
+        std::uint64_t renderBlocks=0,referenceUnderruns=0,aecResets=0;
+        unsigned aecDelayMs=0;
         std::uint64_t encodedPackets=0,fanoutCopies=0,captureBlocks=0;
         unsigned apmFailure=0;
         VoiceReceiveEngine::Snapshot receive;

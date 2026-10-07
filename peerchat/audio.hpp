@@ -11,8 +11,8 @@
 namespace peerchat {
 
 // Windows default audio devices. Frames are exactly 20 ms of signed 16-bit,
-// little-endian, mono PCM at 16 kHz (640 bytes). Use headphones: this prototype
-// does not implement acoustic echo cancellation or noise suppression.
+// little-endian, mono PCM at 16 kHz (640 bytes). Capture DSP belongs to the
+// media generation; the render observer sees only actual far-end playout.
 class Audio {
 public:
     struct Device { int id; std::wstring name; };
@@ -39,6 +39,10 @@ public:
     // Optional device-paced receive path. Install before start and do not change
     // it while running. With no provider, accepted 1:1 mixing is unchanged.
     bool setPlayoutHandler(std::function<bool(std::int16_t*,std::size_t)> handler);
+    using RenderReference=std::function<void(const std::int16_t*,std::size_t,unsigned)>;
+    // Install before start. Runs on the same bounded device worker as capture,
+    // after final mixing/output gain and successful waveOut submission.
+    bool setRenderReference(RenderReference handler);
     std::wstring takeError();
     std::wstring diagnostics();
     MediaTelemetry telemetry();

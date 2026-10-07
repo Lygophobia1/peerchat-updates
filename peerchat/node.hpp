@@ -131,7 +131,7 @@ public:
     bool setVoiceVolumes(int inputPercent, int outputPercent);
     bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain,
                             std::uint32_t noiseSuppressionStrength,
-                            std::uint32_t automaticGainStrength);
+                            std::uint32_t automaticGainStrength, bool echoCancellation=false);
     bool setMediaIceConfiguration(MediaIceConfiguration configuration);
     bool setScreenShareBackend(screen::Backend backend);
     std::wstring voiceDiagnostics();

@@ -22,6 +22,7 @@ public:
         bool enabled = true;
         bool noiseSuppression = true;
         bool automaticGain = true;
+        bool echoCancellation = false;
         NoiseSuppressionStrength noiseSuppressionStrength = NoiseSuppressionStrength::Medium;
         AutomaticGainStrength automaticGainStrength = AutomaticGainStrength::Balanced;
     };

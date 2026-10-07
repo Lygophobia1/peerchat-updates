@@ -77,6 +77,7 @@ int main(){
         if(cycle==1)processing.enabled=false;
         if(cycle==2)processing.automaticGain=false;
         if(cycle==3)processing.noiseSuppression=false;
+        processing.echoCancellation=cycle==2||cycle==3;
         processing.noiseSuppressionStrength=static_cast<peerchat::NoiseSuppressionStrength>(cycle%3);
         processing.automaticGainStrength=static_cast<peerchat::AutomaticGainStrength>((cycle+2)%3);
         peerchat::VoiceMedia::ReceiveBinding callerBinding{std::string(64,'b'),std::string(32,'c'),static_cast<std::uint64_t>(cycle+1),1};
@@ -111,10 +112,11 @@ int main(){
         for(const auto& value:{a,b})require(value.find(L"receive_authorized_sources=1")!=std::wstring::npos&&value.find(L"receive_active_sources=1")!=std::wstring::npos&&value.find(L"receive_source_generation=1")!=std::wstring::npos&&value.find(L"receive_pcm_sample_rate=16000")!=std::wstring::npos&&value.find(L"receive_pcm_channels=1")!=std::wstring::npos&&value.find(L"receive_rtp_clock_rate=48000")!=std::wstring::npos&&countAtLeast(value,L"neteq_packets_inserted=",12),"Incoming RTP did not reach exactly one generation-bound 16 kHz NetEq source with the 48 kHz RTP clock");
         std::wcerr<<L"Caller diagnostics:\n"<<a<<L"\nAnswerer diagnostics:\n"<<b<<L'\n';
         require(countAtLeast(a,L"capture_frames=",12)&&countAtLeast(a,L"encoded_frames=",12)&&countAtLeast(a,L"opus_submitted=",12),"Caller did not capture/encode/submit injected PCM");
-        require(a.find(L"aec_enabled=false")!=std::wstring::npos,"Echo cancellation must stay disabled");
+        require(a.find(processing.echoCancellation?L"aec_enabled=true":L"aec_enabled=false")!=std::wstring::npos,"AEC generation setting mismatch");
+        if(processing.echoCancellation)require(countAtLeast(a,L"aec_render_blocks=",2),"Final device playout never reached AEC render input");
         const auto nsName=peerchat::noiseSuppressionStrengthName(processing.noiseSuppressionStrength);
         const auto gainName=peerchat::automaticGainStrengthName(processing.automaticGainStrength);
-        require(a.find(L"input_volume=100")!=std::wstring::npos&&a.find(L"output_volume=100")!=std::wstring::npos&&a.find(L"aec_enabled=false")!=std::wstring::npos&&a.find(L"codec=Opus 16 kHz mono, 20 ms frames")!=std::wstring::npos,"Voice diagnostics changed volume, AEC or 20 ms Opus packet configuration");
+        require(a.find(L"input_volume=100")!=std::wstring::npos&&a.find(L"output_volume=100")!=std::wstring::npos&&a.find(L"codec=Opus 16 kHz mono, 20 ms frames")!=std::wstring::npos,"Voice diagnostics changed volume or 20 ms Opus packet configuration");
         // Real device capture may add frames concurrently with the 12 injected
         // frames. Exact two-block cadence is tested in voice_apm_capture_test.
         if(processing.enabled)require(countAtLeast(a,L"apm_capture_10ms_calls=",24)&&countAtLeast(a,L"apm_processed_20ms_frames=",12)&&a.find(L"apm_enabled=true")!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_enabled=")+(processing.noiseSuppression?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"noise_suppression_strength=")+nsName)!=std::wstring::npos&&a.find(std::wstring(L"agc_enabled=")+(processing.automaticGain?L"true":L"false"))!=std::wstring::npos&&a.find(std::wstring(L"agc_strength=")+gainName)!=std::wstring::npos&&countAtLeast(a,L"apm_level_frames=",12),"Capture-side APM configuration or cadence did not match requested generation options");

@@ -34,24 +34,24 @@ class VoiceSettingsUiTest {
                     var voice=Find<Button>(settings,"Settings navigation Voice");Require(voice!=null,"Voice navigation missing");
                     voice.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));settings.UpdateLayout();
                     var ns=Find<CheckBox>(settings,"Noise Suppression enabled");var agc=Find<CheckBox>(settings,"Automatic Gain Control enabled");
-                    var nsStrength=Find<ComboBox>(settings,"Noise Suppression strength");var agcStrength=Find<ComboBox>(settings,"Automatic Gain Control strength");
-                    var master=Find<CheckBox>(settings,"Enable Audio Processing");var aec=Find<CheckBox>(settings,"Echo Cancellation unavailable");
+                    var nsStrength=Find<ListBox>(settings,"Noise Suppression strength");var agcStrength=Find<ListBox>(settings,"Automatic Gain Control strength");
+                    var master=Find<CheckBox>(settings,"Enable Audio Processing");var aec=Find<CheckBox>(settings,"Echo Cancellation enabled");
                     Require(ns!=null&&agc!=null&&nsStrength!=null&&agcStrength!=null&&master!=null,"Switches or discrete strength choices missing");
                     Require(String.Join("|",nsStrength.Items.Cast<string>())=="Low|Balanced|High"&&String.Join("|",agcStrength.Items.Cast<string>())=="Gentle|Balanced|Strong","Wrong friendly choices");
                     Require(ns.Template.FindName("SwitchThumb",ns)!=null&&agc.Template.FindName("SwitchThumb",agc)!=null,"On/Off switch presentation missing");
-                    Require(aec!=null&&!aec.IsEnabled&&aec.IsChecked==false,"AEC became available");
+                    Require(aec!=null&&aec.IsEnabled,"AEC switch unavailable");
                     if(visits==0){
-                        nsStrength.SelectedIndex=2;agcStrength.SelectedIndex=0;
+                        nsStrength.SelectedIndex=2;agcStrength.SelectedIndex=0;aec.IsChecked=true;
                         ns.IsChecked=false;agc.IsChecked=false;settings.UpdateLayout();
                         Require(!nsStrength.IsEnabled&&!agcStrength.IsEnabled&&nsStrength.Opacity<1&&agcStrength.Opacity<1,"OFF strengths were not disabled/grayed");
                         Require(nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"OFF discarded strength");
                         Require(((TextBlock)ns.Template.FindName("SwitchState",ns)).Text=="OFF","OFF switch text incorrect");
                     } else {
-                        Require(ns.IsChecked==false&&agc.IsChecked==false&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"Reopening lost saved OFF strengths");
+                        Require(aec.IsChecked==true,"AEC preference did not persist");Require(ns.IsChecked==false&&agc.IsChecked==false&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"Reopening lost saved OFF strengths");
                         ns.IsChecked=true;agc.IsChecked=true;settings.UpdateLayout();
                         Require(nsStrength.IsEnabled&&agcStrength.IsEnabled&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"ON did not restore saved strength");
                         Require(((TextBlock)ns.Template.FindName("SwitchState",ns)).Text=="ON","ON switch text incorrect");
-                        master.IsChecked=false;Require(!ns.IsEnabled&&!agc.IsEnabled&&!nsStrength.IsEnabled&&!agcStrength.IsEnabled,"Master OFF did not disable processing controls");
+                        master.IsChecked=false;Require(!ns.IsEnabled&&!agc.IsEnabled&&!aec.IsEnabled&&!nsStrength.IsEnabled&&!agcStrength.IsEnabled,"Master OFF did not disable processing controls");
                         master.IsChecked=true;Require(nsStrength.IsEnabled&&agcStrength.IsEnabled,"Master ON did not restore controls");
                         result=0;
                     }
@@ -63,7 +63,7 @@ class VoiceSettingsUiTest {
             window.Close();
         };
         app.Run(window);
-        if(result==0)Console.WriteLine("PASS: actual Voice settings switches, discrete presets, OFF gray/disable, saved strength, reopen/re-enable, master toggle, and unavailable AEC.");
+        if(result==0)Console.WriteLine("PASS: actual Voice settings switches, discrete presets, OFF gray/disable, saved strength, reopen/re-enable, master toggle, and persisted AEC switch.");
         return result;
     }
 }

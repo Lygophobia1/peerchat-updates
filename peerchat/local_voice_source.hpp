@@ -24,7 +24,7 @@ public:
         if(opus_encoder_ctl(encoder_,OPUS_SET_BITRATE(24000))!=OPUS_OK||
             opus_encoder_ctl(encoder_,OPUS_SET_COMPLEXITY(5))!=OPUS_OK||
             opus_encoder_ctl(encoder_,OPUS_SET_INBAND_FEC(1))!=OPUS_OK){close();return false;}
-        if(options_.enabled)apm_.open(options_.noiseSuppression,options_.automaticGain,options_.noiseSuppressionStrength,options_.automaticGainStrength);
+        if(options_.enabled)apm_.open(options_.noiseSuppression,options_.automaticGain,options_.noiseSuppressionStrength,options_.automaticGainStrength,options_.echoCancellation);
         muted_=false;frames_=0;encoded_=0;timestamp_=0;return true;
     }
     // Lifecycle is serialized by the session/device owner. Only the capture
@@ -40,7 +40,9 @@ public:
         if(size<=0||muted_)return false;
         packet.size=size;++encoded_;return true;
     }
-    void setMuted(bool value){muted_=value;}
+    void setMuted(bool value){if(muted_.exchange(value)!=value)apm_.requestReset();}
+    void render20ms(const std::int16_t* pcm,std::size_t samples,unsigned delay){apm_.processRender20ms(pcm,samples,delay);}
+    void resetReference(){apm_.requestReset();}
     void close(){if(encoder_)opus_encoder_destroy(encoder_);encoder_=nullptr;apm_.close();}
     std::uint64_t captureFrames()const{return frames_;}
     std::uint64_t encodedPackets()const{return encoded_;}

@@ -19,6 +19,7 @@ public sealed class VoicePreferenceData {
     public string InputDeviceName="Windows default microphone",OutputDeviceName="Windows default output";
     public int InputVolume=100,OutputVolume=100;
     public bool AudioProcessingEnabled=true,NoiseSuppressionEnabled=true,AutomaticGainEnabled=true;
+    public bool EchoCancellationEnabled=false; // Existing profiles retain their prior processing behavior.
     public int NoiseSuppressionStrength=1,AutomaticGainStrength=1;
 }
 

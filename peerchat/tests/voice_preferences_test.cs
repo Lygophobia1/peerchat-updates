@@ -22,11 +22,11 @@ static class VoicePreferencesTest {
             Require(String.Join("|",VoiceProcessingPresets.NoiseSuppressionNames)=="Low|Balanced|High"&&String.Join("|",VoiceProcessingPresets.AutomaticGainNames)=="Gentle|Balanced|Strong","Friendly strength choices changed");
             defaults.NoiseSuppressionEnabled=false;defaults.NoiseSuppressionStrength=2;
             defaults.AutomaticGainEnabled=false;defaults.AutomaticGainStrength=0;
-            defaults.InputVolume=73;defaults.OutputVolume=125;
+            defaults.InputVolume=73;defaults.OutputVolume=125;defaults.EchoCancellationEnabled=true;
             storeA.Save(defaults);
             var loaded=new VoicePreferenceStore(profileA,identity,identity).Load();
             Require(!loaded.NoiseSuppressionEnabled&&loaded.NoiseSuppressionStrength==2&&!loaded.AutomaticGainEnabled&&loaded.AutomaticGainStrength==0,"Independent NS/AGC toggles or presets did not persist");
-            Require(loaded.InputVolume==73&&loaded.OutputVolume==125,"Existing input/output volume preferences changed");
+            Require(loaded.EchoCancellationEnabled,"AEC preference did not persist");Require(loaded.InputVolume==73&&loaded.OutputVolume==125,"Existing input/output volume preferences changed");
             loaded.NoiseSuppressionEnabled=true;loaded.AutomaticGainEnabled=true;storeA.Save(loaded);
             var restored=storeA.Load();
             Require(restored.NoiseSuppressionEnabled&&restored.NoiseSuppressionStrength==2&&restored.AutomaticGainEnabled&&restored.AutomaticGainStrength==0,"Re-enabling discarded the saved strength");
@@ -40,7 +40,7 @@ static class VoicePreferencesTest {
             var older=new {Version=1,InputDeviceId=-1,OutputDeviceId=-1,InputDeviceName="Windows default microphone",OutputDeviceName="Windows default output",InputVolume=100,OutputVolume=100,AudioProcessingEnabled=true,NoiseSuppressionEnabled=true,AutomaticGainEnabled=true};
             File.WriteAllBytes(Path.Combine(profileB,"voice-preferences.dat"),Encoding.UTF8.GetBytes(json.Serialize(older)));
             var upgraded=storeB.Load();
-            Require(upgraded.NoiseSuppressionStrength==1&&upgraded.AutomaticGainStrength==1,"Existing profile without preset fields did not receive Balanced/Balanced defaults");
+            Require(!upgraded.EchoCancellationEnabled,"Upgrade changed prior AEC-disabled behavior");Require(upgraded.NoiseSuppressionStrength==1&&upgraded.AutomaticGainStrength==1,"Existing profile without preset fields did not receive Balanced/Balanced defaults");
             Console.WriteLine("PASS: voice preset defaults, profile-local persistence, independent NS/AGC toggles, legacy defaults, and volume preservation.");
             return 0;
         } catch(Exception error){Console.Error.WriteLine("FAIL: "+error);return 1;}

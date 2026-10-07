@@ -15,6 +15,7 @@ namespace fake {
 HANDLE eventHandle;
 std::vector<WAVEHDR*> headers;
 bool failOpen=false,failStart=false;
+bool renderTest=false;unsigned outputWrites=0;
 std::atomic<int> inputs{0},outputs{0},invalidQueues{0};
 UINT count(){return 1;}
 MMRESULT caps(UINT_PTR,WAVEINCAPSW* caps,UINT){*caps={};lstrcpyW(caps->szPname,L"Test Hands-Free");return 0;}
@@ -28,7 +29,7 @@ MMRESULT unprepareIn(HWAVEIN,WAVEHDR* header,UINT){header->dwFlags=0;return 0;}
 MMRESULT closeIn(HWAVEIN){--inputs;headers.clear();return 0;}
 MMRESULT openOut(LPHWAVEOUT handle,UINT,LPCWAVEFORMATEX,DWORD_PTR,DWORD_PTR,DWORD){*handle=reinterpret_cast<HWAVEOUT>(2);++outputs;return 0;}
 MMRESULT prepareOut(HWAVEOUT,WAVEHDR* header,UINT){header->dwFlags=WHDR_PREPARED;return 0;}
-MMRESULT write(HWAVEOUT,WAVEHDR* header,UINT){header->dwFlags=WHDR_PREPARED|WHDR_INQUEUE;return 0;}
+MMRESULT write(HWAVEOUT,WAVEHDR* header,UINT){++outputWrites;header->dwFlags=WHDR_PREPARED|WHDR_INQUEUE;if(renderTest&&outputWrites<=3)header->dwFlags|=WHDR_DONE;return 0;}
 MMRESULT resetOut(HWAVEOUT){return 0;}
 MMRESULT unprepareOut(HWAVEOUT,WAVEHDR* header,UINT){header->dwFlags=0;return 0;}
 MMRESULT closeOut(HWAVEOUT){--outputs;return 0;}
@@ -79,6 +80,21 @@ int main(){try{
     fake::failOpen=false;fake::failStart=true;
     require(audio.start(error)&&!error.empty()&&fake::inputs==0&&fake::outputs==1,"Capture-start failure leaked input or lost playback");audio.stop();
     require(fake::inputs==0&&fake::outputs==0,"Failure teardown leaked devices");
+    fake::failStart=false;fake::renderTest=true;fake::outputWrites=0;
+    peerchat::Audio referenced;std::atomic<unsigned> references{0},badReference{0};
+    referenced.setDevices(0,0);referenced.setVolumes(1.0f,0.5f);
+    require(referenced.setPlayoutHandler([](std::int16_t* pcm,std::size_t n){std::fill(pcm,pcm+n,2000);return true;}),"Playout install failed");
+    require(referenced.setRenderReference([&](const std::int16_t* pcm,std::size_t n,unsigned delay){
+        if(n!=320||delay<20||delay>160)++badReference;
+        for(std::size_t i=0;i<n;++i)if(pcm[i]!=1000)++badReference;
+        ++references;
+    }),"Render reference install failed");
+    require(referenced.start(error),"Reference device failed to start");
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(references<3&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    require(references==3&&badReference==0,"Reference did not contain exactly final gain-adjusted remote playout");
+    require(!referenced.setRenderReference({}),"Active device allowed mid-generation callback replacement");
+    referenced.stop();require(references==3,"Render reference escaped worker teardown");
     std::cout<<"PASS: three device sessions, callback mute, buffer generation, open/start failures, receive-only playback and handle cleanup.\n";
     return 0;
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

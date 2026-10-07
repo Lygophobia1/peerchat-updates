@@ -4,9 +4,9 @@ namespace {
 class WindowsVoiceAudioDevice final:public IVoiceAudioDevice {
     Audio audio_;
 public:
-    bool start(int input,int output,float inputGain,float outputGain,Capture capture,Playout playout,std::wstring& error)override{
+    bool start(int input,int output,float inputGain,float outputGain,Capture capture,Playout playout,Render render,std::wstring& error)override{
         audio_.setDevices(input,output);audio_.setVolumes(inputGain,outputGain);audio_.setCaptureHandler(std::move(capture));
-        return audio_.setPlayoutHandler(std::move(playout))&&audio_.start(error);
+        return audio_.setRenderReference(std::move(render))&&audio_.setPlayoutHandler(std::move(playout))&&audio_.start(error);
     }
     bool mute(bool value,std::wstring& error)override{return audio_.setMuted(value,error);}
     void stop()override{audio_.stop();}
@@ -29,7 +29,8 @@ bool GroupVoiceSession::start(VoiceRoomBinding binding,MediaIceConfiguration ice
         if(!active_||muted_)return;
         LocalVoiceSource::Packet packet;
         if(source_.process20ms(pcm.data(),pcm.size(),packet)&&active_&&!muted_)copies_+=topology_->sendEncoded(packet);
-    },[this,receive](std::int16_t* pcm,std::size_t samples){return active_&&receive->pull20ms(pcm,samples,deafened_);},error)){
+    },[this,receive](std::int16_t* pcm,std::size_t samples){return active_&&receive->pull20ms(pcm,samples,deafened_);},
+    [this](const std::int16_t* pcm,std::size_t samples,unsigned delay){if(active_)source_.render20ms(pcm,samples,delay);},error)){
         error_=error;stop();return false;
     }
     error_=error;return true;
@@ -51,7 +52,7 @@ bool GroupVoiceSession::mute(bool value,std::wstring& error){
     if(!active_)return false;
     bool result=device_->mute(value,error);if(!result){muted_=true;source_.setMuted(true);error_=error;}return result;
 }
-void GroupVoiceSession::deafen(bool value){deafened_=value;}
+void GroupVoiceSession::deafen(bool value){if(deafened_.exchange(value)!=value)source_.resetReference();}
 void GroupVoiceSession::stop(){
     active_=false;if(device_)device_->stop();if(topology_)topology_->stop();
     if(receive_)receive_->close();
@@ -60,6 +61,9 @@ void GroupVoiceSession::stop(){
 GroupVoiceSession::Snapshot GroupVoiceSession::snapshot(){
     if(active_){auto error=device_->takeError();if(!error.empty())error_=std::move(error);}
     Snapshot result;result.binding=binding_;result.active=active_;result.muted=muted_;result.deafened=deafened_;
+    const auto& apm=source_.processing();
+    result.aecEnabled=apm.echoCancellation();result.referenceActive=apm.referenceActive();
+    result.renderBlocks=apm.renderCalls();result.referenceUnderruns=apm.referenceUnderruns();result.aecResets=apm.resets();result.aecDelayMs=apm.delayMs();
     result.encodedPackets=source_.encodedPackets();result.fanoutCopies=copies_;result.captureBlocks=source_.processing().captureCalls();result.apmActive=source_.processing().active();result.apmFailure=source_.processing().failure();result.error=error_;
     if(receive_)result.receive=receive_->snapshot();
     if(active_)result.routes=topology_->snapshot();

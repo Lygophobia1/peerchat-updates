@@ -260,6 +260,7 @@ struct Audio::Impl {
     std::deque<audio_detail::Frame> captured;
     std::function<void(const std::vector<unsigned char>&)> captureHandler;
     std::function<bool(std::int16_t*,std::size_t)> playoutHandler;
+    Audio::RenderReference renderReference;
     std::wstring pendingError;
     std::wstring captureDiagnostics = L"capture_waveinopen_mmresult=not attempted";
     std::wstring captureStage = L"idle", playbackDiagnostics;
@@ -391,6 +392,25 @@ struct Audio::Impl {
                     started = false;
                     return;
                 }
+                if(renderReference){
+                    std::array<std::int16_t,320> reference{};
+                    for(std::size_t i=0;i<reference.size();++i)
+                        reference[i]=static_cast<std::int16_t>(buffer.data[2*i]|(unsigned(buffer.data[2*i+1])<<8));
+                    unsigned queued=0;
+                    for(const auto& pending:outputBuffers)
+                        if((pending.header.dwFlags&WHDR_INQUEUE)&&!(pending.header.dwFlags&WHDR_DONE))++queued;
+                    // WinMM has no hardware presentation timestamp. Include
+                    // bounded queued playout plus one capture frame; capture
+                    // backlog contributes an additional 20 ms per completed buffer.
+                    unsigned captured=0;
+                    for(const auto& pending:inputBuffers)
+                        if(pending.header.dwFlags&WHDR_DONE)++captured;
+                    const unsigned delay=20*(queued+1+captured);
+                    lock.unlock();
+                    renderReference(reference.data(),reference.size(),delay);
+                    lock.lock();
+                    if(!started)return;
+                }
                 nextOutput = (nextOutput + 1) % outputBuffers.size();
             }
         }
@@ -399,6 +419,11 @@ struct Audio::Impl {
 
 Audio::Audio() : impl_(std::make_unique<Impl>()) {}
 Audio::~Audio() { stop(); }
+bool Audio::setRenderReference(RenderReference handler){
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if(impl_->started||impl_->worker.joinable())return false;
+    impl_->renderReference=std::move(handler);return true;
+}
 bool Audio::setPlayoutHandler(std::function<bool(std::int16_t*,std::size_t)> handler){
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if(impl_->started||impl_->worker.joinable())return false;
