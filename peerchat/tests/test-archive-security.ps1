@@ -1,4 +1,4 @@
-param([switch]$Provenance,[switch]$ServerMetadata,[switch]$SessionScope,[switch]$PeerTls)
+param([switch]$Provenance,[switch]$ServerMetadata,[switch]$SessionScope,[switch]$PeerTls,[switch]$HistoryStorage)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $out=Join-Path $root ('build\tests\archive-security-'+[Guid]::NewGuid().ToString('N'))
@@ -6,6 +6,12 @@ New-Item -ItemType Directory -Path $out|Out-Null
 $compiler=if(Get-Command g++ -ErrorAction SilentlyContinue){(Get-Command g++).Source}else{'C:\TDM-GCC-64\bin\g++.exe'}
 Push-Location $root
 try {
+    if($HistoryStorage){
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_history_storage_test.cpp group.cpp -o "$out\archive-history-storage-test.exe" -lbcrypt -lcrypt32 -lncrypt
+        if($LASTEXITCODE -ne 0){throw 'Archive history storage compilation failed'}
+        & "$out\archive-history-storage-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Archive history storage regression failed'}
+    }
     if($PeerTls){
         & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_reliable_endpoint_test.cpp tls.cpp storage.cpp group.cpp -o "$out\archive-peer-tls-test.exe" -lbcrypt -lcrypt32 -lncrypt -lsecur32
         if($LASTEXITCODE -ne 0){throw 'Archive peer TLS compilation failed'}

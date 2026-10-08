@@ -220,6 +220,12 @@ struct Storage::Impl {
             execute("CREATE TABLE IF NOT EXISTS objects(k TEXT PRIMARY KEY,b BLOB NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS messages(id TEXT UNIQUE NOT NULL,peer TEXT NOT NULL,b BLOB NOT NULL);"
                     "CREATE INDEX IF NOT EXISTS conversation_index ON messages(peer);");
+            // Cursor metadata only. AUTOINCREMENT never reuses a deleted history
+            // position; the ordinary rowid/UI history semantics remain unchanged.
+            execute("CREATE TABLE IF NOT EXISTS message_archive_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT UNIQUE NOT NULL);"
+                    "CREATE TRIGGER IF NOT EXISTS message_archive_insert AFTER INSERT ON messages BEGIN INSERT INTO message_archive_index(message_id) VALUES(NEW.id); END;"
+                    "CREATE TRIGGER IF NOT EXISTS message_archive_delete AFTER DELETE ON messages BEGIN DELETE FROM message_archive_index WHERE message_id=OLD.id; END;"
+                    "INSERT INTO message_archive_index(message_id) SELECT m.id FROM messages m WHERE NOT EXISTS(SELECT 1 FROM message_archive_index a WHERE a.message_id=m.id) ORDER BY m.rowid;");
             execute("CREATE TABLE IF NOT EXISTS group_message_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,server_group TEXT NOT NULL,local_group TEXT NOT NULL,message_id TEXT NOT NULL,UNIQUE(server_group,message_id));"
                     "CREATE INDEX IF NOT EXISTS group_message_history ON group_message_index(local_group,sequence);");
             // Separate outbox index contains identifiers only, never message text.
@@ -357,6 +363,72 @@ std::optional<StoredMessage> Storage::message(const std::string& id){
     auto peer=query.text(0);Secret plain{impl_->protect(query.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};
     auto message=decodeMessage(plain.data);require(message.id==id,"Stored message ID mismatch");return message;
 }
+bool Storage::appendArchiveHistory(const std::string& conversation,const StoredMessage& original,
+                                  const Blob& assertion,bool recipientAlias){
+    require(identifier(conversation)&&identifier(original.id,32)&&identifier(original.sender)&&identifier(original.recipient)&&
+        original.sender!=original.recipient&&(conversation==original.sender||conversation==original.recipient)&&
+        !original.text.empty()&&unicode::utf16Units(original.text)<=16384&&!assertion.empty()&&assertion.size()<=70000,
+        "Invalid verified archive record");
+    Transaction transaction(impl_->sql);
+    auto existing=message(original.id);
+    if(existing){
+        require(existing->sender==original.sender&&(existing->recipient==original.recipient||recipientAlias)&&
+            existing->text==original.text&&existing->utcMilliseconds==original.utcMilliseconds&&
+            existing->logicalOrder==original.logicalOrder,"Conflicting archived logical message");
+        // Preserve the first durable body and real local ACK/outbox state.
+        if(impl_->get("archive-history-proof/"+original.id).empty())impl_->put("archive-history-proof/"+original.id,assertion);
+        transaction.commit();return false;
+    }
+    auto imported=original;imported.delivery=Delivery::Sent; // Not a fabricated recipient ACK.
+    Writer plain;encodeMessage(plain,imported);
+    auto encrypted=impl_->protect(plain.data,"PeerChat.v1/message/"+original.id+"/"+conversation,true);
+    Statement insert(impl_->sql,"INSERT INTO messages(id,peer,b) VALUES(?,?,?)");
+    insert.text(1,original.id);insert.text(2,conversation);insert.blob(3,encrypted);insert.row();
+    impl_->put("archive-history-proof/"+original.id,assertion);
+    // Intentionally no outbox or mailbox upload: this is accepted history only.
+    transaction.commit();return true;
+}
+Blob Storage::archiveHistoryProof(const std::string& id){
+    require(identifier(id,32),"Invalid archive message identity");return impl_->get("archive-history-proof/"+id);
+}
+Blob Storage::archiveSyncState(const std::string& context){
+    require(identifier(context),"Invalid archive sync context");return impl_->get("archive-sync/"+context);
+}
+void Storage::saveArchiveSyncState(const std::string& context,const Blob& expected,const Blob& next){
+    require(identifier(context)&&!next.empty()&&next.size()<=4096,"Invalid archive sync state");
+    Transaction transaction(impl_->sql);
+    require(impl_->get("archive-sync/"+context)==expected,"Archive sync changed concurrently");
+    impl_->put("archive-sync/"+context,next);transaction.commit();
+}
+std::string Storage::archiveStoreId(){
+    Transaction transaction(impl_->sql);auto saved=impl_->get("archive-store-id/v1");
+    if(saved.empty()){auto id=newMessageId();saved.assign(id.begin(),id.end());impl_->put("archive-store-id/v1",saved);}
+    std::string id(saved.begin(),saved.end());require(identifier(id,32),"Invalid archive store identity");transaction.commit();return id;
+}
+std::int64_t Storage::archiveHistoryWatermark(){
+    Statement query(impl_->sql,"SELECT seq FROM sqlite_sequence WHERE name='message_archive_index'");
+    if(!query.row())return 0;
+    auto value=query.number(0);require(value>=0,"Invalid archive high watermark");return value;
+}
+ArchiveHistoryPage Storage::archiveHistoryPage(const std::string& conversation,std::int64_t after,
+                                              std::int64_t through,int limit,size_t maximumBytes){
+    require(identifier(conversation)&&after>=0&&through>=after&&through<=archiveHistoryWatermark()&&
+        limit>0&&limit<=16&&maximumBytes>=128*1024&&maximumBytes<=512*1024,"Invalid archive cursor/page bounds");
+    ArchiveHistoryPage page;page.nextCursor=after;page.throughCursor=through;size_t bytes=0;
+    Statement query(impl_->sql,"SELECT a.sequence,m.id,m.b FROM message_archive_index a JOIN messages m ON m.id=a.message_id WHERE m.peer=? AND a.sequence>? AND a.sequence<=? ORDER BY a.sequence LIMIT ?");
+    query.text(1,conversation);query.number(2,after);query.number(3,through);query.number(4,limit);
+    while(query.row()){
+        auto id=query.text(1);Secret plain{impl_->protect(query.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};
+        require(plain.data.size()<=maximumBytes,"Archive record exceeds page budget");
+        if(bytes>maximumBytes-plain.data.size())break;
+        auto m=decodeMessage(plain.data);require(m.id==id,"Stored archive message identity mismatch");
+        bytes+=plain.data.size();page.nextCursor=query.number(0);page.cursors.push_back(page.nextCursor);page.messages.push_back(std::move(m));
+    }
+    Statement more(impl_->sql,"SELECT 1 FROM message_archive_index a JOIN messages m ON m.id=a.message_id WHERE m.peer=? AND a.sequence>? AND a.sequence<=? LIMIT 1");
+    more.text(1,conversation);more.number(2,page.nextCursor);more.number(3,through);page.complete=!more.row();
+    if(page.complete)page.nextCursor=through;
+    return page;
+}
 void Storage::acknowledge(const std::string& id,Delivery delivery) {
     require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=3,"Invalid delivery acknowledgement");
     Transaction transaction(impl_->sql);
@@ -446,7 +518,7 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
 void Storage::eraseHistory(const std::string& conversation) {
     require(identifier(conversation),"Invalid conversation identity");
     Transaction transaction(impl_->sql);
-    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%'))");
+    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%' OR objects.k='archive-history-proof/'||m.id))");
     mailboxRecords.text(1,conversation);mailboxRecords.row();
     Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE peer=?");removeOutbox.text(1,conversation);removeOutbox.row();
     Statement removeMessages(impl_->sql,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();

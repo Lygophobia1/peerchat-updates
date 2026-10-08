@@ -191,7 +191,7 @@ inline protocol::Writer textPacket(const StoredMessage& message,bool logicalOrde
 inline TextReceipt receiveText(protocol::Reader& reader,bool logicalOrdering,
                                const std::string& authenticatedSource,
                                const Profile& local,Storage& storage,
-                               delivery::DeliveryManager& deliveries) {
+                               delivery::DeliveryManager& deliveries,std::uint64_t authenticatedLocalAccount=0) {
     protocol::check(reader.type()==protocol::Text);
     StoredMessage message;
     message.id=reader.string();
@@ -208,7 +208,7 @@ inline TextReceipt receiveText(protocol::Reader& reader,bool logicalOrdering,
     // Storage still compares identity, timestamp and content exactly.
     if(!logicalOrdering){auto existing=storage.message(message.id);if(existing)message.logicalOrder=existing->logicalOrder;}
     storage.observeLogicalOrder(message.logicalOrder);
-    receipt.inserted=deliveries.acceptIncomingMessage(authenticatedSource,message);
+    receipt.inserted=deliveries.acceptIncomingMessage(authenticatedSource,message,authenticatedLocalAccount);
     receipt.message=std::move(message);
     return receipt;
 }

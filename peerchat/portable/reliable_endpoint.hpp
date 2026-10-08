@@ -3,6 +3,7 @@
 #include "../session_transport_manager.hpp"
 #include "../direct_transport_adapter.hpp"
 #include "../archive_session.hpp"
+#include "../archive_history.hpp"
 #include <deque>
 
 namespace peerchat::portable {
@@ -15,6 +16,9 @@ public:
     struct ArchiveAdmission {
         archive::Authorization* policy=nullptr; // Existing profile owner outlives endpoint.
         session::ReliableAuthorization scope;
+        // Called on the existing worker; the profile/controller owner outlives
+        // this endpoint. Empty response is permitted for a consumed page.
+        std::function<Blob(const Blob&)> control{};
     };
 private:
     const Profile& local_;
@@ -106,13 +110,19 @@ private:
         }
         runtime_.requireOnline(sessions_.active(id_));
         if(archive_){
-            protocol::check(authorized()&&!archiveBound_);
-            archive::verifySessionBinding(reader,archive_->scope);
-            archiveBound_=true;event({EventKind::Ready,runtime_.peerId,{},std::nullopt});return;
+            protocol::check(authorized());
+            if(!archiveBound_){
+                archive::verifySessionBinding(reader,archive_->scope);
+                archiveBound_=true;event({EventKind::Ready,runtime_.peerId,{},std::nullopt});return;
+            }
+            protocol::check(bool(archive_->control));archive::validateHistoryControl(bytes);
+            auto response=archive_->control(bytes);protocol::check(authorized());
+            if(!response.empty())sendArchiveControl(response);
+            return;
         }
         protocol::check(friends_.contains(runtime_.peerId));
         if(reader.type()==protocol::Text){
-            auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_);
+            auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_,friends_.localAccount());
             if(result.message){
                 protocol::Writer ack(protocol::Ack);ack.string(result.messageId);packet(ack);
                 if(result.inserted)event({EventKind::Message,runtime_.peerId,result.messageId,std::move(result.message)});
@@ -143,6 +153,10 @@ public:
     ~ReliableEndpoint(){close(false);}
     bool ready()const{return !closed_&&sessions_.active(id_)&&(!archive_||archiveBound_)&&authorized();}
     bool closed()const noexcept{return closed_;}
+    void sendArchiveControl(const Blob& bytes){
+        protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
+        protocol::Writer value(protocol::ArchiveControl);value.data=bytes;packet(value);
+    }
     bool authenticationExpired(std::uint64_t now)const noexcept{return now>=began_&&now-began_>=20000;}
     const std::string& expected()const noexcept{return runtime_.expected;}
     void receive(const Blob& bytes,std::uint64_t now){

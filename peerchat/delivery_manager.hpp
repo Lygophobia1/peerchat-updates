@@ -4,6 +4,8 @@
 #include "group.hpp"
 #include "mailbox_key_coordinator.hpp"
 #include "portable/utf8.hpp"
+#include "archive_session.hpp"
+#include "archive_provenance.hpp"
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -124,7 +126,7 @@ public:
             StoredMessage message;message.id=envelope.header.messageId;message.sender=envelope.header.senderDevice;message.recipient=localDeviceId_;
             message.text=unicode::decode(std::string(body.utf8.begin(),body.utf8.end()));message.utcMilliseconds=body.messageUtc;
             message.logicalOrder=envelope.header.logicalOrder;message.delivery=Delivery::Delivered;
-            result.inserted=acceptIncomingMessage(verifiedSender.peerId,message);storage_.observeLogicalOrder(message.logicalOrder);
+            result.inserted=acceptIncomingMessage(verifiedSender.peerId,message,localBinding.accountId);storage_.observeLogicalOrder(message.logicalOrder);
             result.receipt=storage_.mailboxReceipt(message.id,verifiedSender.peerId,digest);
             if(result.receipt.empty()) {
                 mailbox::Receipt receipt;receipt.recipientAccount=localBinding.accountId;receipt.recipientDevice=localDeviceId_;
@@ -207,11 +209,26 @@ public:
 
     // Returns false for an identical replay and lets Storage reject conflicting ID reuse.
     bool acceptIncomingMessage(const std::string& authenticatedSource,
-                               const StoredMessage& message) {
+                               const StoredMessage& message,std::uint64_t authenticatedLocalAccount=0) {
         if (authenticatedSource.empty() || message.sender != authenticatedSource ||
             message.recipient != localDeviceId_)
             throw std::runtime_error("Incoming message destination is not authenticated");
         auto previous=storage_.message(message.id);
+        if(previous&&authenticatedLocalAccount){
+            auto proof=storage_.archiveHistoryProof(message.id);
+            if(!proof.empty()){
+                // This protected proof was already verified on archive import.
+                // Revocation prevents future sync, not reading/deduping history
+                // legitimately received earlier. Live TLS/mailbox authentication
+                // above remains mandatory; archived attribution is not a pin.
+                auto a=archive::decodeAssertion(proof);const auto& original=a.original.message;
+                if(a.account==authenticatedLocalAccount&&a.original.recipientAccount==authenticatedLocalAccount&&
+                   a.original.senderAccount!=authenticatedLocalAccount&&original.sender==authenticatedSource&&
+                   previous->sender==authenticatedSource&&original.text==message.text&&previous->text==message.text&&
+                   original.utcMilliseconds==message.utcMilliseconds&&previous->utcMilliseconds==message.utcMilliseconds&&
+                   original.logicalOrder==message.logicalOrder&&previous->logicalOrder==message.logicalOrder)return false;
+            }
+        }
         if(previous&&previous->delivery==Delivery::Delivered&&previous->logicalOrder==0&&message.logicalOrder>0){
             // A previously accepted legacy frame did not carry an order. Keep
             // that already-durable history position on a modern/mailbox retry;
@@ -220,6 +237,28 @@ public:
             return storage_.append(authenticatedSource,compatible);
         }
         return storage_.append(authenticatedSource, message);
+    }
+
+    bool acceptArchiveHistory(const Profile& local,archive::Authorization& policy,
+            const session::ReliableAuthorization& session,const archive::Assertion& assertion,
+            const std::function<std::optional<std::uint64_t>(const std::string&)>& deviceAccount){
+        archive::require(local.peerId==localDeviceId_&&policy.localDevice()==localDeviceId_&&
+            session.archive.reader==localDeviceId_&&session.expectedRemoteDeviceId==assertion.archiveDevice&&
+            assertion.issuer==session.archive.issuer&&archive::currentSessionAuthorization(policy,session));
+        archive::ProvenanceVerifier verifier(policy,storage_,local,policy.account(),deviceAccount);
+        archive::require(verifier.verify(assertion)!=archive::Provenance::OriginalSigned);
+        const auto& original=assertion.original;const auto& m=original.message;
+        auto previous=storage_.message(m.id);bool recipientAlias=false;
+        if(previous){
+            auto sender=deviceAccount(previous->sender),recipient=deviceAccount(previous->recipient);
+            archive::require(sender&&recipient&&*sender==original.senderAccount&&*recipient==original.recipientAccount);
+            recipientAlias=previous->recipient!=m.recipient;
+        }
+        const auto conversation=original.senderAccount==policy.account()?m.recipient:m.sender;
+        // Recheck immediately before the commit; no live/DM transport authority
+        // or recipient ACK is created by an archive assertion.
+        archive::require(archive::currentSessionAuthorization(policy,session));
+        return storage_.appendArchiveHistory(conversation,m,archive::encodeAssertion(assertion),recipientAlias);
     }
 
     std::size_t inFlightCount(session::TransportInstanceId instance) const {

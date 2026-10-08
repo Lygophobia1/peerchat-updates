@@ -52,6 +52,32 @@ int main(){try{
         check(a.contacts().empty()&&b.contacts().empty()&&!as.snapshot(reader.peerId)->connected);
     }
     check(ready==20);
+    // Real peer TLS carries bounded history without friendship, contact pins,
+    // a second session owner, or a DM delivery authorization.
+    Storage friendStore((root/L"friend").wstring());auto contact=friendStore.profile();
+    auto directory=[&](const std::string& peer)->std::optional<std::uint64_t>{
+        if(peer==contact.peerId)return 9;
+        if(members.count(peer))return 8;
+        return {};
+    };
+    for(unsigned n=0;n<25;++n){
+        StoredMessage m{Storage::newMessageId(),contact.peerId,source.peerId,L"TLS archive test",200,Delivery::Delivered,0,n+1};
+        check(a.append(contact.peerId,m));
+    }
+    {
+        auto scopedA=admissionA(),scopedB=admissionB();
+        archive::HistoryReader history(b,reader,reading,bd,scopedB.scope,contact.peerId,directory);
+        scopedA.control=[&](const Blob& bytes){return archive::serveHistoryPage(a,source,serving,scopedA.scope,bytes,directory,300);};
+        scopedB.control=[&](const Blob& bytes){history.acceptPage(bytes);return Blob{};};
+        ReliableEndpoint sender(source,a,as,ad,af,{1},{90},std::make_unique<TlsSession>(ac,false),reader.peerId,route(90),++now,scopedA);
+        ReliableEndpoint receiver(reader,b,bs,bd,bf,{1},{91},std::make_unique<TlsSession>(bc,true),source.peerId,route(91),++now,scopedB);
+        sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
+        unsigned pages=0;
+        do{receiver.sendArchiveControl(history.nextRequest());exchange(receiver,sender);++pages;}while(!history.snapshot().complete);
+        check(pages==4&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
+        check(a.contacts().empty()&&b.contacts().empty());
+        protocol::Writer forbidden(protocol::Text);rejects([&]{receiver.sendArchiveControl(forbidden.data);});
+    }
     // A scoped transport must never drain the ordinary DM outbox or accept Text.
     StoredMessage dm{Storage::newMessageId(),source.peerId,reader.peerId,L"test-only DM",200,Delivery::Queued,0,a.nextLogicalOrder()};
     check(a.append(reader.peerId,dm));
@@ -75,6 +101,6 @@ int main(){try{
     fresh=true;publish(serving.issue(reader.publicKey,0,true,210,true));
     check(!archive::currentSessionAuthorization(reading,altered.scope));
     check(a.profile().peerId==source.peerId&&b.profile().peerId==reader.peerId);
-    std::cout<<"PASS: 11 real mutual peer-TLS archive handshakes, exact scope binding, no friend pin/DM/outbox authority, stale admission and active-session revocation. HOST ONLY\n";
+    std::cout<<"PASS: 12 real mutual peer-TLS archive handshakes, 25 records over four bounded TLS pages, exact scope, no friend pin/DM/outbox authority, stale admission and revocation. HOST ONLY\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

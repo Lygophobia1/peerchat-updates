@@ -48,6 +48,12 @@ struct StoredMessage {
     // queued/retried messages retain their original order across reconnects and restarts.
     std::uint64_t logicalOrder=0;
 };
+struct ArchiveHistoryPage {
+    std::vector<StoredMessage> messages;
+    std::vector<std::int64_t> cursors; // Archive positions, never message identities or UI history cursors.
+    std::int64_t nextCursor=0,throughCursor=0;
+    bool complete=false;
+};
 
 // Thread-confined embedded SQLite store. Construct/use on a worker, not the GUI.
 // Every profile/contact/message payload is protected before binding to SQLite:
@@ -70,6 +76,17 @@ public:
     // False means an identical ID/payload is already durable; mismatched reuse throws.
     bool append(const std::string& conversation, const StoredMessage& message);
     std::optional<StoredMessage> message(const std::string& messageId);
+    // Called only after DeliveryManager validates current archive authorization
+    // and provenance. Does not authorize transport, generate ACKs or queue sends.
+    bool appendArchiveHistory(const std::string& conversation,const StoredMessage& original,
+        const Blob& verifiedAssertion,bool verifiedRecipientAlias=false);
+    Blob archiveHistoryProof(const std::string& messageId);
+    std::string archiveStoreId();
+    std::int64_t archiveHistoryWatermark();
+    ArchiveHistoryPage archiveHistoryPage(const std::string& conversation,std::int64_t afterCursor,
+        std::int64_t throughCursor,int limit=8,size_t maximumBytes=256*1024);
+    Blob archiveSyncState(const std::string& contextId);
+    void saveArchiveSyncState(const std::string& contextId,const Blob& expected,const Blob& next);
     void acknowledge(const std::string& messageId, Delivery delivery);
     Blob mailboxEnvelope(const std::string& messageId,const std::string& recipientDevice);
     void saveMailboxEnvelope(const std::string& messageId,const std::string& recipientDevice,const Blob& envelope);

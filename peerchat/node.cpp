@@ -966,7 +966,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         if(r.type()==protocol::CallDecline||r.type()==protocol::CallBusy||r.type()==protocol::CallEnd){auto type=r.type();auto callId=r.string();r.end();protocol::check(protocol::id(callId,32));auto active=calls.active();if(active&&active->id.value==callId&&active->participants.count(c.peerId))clearVoice(type==protocol::CallDecline?L"Declined":type==protocol::CallBusy?L"Busy":L"Remote ended the call");return;}
         if(r.type()==protocol::Text){
             if(!deliveries)throw std::runtime_error("Delivery owner is unavailable");
-            auto received=reliable::receiveText(r,c.logicalOrdering,c.peerId,profile,*store,*deliveries);
+            auto received=reliable::receiveText(r,c.logicalOrdering,c.peerId,profile,*store,*deliveries,groupAccount.accountId);
             if(!received.message){notice(NodeEvent::Kind::Error,L"Oversized chat message rejected",c.peerId);return;}
             if(received.inserted){NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=c.peerId;e.messages.push_back(*received.message);emit(std::move(e));}
             protocol::Writer ack(protocol::Ack);ack.string(received.messageId);packet(c,ack);
