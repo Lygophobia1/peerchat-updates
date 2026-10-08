@@ -11,6 +11,7 @@
 #include "group_message_envelope.hpp"
 #include "group_text.hpp"
 #include "delivery_manager.hpp"
+#include "archive_application.hpp"
 #include "windows_transfer_io.hpp"
 #include "windows_mailbox.hpp"
 #include "direct_transport_adapter.hpp"
@@ -89,13 +90,16 @@ using namespace node_detail;
 struct Node::Impl {
     enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,FileTransfer,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0,noiseSuppressionStrength=1,automaticGainStrength=1;screen::Backend screenBackend=screen::Backend::NativeWindows;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;
-        bool mailbox=false;std::shared_ptr<std::promise<Blob>> bytesResponse;
+        bool mailbox=false,archive=false;std::shared_ptr<std::promise<Blob>> bytesResponse;
     };
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
     std::unique_ptr<delivery::DeliveryManager> deliveries;
     std::unique_ptr<mailbox::WindowsMailbox> mailboxApplication;
+    std::unique_ptr<archive::Enrollment> archiveApplication;
+    std::uint64_t archiveGeneration=0;
+    bool archiveAuthenticated=false;
     std::wstring mailboxProfileDirectory;
     std::map<std::string,Contact> contacts;
     std::set<std::string> liveOutboxPeers;
@@ -1044,6 +1048,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
     void drain(){
         std::deque<Command> batch;{std::lock_guard<std::mutex> lock(commandMutex);batch.swap(commands);}
         for(auto& command:batch)try{
+            if(command.archive){
+                archive::require(archiveAuthenticated&&authenticatedFriends.localAccount()>0&&authenticatedFriends.generation()>0);
+                if(!archiveApplication)archiveApplication=std::make_unique<archive::Enrollment>(*store,profile,authenticatedFriends.localAccount(),nowMilliseconds);
+                if(archiveGeneration!=authenticatedFriends.generation()){
+                    archiveApplication->authenticated(authenticatedFriends.generation());archiveGeneration=authenticatedFriends.generation();
+                }
+                auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+                auto output=archive::executeEnrollmentOperation(*archiveApplication,command.sourceKind,command.bytes,utc);
+                if(command.bytesResponse)command.bytesResponse->set_value(std::move(output));
+                continue;
+            }
             if(command.mailbox){
                 if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);
                 auto output=mailboxApplication->execute(command.sourceKind,command.bytes,command.id,command.accepted,*store,*deliveries,authenticatedFriends,*sessionTransports);
@@ -1126,6 +1141,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 mediaIce=std::move(command.ice);
             }
             else if(command.action==Action::AuthenticatedFriends){
+                if(archiveApplication)archiveApplication->invalidate();
+                archiveAuthenticated=command.accountId>0;
                 std::vector<reliable::FriendIdentity> snapshot;
                 for(const auto& value:command.friends){
                     snapshot.push_back({value.accountId,value.expectedPeerId,value.knownPeerIds});
@@ -1367,6 +1384,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
+            archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
@@ -1467,6 +1485,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
+        archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
@@ -1479,6 +1498,14 @@ Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messa
     command.mailbox=true;command.sourceKind=operation;command.bytes=input;command.id=messageId;command.accepted=storageAllowed;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");
     if(future.wait_for(std::chrono::seconds(5))!=std::future_status::ready)throw std::runtime_error("Native mailbox operation timed out");
+    return future.get();
+}
+Blob Node::archive(unsigned operation,const Blob& input){
+    if(operation<1||operation>9||input.size()>archive::MaxApplicationBytes)throw std::invalid_argument("Invalid native archive command");
+    auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
+    command.archive=true;command.sourceKind=operation;command.bytes=input;command.bytesResponse=response;
+    if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");
+    if(future.wait_for(std::chrono::seconds(5))!=std::future_status::ready)throw std::runtime_error("Native archive operation timed out");
     return future.get();
 }
 void Node::connect(const std::wstring& host,std::uint16_t port,const std::string& expected,const std::wstring& source,const std::wstring& route,bool forceImmediate){Impl::Command c{};c.action=Impl::Action::Connect;c.text=host;c.port=port;c.peer=expected;c.source=source;c.route=route;c.forceImmediate=forceImmediate;if(!impl_->command(std::move(c)))impl_->notice(NodeEvent::Kind::Error,L"Peer node is stopped or busy.");}

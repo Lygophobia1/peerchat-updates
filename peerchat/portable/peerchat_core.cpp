@@ -2,6 +2,7 @@
 #include "../session_transport_manager.hpp"
 #include "../group.hpp"
 #include "../delivery_manager.hpp"
+#include "../archive_application.hpp"
 #include "../protocol.hpp"
 #include "reliable_endpoint.hpp"
 #include "relay_requests.hpp"
@@ -28,6 +29,8 @@ struct Instance {
     std::unique_ptr<peerchat::Storage> storage;
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
+    std::unique_ptr<peerchat::archive::Enrollment> archiveApplication;
+    std::uint64_t archiveGeneration=0;
     // Provider objects only; existing SessionTransportManager will own route
     // association when networking is ported. No second reconnect/session policy.
     uint64_t nextTls=1;
@@ -260,6 +263,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
             values.push_back(std::move(value));
         }
         reader.end();peerchat::protocol::check(account||values.empty());
+        if(instance->archiveApplication)instance->archiveApplication->invalidate();
         instance->friends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
         instance->relayRequests->revoke();
         for(auto& peer:instance->peers)if(!instance->friends.contains(peer.second->expected())){
@@ -267,6 +271,21 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
         }
         return PC_CORE_OK;
     });
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_request(JNIEnv* env,jobject,jlong handle,jint operation,jbyteArray input){
+    try{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        auto bytes=mailboxArgument(env,input,peerchat::archive::MaxApplicationBytes);
+        std::lock_guard<std::mutex> lock(instance->gate);
+        peerchat::archive::require(instance->storage&&instance->friends.localAccount()>0&&instance->friends.generation()>0);
+        if(!instance->archiveApplication)instance->archiveApplication=std::make_unique<peerchat::archive::Enrollment>(
+            *instance->storage,instance->profile,instance->friends.localAccount(),runtimeNow);
+        if(instance->archiveGeneration!=instance->friends.generation()){
+            instance->archiveApplication->authenticated(instance->friends.generation());instance->archiveGeneration=instance->friends.generation();
+        }
+        auto output=peerchat::archive::executeEnrollmentOperation(*instance->archiveApplication,static_cast<unsigned>(operation),bytes,mailboxNow());
+        return peerchat::platform::android::Context::input(env,output);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_presence(JNIEnv* env,jobject,jlong handle,jbyteArray pin,jboolean online,jlong generation,jlong network){
     return guarded([&]()->pc_core_status{

@@ -28,6 +28,14 @@ UI_API int ui_mailbox(void* handle,unsigned operation,const unsigned char* bytes
 UI_API int ui_mailbox_supported(){
     return 1;
 }
+UI_API int ui_archive(void* handle,unsigned operation,const unsigned char* bytes,unsigned length,unsigned char* output,unsigned capacity){try{
+    if(!handle||length>262144||(!bytes&&length)||!output||capacity<1||capacity>262144)return -1;
+    peerchat::Blob input;if(length)input.assign(bytes,bytes+length);
+    auto result=static_cast<UiBridge*>(handle)->node.archive(operation,input);
+    if(result.size()>capacity)return -1;
+    if(!result.empty())memcpy(output,result.data(),result.size());
+    return static_cast<int>(result.size());
+}catch(...){return -1;}}
 // Profile maintenance deliberately has no Node/session ownership.  It opens two closed
 // SQLite stores only while the managed bootstrap has verified the profile lock is free,
 // and copies just the durable device identity into a brand-new current-schema store.

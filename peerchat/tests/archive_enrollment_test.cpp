@@ -1,5 +1,5 @@
 #include "../storage.cpp"
-#include "../archive_enrollment.hpp"
+#include "../archive_application.hpp"
 #include <iostream>
 using namespace peerchat;
 namespace ar=peerchat::archive;
@@ -12,6 +12,12 @@ int main(){try{
     ar::Enrollment source(a,pa,8,clock),reader(b,pb,8,clock);
     rejects([&]{source.registration(10);});source.authenticated(1);reader.authenticated(1);
     auto da=source.registration(10),db=reader.registration(10);
+    check(ar::executeEnrollmentOperation(source,1,ar::applicationHeader(1).data,11)==da);
+    auto malformed=ar::applicationHeader(4);malformed.string(pa.peerId);malformed.number(1);malformed.data.push_back(0);
+    rejects([&]{ar::executeEnrollmentOperation(source,4,malformed.data,20);});
+    check(!source.policy().trustsAuthority(pa.publicKey)); // Trailing bytes cannot approve before rejection.
+    rejects([&]{ar::executeEnrollmentOperation(source,1,Blob(ar::MaxApplicationBytes+1,0),20);});
+    rejects([&]{ar::executeEnrollmentOperation(source,9,ar::applicationHeader(1).data,20);});
     check(source.registration(11)==da&&reader.registration(11)==db);
     auto metadata=[&](const Profile& device,std::uint64_t revision,std::vector<ar::RegisteredGrant> grants,
             std::uint64_t generation=1){

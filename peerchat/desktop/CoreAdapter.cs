@@ -25,6 +25,14 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_mailbox(IntPtr handle,uint operation,byte[] input,uint length,string messageId,int allowed,[Out] byte[] output,uint capacity);
     public bool MailboxSupported {get{return ui_mailbox_supported()!=0;}}
+    [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_archive(IntPtr handle,uint operation,byte[] input,uint length,[Out] byte[] output,uint capacity);
+    public byte[] Archive(uint operation,byte[] input){lock(mailboxGate){
+        if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
+        if(input==null||input.Length>262144)throw new ArgumentException("Archive input exceeds bound.");
+        var output=new byte[262144];int size=ui_archive(handle,operation,input,(uint)input.Length,output,(uint)output.Length);
+        if(size<0||size>output.Length)throw new InvalidOperationException("Native archive operation rejected.");
+        Array.Resize(ref output,size);return output;
+    }}
     public byte[] Mailbox(uint operation,byte[] input=null,string messageId="",bool allowed=false){lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
         input=input??new byte[0];if(input.Length>70000)throw new ArgumentException("Mailbox input exceeds bound.");
