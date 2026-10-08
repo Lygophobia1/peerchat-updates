@@ -16,10 +16,12 @@ static class ArchiveApplicationBoundaryTest {
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_archive(IntPtr h,uint op,byte[] input,uint length,[Out] byte[] output,uint capacity);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr h,ulong generation,string fingerprint);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr h);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr h,uint op,string peer,string id,string path);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr h,ulong attempt,int incoming);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern void ui_relay_closed(IntPtr h,ulong attempt,string reason);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_receive(IntPtr h,ulong attempt,byte[] bytes,uint length);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_take_output(IntPtr h,ulong attempt,[Out] byte[] bytes,uint capacity,uint wait);
-    static void Check(bool condition){if(!condition)throw new Exception("Archive C ABI regression");}
+    static void Check(bool condition,[System.Runtime.CompilerServices.CallerLineNumber]int line=0){if(!condition)throw new Exception("Archive C ABI regression at line "+line);}
     sealed class Wire:IDisposable {
         MemoryStream stream=new MemoryStream();BinaryWriter writer;
         public Wire(uint op){writer=new BinaryWriter(stream);writer.Write(new byte[]{80,84,1,31});Text("PeerChat/ArchiveApplication/v1");Number(1);Number(op);}
@@ -60,10 +62,12 @@ static class ArchiveApplicationBoundaryTest {
     }}
     static ArchiveEnrollmentExecution Client(IntPtr h){return new ArchiveEnrollmentExecution((op,bytes)=>{var output=new byte[262144];int n=ui_archive(h,op,bytes,(uint)bytes.Length,output,(uint)output.Length);Check(n>0);Array.Resize(ref output,n);return output;},(op,fields)=>{throw new Exception("Unexpected fixture RPC");});}
     static ulong Relay(IntPtr h,out ArchiveRelayScope scope){scope=null;foreach(var item in new JavaScriptSerializer().Deserialize<object[]>(Marshal.PtrToStringUni(ui_poll(h)))){
-        var row=(Dictionary<string,object>)item;if(Convert.ToInt32(row["kind"])!=18)continue;
+        var row=(Dictionary<string,object>)item;if(Convert.ToInt32(row["kind"])==8)Console.Error.WriteLine("Fixture native error: "+Convert.ToString(row["text"]));if(Convert.ToInt32(row["kind"])!=18)continue;
         Check(Convert.ToString(row["authorizationGroupId"])=="");scope=ArchiveRelayScope.Parse(Convert.ToString(row["authorizationArchive"]));return Convert.ToUInt64(row["attempt"]);
     }return 0;}
     static void PairedNode(string root){var a=ui_create();var b=ui_create();try{
+        var seed=new System.Diagnostics.ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"archive-attachment-fixture.exe"),"\""+root+"\""){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+        string attachment;using(var process=System.Diagnostics.Process.Start(seed)){attachment=process.StandardOutput.ReadToEnd();string error=process.StandardError.ReadToEnd();process.WaitForExit();if(process.ExitCode!=0)throw new Exception(error);Check(attachment.Length==32);}
         Check(ui_start(a,Path.Combine(root,"pair-source"),0,"Source")==1&&ui_start(b,Path.Combine(root,"pair-reader"),0,"Reader")==1);
         Check(ui_authenticated_friends(a,8,1,"")==1&&ui_authenticated_friends(b,8,1,"")==1);
         Check(ui_network_context(a,1,"paired-fixture")==1&&ui_network_context(b,1,"paired-fixture")==1);
@@ -84,7 +88,26 @@ static class ArchiveApplicationBoundaryTest {
             n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
             var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==0);complete=true;break;}Thread.Sleep(10);
         }
-        Check(complete);Console.WriteLine("PASS: actual paired Node workers, zero friends, scoped opaque relay, mutual Schannel TLS, manifest completion and bounded retirement. HOST ONLY");
+        Check(complete);Check(reader.Progress(8,1).Attachments==1);
+        // The byte-only fixture must also propagate EOF when history demand
+        // retires. A real RelayTransport does this; silently leaving its old
+        // opposite pipe alive would manufacture a stale winner in the harness.
+        ui_relay_closed(a,ra,"Fixture propagates completed history relay EOF");ui_relay_closed(b,rb,"Fixture propagates completed history relay EOF");Thread.Sleep(100);
+        var output=ui_file_transfer(b,5,pa,attachment,Path.Combine(root,"downloads"));Check(output!=IntPtr.Zero);var transfer=Marshal.PtrToStringUni(output);Check(transfer.Length==32);
+        until=DateTime.UtcNow.AddSeconds(20);bool downloaded=false;
+        while(DateTime.UtcNow<until){
+            var request=Relay(b,out scope);if(request!=0){rb=request;source.IncomingArchive(8,1,scope);Check(ui_relay_ready(b,rb,1)==1);}
+            request=Relay(a,out scope);if(request!=0){ra=request;Check(ui_relay_ready(a,ra,0)==1);}
+            int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);
+            n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
+            var rows=new JavaScriptSerializer().Deserialize<object[]>(Marshal.PtrToStringUni(ui_file_transfer(b,0,"","","")));
+            foreach(Dictionary<string,object> row in rows)if((string)row["id"]==transfer&&Convert.ToInt32(row["state"])==4)downloaded=true;
+            if(downloaded)break;Thread.Sleep(10);
+        }
+        if(!downloaded){Console.Error.WriteLine("Reader transfer states: "+Marshal.PtrToStringUni(ui_file_transfer(b,0,"","","")));Console.Error.WriteLine("Source transfer states: "+Marshal.PtrToStringUni(ui_file_transfer(a,0,"","","")));}
+        Check(downloaded);var files=Directory.GetFiles(Path.Combine(root,"downloads"));Check(files.Length==1);
+        Check(Convert.ToBase64String(File.ReadAllBytes(files[0]))==Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"source-file.bin"))));
+        Console.WriteLine("PASS: actual paired Node workers, zero friends, scoped opaque relay, mutual Schannel TLS, catalog sync and verified Unicode attachment download through ONE TransferManager. HOST ONLY");
     }finally{ui_destroy(b);ui_destroy(a);}}
     public static int Main(string[] args){try{
         Check(args.Length==2&&LoadLibraryEx(Path.Combine(args[0],"PeerChat.Core.dll"),IntPtr.Zero,0x1100)!=IntPtr.Zero);

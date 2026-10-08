@@ -38,7 +38,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
             }
         }
     }
-    Text(state.archiveProgress.state+" · "+state.archiveProgress.processed+" messages processed · "+state.archiveProgress.conversations+" conversations completed",style=MaterialTheme.typography.bodySmall)
+    Text(state.archiveProgress.state+" · "+state.archiveProgress.processed+" messages processed · "+state.archiveProgress.conversations+" conversations completed · "+state.archiveProgress.attachments+" attachment records (not downloaded)",style=MaterialTheme.typography.bodySmall)
     if(enrollment!=null&&state.archiveProgress.running)OutlinedButton({dispatch(UiAction.ArchiveSynchronize(enrollment,pause=true))},enabled=!state.archiveBusy){Text("Pause synchronization")}
     pending?.let {p->
         AlertDialog(onDismissRequest={pending=null},title={Text("Confirm archive authorization")},text={

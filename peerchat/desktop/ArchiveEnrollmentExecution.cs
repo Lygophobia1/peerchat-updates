@@ -71,13 +71,13 @@ internal sealed class ArchiveEnrollmentExecution {
     public void StartSync(long account,long generation,string source,bool newScan){native(12,Command(12,w=>{w.Write(account);w.Write(generation);WriteText(w,source);w.Write(newScan?1L:0L);}));}
     public void PauseSync(long account,long generation){native(14,Command(14,w=>{w.Write(account);w.Write(generation);}));}
     public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
-    public sealed class SyncProgress {public string State,Source;public long Processed,Conversations;public bool Complete,Running;}
+    public sealed class SyncProgress {public string State,Source;public long Processed,Conversations,Attachments;public bool Complete,Running;}
     public SyncProgress Progress(long account,long generation){
         var bytes=native(13,Command(13,w=>{w.Write(account);w.Write(generation);}));var header=Command(13);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
         using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,new UTF8Encoding(false,true))){stream.Position=header.Length;
             Func<string> text=()=>{long n=r.ReadInt64();Check(n>=0&&n<=128&&n<=stream.Length-stream.Position);return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
-            var result=new SyncProgress{State=text(),Processed=r.ReadInt64(),Conversations=r.ReadInt64()};long complete=r.ReadInt64(),running=r.ReadInt64();result.Source=text();
-            Check(result.Processed>=0&&result.Conversations>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
+            var result=new SyncProgress{State=text(),Processed=r.ReadInt64(),Conversations=r.ReadInt64()};long complete=r.ReadInt64(),running=r.ReadInt64();result.Source=text();result.Attachments=r.ReadInt64();
+            Check(result.Processed>=0&&result.Conversations>=0&&result.Attachments>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
         }
     }
     public bool HistorySync(long account,long generation,bool? enabled=null){

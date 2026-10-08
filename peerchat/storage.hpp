@@ -60,6 +60,10 @@ struct ArchiveConversationPage {
     std::int64_t nextCursor=0,throughCursor=0;
     bool complete=false;
 };
+// Protected attachment metadata only. Content and resumable byte transfer remain
+// TransferManager responsibilities. Sequence is a local monotonic catalog cursor.
+struct AttachmentMetadataRecord {std::string id;Blob record;std::int64_t sequence=0;};
+struct AttachmentMetadataPage {std::vector<AttachmentMetadataRecord> records;std::int64_t next=0,through=0;bool complete=false;};
 
 // Thread-confined embedded SQLite store. Construct/use on a worker, not the GUI.
 // Every profile/contact/message payload is protected before binding to SQLite:
@@ -98,7 +102,13 @@ public:
     ArchiveHistoryPage archiveHistoryPage(const std::string& conversation,std::int64_t afterCursor,
         std::int64_t throughCursor,int limit=8,size_t maximumBytes=256*1024);
     Blob archiveSyncState(const std::string& contextId);
+    Blob transferJournal(const std::string& device);
+    void saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next);
     void saveArchiveSyncState(const std::string& contextId,const Blob& expected,const Blob& next);
+    Blob attachmentMetadata(const std::string& id);
+    void saveAttachmentMetadata(const std::string& id,const Blob& expected,const Blob& record);
+    std::int64_t attachmentMetadataWatermark();
+    AttachmentMetadataPage attachmentMetadataPage(std::int64_t after,std::int64_t through,int limit=8);
     void acknowledge(const std::string& messageId, Delivery delivery);
     Blob mailboxEnvelope(const std::string& messageId,const std::string& recipientDevice);
     void saveMailboxEnvelope(const std::string& messageId,const std::string& recipientDevice,const Blob& envelope);

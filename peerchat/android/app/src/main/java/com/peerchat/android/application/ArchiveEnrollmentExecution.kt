@@ -21,9 +21,9 @@ internal class ArchiveEnrollmentExecution(
     fun progress(account:Long,generation:Long):ArchiveSyncProgress {
         val r=NativeRecord(native(13,command(13){w->w.number(account);w.number(generation)}),31)
         require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==13L)
-        val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text()
+        val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text();val attachments=r.number()
         require(state.length<=128&&complete<=1&&running<=1&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
-        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source)
+        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments)
     }
     private fun proof(value:String,max:Int):ByteArray {
         require(value.length<=((max+2)/3)*4)

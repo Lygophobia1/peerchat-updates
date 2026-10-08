@@ -11,6 +11,7 @@ class SyncReader {
     std::string context_;Blob saved_;ManifestRequest position_;
     std::optional<ManifestPage> page_;size_t index_=0;
     std::unique_ptr<HistoryReader> history_;
+    std::unique_ptr<AttachmentReader> attachments_;
     std::uint64_t processed_=0,conversations_=0;
     bool complete_=false,pending_=false,cancelled_=false;
     Blob state()const{
@@ -27,7 +28,7 @@ class SyncReader {
         persist();
     }
 public:
-    struct Snapshot {std::uint64_t processed,conversations;bool complete,pending,cancelled;};
+    struct Snapshot {std::uint64_t processed,conversations;bool complete,pending,cancelled;std::uint64_t attachments=0;};
     SyncReader(Storage& storage,const Profile& local,Authorization& authorization,delivery::DeliveryManager& deliveries,
         session::ReliableAuthorization scope,DeviceAccounts directory)
         :storage_(storage),local_(local),authorization_(authorization),deliveries_(deliveries),scope_(std::move(scope)),directory_(std::move(directory)){
@@ -40,12 +41,13 @@ public:
             protocol::Reader r(saved_);historyHeader(r,8);position_=manifestFields(r);processed_=r.number();conversations_=r.number();
             auto complete=r.number();require(complete<=1);complete_=complete!=0;r.end();require(state()==saved_&&(!complete_||position_.after==position_.through));
         }
+        attachments_=std::make_unique<AttachmentReader>(storage_,authorization_,scope_,directory_);
     }
     // Explicit new scan preserves every per-conversation resume cursor. A
     // completed scan is never silently restarted by a transport poll.
-    void rescan(){current();require(!pending_&&complete_);position_.after=position_.through=0;complete_=false;persist();}
+    void rescan(){current();require(!pending_&&complete_&&attachments_->snapshot().complete);attachments_->rescan();position_.after=position_.through=0;complete_=false;persist();}
     Blob nextRequest(){
-        current();require(!pending_);if(complete_)return {};
+        current();require(!pending_);if(complete_)return attachments_->nextRequest();
         Blob request;
         if(page_){
             require(index_<page_->conversations.size());
@@ -55,7 +57,7 @@ public:
         pending_=true;return request;
     }
     size_t accept(const Blob& bytes){
-        current();require(pending_);
+        current();if(complete_){attachments_->accept(bytes);return 0;}require(pending_);
         if(history_){
             auto before=history_->snapshot().processed;auto inserted=history_->acceptPage(bytes);auto snapshot=history_->snapshot();
             require(snapshot.processed>=before&&processed_<=UINT64_MAX-(snapshot.processed-before));processed_+=snapshot.processed-before;
@@ -71,13 +73,15 @@ public:
         else{page_=std::move(page);index_=0;persist();}
         return 0;
     }
-    void disconnected(){pending_=false;if(history_)history_->disconnected();}
-    void cancel(){cancelled_=true;pending_=false;if(history_)history_->cancel();}
-    Snapshot snapshot()const{return {processed_,conversations_,complete_,pending_,cancelled_};}
+    void disconnected(){pending_=false;if(history_)history_->disconnected();attachments_->disconnected();}
+    void cancel(){cancelled_=true;pending_=false;if(history_)history_->cancel();attachments_->cancel();}
+    Snapshot snapshot()const{auto media=attachments_->snapshot();return {processed_,conversations_,complete_&&media.complete,complete_?media.pending:pending_,cancelled_,media.processed};}
 };
 inline Blob serveSyncControl(Storage& storage,const Profile& local,Authorization& authorization,
     const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now){
-    validateHistoryControl(request);protocol::Reader r(request);require(r.type()==protocol::ArchiveControl);r.string();r.number();auto kind=r.number();
+    validateHistoryControl(request);protocol::Reader r(request);require(r.type()==protocol::ArchiveControl);auto domain=r.string();
+    if(domain==AttachmentDomain)return serveAttachmentPage(storage,local,authorization,scope,request,directory);
+    r.number();auto kind=r.number();
     if(kind==4)return serveManifestPage(storage,local,authorization,scope,request);
     require(kind==2);return serveHistoryPage(storage,local,authorization,scope,request,std::move(directory),now);
 }

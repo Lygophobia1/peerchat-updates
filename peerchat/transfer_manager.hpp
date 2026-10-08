@@ -148,12 +148,25 @@ public:
         save();
     }
     std::vector<Snapshot> snapshots()const{std::vector<Snapshot> result;for(auto& p:entries_)result.push_back(p.second);return result;}
+    bool hasPendingControl(const std::string& id)const{auto found=entries_.find(id);return found!=entries_.end()&&found->second.reply.has_value();}
+    // Local adapter readout only; tokens never travel in a transfer packet.
+    std::vector<DurableState> completedRecords()const{
+        std::vector<DurableState> result;
+        for(const auto& p:entries_)if(p.second.state==State::Complete){
+            const auto& e=p.second;DurableState d;static_cast<Snapshot&>(d)=e;
+            d.location=e.location;d.created=e.created;d.updated=e.updated;d.expires=e.expires;
+            d.highWaterSent=e.highWaterSent;d.digestReady=e.digestReady;result.push_back(std::move(d));
+        }
+        return result;
+    }
     std::vector<std::string> demandedPeers()const{
         std::vector<std::string> result;for(auto& p:entries_)if(!terminal(p.second.state)||p.second.reply)result.push_back(p.second.peer);return result;
     }
-    void offer(const std::string& peer,const std::string& id,std::unique_ptr<Source> source,std::uint64_t now){
+    void offer(const std::string& peer,const std::string& id,std::unique_ptr<Source> source,std::uint64_t now,const Digest* expectedDigest=nullptr){
         if(!protocol::id(peer)||!protocol::id(id,32)||!source||!safeName(source->name())||source->size()>MaxFileBytes||entries_.count(id))throw std::runtime_error("Invalid file offer");
-        room();Entry e;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();e.sending=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
+        room();Entry e;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();
+        if(expectedDigest){e.metadata.digest=*expectedDigest;e.digestReady=true;}
+        e.sending=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
     }
     void accept(const std::string& id,std::unique_ptr<Sink> sink,std::uint64_t now){
         auto i=entries_.find(id);if(i==entries_.end()||i->second.sending||i->second.state!=State::AwaitingAcceptance||!sink)throw std::runtime_error("File offer no longer available");
@@ -205,7 +218,9 @@ public:
                         if(b.empty()||b.size()>ChunkBytes||b.size()>e.metadata.size-e.prepared)throw std::runtime_error("Source read failed");
                         e.hash->update(b.data(),b.size());e.prepared+=b.size();e.lastActivity=now;continue;
                     }
-                    e.metadata.digest=e.hash->finish();e.hash.reset();e.state=State::Offered;e.digestReady=true;touch(e);
+                    auto digest=e.hash->finish();e.hash.reset();
+                    if(e.digestReady&&digest!=e.metadata.digest){fail(e,"Source no longer matches verified content");continue;}
+                    e.metadata.digest=digest;e.state=State::Offered;e.digestReady=true;touch(e);
                 }
                 auto current=route(e.peer);if(!current){e.route=0;e.ready=false;continue;}
                 if(e.reply){if(durableSend(e.peer,*e.reply))e.reply.reset();continue;}

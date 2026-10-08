@@ -44,6 +44,12 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     private fun checkOpen() { if (closed) throw ProviderFailure("STORAGE_CLOSED") }
     private fun statement(id: Long): Statement { checkOpen(); return statements[id] ?: throw ProviderFailure("INVALID_STATEMENT") }
     fun scope(): ByteArray = profile.toByteArray(Charsets.UTF_8)
+    fun attachmentDirectory(): ByteArray {
+        checkOpen()
+        val cache = File(directory, "attachments")
+        if (!cache.isDirectory && !cache.mkdir()) throw ProviderFailure("ATTACHMENT_CACHE_OPEN_FAILED")
+        return cache.absolutePath.toByteArray(Charsets.UTF_8)
+    }
     fun publicKey(): ByteArray = identity.publicRepresentation()
     fun sign(bytes: ByteArray): ByteArray = identity.sign(bytes)
     // Separate DB file avoids self-contention while a KeyManager lease spans

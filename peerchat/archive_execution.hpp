@@ -55,6 +55,12 @@ public:
     }
     void incoming(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t network){
         require(scope.archive.source==local_.peerId&&currentSessionAuthorization(policy_,scope));
+        hold(scope,now,network);
+    }
+    // Existing bounded demand owner, shared by history pages and authorized
+    // TransferManager work; neither adapter owns a reconnect loop.
+    void hold(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t network){
+        require(currentSessionAuthorization(policy_,scope));
         auto key=scope.continuityKey();require(serving_.count(key)||serving_.size()<8);
         require(now<=UINT64_MAX-30000&&sessions_.demandArchiveRoute(scope,now+30000,network,now));
         serving_[key]={scope,now+30000};
@@ -78,12 +84,12 @@ public:
             if(now>=it->second.second||!currentSessionAuthorization(policy_,it->second.first)){retire(it->second.first);it=serving_.erase(it);}
             else{sessions_.demandArchiveRoute(it->second.first,it->second.second,network,now);++it;}
         }
-        if(!running_||!scope_){if(scope_)retire(*scope_);return close;}
+        if(!running_||!scope_){if(scope_&&!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(!currentSessionAuthorization(policy_,*scope_)){
             reader_->disconnected();state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
             retire(*scope_);return close;
         }
-        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;state_="History synchronized";retire(*scope_);return close;}
+        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;state_="History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(reader_->snapshot().pending&&now>=pendingAt_&&now-pendingAt_>=15000){
             auto route=sessions_.snapshot(scope_->continuityKey());
             if(route&&route->activeTransport.value){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);

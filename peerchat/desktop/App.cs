@@ -373,7 +373,7 @@ public class DesktopApplication {
                         if(choose.ShowDialog(fileTransferWindow)==true)await FileOperation(2,"",item.id,Path.GetDirectoryName(choose.FileName));
                     };actions.Children.Add(accept);
                 }
-                if(item.state<4||item.state==7||item.state==8){var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=async(s,e)=>await FileOperation(3,"",item.id,"");actions.Children.Add(cancel);}
+                if(item.state<4||item.state==7||item.state==8||(item.error??"").StartsWith("Archive file unavailable",StringComparison.Ordinal)){var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=async(s,e)=>await FileOperation(3,"",item.id,"");actions.Children.Add(cancel);}
                 if(item.state==4&&!item.sending&&!String.IsNullOrEmpty(item.path)){
                     var folder=new Button{Content="Open containing folder"};folder.Click+=(s,e)=>{try{Process.Start("explorer.exe","/select,\""+item.path+"\"");}catch{}};actions.Children.Add(folder);
                 }
@@ -2900,7 +2900,23 @@ public class DesktopApplication {
         Action<string,uint> button=(label,action)=>{var b=new Button{Content=label,Padding=new Thickness(10,7,10,7),Margin=new Thickness(0,4,6,4)};AutomationProperties.SetName(b,label);b.Click+=(s,e)=>run(action);buttons.Children.Add(b);};
         button("Refresh archive devices",0);button("Trust archive authorizer",4);button("Authorize history access",5);button("Revoke access",6);button("Disable authorizer",7);
         button("Synchronize from selected archive",12);button("Pause synchronization",14);
-        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.State+" · "+archiveProgress.Processed+" messages processed · "+archiveProgress.Conversations+" conversations completed";};
+        panel.Children.Add(new TextBlock{Text="Historical attachments",FontSize=18,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,14,0,6)});
+        panel.Children.Add(new TextBlock{Text="Synchronize from an authorized archive first. Files are fetched only when requested; metadata is archive-attested, not an original-sender signature. The source must still possess the unchanged file.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
+        var attachments=new ComboBox{Margin=new Thickness(0,8,0,6),MinHeight=32};AutomationProperties.SetName(attachments,"Historical attachment selector");panel.Children.Add(attachments);
+        var fileButtons=new WrapPanel();panel.Children.Add(fileButtons);long attachmentCursor=0;
+        var firstFiles=new Button{Content="Refresh attachments",Margin=new Thickness(0,4,6,4)};
+        var nextFiles=new Button{Content="Next attachment page",IsEnabled=false,Margin=new Thickness(0,4,6,4)};
+        Action<bool> loadFiles=async reset=>{try{var page=await Task.Run(()=>core.ArchiveAttachments(reset?0:attachmentCursor));if(!dialog.IsVisible)return;attachments.ItemsSource=page.records;attachments.SelectedIndex=page.records.Length>0?0:-1;attachmentCursor=page.next;nextFiles.IsEnabled=!page.complete;}catch(Exception error){status.Text="Attachment catalog unavailable: "+error.Message;}};
+        firstFiles.Click+=(s,e)=>loadFiles(true);nextFiles.Click+=(s,e)=>loadFiles(false);fileButtons.Children.Add(firstFiles);fileButtons.Children.Add(nextFiles);
+        var download=new Button{Content="Download selected attachment…",Margin=new Thickness(0,4,6,4)};fileButtons.Children.Add(download);
+        download.Click+=async(s,e)=>{
+            var file=attachments.SelectedItem as CoreAdapter.ArchiveAttachment;var source=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
+            if(file==null||source==null||!source.MayServe||archiveProgress==null||archiveProgress.Source!=source.PeerId||displayedAccount!=(discovery==null?0:discovery.AccountId)||displayedGeneration!=authenticatedFriendSnapshotGeneration){status.Text="Refresh, select an authorized source, and synchronize from it before downloading.";return;}
+            var choose=new Microsoft.Win32.SaveFileDialog{Title="Choose download folder — a unique ID prefix prevents overwrites",FileName=file.name,OverwritePrompt=false};
+            if(choose.ShowDialog(dialog)!=true)return;
+            try{await Task.Run(()=>core.FileTransfer(5,source.PeerId,file.id,Path.GetDirectoryName(choose.FileName)));ShowFileTransfers();status.Text="Attachment requested. File transfers shows verified progress and cancellation.";}catch(Exception error){status.Text="Attachment request failed closed: "+error.Message;}
+        };
+        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.State+" · "+archiveProgress.Processed+" messages processed · "+archiveProgress.Conversations+" conversations completed · "+archiveProgress.Attachments+" attachment records (not downloaded)";};
         voiceTimer.Tick+=progressTick;dialog.Closed+=(s,e)=>voiceTimer.Tick-=progressTick;
         return panel;
     }

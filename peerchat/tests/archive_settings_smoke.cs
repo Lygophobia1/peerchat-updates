@@ -14,7 +14,7 @@ static class ArchiveSettingsSmoke {
     static FrameworkElement Find(DependencyObject root,string name){
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){
             var child=VisualTreeHelper.GetChild(root,i);var item=child as FrameworkElement;
-            if(item!=null&&AutomationProperties.GetName(item)==name)return item;
+            if(item!=null&&(AutomationProperties.GetName(item)==name||(item is Button&&Object.Equals(((Button)item).Content,name))))return item;
             var found=Find(child,name);if(found!=null)return found;
         }return null;
     }
@@ -55,6 +55,9 @@ static class ArchiveSettingsSmoke {
                 var panel=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,new object[]{dialog});
                 dialog.Content=new ScrollViewer{Content=panel};dialog.Show();dialog.UpdateLayout();
                 Check(Find(dialog,"Archive device selector") is ComboBox);
+                Check(Find(dialog,"Historical attachment selector") is ComboBox);
+                foreach(var label in new[]{"Refresh attachments","Next attachment page","Download selected attachment…"})Check(Find(dialog,label) is Button);
+                Check(!((Button)Find(dialog,"Next attachment page")).IsEnabled);
                 foreach(var label in new[]{"Refresh archive devices","Trust archive authorizer","Authorize history access","Revoke access","Disable authorizer","Synchronize from selected archive","Pause synchronization"})Check(Find(dialog,label) is Button);
                 var selector=(ComboBox)Find(dialog,"Archive device selector");Check(selector.Items.Count==0);
                 ((Button)Find(dialog,"Refresh archive devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

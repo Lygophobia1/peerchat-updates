@@ -22,6 +22,9 @@ public sealed class CoreAdapter : IDisposable {
         return Marshal.PtrToStringUni(result);
     }}
     public FileTransferData[] FileTransfers(){return new JavaScriptSerializer().Deserialize<FileTransferData[]>(FileTransfer(0))??new FileTransferData[0];}
+    public sealed class ArchiveAttachment {public string id,name;public long size;public bool availableLocally,archiveAttested;public override string ToString(){return name+" · "+size.ToString("N0")+" bytes · "+(availableLocally?"local file recorded":archiveAttested?"archive-attested":"local metadata");}}
+    public sealed class ArchiveAttachmentPage {public long next;public bool complete;public ArchiveAttachment[] records;}
+    public ArchiveAttachmentPage ArchiveAttachments(long after){return new JavaScriptSerializer().Deserialize<ArchiveAttachmentPage>(FileTransfer(4,id:after.ToString(System.Globalization.CultureInfo.InvariantCulture)));}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_mailbox(IntPtr handle,uint operation,byte[] input,uint length,string messageId,int allowed,[Out] byte[] output,uint capacity);
     public bool MailboxSupported {get{return ui_mailbox_supported()!=0;}}

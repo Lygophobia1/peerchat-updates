@@ -4,6 +4,8 @@ $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $out=Join-Path $root ('build\tests\archive-application-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $out | Out-Null
+& g++ -std=c++17 -O2 -Wall -Wextra -Werror -I. "$PSScriptRoot\archive_attachment_fixture.cpp" "$root\storage.cpp" "$root\group.cpp" -o "$out\archive-attachment-fixture.exe" -lbcrypt -lcrypt32 -lncrypt
+if($LASTEXITCODE -ne 0){throw 'Archive attachment fixture compilation failed'}
 $client=(Resolve-Path -LiteralPath $ClientDirectory).Path
 $compiler=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 & $compiler /nologo /target:exe /platform:x64 /optimize+ /reference:System.Web.Extensions.dll "/out:$out\archive-application-test.exe" "$PSScriptRoot\archive_application_boundary_test.cs" "$root\desktop\ArchiveEnrollmentExecution.cs"

@@ -25,8 +25,10 @@ foreach($variant in @('debug','release')){
                 foreach($method in @('bind','publicKey','sign')){if($symbols -notmatch "Java_com_peerchat_android_ProfileBridge_$method\b"){throw "Missing ProfileBridge $method"}}
                 foreach($method in @('open','exchange','close')){if($symbols -notmatch "Java_com_peerchat_android_PeerTlsBridge_$method\b"){throw "Missing PeerTlsBridge $method"}}
                 foreach($method in @('friends','presence','requests','open','exchange','close','send','queueLocal','history','state')){if($symbols -notmatch "Java_com_peerchat_android_ReliableBridge_$method\b"){throw "Missing ReliableBridge $method"}}
-                $testHook=$symbols -match 'Java_com_peerchat_android_ProfileBridge_storageTest\b'
-                if($testHook -ne ($variant -eq 'debug')){throw "$variant test-hook isolation failed"}
+                foreach($hook in @('storageTest','attachmentTest')){
+                    $testHook=$symbols -match "Java_com_peerchat_android_ProfileBridge_$hook\b"
+                    if($testHook -ne ($variant -eq 'debug')){throw "$variant $hook isolation failed"}
+                }
             }
             Write-Host "PASS: $variant ARM64 $name, dependencies=$($needed -join ',')"
         }

@@ -88,8 +88,8 @@ class FileSource final:public Source {
     std::string name_;
     Blob token_;
 public:
-    explicit FileSource(const std::wstring& path){
-        name_=unicode::encode(std::filesystem::path(path).filename().wstring());require(safeName(name_));
+    explicit FileSource(const std::wstring& path,const std::string& logicalName={}){
+        name_=logicalName.empty()?unicode::encode(std::filesystem::path(path).filename().wstring()):logicalName;require(safeName(name_));
         handle_=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle_==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot open file");
         BY_HANDLE_FILE_INFORMATION info{};LARGE_INTEGER size{};
@@ -97,7 +97,8 @@ public:
             CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;throw std::runtime_error("Unsupported source file");
         }
         size_=static_cast<std::uint64_t>(size.QuadPart);
-        try{protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(path).wstring());fileIdentity(token,handle_,true);token_=std::move(token.data);}
+        try{protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(path).wstring());fileIdentity(token,handle_,true);
+            if(!logicalName.empty()){token.string("PeerChat/LogicalFileName/v1");token.string(logicalName);}token_=std::move(token.data);}
         catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;throw;}
     }
     ~FileSource(){if(handle_!=INVALID_HANDLE_VALUE)CloseHandle(handle_);}
@@ -107,7 +108,9 @@ public:
     static std::unique_ptr<FileSource> reopen(const DurableState& d){
         protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto path=r.text();
         require(std::filesystem::path(path).is_absolute());auto source=std::make_unique<FileSource>(path);
-        checkIdentity(r,source->handle_,true);r.end();return source;
+        checkIdentity(r,source->handle_,true);
+        if(r.remaining()){require(r.string()=="PeerChat/LogicalFileName/v1");source->name_=r.string();require(safeName(source->name_));source->token_=d.location;}
+        r.end();return source;
     }
     Blob read(std::uint64_t offset,size_t limit)override{
         require(offset<=size_&&limit<=ChunkBytes&&limit<=size_-offset);LARGE_INTEGER position{};position.QuadPart=offset;

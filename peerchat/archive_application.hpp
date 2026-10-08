@@ -19,7 +19,7 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
         auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
     if(operation==13){r.end();execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
         result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
-        result.string(execution.scope()?execution.scope()->archive.source:std::string{});}
+        result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);}
     return result.data;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){

@@ -12,6 +12,7 @@
 #include "group_text.hpp"
 #include "delivery_manager.hpp"
 #include "archive_application.hpp"
+#include "archive_attachment_transfer.hpp"
 #include "windows_transfer_io.hpp"
 #include "windows_mailbox.hpp"
 #include "direct_transport_adapter.hpp"
@@ -99,6 +100,15 @@ struct Node::Impl {
     std::unique_ptr<mailbox::WindowsMailbox> mailboxApplication;
     std::unique_ptr<archive::Enrollment> archiveApplication;
     std::unique_ptr<archive::Execution> archiveExecution;
+    std::unique_ptr<archive::AttachmentTransfers> archiveTransfers;
+    void prepareArchiveTransfers(){
+        if(archiveTransfers||!archiveApplication||!archiveExecution||!transfers)return;
+        archiveTransfers=std::make_unique<archive::AttachmentTransfers>(*store,profile,archiveApplication->policy(),*transfers,
+            [](const archive::Attachment& a){transfer::DurableState d;d.location=a.location;d.metadata={a.id,a.name,a.size,a.digest};return transfer::windows::FileSource::reopen(d);},
+            [](const transfer::Metadata& m,const Blob& destination){auto folder=unicode::decode(std::string(destination.begin(),destination.end()));return std::make_unique<transfer::windows::FileSink>(folder,m,nullptr,true);},
+            [](const transfer::DurableState& d){protocol::Reader r(d.location);protocol::check(r.type()==protocol::FileTransfer);r.text();auto final=r.text();transfer::windows::FileSource source(final,d.metadata.name);protocol::check(source.size()==d.metadata.size);return source.resumeToken();},
+            [this](const session::ReliableAuthorization& scope,std::uint64_t now){archiveExecution->hold(scope,now,networkGeneration);});
+    }
     std::uint64_t archiveGeneration=0;
     bool archiveAuthenticated=false;
     std::wstring mailboxProfileDirectory;
@@ -110,11 +120,36 @@ struct Node::Impl {
     std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
     bool transferPersistenceReported=false;
+    std::set<std::string> cataloguedTransfers;
+    std::uint64_t attachmentCatalogAt=0;
+    void retainCompletedAttachments(){
+        auto now=nowMilliseconds();if(!transfers||now<attachmentCatalogAt)return;attachmentCatalogAt=now+1000;
+        archive::AttachmentCatalog catalog(*store);
+        for(auto d:transfers->completedRecords()){
+            try{
+                if(cataloguedTransfers.count(d.metadata.id)||(archiveTransfers&&archiveTransfers->wasArchiveTransfer(d.metadata.id))||!store->historicalDeviceAccount(profile.peerId)||!store->historicalDeviceAccount(d.peer))continue;
+                if(!d.sending){
+                    // Normalize a committed receive token into a read-only source
+                    // token. No path from an archive peer is ever opened here.
+                    protocol::Reader r(d.location);protocol::check(r.type()==protocol::FileTransfer);r.text();auto final=r.text();
+                    d.location.clear();
+                    try{auto file=std::make_unique<transfer::windows::FileSource>(final,d.metadata.name);if(file->size()==d.metadata.size)d.location=file->resumeToken();}catch(const std::exception&){}
+                }
+                catalog.completed(d,profile.peerId,[&](const std::string& device){return store->historicalDeviceAccount(device);});
+                cataloguedTransfers.insert(d.metadata.id);
+            }catch(const std::exception&){transferPersistenceFailure();}
+        }
+    }
     void transferPersistenceFailure(){
         if(!transferPersistenceReported){notice(NodeEvent::Kind::Error,L"File transfer progress is waiting for protected local storage; messaging is unaffected");transferPersistenceReported=true;}
     }
     Connection* transferConnection(const std::string& peer){
         if(!sessionTransports)return nullptr;
+        if(archiveTransfers)if(auto scope=archiveTransfers->scopeForPeer(peer)){
+            auto route=sessionTransports->snapshot(scope->continuityKey());
+            if(route&&route->connected)for(auto& c:connections)if(c->attemptId==route->activeTransport.value&&c->peerId==peer&&c->online&&!c->dead&&c->archiveBound&&c->authorization.permitsArchiveControl()&&(c->remoteCapabilities&protocol::CapabilityFileTransfer))return c.get();
+            return nullptr;
+        }
         auto state=sessionTransports->snapshot(peer);auto contact=contacts.find(peer);
         if(!state||!state->connected||contact==contacts.end()||!contact->second.verified)return nullptr;
         for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->peerId==peer&&c->online&&!c->dead&&c->approved&&c->authorization.permitsDirectMessage()&&(c->remoteCapabilities&protocol::CapabilityFileTransfer))return c.get();
@@ -129,13 +164,17 @@ struct Node::Impl {
         try{transfers->tick(nowMilliseconds(),[&](const std::string& peer){auto c=transferConnection(peer);return c?c->attemptId:0;},
             [&](const std::string& peer,const Blob& bytes){
                 auto c=transferConnection(peer);if(!c||c->output.size()-c->sent>MaxQueue/4)return false;
+                // A revoked archive transfer may never escape its purpose by
+                // falling through to a coincident ordinary friend route.
+                if(archiveTransfers&&archiveTransfers->wasArchiveTransfer(archive::transferPacketId(bytes))&&!c->authorization.permitsArchiveControl())return false;
                 if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
-                try{packet(*c,bytes);return true;}
+                try{packet(*c,c->authorization.permitsArchiveControl()?archiveTransfers->outgoing(c->authorization,bytes):bytes);return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
-            });}catch(const transfer::PersistenceError&){transferPersistenceFailure();}
+            });retainCompletedAttachments();}catch(const transfer::PersistenceError&){transferPersistenceFailure();}
     }
     void serviceArchive(){
         if(!archiveExecution||!archiveApplication)return;
+        try{prepareArchiveTransfers();if(archiveTransfers)archiveTransfers->maintain(nowMilliseconds());}catch(const std::exception&){transferPersistenceFailure();}
         auto retired=archiveExecution->tick(nowMilliseconds(),networkGeneration);
         for(auto& c:connections)if(!c->dead&&c->authorization.permitsArchiveControl()){
             try{
@@ -144,7 +183,11 @@ struct Node::Impl {
                     std::any_of(retired.begin(),retired.end(),[&](auto id){return id.value==c->attemptId;})){
                     c->closeReason=L"Archive work completed, paused or authorization unavailable";c->dead=true;
                     if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);c->relayPipe->output.clear();c->relayPipe->queued=0;}
-                }else if(c->online&&c->archiveBound){auto request=archiveExecution->request(c->authorization,nowMilliseconds());if(!request.empty())packet(*c,request);}
+                }else if(c->online&&c->archiveBound&&c->output.size()-c->sent<MaxQueue/4){
+                    auto request=archiveTransfers?archiveTransfers->request(c->authorization,c->attemptId):Blob{};
+                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds());
+                    if(!request.empty())packet(*c,request);
+                }
             }catch(const std::exception&){c->closeReason=L"Archive synchronization failed closed";c->dead=true;}
         }
     }
@@ -167,10 +210,24 @@ struct Node::Impl {
             auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,nullptr,true);auto path=sink->path();
             transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;return L"ok";
         }
-        if(command.sourceKind==3){transfers->cancel(command.id);return L"ok";}
+        if(command.sourceKind==3){if(archiveTransfers&&archiveTransfers->owns(command.id))archiveTransfers->cancel(command.id);else transfers->cancel(command.id);return L"ok";}
+        if(command.sourceKind==4){
+            std::uint64_t after=0;if(!command.id.empty()){size_t used=0;after=std::stoull(command.id,&used);protocol::check(used==command.id.size()&&after<=INT64_MAX);}
+            auto through=store->attachmentMetadataWatermark();auto page=store->attachmentMetadataPage(static_cast<std::int64_t>(after),through);
+            std::wostringstream out;out<<L"{\"next\":"<<page.next<<L",\"complete\":"<<(page.complete?L"true":L"false")<<L",\"records\":[";bool first=true;
+            for(const auto& record:page.records){auto a=archive::decodeLocalAttachment(record.record);if(!first)out<<L",";first=false;
+                out<<L"{\"id\":"<<transferQuote(widenUtf8(a.id))<<L",\"name\":"<<transferQuote(widenUtf8(a.name))<<L",\"size\":"<<a.size<<L",\"availableLocally\":"<<(!a.location.empty()?L"true":L"false")<<L",\"archiveAttested\":"<<(!a.proof.empty()?L"true":L"false")<<L"}";}
+            out<<L"]}";return out.str();
+        }
+        if(command.sourceKind==5){
+            protocol::check(archiveAuthenticated&&archiveExecution&&archiveExecution->scope()&&archiveExecution->scope()->archive.source==command.peer);
+            prepareArchiveTransfers();protocol::check(bool(archiveTransfers));auto destination=utf8(command.text);
+            return widenUtf8(archiveTransfers->download(*archiveExecution->scope(),command.id,Blob(destination.begin(),destination.end())));
+        }
         if(command.sourceKind!=0)throw std::runtime_error("Invalid file operation");
         std::wostringstream out;out<<L"[";bool first=true;
-        for(auto& s:transfers->snapshots()){
+        auto snapshots=transfers->snapshots();if(archiveTransfers){auto pending=archiveTransfers->pending();snapshots.insert(snapshots.end(),pending.begin(),pending.end());}
+        for(auto& s:snapshots){
             if(!first)out<<L",";
             first=false;
             out<<L"{\"id\":"<<transferQuote(widenUtf8(s.metadata.id))<<L",\"peer\":"<<transferQuote(widenUtf8(s.peer))<<L",\"name\":"<<transferQuote(widenUtf8(s.metadata.name))
@@ -817,6 +874,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         if(c.authorization.scope==session::ReliableAuthorizationScope::ArchiveControl){
             protocol::check(archiveApplication&&archiveExecution&&archive::currentSessionAuthorization(archiveApplication->policy(),c.authorization));
             if(!c.archiveBound){archive::verifySessionBinding(r,c.authorization);c.archiveBound=true;return;}
+            {protocol::Reader control(frame);if(control.type()==protocol::ArchiveControl&&control.string()==archive::AttachmentDomain){
+                protocol::check(control.number()==1);auto kind=control.number();if(kind>=3){prepareArchiveTransfers();protocol::check(bool(archiveTransfers));archiveTransfers->control(c.authorization,frame,nowMilliseconds());return;}
+            }}
             auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
             auto response=archiveExecution->control(c.authorization,frame,utc,nowMilliseconds());
             if(!response.empty())packet(c,response);
@@ -1435,11 +1495,11 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
-            archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+            archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
-            transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;
+            transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
             try{
                 transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
                 transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
@@ -1541,7 +1601,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+        archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };

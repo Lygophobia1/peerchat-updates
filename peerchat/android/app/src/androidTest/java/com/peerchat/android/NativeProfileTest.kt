@@ -38,6 +38,12 @@ class NativeProfileTest {
             }
         } finally { clean(profile) }
     }
+    @Test fun nativeAttachmentFilesAndRestart() {
+        val profile = "test_${UUID.randomUUID()}"
+        try {
+            NativeProfile(context, profile).use { assertEquals(0, ProfileBridge.attachmentTest(it.handle)) }
+        } finally { clean(profile) }
+    }
     @Test fun crossProcessStorageCheckpoint() {
         val args = InstrumentationRegistry.getArguments()
         val phase = args.getString("storage_phase")

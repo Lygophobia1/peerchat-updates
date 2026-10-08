@@ -228,6 +228,9 @@ struct Storage::Impl {
                     "INSERT INTO message_archive_index(message_id) SELECT m.id FROM messages m WHERE NOT EXISTS(SELECT 1 FROM message_archive_index a WHERE a.message_id=m.id) ORDER BY m.rowid;");
             execute("CREATE TABLE IF NOT EXISTS group_message_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,server_group TEXT NOT NULL,local_group TEXT NOT NULL,message_id TEXT NOT NULL,UNIQUE(server_group,message_id));"
                     "CREATE INDEX IF NOT EXISTS group_message_history ON group_message_index(local_group,sequence);");
+            // Additive index only; names, paths, digests and provenance remain
+            // in the existing platform-protected object backend.
+            execute("CREATE TABLE IF NOT EXISTS attachment_history_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,attachment_id TEXT UNIQUE NOT NULL);");
             // Separate outbox index contains identifiers only, never message text.
             execute("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS group_events(event_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,logical_order INTEGER NOT NULL,b BLOB NOT NULL);"
@@ -393,6 +396,41 @@ Blob Storage::archiveHistoryProof(const std::string& id){
 }
 Blob Storage::archiveSyncState(const std::string& context){
     require(identifier(context),"Invalid archive sync context");return impl_->get("archive-sync/"+context);
+}
+Blob Storage::transferJournal(const std::string& device){require(identifier(device),"Invalid transfer device");return impl_->get("transfer-journal/v1/"+device);}
+void Storage::saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid transfer journal");
+    Transaction transaction(impl_->sql);require(transferJournal(device)==expected,"Transfer journal changed concurrently");
+    impl_->put("transfer-journal/v1/"+device,next);transaction.commit();
+}
+Blob Storage::attachmentMetadata(const std::string& id){
+    require(identifier(id,32),"Invalid attachment identity");return impl_->get("attachment-history/v1/"+id);
+}
+void Storage::saveAttachmentMetadata(const std::string& id,const Blob& expected,const Blob& record){
+    require(identifier(id,32)&&!record.empty()&&record.size()<=16384,"Invalid attachment metadata");
+    Transaction transaction(impl_->sql);
+    require(attachmentMetadata(id)==expected,"Attachment metadata changed concurrently");
+    impl_->put("attachment-history/v1/"+id,record);
+    Statement index(impl_->sql,"INSERT INTO attachment_history_index(attachment_id) VALUES(?) ON CONFLICT(attachment_id) DO NOTHING");index.text(1,id);index.row();
+    transaction.commit();
+}
+std::int64_t Storage::attachmentMetadataWatermark(){
+    Statement query(impl_->sql,"SELECT seq FROM sqlite_sequence WHERE name='attachment_history_index'");
+    if(!query.row())return 0;
+    auto value=query.number(0);require(value>=0,"Invalid attachment watermark");return value;
+}
+AttachmentMetadataPage Storage::attachmentMetadataPage(std::int64_t after,std::int64_t through,int limit){
+    require(after>=0&&through>=after&&through<=attachmentMetadataWatermark()&&limit>0&&limit<=8,"Invalid attachment page bounds");
+    AttachmentMetadataPage page;page.next=after;page.through=through;
+    Statement query(impl_->sql,"SELECT sequence,attachment_id FROM attachment_history_index WHERE sequence>? AND sequence<=? ORDER BY sequence LIMIT ?");
+    query.number(1,after);query.number(2,through);query.number(3,limit+1);
+    while(query.row()){
+        if(page.records.size()==static_cast<size_t>(limit))return page;
+        AttachmentMetadataRecord record;record.sequence=query.number(0);record.id=query.text(1);record.record=attachmentMetadata(record.id);
+        require(record.sequence>page.next&&!record.record.empty()&&record.record.size()<=16384,"Invalid attachment index record");
+        page.next=record.sequence;page.records.push_back(std::move(record));
+    }
+    page.complete=true;page.next=through;return page;
 }
 void Storage::saveArchiveSyncState(const std::string& context,const Blob& expected,const Blob& next){
     require(identifier(context)&&!next.empty()&&next.size()<=4096,"Invalid archive sync state");

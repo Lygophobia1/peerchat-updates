@@ -19,6 +19,7 @@ public:
         // Called on the existing worker; the profile/controller owner outlives
         // this endpoint. Empty response is permitted for a consumed page.
         std::function<Blob(const Blob&)> control{};
+        bool attachments=false;
     };
 private:
     const Profile& local_;
@@ -167,7 +168,7 @@ public:
             protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
-                (archive_?protocol::CapabilityArchiveControl:0);
+                (archive_?protocol::CapabilityArchiveControl:0)|(archive_&&archive_->attachments?protocol::CapabilityFileTransfer:0);
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
             if(!live)close(true);

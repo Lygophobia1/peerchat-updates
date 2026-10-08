@@ -58,6 +58,11 @@ int main(){
         }
         {Harness h;auto bytes=data(100000);h.offer(bytes);while(h.result.bytes.size()<32768)h.pump();h.route=0;h.pump();check(!h.result.committed);h.route=2;h.finish();check(h.result.bytes==bytes&&h.result.committed);}
         {Harness h;h.offer(data(50000));h.corrupt=true;h.finish();check(!h.result.committed&&h.receiver.snapshots()[0].state==State::Failed&&h.result.destroyed);}
+        {Harness h;auto content=data(50000);windows::Sha256 hash;hash.update(content.data(),content.size()>ChunkBytes?ChunkBytes:content.size());
+            hash.update(content.data()+ChunkBytes,content.size()-ChunkBytes);auto expected=hash.finish();
+            h.sender.offer(h.b,h.id,std::make_unique<MemorySource>(content),h.now,&expected);h.finish();check(h.result.committed&&h.result.bytes==content);}
+        {Harness h;Digest wrong{};h.sender.offer(h.b,h.id,std::make_unique<MemorySource>(data(50000)),h.now,&wrong);
+            h.finish();check(h.sender.snapshots()[0].state==State::Failed&&!h.result.committed&&h.receiver.snapshots().empty());}
         {Harness h;h.offer(data(50000));h.result.diskFailure=true;h.finish();check(!h.result.committed&&h.receiver.snapshots()[0].state==State::Failed);}
         {Harness h;h.offer(data(50000));while(!h.accepted)h.pump();h.receiver.cancel(h.id);h.pump();check(h.result.destroyed&&!h.result.committed&&h.sender.snapshots()[0].state==State::Cancelled);}
         for(auto name:{"../bad","C:bad","CON.txt","NUL","LPT1.bin","bad\\name","bad.","bad ","a\nb"})check(!safeName(name));

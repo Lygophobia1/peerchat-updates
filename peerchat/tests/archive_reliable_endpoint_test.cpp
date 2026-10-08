@@ -75,7 +75,7 @@ int main(){try{
         sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
         unsigned pages=0;
         do{readerWork.tick(now,0);receiver.sendArchiveControl(readerWork.request(scopedB.scope,now));exchange(receiver,sender);++pages;}while(!readerWork.snapshot().complete);
-        check(pages==5&&readerWork.snapshot().conversations==1&&readerWork.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
+        check(pages==6&&readerWork.snapshot().conversations==1&&readerWork.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
         readerWork.tick(now,0);check(!readerWork.running()&&readerWork.state()=="History synchronized");
         archive::Execution reopened(b,reader,reading,bd,bs);reopened.start(source.peerId,source.peerId,false);check(reopened.snapshot().complete&&!reopened.running());
         reopened.start(source.peerId,source.peerId,true);check(reopened.running());reopened.stop();check(!reopened.running()&&reopened.state()=="Paused");

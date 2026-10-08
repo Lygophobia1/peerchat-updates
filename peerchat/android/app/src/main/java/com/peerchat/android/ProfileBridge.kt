@@ -12,6 +12,7 @@ object ProfileBridge {
     external fun sign(handle: Long, payload: ByteArray): ByteArray?
     // Export exists only in the debug build and rejects non-test profiles.
     external fun storageTest(handle: Long, mode: Int): Int
+    external fun attachmentTest(handle: Long): Int
 }
 class NativeProfile(context: Context, profile: String = "default") : AutoCloseable {
     val handle = NativeBridge.create()

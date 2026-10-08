@@ -17,6 +17,9 @@
 #include "../platform/sql_key_registry.hpp"
 #include "android_tls_provider.hpp"
 #include "../tls.hpp"
+#include "../archive_attachment_transfer.hpp"
+#include "transfer_storage.hpp"
+#include "attachment_file_io.hpp"
 #endif
 
 namespace {
@@ -29,8 +32,32 @@ struct Instance {
     std::unique_ptr<peerchat::Storage> storage;
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
+    std::shared_ptr<peerchat::transfer::posix::Cache> attachmentCache;
+    std::unique_ptr<peerchat::transfer::ProtectedStorageJournal> transferJournal;
+    std::unique_ptr<peerchat::transfer::TransferManager> transfers;
     std::unique_ptr<peerchat::archive::Enrollment> archiveApplication;
     std::unique_ptr<peerchat::archive::Execution> archiveExecution;
+    std::unique_ptr<peerchat::archive::AttachmentTransfers> archiveTransfers;
+    void prepareAttachments(std::uint64_t now){
+        using namespace peerchat;
+        protocol::check(storage&&archiveApplication&&archiveExecution);
+        if(!transfers){
+            auto identity=std::dynamic_pointer_cast<platform::android::Identity>(profile.identity);protocol::check(bool(identity));
+            auto path=identity->context->bytes("attachmentDirectory","()[B");attachmentCache=std::make_shared<transfer::posix::Cache>(std::string(path.begin(),path.end()));
+            auto cache=attachmentCache;
+            transferJournal=std::make_unique<transfer::ProtectedStorageJournal>(*storage,profile.peerId,
+                [cache](const transfer::DurableState& d){return transfer::posix::FileSource::reopen(cache,d);},
+                [cache](const transfer::DurableState& d){return transfer::posix::FileSink::reopen(cache,d);});
+            auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get());manager->restore(now);transfers=std::move(manager);
+        }
+        if(!archiveTransfers){auto cache=attachmentCache;
+            archiveTransfers=std::make_unique<archive::AttachmentTransfers>(*storage,profile,archiveApplication->policy(),*transfers,
+                [cache](const archive::Attachment& a){transfer::DurableState d;d.metadata={a.id,a.name,a.size,a.digest};d.location=a.location;return transfer::posix::FileSource::reopen(cache,d);},
+                [cache](const transfer::Metadata& m,const Blob&){cache->reserve(m.size);return std::make_unique<transfer::posix::FileSink>(cache,m);},
+                [cache](const transfer::DurableState& d){auto file=transfer::posix::FileSink::reopen(cache,d);return file->sourceToken();},
+                [this](const session::ReliableAuthorization& scope,std::uint64_t time){archiveExecution->hold(scope,time,relayRequests->network());});
+        }
+    }
     std::uint64_t archiveGeneration=0;
     // Provider objects only; existing SessionTransportManager will own route
     // association when networking is ported. No second reconnect/session policy.
@@ -295,6 +322,15 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_
         }
         if(!instance->archiveExecution)instance->archiveExecution=std::make_unique<peerchat::archive::Execution>(*instance->storage,instance->profile,
             instance->archiveApplication->policy(),*instance->deliveries,instance->sessions);
+        if(operation>=16&&operation<=18){
+            using namespace peerchat;protocol::Reader r(bytes);archive::require(r.type()==archive::LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==static_cast<unsigned>(operation));
+            auto account=r.number(),generation=r.number();archive::require(instance->archiveApplication->matches(account,generation));auto result=archive::applicationHeader(operation);
+            if(operation==16){auto after=r.number();r.end();archive::require(after<=INT64_MAX);auto page=instance->storage->attachmentMetadataPage(after,instance->storage->attachmentMetadataWatermark());
+                result.number(page.next);result.number(page.complete);result.number(page.records.size());for(const auto& record:page.records){auto a=archive::decodeLocalAttachment(record.record);result.string(a.id);result.string(a.name);result.number(a.size);result.number(!a.location.empty());result.number(!a.proof.empty());}}
+            if(operation==17){auto source=r.string(),id=r.string();r.end();archive::require(instance->archiveExecution->scope()&&instance->archiveExecution->scope()->archive.source==source);instance->prepareAttachments(runtimeNow());result.string(instance->archiveTransfers->download(*instance->archiveExecution->scope(),id,Blob{'c','a','c','h','e'}));}
+            if(operation==18){auto id=r.string();r.end();instance->prepareAttachments(runtimeNow());instance->archiveTransfers->cancel(id);}
+            return platform::android::Context::input(env,result.data);
+        }
         auto output=operation>=12?peerchat::archive::executeSyncOperation(*instance->archiveApplication,*instance->archiveExecution,static_cast<unsigned>(operation),bytes,runtimeNow(),instance->relayRequests->network()):
             peerchat::archive::executeEnrollmentOperation(*instance->archiveApplication,static_cast<unsigned>(operation),bytes,mailboxNow());
         return peerchat::platform::android::Context::input(env,output);
@@ -332,7 +368,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->relayRequests)return nullptr;
         // Poll execution commands, not a Kotlin retry/session policy.
         auto now=runtimeNow();
-        if(instance->archiveExecution)instance->archiveExecution->tick(now,instance->relayRequests->network());
+        if(instance->archiveExecution){try{instance->prepareAttachments(now);instance->archiveTransfers->maintain(now);}catch(const std::exception&){}instance->archiveExecution->tick(now,instance->relayRequests->network());}
         if(!instance->outboxDemandLoaded){
             for(const auto& contact:instance->storage->contacts())if(!instance->storage->pending(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
             instance->outboxDemandLoaded=true;
@@ -359,13 +395,18 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
             }
             else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
-                try{auto request=instance->archiveExecution->request(*scope,now);if(!request.empty())peer.second->sendArchiveControl(request);}
+                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now);if(!request.empty())peer.second->sendArchiveControl(request);}
                 catch(...){instance->archiveExecution->disconnected(*scope);peer.second->close(false);}
             }
         }
         for(auto it=instance->peers.begin();it!=instance->peers.end();){
             if(it->second->closed())it=instance->peers.erase(it);else ++it;
         }
+        if(instance->transfers&&instance->archiveTransfers)try{
+            instance->transfers->tick(now,[&](const std::string& device)->std::uint64_t{auto scope=instance->archiveTransfers->scopeForPeer(device);if(!scope)return 0;auto route=instance->sessions.snapshot(scope->continuityKey());if(!route||!route->connected)return 0;auto peer=instance->peers.find(route->activeTransport.value);return peer!=instance->peers.end()&&peer->second->ready()?route->activeTransport.value:0;},
+                [&](const std::string& device,const peerchat::Blob& bytes){auto scope=instance->archiveTransfers->scopeForPeer(device);if(!scope)return false;auto route=instance->sessions.snapshot(scope->continuityKey());if(!route)return false;auto peer=instance->peers.find(route->activeTransport.value);if(peer==instance->peers.end()||!peer->second->ready())return false;
+                    try{peer->second->sendArchiveControl(instance->archiveTransfers->outgoing(*scope,bytes));return true;}catch(...){peer->second->close(true);return false;}});
+        }catch(const peerchat::transfer::PersistenceError&){}
         auto used=instance->peers.size()+instance->tls.size();
         auto requests=instance->relayRequests->take(now,static_cast<std::uint32_t>(now),used<32?32-used:0);
         peerchat::protocol::Writer value(peerchat::protocol::Hello);value.number(requests.size());
@@ -393,7 +434,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
             peerchat::protocol::check(instance->archiveApplication&&instance->archiveExecution);
             auto scope=request->authorization;auto owner=instance.get();
             archive=peerchat::portable::ReliableEndpoint::ArchiveAdmission{&instance->archiveApplication->policy(),scope,
-                [owner,scope](const peerchat::Blob& bytes){return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());}};
+                [owner,scope](const peerchat::Blob& bytes){peerchat::protocol::Reader r(bytes);if(r.type()==peerchat::protocol::ArchiveControl&&r.string()==peerchat::archive::AttachmentDomain){peerchat::protocol::check(r.number()==1);if(r.number()>=3){owner->prepareAttachments(runtimeNow());owner->archiveTransfers->control(scope,bytes,runtimeNow());return peerchat::Blob{};}}return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());},true};
         }
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,
             instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow(),std::move(archive));
@@ -626,6 +667,32 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ProfileBridge_
 }
 #if defined(PEERCHAT_STORAGE_TEST_HOOKS)
 // Debug-only synthetic fixture. Never available for the normal profile or release.
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_attachmentTest(JNIEnv*,jobject,jlong handle){
+    return guarded([&]()->pc_core_status{
+        using namespace peerchat;auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage||!instance->testProfile)return PC_CORE_INVALID_ARGUMENT;
+        auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance->profile.identity);protocol::check(bool(identity));auto path=identity->context->bytes("attachmentDirectory","()[B");
+        auto cache=std::make_shared<transfer::posix::Cache>(std::string(path.begin(),path.end()));Blob content(100000);for(size_t n=0;n<content.size();++n)content[n]=static_cast<unsigned char>(n*17);
+        transfer::posix::Sha256 hash;for(size_t n=0;n<content.size();n+=transfer::ChunkBytes)hash.update(content.data()+n,std::min(transfer::ChunkBytes,content.size()-n));
+        transfer::DurableState d;d.metadata={Storage::newMessageId(),u8"résumé-日本.bin",content.size(),hash.finish()};
+        cache->reserve(d.metadata.size);
+        {transfer::posix::FileSink file(cache,d.metadata);file.append(Blob(content.begin(),content.begin()+transfer::ChunkBytes));file.flush();d.location=file.resumeToken();d.done=transfer::ChunkBytes;}
+        {auto file=transfer::posix::FileSink::reopen(cache,d);protocol::check(file->read(0,transfer::ChunkBytes)==Blob(content.begin(),content.begin()+transfer::ChunkBytes));
+            for(size_t n=transfer::ChunkBytes;n<content.size();n+=transfer::ChunkBytes)file->append(Blob(content.begin()+n,content.begin()+std::min(content.size(),n+transfer::ChunkBytes)));
+            file->commit();file->commit();d.done=d.metadata.size;d.state=transfer::State::Complete;d.location=file->resumeToken();}
+        auto committed=transfer::posix::FileSink::reopen(cache,d);auto sourceRecord=d;sourceRecord.location=committed->sourceToken();
+        {auto source=transfer::posix::FileSource::reopen(cache,sourceRecord);transfer::posix::Sha256 verified;
+            for(size_t n=0;n<content.size();n+=transfer::ChunkBytes){auto bytes=source->read(n,std::min(transfer::ChunkBytes,content.size()-n));protocol::check(bytes==Blob(content.begin()+n,content.begin()+n+bytes.size()));verified.update(bytes.data(),bytes.size());}protocol::check(verified.finish()==d.metadata.digest);}
+        bool rejected=false;{transfer::posix::FileSink replacement(cache,d.metadata);for(size_t n=0;n<content.size();n+=transfer::ChunkBytes)replacement.append(Blob(content.begin()+n,content.begin()+std::min(content.size(),n+transfer::ChunkBytes)));
+            try{replacement.commit();}catch(const std::exception&){rejected=true;}protocol::check(rejected);replacement.discard();}
+        // Partial replacement cannot overwrite the independently committed file.
+        protocol::check(transfer::posix::FileSource::reopen(cache,sourceRecord)->size()==content.size());
+        auto cancel=d.metadata;cancel.id=Storage::newMessageId();{transfer::posix::FileSink file(cache,cancel);file.append(Blob{1});file.discard();}
+        struct stat s{};protocol::check(fstatat(cache->fd(),(cancel.id+".part").c_str(),&s,AT_SYMLINK_NOFOLLOW)!=0&&errno==ENOENT);
+        auto wrong=sourceRecord;wrong.location.back()^=1;rejected=false;try{transfer::posix::FileSource::reopen(cache,wrong);}catch(const std::exception&){rejected=true;}protocol::check(rejected);
+        return PC_CORE_OK;
+    });
+}
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_storageTest(JNIEnv*,jobject,jlong handle,jint mode){
     return guarded([&]()->pc_core_status{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
