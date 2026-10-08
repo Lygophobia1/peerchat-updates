@@ -23,6 +23,9 @@ class TransferUiTest {
         window.Loaded+=(s,e)=>{
             try {
                 var attach=(Button)window.FindName("Attachment");Require(attach!=null,"Attachment control missing");
+                Require(attach.IsEnabled&&attach.IsHitTestVisible&&attach.Focusable,
+                    "Paperclip cannot be activated by a user");
+                Require(Convert.ToString(attach.ToolTip)=="File transfers","Stale attachment-unavailable tooltip");
                 attach.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 attach.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 var timer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(2)};

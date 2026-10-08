@@ -12,6 +12,9 @@ try {
     & "$framework\csc.exe" /nologo /target:exe /platform:x64 "/out:$exe" "/reference:$run\PeerChat.Desktop.exe" $references .\tests\transfer_ui_test.cs
     if($LASTEXITCODE -ne 0){throw 'Transfer UI test build failed'}
     $process=Start-Process -WindowStyle Hidden -FilePath $exe -ArgumentList ('"'+$run+'"') -RedirectStandardOutput (Join-Path $run 'stdout.txt') -RedirectStandardError (Join-Path $run 'stderr.txt') -PassThru
+    # Retain the native process handle before a fast test exits; Windows
+    # PowerShell can otherwise expose a null ExitCode despite successful output.
+    $ownedProcessHandle=$process.Handle
     if(-not $process.WaitForExit(45000)){try{$process.Kill()}catch{};throw "Transfer UI timed out; artifacts: $run"}
     $process.WaitForExit()
     Get-Content (Join-Path $run 'stdout.txt')

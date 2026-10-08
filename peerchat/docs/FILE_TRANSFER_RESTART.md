@@ -1,5 +1,31 @@
 # Durable file-transfer restart resume
 
+## Paperclip accessibility correction (dev.43)
+
+The composer paperclip opens the existing File transfers window. Its layout
+still had a legacy disabled flag and unavailable tooltip after the transfer
+handler was added; this made normal mouse/keyboard activation impossible.
+Removing that flag restores the existing handler without changing transfer,
+authorization, session or networking behavior. Sending still requires selecting
+a verified direct conversation and explicit file selection; receiving still
+requires explicit acceptance. Drag/drop and Android file UI are not implemented.
+
+The focused UI regression now checks enabled, hit-test and keyboard-focus state
+before raising a click. It reproduces the defect against dev.42 instead of
+bypassing the disabled control and incorrectly passing. The obsolete general
+UI-smoke assertion requiring attachments to remain disabled is corrected too.
+
+Validation passed: two simultaneous isolated Windows client UI processes,
+transfer manager and durable restart regressions, voice-settings UI assertions
+with a retained native process handle, full Windows build/package/import audit,
+94 Android JVM tests, debug/test/release builds and lint, ARM64/JNI/dependency
+audit, version/updater extraction audit and diff checks. The transfer UI runner
+now retains its process handle before waiting so fast successful exits do not
+surface as null exit codes; it still requires an actual zero exit status.
+Dev.43 Development ZIP SHA-256:
+e17c576043bf073c33ce6a3602488832f1d3b7657035a5bb9b6bcaf5a4548a78.
+Physical end-to-end file acceptance remains pending.
+
 TransferManager remains the sole bulk-transfer owner. Its optional StateStore
 persists transfer snapshots; it does not own sockets, reconnect, delivery or chat
 history. Windows Node still accepts only the verified, DirectMessage-authorized
