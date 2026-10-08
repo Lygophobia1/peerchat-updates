@@ -265,6 +265,13 @@ Storage::Storage(std::shared_ptr<platform::StoragePlatform> platform){
     impl_->identity=platform->identity;
 }
 Storage::~Storage()=default;
+Blob Storage::archiveAuthorizationState(){return impl_->get("archive-authorization/v1");}
+void Storage::saveArchiveAuthorizationState(const Blob& expected,const Blob& next){
+    require(!next.empty()&&next.size()<=65536,"Invalid archive authorization state");
+    Transaction transaction(impl_->sql);
+    require(impl_->get("archive-authorization/v1")==expected,"Archive authorization changed concurrently");
+    impl_->put("archive-authorization/v1",next);transaction.commit();
+}
 std::string Storage::newMessageId(){
 #if defined(_WIN32) && !defined(PEERCHAT_PORTABLE_CRYPTO)
     Blob id(16);crypto(BCryptGenRandom(nullptr,id.data(),16,BCRYPT_USE_SYSTEM_PREFERRED_RNG));

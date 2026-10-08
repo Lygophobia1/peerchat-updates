@@ -113,6 +113,10 @@ public:
     void cancelGroupKeyHandoffsFor(const std::string& groupId,const std::string& recipientPeerId);
     static std::string newMessageId();
     static std::string publicKeyId(const Blob& publicKey);
+    // Archive authorization/provenance policy, not message/outbox ownership.
+    // Protected, profile-bound CAS prevents concurrent stale writers.
+    Blob archiveAuthorizationState();
+    void saveArchiveAuthorizationState(const Blob& expected,const Blob& next);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
