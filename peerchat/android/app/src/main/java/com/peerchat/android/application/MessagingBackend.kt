@@ -125,6 +125,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
                 mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,device,true,"Authenticated; refreshing contacts")
+                // Password authentication does not register this device. Use the
+                // established authenticated presence path before the combined
+                // bootstrap, which correctly requires prior account ownership.
+                // A device owned by another account still fails closed here.
+                connection.presence()
                 refresh();refreshAt=System.nanoTime()/1_000_000+900000
                 if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
                     try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}

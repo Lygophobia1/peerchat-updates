@@ -66,7 +66,15 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
             JSONObject(channel.read(16384).toString(Charsets.UTF_8))
         }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
-        if(!response.optBoolean("ok")) throw ServerRejected(response.optString("error", "request_failed"))
+        if(!response.optBoolean("ok")) {
+            val code=response.optString("error", "request_failed")
+            // Log only fixed protocol categories, never arbitrary server text or payloads.
+            val category=if(code in setOf("login_failed","session_invalid","session_superseded",
+                "device_session_mismatch","device_account_mismatch","bootstrap_version_unsupported",
+                "bootstrap_too_large","unsupported_request","invalid_presence"))code else "request_rejected"
+            android.util.Log.w("PeerChatWake","stage=server_request_rejected operation="+safeOperation(type)+" reason="+category)
+            throw ServerRejected(code)
+        }
         if(response.optInt("rpcVersion")==1)supportsRpc=true
         if(authenticated&&(type=="presence"||type=="messaging_bootstrap")&&response.optString("registeredPublicIdentity")==device)rpcAuthorized=true
         return response

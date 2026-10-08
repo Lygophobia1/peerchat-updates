@@ -52,12 +52,40 @@ class DiscoveryIntegrationTest {
     static RelayConnection Attach(DiscoveryClient client,string local,long targetAccount,string target){TcpClient tcp;var tls=client.OpenAuthenticatedStream(out tcp,true);var json=new JavaScriptSerializer();var request=new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",client.SessionToken},{"publicIdentity",local},{"targetAccountId",targetAccount.ToString()},{"targetPublicIdentity",target}};DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(request)));var response=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(tls)));object ok,error;if(!response.TryGetValue("ok",out ok)||!(bool)ok){response.TryGetValue("error",out error);tls.Dispose();tcp.Close();throw new InvalidOperationException(error as string??"relay_failed");}return new RelayConnection{Tcp=tcp,Tls=tls,Session=(string)response["sessionId"]};}
     static RelayConnection OpenSilentEventLease(DiscoveryClient client,string identity){TcpClient tcp;var tls=client.OpenAuthenticatedStream(out tcp,true);var json=new JavaScriptSerializer();DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string,object>{{"version",1},{"type","events"},{"sessionToken",client.SessionToken},{"publicIdentity",identity},{"clientHeartbeats",true}})));var ready=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(tls)));Require(ready.ContainsKey("ok")&&(bool)ready["ok"],"silent event lease was rejected");DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string,object>{{"type","event_heartbeat"}})));return new RelayConnection{Tcp=tcp,Tls=tls};}
     static void RelayRoundTrip(DiscoveryClient left,string leftPeer,long leftTarget,string rightPeer,DiscoveryClient right,long rightTarget,string description,bool proveIdle=false){var a=Task.Run(()=>Attach(left,leftPeer,leftTarget,rightPeer));var b=Task.Run(()=>Attach(right,rightPeer,rightTarget,leftPeer));Task.WaitAll(a,b);using(var first=a.Result)using(var second=b.Result){Require(first.Tcp.ReceiveTimeout==0&&second.Tcp.ReceiveTimeout==0,description+" inherited the short discovery request timeout");Require(first.Session==second.Session&&first.Session.Length==43,description+" did not receive one bound session");byte[] prefix=Encoding.ASCII.GetBytes(first.Session),payload=Encoding.UTF8.GetBytes("opaque-inner-peer-tls-test");var frame=new byte[prefix.Length+payload.Length];Buffer.BlockCopy(prefix,0,frame,0,prefix.Length);Buffer.BlockCopy(payload,0,frame,prefix.Length,payload.Length);var read=Task.Run(()=>DiscoveryClient.ReadFrame(second.Tls,frame.Length));if(proveIdle)System.Threading.Thread.Sleep(11000);DiscoveryClient.WriteFrame(first.Tls,frame);Require(read.Wait(3000),description+" did not survive an idle interval");var received=read.Result;Require(Convert.ToBase64String(received)==Convert.ToBase64String(frame),description+" changed opaque bytes");}}
+    static void PasswordDeviceBootstrap(string host,int port,string pin){
+        var owner=new DiscoveryClient(host,port,pin);
+        owner.Register("bootstrap-owner-7f3k","bootstrap fixture password","bootstrap-original-device-0123456789");
+        var login=new DiscoveryClient(host,port,pin);login.Login("bootstrap-owner-7f3k","bootstrap fixture password");
+        var json=new JavaScriptSerializer();
+        Func<string,Dictionary<string,object>> bootstrap=device=>{
+            TcpClient tcp;using(var tls=login.OpenAuthenticatedStream(out tcp))using(tcp){
+                DiscoveryClient.WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string,object>{
+                    {"version",1},{"type","messaging_bootstrap"},{"bootstrapVersion",1},
+                    {"sessionToken",login.SessionToken},{"publicIdentity",device}})));
+                return json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(tls)));
+            }
+        };
+        const string fresh="bootstrap-fresh-device-0123456789";
+        Require((string)bootstrap(fresh)["error"]=="device_account_mismatch","Unregistered device bootstrap was accepted");
+        login.ReportPresence(fresh,"",0,"",0,false);
+        var state=bootstrap(fresh);
+        Require((bool)state["ok"]&&(bool)state["presenceLive"]&&(string)state["registeredPublicIdentity"]==fresh,
+            "Password device registration did not unblock authoritative bootstrap");
+        var other=new DiscoveryClient(host,port,pin);
+        const string foreign="bootstrap-foreign-device-0123456789";
+        other.Register("bootstrap-other-7f3k","other bootstrap fixture password",foreign);
+        Require(Fails(()=>login.ReportPresence(foreign,"",0,"",0,false)),"Password session claimed another account device");
+        Require((string)bootstrap(foreign)["error"]=="device_account_mismatch","Foreign device bootstrap accepted");
+        login.Logout();owner.Logout();other.Logout();
+        Console.WriteLine("PASS: password login registers a fresh device before bootstrap; unregistered and foreign devices fail closed.");
+    }
     public static int Main(string[] args){
         try {
             if(args.Length==1&&args[0]=="--physical-turn"){PhysicalTurnProof();return 0;}
             string host=args[0],pin=args[1];int port=Int32.Parse(args[2]);bool remote=args.Length>3&&args[3]=="--remote-no-admin";string adminPipe=args.Length>3&&args[3]!="--after-restart"&&args[3]!="--turn-disabled"&&!remote?args[3]:"";
             if(args.Length>3&&args[3]=="--after-restart") { var aliceAfterRestart=new DiscoveryClient(host,port,pin);aliceAfterRestart.Login("alice-7f3k","correct horse battery staple");var bobAfterRestart=aliceAfterRestart.Search("bob-4m2q");Require(bobAfterRestart.PublicIdentity=="peer-public-fingerprint-bob-replacement-0123456789","server restart lost replacement account/device identity");Require(!aliceAfterRestart.GetFriendState().Friends.Exists(x=>x.AccountId==bobAfterRestart.AccountId),"deleted account relationship survived server restart");Console.WriteLine("PASS: durable retained account and replacement account state survived server restart.");return 0; }
             if(args.Length>3&&args[3]=="--turn-disabled"){var disabled=new DiscoveryClient(host,port,pin);disabled.Register("turn-disabled-7f3k","turn disabled password","peer-public-fingerprint-turn-disabled-0123456789");Require(Fails(()=>disabled.GetMediaTurnCredentials("peer-public-fingerprint-turn-disabled-0123456789")),"disabled TURN issuer returned credentials");Console.WriteLine("PASS: disabled TURN issuer rejects credential requests without affecting authenticated discovery.");return 0;}
+            PasswordDeviceBootstrap(host,port,pin);
             string turnSecret=Environment.GetEnvironmentVariable("PEERCHAT_TEST_TURN_SECRET")??"";Require(turnSecret.Length>=16,"missing TURN integration-test secret");
             var alice=new DiscoveryClient(host,port,pin);alice.Register("alice-7f3k","correct horse battery staple","peer-public-fingerprint-alice-0123456789");alice.RefreshSessionInfo();Require(alice.RegisteredPublicIdentity=="peer-public-fingerprint-alice-0123456789","authenticated session did not return its registered device identity");Require(alice.SupportsRelayOnlyPresence,"server did not advertise relay-only presence capability");alice.ReportPresence("peer-public-fingerprint-alice-0123456789","",0,"",0,false);
             int rpcBefore=alice.RpcConnectionsOpened;for(int i=0;i<8;i++)alice.GetFriendState();Require(alice.RpcConnectionsOpened==rpcBefore+1,"sequential authenticated RPCs opened extra TLS connections");alice.CloseRpc();alice.GetFriendState();Require(alice.RpcConnectionsOpened==rpcBefore+2,"RPC did not reopen on demand");
