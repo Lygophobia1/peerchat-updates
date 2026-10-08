@@ -141,7 +141,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
         current=snapshot
         if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
-        mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed)
+        mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress)
         if(snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
             mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
         }
@@ -246,9 +246,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
             }
-            UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync -> {
+            UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize -> {
                 if(mutable.value.archiveBusy)return
                 val displayed=mutable.value.archiveEnrollment
+                if(action is UiAction.ArchiveSynchronize&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh before synchronizing.");return}
                 if(action is UiAction.ArchiveConsent&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh and confirm again.");return}
                 if(action is UiAction.HistorySync&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh before changing history policy.");return}
                 mutable.value=mutable.value.copy(archiveBusy=true)
@@ -257,6 +258,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                         val result=when(action){
                             is UiAction.ArchiveConsent->backend.archiveConsent(checkNotNull(displayed),action.action,action.device,action.read,action.serve)
                             is UiAction.HistorySync->backend.setHistorySync(checkNotNull(displayed),action.enabled)
+                            is UiAction.ArchiveSynchronize->backend.synchronizeArchive(checkNotNull(displayed),action.source,action.pause)
                             else->backend.archiveDevices()
                         }
                         if(current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")

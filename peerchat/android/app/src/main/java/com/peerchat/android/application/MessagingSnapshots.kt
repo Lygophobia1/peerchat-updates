@@ -16,7 +16,7 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val incomingRequests:List<AccountRequestSnapshot> = emptyList(),
     // Authentication alone is not evidence of a currently refreshed device lease.
     val serverPresenceLive:Boolean=false,val mailboxStorageAllowed:Boolean=false,
-    val localHistoryReady:Boolean=false)
+    val localHistoryReady:Boolean=false,val archiveProgress:ArchiveSyncProgress=ArchiveSyncProgress())
 
 internal fun expiredServerSession(failure:Exception):Boolean = failure is com.peerchat.android.platform.ServerRejected &&
     failure.code in setOf("session_invalid","session_superseded","event_session_superseded")

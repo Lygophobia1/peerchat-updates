@@ -3,6 +3,8 @@ using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Web.Script.Serialization;
+using System.Threading;
 using PeerChatDesktop;
 
 static class ArchiveApplicationBoundaryTest {
@@ -12,6 +14,11 @@ static class ArchiveApplicationBoundaryTest {
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_start(IntPtr h,string directory,ushort port,string name);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_authenticated_friends(IntPtr h,ulong account,ulong generation,string peers);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_archive(IntPtr h,uint op,byte[] input,uint length,[Out] byte[] output,uint capacity);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr h,ulong generation,string fingerprint);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr h);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr h,ulong attempt,int incoming);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_receive(IntPtr h,ulong attempt,byte[] bytes,uint length);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_take_output(IntPtr h,ulong attempt,[Out] byte[] bytes,uint capacity,uint wait);
     static void Check(bool condition){if(!condition)throw new Exception("Archive C ABI regression");}
     sealed class Wire:IDisposable {
         MemoryStream stream=new MemoryStream();BinaryWriter writer;
@@ -46,6 +53,39 @@ static class ArchiveApplicationBoundaryTest {
         var record=new Record(Simple(h,3));Check(record.Text()=="PeerChat/ArchiveApplication/v1"&&record.Number()==1&&record.Number()==3&&record.Number()==1);
         Check(record.Text()==peer&&record.Number()==1&&record.Number()==(approved?1UL:0UL)&&record.Number()==0&&record.Number()==(serving?1UL:0UL));record.End();
     }
+    static string Device(byte[] descriptor){var outer=new Record(descriptor);var payload=outer.Bytes();outer.Bytes();outer.End();var r=new Record(payload);Check(r.Text()=="PeerChat/ArchiveDeviceDescriptor/v1"&&r.Number()==1&&r.Number()==8);return r.Text();}
+    static void PairMetadata(IntPtr h,string peer,byte[][] descriptors,byte[][] grants,ulong revision){using(var w=new Wire(2)){
+        w.Number(8);w.Number(1);w.Number(revision);w.Text(peer);w.Text("paired-node-fixture");w.Number((ulong)descriptors.Length);foreach(var d in descriptors)w.Bytes(d);
+        w.Number((ulong)grants.Length);foreach(var g in grants){w.Bytes(g);w.Number(1);}Request(h,2,w);
+    }}
+    static ArchiveEnrollmentExecution Client(IntPtr h){return new ArchiveEnrollmentExecution((op,bytes)=>{var output=new byte[262144];int n=ui_archive(h,op,bytes,(uint)bytes.Length,output,(uint)output.Length);Check(n>0);Array.Resize(ref output,n);return output;},(op,fields)=>{throw new Exception("Unexpected fixture RPC");});}
+    static ulong Relay(IntPtr h,out ArchiveRelayScope scope){scope=null;foreach(var item in new JavaScriptSerializer().Deserialize<object[]>(Marshal.PtrToStringUni(ui_poll(h)))){
+        var row=(Dictionary<string,object>)item;if(Convert.ToInt32(row["kind"])!=18)continue;
+        Check(Convert.ToString(row["authorizationGroupId"])=="");scope=ArchiveRelayScope.Parse(Convert.ToString(row["authorizationArchive"]));return Convert.ToUInt64(row["attempt"]);
+    }return 0;}
+    static void PairedNode(string root){var a=ui_create();var b=ui_create();try{
+        Check(ui_start(a,Path.Combine(root,"pair-source"),0,"Source")==1&&ui_start(b,Path.Combine(root,"pair-reader"),0,"Reader")==1);
+        Check(ui_authenticated_friends(a,8,1,"")==1&&ui_authenticated_friends(b,8,1,"")==1);
+        Check(ui_network_context(a,1,"paired-fixture")==1&&ui_network_context(b,1,"paired-fixture")==1);
+        var da=Simple(a,1);var db=Simple(b,1);var pa=Device(da);var pb=Device(db);var descriptors=new[]{da,db};
+        PairMetadata(a,pa,descriptors,new byte[0][],1);PairMetadata(b,pb,descriptors,new byte[0][],1);
+        foreach(var h in new[]{a,b})using(var approve=new Wire(4)){approve.Text(pa);approve.Number(1);Request(h,4,approve);}
+        byte[] serve,read;using(var w=new Wire(5)){w.Text(pa);w.Number(2);w.Number(1);serve=Request(a,5,w);}
+        using(var w=new Wire(5)){w.Text(pb);w.Number(1);w.Number(1);read=Request(a,5,w);}
+        PairMetadata(a,pa,descriptors,new[]{serve,read},2);PairMetadata(b,pb,descriptors,new[]{serve,read},2);
+        var source=Client(a);var reader=Client(b);reader.StartSync(8,1,pa,false);
+        ulong ra=0,rb=0;ArchiveRelayScope scope;var until=DateTime.UtcNow.AddSeconds(10);
+        while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb!=0)source.IncomingArchive(8,1,scope);else Thread.Sleep(10);}
+        while(ra==0&&DateTime.UtcNow<until){ra=Relay(a,out scope);if(ra==0)Thread.Sleep(10);}
+        Check(ra>0&&rb>0&&ui_relay_ready(a,ra,0)==1&&ui_relay_ready(b,rb,1)==1);
+        var bytes=new byte[65536];bool complete=false;
+        while(DateTime.UtcNow<until){
+            int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);
+            n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
+            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==0);complete=true;break;}Thread.Sleep(10);
+        }
+        Check(complete);Console.WriteLine("PASS: actual paired Node workers, zero friends, scoped opaque relay, mutual Schannel TLS, manifest completion and bounded retirement. HOST ONLY");
+    }finally{ui_destroy(b);ui_destroy(a);}}
     public static int Main(string[] args){try{
         Check(args.Length==2&&LoadLibraryEx(Path.Combine(args[0],"PeerChat.Core.dll"),IntPtr.Zero,0x1100)!=IntPtr.Zero);
         IntPtr handle=ui_create();Check(handle!=IntPtr.Zero);byte[] descriptor=null,grant=null;string peer=null;
@@ -109,6 +149,7 @@ static class ArchiveApplicationBoundaryTest {
             Check(failed);Simple(handle,3,true);wrongAccount=false;execution.Refresh(8,4,peer);Views(handle,peer,true,false);
             Check(registrations>=5&&ArchiveEnrollmentExecution.Devices(execution.Refresh(8,4,peer)).Length==1);
         }finally{ui_destroy(handle);}
+        PairedNode(args[1]);
         Console.WriteLine("PASS: packaged Windows archive C ABI, five actual Node profile-worker restarts, exact registration identity, explicit consent, publication gating, account rejection, logout/relogin and fresh metadata. HOST ONLY");
         return 0;
     }catch(Exception e){Console.Error.WriteLine(e.Message);return 1;}}

@@ -67,7 +67,7 @@ struct Connection : reliable::SharedPeerRuntime {
     bool incoming=false,connecting=false,dead=false,online=false;
     std::wstring host,source,route,closeReason;std::uint64_t attemptId=0;
     session::ReliableAuthorization authorization;
-    bool relay=false;
+    bool relay=false,archiveBound=false;
     std::shared_ptr<RelayPipe> relayPipe;
     std::unique_ptr<TlsSession> tls;
     Blob output;size_t sent=0;
@@ -98,6 +98,7 @@ struct Node::Impl {
     std::unique_ptr<delivery::DeliveryManager> deliveries;
     std::unique_ptr<mailbox::WindowsMailbox> mailboxApplication;
     std::unique_ptr<archive::Enrollment> archiveApplication;
+    std::unique_ptr<archive::Execution> archiveExecution;
     std::uint64_t archiveGeneration=0;
     bool archiveAuthenticated=false;
     std::wstring mailboxProfileDirectory;
@@ -132,6 +133,20 @@ struct Node::Impl {
                 try{packet(*c,bytes);return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
             });}catch(const transfer::PersistenceError&){transferPersistenceFailure();}
+    }
+    void serviceArchive(){
+        if(!archiveExecution||!archiveApplication)return;
+        auto retired=archiveExecution->tick(nowMilliseconds(),networkGeneration);
+        for(auto& c:connections)if(!c->dead&&c->authorization.permitsArchiveControl()){
+            try{
+                if(!archiveAuthenticated||!archive::currentSessionAuthorization(archiveApplication->policy(),c->authorization)||
+                    !sessionTransports->attachablePeer(sessionEpoch,{c->attemptId})||
+                    std::any_of(retired.begin(),retired.end(),[&](auto id){return id.value==c->attemptId;})){
+                    c->closeReason=L"Archive work completed, paused or authorization unavailable";c->dead=true;
+                    if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);c->relayPipe->output.clear();c->relayPipe->queued=0;}
+                }else if(c->online&&c->archiveBound){auto request=archiveExecution->request(c->authorization,nowMilliseconds());if(!request.empty())packet(*c,request);}
+            }catch(const std::exception&){c->closeReason=L"Archive synchronization failed closed";c->dead=true;}
+        }
     }
     static std::wstring transferQuote(const std::wstring& value){
         std::wstring result=L"\"";for(auto ch:value){if(ch==L'\\'||ch==L'"')result+=L'\\';if(ch<32)result+=L' ';else result+=ch;}return result+L"\"";
@@ -722,6 +737,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         if(!decision.activated()){
             c.closeReason=widenUtf8(decision.reasonUtf8);c.dead=true;emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,c.closeReason,c,c.peerId));emitSessionSnapshot(c.peerId);return;
         }
+        if(c.authorization.scope==session::ReliableAuthorizationScope::ArchiveControl){
+            protocol::check(archiveApplication&&archiveExecution&&archive::currentSessionAuthorization(archiveApplication->policy(),c.authorization));
+            c.online=true;
+            for(auto loser:decision.retire)for(auto& other:connections)if(other->attemptId==loser.value&&!other->dead){other->closeReason=L"Superseded archive route";other->dead=true;}
+            auto bind=archive::sessionBinding(c.authorization);packet(c,bind);
+            emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"Authenticated archive route; awaiting scope binding",c,c.peerId));
+            return;
+        }
         if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
             // Group-control may use the existing peer-TLS relay, but it must
             // never authorize the ordinary DM/group-message outbox or media.
@@ -750,6 +773,13 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             auto capabilities=c.remoteCapabilities;
             if(c.host.empty()&&!c.relay)c.host=observedAddress(c.socket);
             if(c.directTransport){c.directTransport->updateRoute(routeObservation(c,c.directTransport->routeRevision()));project(c,c.directTransport->identityPresented(c.peerId,capabilities));}
+            if(c.authorization.scope==session::ReliableAuthorizationScope::ArchiveControl){
+                auto key=c.tls->remotePublicKey();
+                protocol::check(c.relay&&archiveApplication&&archiveExecution&&(capabilities&protocol::CapabilityArchiveControl)&&
+                    !c.identityMismatch&&c.peerId==c.authorization.expectedRemoteDeviceId&&
+                    archive::currentSessionAuthorization(archiveApplication->policy(),c.authorization,&key));
+                approve(c);return; // Never create or update ordinary friend trust.
+            }
             if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
                 protocol::check(c.relay&&(capabilities&protocol::CapabilityGroupKeyHandoff)!=0&&c.authorization.valid()&&c.peerId==c.authorization.expectedRemoteDeviceId);
                 const auto* roster=groupKeys?groupKeys->roster(c.authorization.groupId):nullptr;
@@ -784,6 +814,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         }
         if(kind==reliable::SharedPeerRuntime::FrameKind::Accepted){if(sessionTransports)sessionTransports->markRemoteAccepted(sessionEpoch,{c.attemptId});online(c);return;}
         c.requireOnline(c.online);
+        if(c.authorization.scope==session::ReliableAuthorizationScope::ArchiveControl){
+            protocol::check(archiveApplication&&archiveExecution&&archive::currentSessionAuthorization(archiveApplication->policy(),c.authorization));
+            if(!c.archiveBound){archive::verifySessionBinding(r,c.authorization);c.archiveBound=true;return;}
+            auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+            auto response=archiveExecution->control(c.authorization,frame,utc,nowMilliseconds());
+            if(!response.empty())packet(c,response);
+            return;
+        }
         if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){
             protocol::check(groupKeys&&c.relay&&c.peerId==c.authorization.expectedRemoteDeviceId);
             const auto* roster=groupKeys->roster(c.authorization.groupId);
@@ -1009,7 +1047,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         // Voice capability describes authenticated call control. The media
         // path remains independent ICE/DTLS-SRTP and is never put on relay.
         capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
-        capabilities|=protocol::CapabilityGroupKeyHandoff;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
+        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
         if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
         if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
         bool live=c.reliable::SharedPeerRuntime::receive(*c.tls,encrypted,profile,capabilities,profile.listenPort,
@@ -1055,7 +1093,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     archiveApplication->authenticated(authenticatedFriends.generation());archiveGeneration=authenticatedFriends.generation();
                 }
                 auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                auto output=archive::executeEnrollmentOperation(*archiveApplication,command.sourceKind,command.bytes,utc);
+                if(!archiveExecution)archiveExecution=std::make_unique<archive::Execution>(*store,profile,archiveApplication->policy(),*deliveries,*sessionTransports);
+                auto output=command.sourceKind>=12?archive::executeSyncOperation(*archiveApplication,*archiveExecution,command.sourceKind,command.bytes,nowMilliseconds(),networkGeneration):
+                    archive::executeEnrollmentOperation(*archiveApplication,command.sourceKind,command.bytes,utc);
                 if(command.bytesResponse)command.bytesResponse->set_value(std::move(output));
                 continue;
             }
@@ -1122,7 +1162,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 auto c=std::make_unique<Connection>();c->relay=true;c->relayPipe=pipe;c->incoming=command.accepted;c->expected=authorization->expectedRemoteDeviceId;c->authorization=*authorization;c->attemptId=command.accountId;c->host=L"relay";c->port=1;c->source=L"PeerChat server relay";c->route=L"end-to-end peer TLS over opaque relay";attachDirectTransport(*c);c->tls=std::make_unique<TlsSession>(*credentials,c->incoming);emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,L"relay rendezvous established; peer TLS begins",*c));collect(*c);connections.push_back(std::move(c));
             }
             else if(command.action==Action::RelayReceive){for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){try{receiveEncrypted(*c,command.bytes);}catch(const std::exception& error){c->dead=true;std::string detail=error.what();c->closeReason=L"TLS handshake failure: "+widenUtf8(detail);emit(connectionEvent(NodeEvent::Kind::Error,c->closeReason,*c,c->peerId.empty()?c->expected:c->peerId));}break;}}
-            else if(command.action==Action::RelayClosed){bool found=false;for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){c->closeReason=command.text.empty()?L"relay channel closed":command.text;c->dead=true;found=true;break;}if(!found){auto authorization=sessionTransports->authorization(sessionEpoch,{command.accountId});auto close=sessionTransports->closeTransport(sessionEpoch,{command.accountId},utf8(command.text),true);std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto item=relayPipes.find(command.accountId);if(item!=relayPipes.end()){pipe=item->second;relayPipes.erase(item);}}if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}if(!close.remoteDeviceId.empty()&&(!authorization||authorization->scope==session::ReliableAuthorizationScope::Friend)){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(close.remoteDeviceId,nowMilliseconds(),random);emitSessionSnapshot(close.remoteDeviceId);}}}
+            else if(command.action==Action::RelayClosed){bool found=false;for(auto& c:connections)if(c->relay&&!c->dead&&c->attemptId==command.accountId){c->closeReason=command.text.empty()?L"relay channel closed":command.text;c->dead=true;found=true;break;}if(!found){auto authorization=sessionTransports->authorization(sessionEpoch,{command.accountId});auto close=sessionTransports->closeTransport(sessionEpoch,{command.accountId},utf8(command.text),true);std::shared_ptr<RelayPipe> pipe;{std::lock_guard<std::mutex> lock(relayMutex);auto item=relayPipes.find(command.accountId);if(item!=relayPipes.end()){pipe=item->second;relayPipes.erase(item);}}if(pipe){std::lock_guard<std::mutex> lock(pipe->mutex);pipe->closed=true;pipe->changed.notify_all();}if(authorization&&authorization->permitsArchiveControl()&&archiveApplication&&archive::currentSessionAuthorization(archiveApplication->policy(),*authorization)){sessionTransports->scheduleRelayRetry(authorization->continuityKey(),nowMilliseconds(),static_cast<std::uint32_t>(nowMilliseconds()));}else if(!close.remoteDeviceId.empty()&&(!authorization||authorization->scope==session::ReliableAuthorizationScope::Friend)){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(close.remoteDeviceId,nowMilliseconds(),random);emitSessionSnapshot(close.remoteDeviceId);}}}
             else if(command.action==Action::InvalidateRoute){
                 if(command.peer.empty())continue;
                 auto decision=sessionTransports->cancelRoutes(sessionEpoch,command.peer,utf8(endpoint(command.text,command.port)),command.accepted,command.accountId);
@@ -1366,8 +1406,10 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
     void reapDeadConnections(){
         for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
             auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch,wasRelay=connection.relay;
-            bool groupControl=connection.authorization.scope==session::ReliableAuthorizationScope::GroupControl;
+            bool groupControl=connection.authorization.scope!=session::ReliableAuthorizationScope::Friend;
+            const bool archiveControl=connection.authorization.permitsArchiveControl();
             std::string groupScopeKey=groupControl?connection.authorization.continuityKey():std::string{};
+            if(connection.authorization.permitsArchiveControl()&&archiveExecution)archiveExecution->disconnected(connection.authorization);
             std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;
             std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;
             if(connection.directTransport)connection.directTransport->closed(utf8(reason),!connection.online);
@@ -1382,7 +1424,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 auto activeShare=screenShares.active();if(close.wasActiveWinner&&!close.hasActiveWinner&&activeShare&&activeShare->peer==id){activeShare->controlAvailable=false;screenEvent(L"Share control unavailable · waiting to reconnect");}
                 if(!groupControl)emit(std::move(disconnected));
                 if(wasRelay&&!groupControl){std::uint32_t random=0;BCryptGenRandom(nullptr,reinterpret_cast<PUCHAR>(&random),sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG);sessionTransports->scheduleRelayRetry(id,nowMilliseconds(),random);emitSessionSnapshot(id);}
-                else if(groupControl)emitSessionSnapshot(groupScopeKey);
+                else if(groupControl){if(archiveControl)sessionTransports->scheduleRelayRetry(groupScopeKey,nowMilliseconds(),static_cast<std::uint32_t>(nowMilliseconds()));emitSessionSnapshot(groupScopeKey);}
                 else scheduleReconnect(id,host,port,source,route,mismatch);
             }else if(groupControl)emitSessionSnapshot(groupScopeKey);
             else if(!id.empty())emitSessionSnapshot(id);
@@ -1393,7 +1435,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
-            archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+            archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
@@ -1456,7 +1498,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 // Relay-only idle iterations skip the direct-socket select below, so retire
                 // relay EOFs here before that early sleep/continue can bypass manager cleanup.
-                reapDeadConnections();resolved();serviceTransfers();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
+                serviceArchive();reapDeadConnections();resolved();serviceTransfers();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
                 if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}
                 if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 if(calls.mediaTimedOut(nowMilliseconds())||calls.controlAndMediaTimedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Voice connection could not be restored",true);}
@@ -1465,9 +1507,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     if(relay.networkRevision<networkGeneration)continue;
                     auto attempt=nextAttemptId++;
                     session::RouteObservation route{{nextRouteRevision++},"relay:"+relay.remoteDeviceId,"PeerChat server relay","relay fallback",false,relay.networkRevision,session::TransportKind::Relay,session::RouteClass::ServerRelay};
-                    if(!sessionTransports->registerAttempt(sessionEpoch,{attempt},relay.remoteDeviceId,route,nowMilliseconds()))continue;
+                    const bool archiveRoute=relay.authorization.permitsArchiveControl();
+                    if(archiveRoute){if(!archiveApplication||!archive::currentSessionAuthorization(archiveApplication->policy(),relay.authorization)||
+                        !sessionTransports->registerArchiveControlAttempt(sessionEpoch,{attempt},relay.authorization,route,nowMilliseconds()))continue;}
+                    else if(!sessionTransports->registerAttempt(sessionEpoch,{attempt},relay.remoteDeviceId,route,nowMilliseconds()))continue;
                     auto pipe=std::make_shared<RelayPipe>();{std::lock_guard<std::mutex> lock(relayMutex);relayPipes[attempt]=pipe;}
-                    NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=relay.remoteDeviceId;request.attemptId=attempt;request.networkGeneration=relay.networkRevision;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated discovery service";request.route=L"manager-owned bounded direct fallback";request.text=L"Relay transport requested";emit(std::move(request));emitSessionSnapshot(relay.remoteDeviceId);
+                    NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=relay.remoteDeviceId;request.attemptId=attempt;request.networkGeneration=relay.networkRevision;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated discovery service";request.route=L"manager-owned bounded direct fallback";request.text=L"Relay transport requested";
+                    if(archiveRoute){request.authorizationArchive=group_text::base64(archive::sessionBinding(relay.authorization).data);request.authorizationTargetAccountId=relay.authorization.archive.account;}
+                    emit(std::move(request));emitSessionSnapshot(archiveRoute?relay.authorization.continuityKey():relay.remoteDeviceId);
                 }
                 for(auto& c:connections)if(!c->dead&&c->relay&&!c->online&&Clock::now()-c->began>std::chrono::seconds(20)){c->closeReason=L"relay peer authentication timeout";c->dead=true;}
                 reapDeadConnections();
@@ -1494,7 +1541,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+        archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
@@ -1510,7 +1557,7 @@ Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messa
     return future.get();
 }
 Blob Node::archive(unsigned operation,const Blob& input){
-    if(operation<1||operation>11||input.size()>archive::MaxApplicationBytes)throw std::invalid_argument("Invalid native archive command");
+    if(operation<1||operation>15||input.size()>archive::MaxApplicationBytes)throw std::invalid_argument("Invalid native archive command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.archive=true;command.sourceKind=operation;command.bytes=input;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");

@@ -27,7 +27,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         var stage="relay_rendezvous"
         try {
             android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
-            val relay=accounts.openRelay(remoteAccount,request.peerId)
+            val relay=accounts.openRelay(remoteAccount,request.peerId,request.archive?.fields())
             stage="native_peer_tls_open"
             android.util.Log.i("PeerChatWake","stage=relay_rendezvous_ready account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             channel=relay.channel

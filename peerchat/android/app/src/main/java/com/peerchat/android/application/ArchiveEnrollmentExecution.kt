@@ -12,6 +12,19 @@ internal class ArchiveEnrollmentExecution(
     private fun command(operation:Int,fields:(NativeRecordWriter)->Unit = {}):ByteArray =
         NativeRecordWriter(31).also {it.text("PeerChat/ArchiveApplication/v1");it.number(1);it.number(operation.toLong());fields(it)}.bytes()
     private fun invalidate(){native(9,command(9))}
+    fun refreshCurrent(account:Long,generation:Long,device:String):ByteArray {
+        try{refreshState(account,generation,device);return native(3,command(3))}catch(error:Exception){invalidate();throw error}
+    }
+    fun startSync(account:Long,generation:Long,source:String){native(12,command(12){w->w.number(account);w.number(generation);w.text(source);w.number(1)})}
+    fun pauseSync(account:Long,generation:Long){native(14,command(14){w->w.number(account);w.number(generation)})}
+    fun incoming(account:Long,generation:Long,scope:ArchiveRelayScope){native(15,command(15){w->w.number(account);w.number(generation);w.blob(scope.binding())})}
+    fun progress(account:Long,generation:Long):ArchiveSyncProgress {
+        val r=NativeRecord(native(13,command(13){w->w.number(account);w.number(generation)}),31)
+        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==13L)
+        val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text()
+        require(state.length<=128&&complete<=1&&running<=1&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
+        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source)
+    }
     private fun proof(value:String,max:Int):ByteArray {
         require(value.length<=((max+2)/3)*4)
         return java.util.Base64.getDecoder().decode(value).also {require(it.size in 1..max)}

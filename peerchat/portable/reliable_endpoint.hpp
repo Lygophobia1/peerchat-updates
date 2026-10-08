@@ -159,6 +159,7 @@ public:
     }
     bool authenticationExpired(std::uint64_t now)const noexcept{return now>=began_&&now-began_>=20000;}
     const std::string& expected()const noexcept{return runtime_.expected;}
+    const session::ReliableAuthorization* archiveScope()const noexcept{return archive_?&archive_->scope:nullptr;}
     void receive(const Blob& bytes,std::uint64_t now){
         protocol::check(!closed_);now_=now;
         try{

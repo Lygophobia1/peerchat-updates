@@ -34,10 +34,12 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
                 TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.Authorize,device.peerId,read,serve)},enabled=!state.archiveBusy&&(read||serve)){Text("Authorize history access")}
                 TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.Revoke,device.peerId)},enabled=!state.archiveBusy){Text("Revoke access")}
                 TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.DisableAuthorizer,device.peerId)},enabled=!state.archiveBusy){Text("Disable authorizer")}
+                if(!device.local)OutlinedButton({dispatch(UiAction.ArchiveSynchronize(enrollment,device.peerId))},enabled=!state.archiveBusy&&device.mayServe&&enrollment.historySyncEnabled&&!state.archiveProgress.running){Text("Synchronize from this archive")}
             }
         }
     }
-    Text("Grants do not start synchronization. Text sync controls await route integration.",style=MaterialTheme.typography.bodySmall)
+    Text(state.archiveProgress.state+" · "+state.archiveProgress.processed+" messages processed · "+state.archiveProgress.conversations+" conversations completed",style=MaterialTheme.typography.bodySmall)
+    if(enrollment!=null&&state.archiveProgress.running)OutlinedButton({dispatch(UiAction.ArchiveSynchronize(enrollment,pause=true))},enabled=!state.archiveBusy){Text("Pause synchronization")}
     pending?.let {p->
         AlertDialog(onDismissRequest={pending=null},title={Text("Confirm archive authorization")},text={
             Text("Account "+p.context.accountId+"\nDevice Peer ID:\n"+p.device+"\n\n"+when(p.action){

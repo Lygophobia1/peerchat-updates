@@ -30,6 +30,7 @@ struct Instance {
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
     std::unique_ptr<peerchat::archive::Enrollment> archiveApplication;
+    std::unique_ptr<peerchat::archive::Execution> archiveExecution;
     std::uint64_t archiveGeneration=0;
     // Provider objects only; existing SessionTransportManager will own route
     // association when networking is ported. No second reconnect/session policy.
@@ -292,7 +293,10 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_
         if(instance->archiveGeneration!=instance->friends.generation()){
             instance->archiveApplication->authenticated(instance->friends.generation());instance->archiveGeneration=instance->friends.generation();
         }
-        auto output=peerchat::archive::executeEnrollmentOperation(*instance->archiveApplication,static_cast<unsigned>(operation),bytes,mailboxNow());
+        if(!instance->archiveExecution)instance->archiveExecution=std::make_unique<peerchat::archive::Execution>(*instance->storage,instance->profile,
+            instance->archiveApplication->policy(),*instance->deliveries,instance->sessions);
+        auto output=operation>=12?peerchat::archive::executeSyncOperation(*instance->archiveApplication,*instance->archiveExecution,static_cast<unsigned>(operation),bytes,runtimeNow(),instance->relayRequests->network()):
+            peerchat::archive::executeEnrollmentOperation(*instance->archiveApplication,static_cast<unsigned>(operation),bytes,mailboxNow());
         return peerchat::platform::android::Context::input(env,output);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
@@ -303,6 +307,14 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_prese
         std::lock_guard<std::mutex> lock(instance->gate);
         if(!instance->relayRequests)return PC_CORE_INVALID_ARGUMENT;
         return instance->relayRequests->presence(expected,online==JNI_TRUE,generation,network,runtimeNow())?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
+    });
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_network(JNIEnv*,jobject,jlong handle,jlong generation,jlong network){
+    return guarded([&]()->pc_core_status{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        if(generation<=0||network<=0||!instance->relayRequests)return PC_CORE_INVALID_ARGUMENT;
+        return instance->relayRequests->authenticatedNetwork(generation,network)?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
     });
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_demand(JNIEnv* env,jobject,jlong handle,jbyteArray pin){
@@ -320,6 +332,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->relayRequests)return nullptr;
         // Poll execution commands, not a Kotlin retry/session policy.
         auto now=runtimeNow();
+        if(instance->archiveExecution)instance->archiveExecution->tick(now,instance->relayRequests->network());
         if(!instance->outboxDemandLoaded){
             for(const auto& contact:instance->storage->contacts())if(!instance->storage->pending(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
             instance->outboxDemandLoaded=true;
@@ -339,8 +352,15 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             if(peer.second->closed()||!instance->sessions.attachablePeer({1},{peer.first})||
                (!peer.second->ready()&&peer.second->authenticationExpired(now))){
                 peer.second->close(true);
-                if(instance->friends.contains(peer.second->expected())&&!instance->sessions.hasActiveWinner(peer.second->expected()))
+                if(auto scope=peer.second->archiveScope()){
+                    if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope);
+                    instance->sessions.scheduleRelayRetry(scope->continuityKey(),now,static_cast<std::uint32_t>(now));
+                }else if(instance->friends.contains(peer.second->expected())&&!instance->sessions.hasActiveWinner(peer.second->expected()))
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
+            }
+            else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
+                try{auto request=instance->archiveExecution->request(*scope,now);if(!request.empty())peer.second->sendArchiveControl(request);}
+                catch(...){instance->archiveExecution->disconnected(*scope);peer.second->close(false);}
             }
         }
         for(auto it=instance->peers.begin();it!=instance->peers.end();){
@@ -349,7 +369,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         auto used=instance->peers.size()+instance->tls.size();
         auto requests=instance->relayRequests->take(now,static_cast<std::uint32_t>(now),used<32?32-used:0);
         peerchat::protocol::Writer value(peerchat::protocol::Hello);value.number(requests.size());
-        for(const auto& request:requests){value.number(request.id.value);value.string(request.peer);value.number(request.route.networkRevision);}
+        for(const auto& request:requests){value.number(request.id.value);value.string(request.peer);value.number(request.route.networkRevision);
+            value.bytes(request.authorization.permitsArchiveControl()?peerchat::archive::sessionBinding(request.authorization).data:peerchat::Blob{});}
         return peerchat::platform::android::Context::input(env,value.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
@@ -357,7 +378,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
     try{
         auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
         std::lock_guard<std::mutex> lock(instance->gate);
-        if(!instance->storage||!instance->friends.contains(expected)||instance->tls.size()+instance->peers.size()>=32||attempt<=0)return 0;
+        if(!instance->storage||instance->tls.size()+instance->peers.size()>=32||attempt<=0)return 0;
         auto request=instance->relayRequests->attach({static_cast<std::uint64_t>(attempt)},expected);if(!request)return 0;
         auto id=request->id.value;
         try{
@@ -367,8 +388,15 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
         peerchat::TlsCredentials credentials(instance->profile,std::move(factory));
         auto tls=std::make_unique<peerchat::TlsSession>(credentials,incoming==JNI_TRUE,expected);
         auto route=request->route;route.incoming=incoming==JNI_TRUE;
+        std::optional<peerchat::portable::ReliableEndpoint::ArchiveAdmission> archive;
+        if(request->authorization.permitsArchiveControl()){
+            peerchat::protocol::check(instance->archiveApplication&&instance->archiveExecution);
+            auto scope=request->authorization;auto owner=instance.get();
+            archive=peerchat::portable::ReliableEndpoint::ArchiveAdmission{&instance->archiveApplication->policy(),scope,
+                [owner,scope](const peerchat::Blob& bytes){return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());}};
+        }
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,
-            instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow());
+            instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow(),std::move(archive));
         instance->peers.emplace(id,std::move(endpoint));return static_cast<jlong>(id);
         }catch(...){instance->relayRequests->failed(*request,runtimeNow(),static_cast<std::uint32_t>(runtimeNow()),true);throw;}
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 0;}
@@ -405,8 +433,12 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_close
         std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));
         auto now=runtimeNow();
         if(found==instance->peers.end())return instance->relayRequests&&instance->relayRequests->close({static_cast<std::uint64_t>(token)},now,static_cast<std::uint32_t>(now),recoverable==JNI_TRUE)?PC_CORE_OK:PC_CORE_INVALID_HANDLE;
-        auto expected=found->second->expected();found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);
-        if(recoverable==JNI_TRUE&&instance->friends.contains(expected)&&!instance->sessions.hasActiveWinner(expected))
+        auto expected=found->second->expected();std::optional<peerchat::session::ReliableAuthorization> scope;
+        if(auto archive=found->second->archiveScope())scope=*archive;
+        found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);
+        if(scope){if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope);
+            if(recoverable==JNI_TRUE)instance->sessions.scheduleRelayRetry(scope->continuityKey(),now,static_cast<std::uint32_t>(now));}
+        else if(recoverable==JNI_TRUE&&instance->friends.contains(expected)&&!instance->sessions.hasActiveWinner(expected))
             instance->sessions.scheduleRelayRetry(expected,now,static_cast<std::uint32_t>(now));
         return PC_CORE_OK;
     });
@@ -524,7 +556,10 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_bind(J
         // Rebind the existing session owner; no second session/retry owner.
         instance->sessions=peerchat::session::SessionTransportManager(profile.peerId,profile.peerId,{1});
         instance->profile=std::move(profile);instance->storage=std::move(store);instance->deliveries=std::move(delivery);
-        instance->relayRequests=std::make_unique<peerchat::portable::RelayRequests>(instance->sessions,instance->friends,peerchat::session::SessionEpoch{1},instance->nextTls);
+        auto owner=instance.get();
+        instance->relayRequests=std::make_unique<peerchat::portable::RelayRequests>(instance->sessions,instance->friends,peerchat::session::SessionEpoch{1},instance->nextTls,
+            [owner](const peerchat::session::ReliableAuthorization& scope){return owner->friends.localAccount()==scope.archive.account&&owner->archiveApplication&&
+                peerchat::archive::currentSessionAuthorization(owner->archiveApplication->policy(),scope);});
         return PC_CORE_OK;
     });
 }

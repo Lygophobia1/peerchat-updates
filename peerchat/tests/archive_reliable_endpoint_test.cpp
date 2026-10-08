@@ -1,5 +1,5 @@
 #include "../portable/reliable_endpoint.hpp"
-#include "../archive_sync.hpp"
+#include "../archive_execution.hpp"
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -56,26 +56,42 @@ int main(){try{
     // Real peer TLS carries bounded history without friendship, contact pins,
     // a second session owner, or a DM delivery authorization.
     Storage friendStore((root/L"friend").wstring());auto contact=friendStore.profile();
-    auto directory=[&](const std::string& peer)->std::optional<std::uint64_t>{
-        if(peer==contact.peerId)return 9;
-        if(members.count(peer))return 8;
-        return {};
-    };
     for(unsigned n=0;n<25;++n){
         StoredMessage m{Storage::newMessageId(),contact.peerId,source.peerId,L"TLS archive test",200,Delivery::Delivered,0,n+1};
         check(a.append(contact.peerId,m));
     }
     {
         auto scopedA=admissionA(),scopedB=admissionB();
-        archive::SyncReader history(b,reader,reading,bd,scopedB.scope,directory);
-        scopedA.control=[&](const Blob& bytes){return archive::serveSyncControl(a,source,serving,scopedA.scope,bytes,directory,300);};
-        scopedB.control=[&](const Blob& bytes){history.accept(bytes);return Blob{};};
+        a.rememberAuthenticatedDeviceAccount(source.peerId,8);a.rememberAuthenticatedDeviceAccount(contact.peerId,9);
+        b.rememberAuthenticatedDeviceAccount(source.peerId,8);b.rememberAuthenticatedDeviceAccount(reader.peerId,8);b.rememberAuthenticatedDeviceAccount(contact.peerId,9);
+        archive::Execution sourceWork(a,source,serving,ad,as),readerWork(b,reader,reading,bd,bs);
+        sourceWork.incoming(scopedA.scope,now,0);readerWork.start(source.peerId,source.peerId,false);
+        check(archive::decodeSessionBinding(archive::sessionBinding(scopedA.scope).data,reader.peerId).expectedRemoteDeviceId==source.peerId);
+        rejects([&]{archive::decodeSessionBinding(archive::sessionBinding(scopedA.scope).data,contact.peerId);});
+        scopedA.control=[&](const Blob& bytes){return sourceWork.control(scopedA.scope,bytes,300,now);};
+        scopedB.control=[&](const Blob& bytes){return readerWork.control(scopedB.scope,bytes,300,now);};
         ReliableEndpoint sender(source,a,as,ad,af,{1},{90},std::make_unique<TlsSession>(ac,false),reader.peerId,route(90),++now,scopedA);
         ReliableEndpoint receiver(reader,b,bs,bd,bf,{1},{91},std::make_unique<TlsSession>(bc,true),source.peerId,route(91),++now,scopedB);
         sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
         unsigned pages=0;
-        do{receiver.sendArchiveControl(history.nextRequest());exchange(receiver,sender);++pages;}while(!history.snapshot().complete);
-        check(pages==5&&history.snapshot().conversations==1&&history.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
+        do{readerWork.tick(now,0);receiver.sendArchiveControl(readerWork.request(scopedB.scope,now));exchange(receiver,sender);++pages;}while(!readerWork.snapshot().complete);
+        check(pages==5&&readerWork.snapshot().conversations==1&&readerWork.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
+        readerWork.tick(now,0);check(!readerWork.running()&&readerWork.state()=="History synchronized");
+        archive::Execution reopened(b,reader,reading,bd,bs);reopened.start(source.peerId,source.peerId,false);check(reopened.snapshot().complete&&!reopened.running());
+        reopened.start(source.peerId,source.peerId,true);check(reopened.running());reopened.stop();check(!reopened.running()&&reopened.state()=="Paused");
+        // Durable job intent survives process-owner replacement without a UI
+        // command. OFF retains intent/history but never creates route demand.
+        {
+            archive::Execution interrupted(b,reader,reading,bd,bs);interrupted.start(source.peerId,source.peerId,false);
+            auto request=interrupted.request(scopedB.scope,now);check(!request.empty()&&interrupted.snapshot().pending);
+        }
+        reading.setHistorySyncEnabled(false);
+        archive::Execution resumed(b,reader,reading,bd,bs);resumed.tick(now,0);
+        check(!resumed.running()&&resumed.state()=="History synchronization is off"&&b.history(contact.peerId,100).size()==25);
+        reading.setHistorySyncEnabled(true);resumed.tick(now,0);check(resumed.running()&&!resumed.snapshot().pending);
+        auto request=resumed.request(scopedB.scope,now);check(!request.empty());
+        resumed.tick(now+15001,0);check(!resumed.snapshot().pending);
+        resumed.stop();archive::Execution paused(b,reader,reading,bd,bs);paused.tick(now,0);check(!paused.running());
         check(a.contacts().empty()&&b.contacts().empty());
         protocol::Writer forbidden(protocol::Text);rejects([&]{receiver.sendArchiveControl(forbidden.data);});
     }

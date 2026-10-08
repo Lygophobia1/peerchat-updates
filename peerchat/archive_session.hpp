@@ -45,4 +45,14 @@ inline void verifySessionBinding(protocol::Reader& reader,const session::Reliabl
     const auto expected=sessionBinding(authorization);
     require(reader.data==expected.data);reader.cursor=reader.data.size();reader.end();
 }
+// Used only for authenticated server hints/local application commands. The
+// returned value is not admission: currentSessionAuthorization is still required.
+inline session::ReliableAuthorization decodeSessionBinding(const Blob& bytes,const std::string& local){
+    protocol::Reader r(bytes);require(r.type()==protocol::ArchiveControl&&r.string()=="PeerChat/ArchiveSession/v1"&&r.number()==1&&r.number()==1);
+    session::ReliableAuthorization scope;scope.scope=session::ReliableAuthorizationScope::ArchiveControl;
+    auto& a=scope.archive;a.account=r.number();a.issuer=r.string();a.source=r.string();a.reader=r.string();
+    a.sourceGeneration=r.number();a.readerGeneration=r.number();a.sourceGrantId=r.string();a.readerGrantId=r.string();r.end();
+    require(local==a.source||local==a.reader);scope.expectedRemoteDeviceId=local==a.source?a.reader:a.source;
+    require(scope.valid()&&sessionBinding(scope).data==bytes);return scope;
+}
 }

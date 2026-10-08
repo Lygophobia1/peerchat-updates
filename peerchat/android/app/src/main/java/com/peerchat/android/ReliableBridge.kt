@@ -8,6 +8,7 @@ object ReliableBridge {
     init { System.loadLibrary("peerchat_messaging") }
     external fun friends(profile: Long, account: Long, generation: Long, snapshot: ByteArray): Int
     external fun presence(profile: Long, expectedPeer: ByteArray, online: Boolean, generation: Long, network: Long): Int
+    external fun network(profile:Long,generation:Long,network:Long):Int
     external fun demand(profile: Long, expectedPeer: ByteArray): Int
     external fun requests(profile: Long): ByteArray?
     external fun open(profile: Long, attempt: Long, incoming: Boolean, expectedPeer: ByteArray): Long

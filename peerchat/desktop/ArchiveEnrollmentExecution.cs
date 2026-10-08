@@ -6,6 +6,33 @@ using System.Collections;
 using System.Collections.Generic;
 
 namespace PeerChatDesktop {
+// Immutable scope copied from native admission or an authenticated server hint.
+// This adapter never grants trust: native revalidates signed grants independently.
+public sealed class ArchiveRelayScope {
+    public long Account,SourceGeneration,ReaderGeneration;
+    public string Issuer,Source,Reader,SourceGrantId,ReaderGrantId;
+    static bool Id(string value,int size){return value!=null&&value.Length==size&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f');}
+    void Validate(){if(Account<=0||SourceGeneration<=0||ReaderGeneration<=0||!Id(Issuer,64)||!Id(Source,64)||!Id(Reader,64)||Source==Reader||!Id(SourceGrantId,32)||!Id(ReaderGrantId,32))throw new InvalidDataException("Invalid archive route scope.");}
+    public static ArchiveRelayScope Parse(string encoded){
+        if(encoded==null||encoded.Length>1400)throw new InvalidDataException("Invalid archive route scope.");
+        using(var stream=new MemoryStream(Convert.FromBase64String(encoded),false))using(var r=new BinaryReader(stream,new UTF8Encoding(false,true))){
+            Func<string> text=()=>{long n=r.ReadInt64();if(n<0||n>128||n>stream.Length-stream.Position)throw new InvalidDataException("Invalid archive scope field.");return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
+            if(!r.ReadBytes(4).SequenceEqual(new byte[]{80,84,1,32})||text()!="PeerChat/ArchiveSession/v1"||r.ReadInt64()!=1||r.ReadInt64()!=1)throw new InvalidDataException("Invalid archive scope version.");
+            var scope=new ArchiveRelayScope{Account=r.ReadInt64(),Issuer=text(),Source=text(),Reader=text(),SourceGeneration=r.ReadInt64(),ReaderGeneration=r.ReadInt64(),SourceGrantId=text(),ReaderGrantId=text()};
+            scope.Validate();if(stream.Position!=stream.Length)throw new InvalidDataException("Trailing archive scope data.");return scope;
+        }
+    }
+    public Dictionary<string,object> Fields(){Validate();return new Dictionary<string,object>{{"purpose","archive_history"},{"archiveIssuer",Issuer},{"archiveSource",Source},{"archiveReader",Reader},{"archiveSourceGeneration",SourceGeneration.ToString()},{"archiveReaderGeneration",ReaderGeneration.ToString()},{"archiveSourceGrantId",SourceGrantId},{"archiveReaderGrantId",ReaderGrantId}};}
+    public static ArchiveRelayScope FromEvent(Dictionary<string,object> fields,long account){
+        var scope=new ArchiveRelayScope{Account=account,Issuer=Convert.ToString(fields["archiveIssuer"]),Source=Convert.ToString(fields["archiveSource"]),Reader=Convert.ToString(fields["archiveReader"]),
+            SourceGeneration=Convert.ToInt64(fields["archiveSourceGeneration"]),ReaderGeneration=Convert.ToInt64(fields["archiveReaderGeneration"]),SourceGrantId=Convert.ToString(fields["archiveSourceGrantId"]),ReaderGrantId=Convert.ToString(fields["archiveReaderGrantId"])};
+        scope.Validate();return scope;
+    }
+    public void Verify(Dictionary<string,object> reply){foreach(var field in Fields()){object value;if(!reply.TryGetValue(field.Key,out value)||Convert.ToString(value)!=Convert.ToString(field.Value))throw new InvalidDataException("Archive scope changed during rendezvous.");}}
+    public byte[] Binding(){Validate();using(var stream=new MemoryStream())using(var w=new BinaryWriter(stream,Encoding.UTF8)){
+        Action<string> text=value=>{var bytes=Encoding.UTF8.GetBytes(value);w.Write((long)bytes.Length);w.Write(bytes);};
+        w.Write(new byte[]{80,84,1,32});text("PeerChat/ArchiveSession/v1");w.Write(1L);w.Write(1L);w.Write(Account);text(Issuer);text(Source);text(Reader);w.Write(SourceGeneration);w.Write(ReaderGeneration);text(SourceGrantId);text(ReaderGrantId);return stream.ToArray();}}
+}
 // One synchronous application operation, called on the existing profile worker.
 // No socket, timer, retry loop, signing decision or durable queue is owned here.
 internal sealed class ArchiveEnrollmentExecution {
@@ -41,6 +68,18 @@ internal sealed class ArchiveEnrollmentExecution {
         object version;Check(result.TryGetValue("archiveVersion",out version)&&Convert.ToInt64(version)==1);return result;
     }
     void Invalidate(){native(9,Command(9));}
+    public void StartSync(long account,long generation,string source,bool newScan){native(12,Command(12,w=>{w.Write(account);w.Write(generation);WriteText(w,source);w.Write(newScan?1L:0L);}));}
+    public void PauseSync(long account,long generation){native(14,Command(14,w=>{w.Write(account);w.Write(generation);}));}
+    public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
+    public sealed class SyncProgress {public string State,Source;public long Processed,Conversations;public bool Complete,Running;}
+    public SyncProgress Progress(long account,long generation){
+        var bytes=native(13,Command(13,w=>{w.Write(account);w.Write(generation);}));var header=Command(13);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,new UTF8Encoding(false,true))){stream.Position=header.Length;
+            Func<string> text=()=>{long n=r.ReadInt64();Check(n>=0&&n<=128&&n<=stream.Length-stream.Position);return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
+            var result=new SyncProgress{State=text(),Processed=r.ReadInt64(),Conversations=r.ReadInt64()};long complete=r.ReadInt64(),running=r.ReadInt64();result.Source=text();
+            Check(result.Processed>=0&&result.Conversations>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
+        }
+    }
     public bool HistorySync(long account,long generation,bool? enabled=null){
         var bytes=native(11,Command(11,w=>{w.Write(account);w.Write(generation);w.Write(enabled.HasValue?1L:0L);if(enabled.HasValue)w.Write(enabled.Value?1L:0L);}));
         var header=Command(11);Check(bytes.Length==header.Length+8&&bytes.Take(header.Length).SequenceEqual(header));
@@ -61,6 +100,10 @@ internal sealed class ArchiveEnrollmentExecution {
             }
         });
         native(2,command); // Native verifies signatures, identity, consent and freshness.
+    }
+    public byte[] RefreshCurrent(long account,long generation,string device){
+        try{RefreshState(account,generation,device);return native(3,Command(3));}
+        catch{Invalidate();throw;}
     }
     public byte[] Refresh(long account,long generation,string device){
         try{

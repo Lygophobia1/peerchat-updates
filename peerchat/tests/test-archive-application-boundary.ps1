@@ -6,7 +6,7 @@ $out=Join-Path $root ('build\tests\archive-application-'+[Guid]::NewGuid().ToStr
 New-Item -ItemType Directory -Path $out | Out-Null
 $client=(Resolve-Path -LiteralPath $ClientDirectory).Path
 $compiler=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $compiler /nologo /target:exe /platform:x64 /optimize+ "/out:$out\archive-application-test.exe" "$PSScriptRoot\archive_application_boundary_test.cs" "$root\desktop\ArchiveEnrollmentExecution.cs"
+& $compiler /nologo /target:exe /platform:x64 /optimize+ /reference:System.Web.Extensions.dll "/out:$out\archive-application-test.exe" "$PSScriptRoot\archive_application_boundary_test.cs" "$root\desktop\ArchiveEnrollmentExecution.cs"
 if($LASTEXITCODE -ne 0){throw 'Archive application boundary compilation failed'}
 & "$out\archive-application-test.exe" $client (Join-Path $out 'profile')
 if($LASTEXITCODE -ne 0){throw 'Archive application boundary regression failed'}

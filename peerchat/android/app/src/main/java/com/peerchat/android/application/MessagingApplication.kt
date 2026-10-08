@@ -27,6 +27,7 @@ interface MessagingApplication:AutoCloseable {
     suspend fun signOut()
     suspend fun setMailboxStorageAllowed(allowed:Boolean){check(!allowed){"Mailbox configuration unavailable"}}
     suspend fun archiveDevices():ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
+    suspend fun synchronizeArchive(snapshot:ArchiveEnrollmentSnapshot,source:String?,pause:Boolean):ArchiveEnrollmentSnapshot = error("Archive synchronization unavailable")
     suspend fun setHistorySync(snapshot:ArchiveEnrollmentSnapshot,enabled:Boolean):ArchiveEnrollmentSnapshot = error("History policy unavailable")
     suspend fun archiveConsent(snapshot:ArchiveEnrollmentSnapshot,action:ArchiveDeviceAction,device:String,read:Boolean,serve:Boolean):ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
 }

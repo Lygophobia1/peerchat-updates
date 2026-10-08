@@ -55,7 +55,7 @@ static class ArchiveSettingsSmoke {
                 var panel=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,new object[]{dialog});
                 dialog.Content=new ScrollViewer{Content=panel};dialog.Show();dialog.UpdateLayout();
                 Check(Find(dialog,"Archive device selector") is ComboBox);
-                foreach(var label in new[]{"Refresh archive devices","Trust archive authorizer","Authorize history access","Revoke access","Disable authorizer"})Check(Find(dialog,label) is Button);
+                foreach(var label in new[]{"Refresh archive devices","Trust archive authorizer","Authorize history access","Revoke access","Disable authorizer","Synchronize from selected archive","Pause synchronization"})Check(Find(dialog,label) is Button);
                 var selector=(ComboBox)Find(dialog,"Archive device selector");Check(selector.Items.Count==0);
                 ((Button)Find(dialog,"Refresh archive devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));

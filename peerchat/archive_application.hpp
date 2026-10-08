@@ -1,10 +1,26 @@
 #pragma once
 #include "archive_enrollment.hpp"
+#include "archive_execution.hpp"
 
 namespace peerchat::archive {
 constexpr size_t MaxApplicationBytes=262144;
 inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
+}
+inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,unsigned operation,const Blob& bytes,
+    std::uint64_t now,std::uint64_t network){
+    require(operation>=12&&operation<=15&&bytes.size()<=MaxApplicationBytes);
+    protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
+    auto account=r.number(),generation=r.number();require(enrollment.matches(account,generation));
+    auto result=applicationHeader(operation);
+    if(operation==12){auto source=r.string();auto rescan=r.number();require(rescan<=1);r.end();execution.start(enrollment.sourceIssuer(source),source,rescan!=0);}
+    if(operation==14){r.end();execution.stop();}
+    if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();
+        auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
+    if(operation==13){r.end();execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
+        result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
+        result.string(execution.scope()?execution.scope()->archive.source:std::string{});}
+    return result.data;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){
     require(operation>=1&&operation<=11&&bytes.size()<=MaxApplicationBytes);

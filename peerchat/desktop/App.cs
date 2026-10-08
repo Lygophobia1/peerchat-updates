@@ -92,6 +92,26 @@ public class DesktopApplication {
     Task startupTask=Task.FromResult(0);
     Task mailboxTask=Task.FromResult(0);DateTime mailboxNextUtc=DateTime.MinValue;
     bool mailboxRequested=true;
+    Task archiveTask=Task.FromResult(0);DateTime archiveNextUtc=DateTime.MinValue,archiveMetadataUtc=DateTime.MinValue,archiveServingUntilUtc=DateTime.MinValue;
+    ArchiveEnrollmentExecution.SyncProgress archiveProgress;
+    long archiveProjectedCount=-1;
+    DiscoveryClient archiveLoadedOwner;ulong archiveLoadedGeneration;
+    void PumpArchive(){
+        var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
+        if(closing||busy||owner==null||account<=0||mailboxContextAccount!=account||generation==0||!archiveTask.IsCompleted||DateTime.UtcNow<archiveNextUtc)return;
+        bool initial=archiveLoadedOwner!=owner||archiveLoadedGeneration!=generation;
+        if(!initial&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc)return;
+        archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
+        archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
+        archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
+            if(refresh)execution.RefreshCurrent(account,(long)generation,local);return execution.Progress(account,(long)generation);
+        }).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
+            if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
+            if(task.IsFaulted){archiveProgress=null;TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            archiveProgress=task.Result;
+            if(archiveProgress.Processed!=archiveProjectedCount){archiveProjectedCount=archiveProgress.Processed;if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);}
+        })));
+    }
     void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
     MailboxExecution mailboxExecution;DiscoveryClient mailboxService;
     long mailboxContextAccount;
@@ -522,7 +542,7 @@ public class DesktopApplication {
     void Poll(){
         if(busy||closing)return;
         try{
-            PumpMailbox();
+            PumpMailbox();PumpArchive();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -606,6 +626,15 @@ public class DesktopApplication {
     }
     void StartRelay(CoreEvent request){
         ulong attempt=request.attempt>0?(ulong)request.attempt:0;var conversation=model.FindByPeer(request.expected)??model.FindByPeer(request.peer);var service=discovery;
+        if(!String.IsNullOrEmpty(request.authorizationArchive)){
+            try{
+                var scope=ArchiveRelayScope.Parse(request.authorizationArchive);
+                if(attempt==0||service==null||service.AccountId!=scope.Account||request.networkGeneration!=(long)networkGeneration||String.IsNullOrEmpty(service.SessionToken))throw new InvalidOperationException("Archive account context changed.");
+                var relay=new RelayTransport(service,core,attempt,model.OwnId,scope.Account,request.expected,value=>{lock(relayGate)relayTransports.Remove(value);},archive:scope);
+                lock(relayGate){if(relayTransports.ContainsKey(attempt)){relay.Dispose();return;}relayTransports.Add(attempt,relay);}relay.Start();
+            }catch(Exception error){core.RelayClosed(attempt,"Archive relay rejected: "+error.GetType().Name);}
+            return;
+        }
         if(!String.IsNullOrEmpty(request.authorizationGroupId)){
             var roster=serverGroupRosters.Values.FirstOrDefault(value=>value.GroupId==request.authorizationGroupId);
             bool current=attempt>0&&service!=null&&!String.IsNullOrEmpty(service.SessionToken)&&request.networkGeneration==(long)networkGeneration&&roster!=null&&roster.RosterGeneration==request.authorizationRosterGeneration&&roster.Members.Any(value=>value.AccountId==request.authorizationTargetAccountId&&value.PeerId==request.expected&&value.State=="member")&&roster.Members.Any(value=>value.AccountId==service.AccountId&&value.PeerId==model.OwnId&&value.State=="member");
@@ -1757,7 +1786,7 @@ public class DesktopApplication {
 		{
 			return;
 		}
-		window.Dispatcher.BeginInvoke((Action)delegate
+		window.Dispatcher.BeginInvoke((Action)async delegate
 		{
 			if (discovery != null)
 			{
@@ -1765,6 +1794,16 @@ public class DesktopApplication {
                     RequestMailbox(notification.Event);PumpMailbox();return;
                 }
                 if(notification!=null&&notification.Event=="relay_demand"){
+                    var service=discovery;
+                    if(notification.Purpose=="archive_history"&&notification.ArchiveScope!=null&&notification.AccountId==service.AccountId&&notification.TargetPublicIdentity==model.OwnId){
+                        var scope=notification.ArchiveScope;var local=model.OwnId;var generation=authenticatedFriendSnapshotGeneration;
+                        if(scope.Source!=local||scope.Reader!=notification.PublicIdentity)return;
+                        try{await Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>service.Archive(op,local,fields));
+                            execution.RefreshCurrent(service.AccountId,(long)generation,local);execution.IncomingArchive(service.AccountId,(long)generation,scope);});
+                            if(discovery==service){archiveServingUntilUtc=DateTime.UtcNow.AddSeconds(60);archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);}
+                        }catch(Exception error){TraceUi("incoming archive route denied: "+error.GetType().Name);}
+                        return;
+                    }
                     DiscoverySearchResult friend;
                     if(notification.Purpose=="friend"&&notification.TargetPublicIdentity==model.OwnId&&friendDirectory.TryGetValue(notification.AccountId,out friend)&&friend.PublicIdentity==notification.PublicIdentity){
                         var conversation=model.FindByPeer(friend.PublicIdentity);if(conversation!=null)ConnectFriendCandidate(friend,conversation,true,"authorized incoming demand");
@@ -2831,32 +2870,38 @@ public class DesktopApplication {
             var owner=discovery;var selected=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
             long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
             if(closing||owner==null||account<=0||mailboxContextAccount!=account||generation==0||generation>Int64.MaxValue){status.Text="Sign in and establish authenticated server presence first.";return;}
-            if(action!=0&&((action!=11&&selected==null)||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
+            if(action!=0&&((action!=11&&action!=14&&selected==null)||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
             string target=selected==null?"":selected.PeerId;long capabilities=(read.IsChecked==true?1L:0L)|(serve.IsChecked==true?2L:0L);
             if(action==5&&capabilities==0){status.Text="Select at least one capability, or use Revoke access.";return;}
-            if(action!=0&&action!=11&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
+            if(action>=4&&action<=7&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
             bool desiredSync=sync.IsChecked==true;
             panel.IsEnabled=false;status.Text="Verifying archive authorization…";
             try{
                 var rows=await Task.Run(()=>{
                     var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
                     execution.Refresh(account,(long)generation,local);
-                    if(action!=0&&action!=11)execution.Consent(account,(long)generation,action,target,capabilities,true);
+                    if(action>=4&&action<=7)execution.Consent(account,(long)generation,action,target,capabilities,true);
                     bool enabled=execution.HistorySync(account,(long)generation,action==11?(bool?)desiredSync:null);
                     execution.PublishPending(account,(long)generation,local);
-                    return new {Rows=ArchiveEnrollmentExecution.Devices(execution.Refresh(account,(long)generation,local)),Enabled=enabled};
+                    if(action==12)execution.StartSync(account,(long)generation,target,true);
+                    if(action==14)execution.PauseSync(account,(long)generation);
+                    return new {Rows=ArchiveEnrollmentExecution.Devices(execution.RefreshCurrent(account,(long)generation,local)),Enabled=enabled,Progress=execution.Progress(account,(long)generation)};
                 });
                 if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation||!dialog.IsVisible)return;
                 displayedAccount=account;displayedGeneration=generation;devices.ItemsSource=rows.Rows;
                 devices.SelectedItem=rows.Rows.FirstOrDefault(d=>d.PeerId==target)??rows.Rows.FirstOrDefault(d=>d.Local);
                 sync.IsThreeState=false;sync.IsChecked=rows.Enabled;sync.IsEnabled=true;
-                status.Text="Current signed metadata verified. Archive grants do not start synchronization. Text sync controls will be available when the route integration is complete.";
+                archiveProgress=rows.Progress;archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
+                status.Text=rows.Progress.State+" · "+rows.Progress.Processed+" messages processed · "+rows.Progress.Conversations+" conversations completed. No access is inferred from login.";
             }catch(Exception error){sync.IsEnabled=false;sync.IsChecked=null;status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
             finally{panel.IsEnabled=true;}
         };
         sync.Click+=(s,e)=>run(11);
         Action<string,uint> button=(label,action)=>{var b=new Button{Content=label,Padding=new Thickness(10,7,10,7),Margin=new Thickness(0,4,6,4)};AutomationProperties.SetName(b,label);b.Click+=(s,e)=>run(action);buttons.Children.Add(b);};
         button("Refresh archive devices",0);button("Trust archive authorizer",4);button("Authorize history access",5);button("Revoke access",6);button("Disable authorizer",7);
+        button("Synchronize from selected archive",12);button("Pause synchronization",14);
+        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.State+" · "+archiveProgress.Processed+" messages processed · "+archiveProgress.Conversations+" conversations completed";};
+        voiceTimer.Tick+=progressTick;dialog.Closed+=(s,e)=>voiceTimer.Tick-=progressTick;
         return panel;
     }
 	private void SettingsPage()

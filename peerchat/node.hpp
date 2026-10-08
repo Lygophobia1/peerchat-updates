@@ -29,6 +29,7 @@ struct NodeEvent {
     std::uint16_t port=0;
     std::uint64_t attemptId=0;
     std::string authorizationGroupId;
+    std::wstring authorizationArchive;
     std::uint64_t authorizationRosterGeneration=0;
     std::uint64_t authorizationTargetAccountId=0;
     std::uint64_t sessionEpoch=0;

@@ -53,10 +53,29 @@ username, account claim or conversation label cannot manufacture sender identity
 
 ## Remaining before a physical candidate
 
-- Wire archive demand/admission through the production Windows/Android relay adapters.
-- Bind native SyncReader execution and progress/cancel controls into both applications.
-- Refresh authenticated archive metadata during bounded active work and retire routes
-  on completion, pause, revocation and metadata expiry.
+Dev.56 wires the existing Windows relay adapter and Android relay execution to the
+native archive authorization value. Requests, authenticated server hints and relay
+responses carry the exact account/issuer/source/reader/grant-generation binding.
+Both TLS implementations require the corresponding device key and exact in-TLS
+scope binding; neither path pins a friend or drains a DM outbox.
+
+The native Execution component borrows the existing profile owners. Sync/Pause
+controls and bounded progress are available in both Settings surfaces. A protected
+explicit job intent survives owner/process restart; one authenticated startup
+metadata check can resume it. Metadata is refreshed only during active reading or
+bounded serving work. OFF pauses admission without deleting intent, history or
+cursors. Completion/pause/revocation retires manager-owned demand. A 15-second
+page deadline resets the pending page and uses the existing STM backoff. Invalid
+archive data/storage stops archive work rather than the ordinary messaging worker.
+
+Dev.56 automated evidence: full immutable Windows build/import audits; Android
+debug/test/release/lint and 105 JVM tests (zero failures/errors); real paired Node
+workers with zero friends, opaque relay and mutual Schannel TLS; native 25-record
+history over real TLS; durable intent/OFF/ON/restart/deadline checks; 1,000 relay
+lifecycles plus zero-friend archive retry/revocation. No physical success is claimed.
+
+Still required:
+
 - Integrate authenticated attachment catalogs and TransferManager archive transfers.
 - Complete mobile cache/application projection and candidate acceptance audits.
 - Produce final versioned clients and the requested physical checklist.

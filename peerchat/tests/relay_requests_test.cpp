@@ -52,6 +52,29 @@ int main(){using namespace peerchat;try{
         auto retired=owner.retireIdleRoutes(501);check(retired.size()==1,"idle route was not retired");
         check(requests.take(502,0,32).empty(),"idle retirement created route demand");
     }
-    std::cout<<"PASS: 1000 manager-owned relay lifecycles plus idle, incoming demand, expiry, unrelated-presence/backoff and idle retirement. HOST ONLY\n";
+    {
+        session::SessionTransportManager owner(alice,alice,{1},100,1000);
+        reliable::AuthenticatedFriendSnapshot friends;friends.replace(10,1,{});
+        session::ReliableAuthorization scope;scope.scope=session::ReliableAuthorizationScope::ArchiveControl;scope.expectedRemoteDeviceId=bob;
+        scope.archive={10,1,2,alice,alice,bob,std::string(32,'d'),std::string(32,'e')};
+        bool authorized=true;std::uint64_t next=1;
+        auto same=[&](const auto& value){return value.valid()&&value.permitsArchiveControl()&&value.expectedRemoteDeviceId==scope.expectedRemoteDeviceId&&value.continuityKey()==scope.continuityKey()&&
+            value.archive.sourceGeneration==scope.archive.sourceGeneration&&value.archive.readerGeneration==scope.archive.readerGeneration&&
+            value.archive.sourceGrantId==scope.archive.sourceGrantId&&value.archive.readerGrantId==scope.archive.readerGrantId;};
+        portable::RelayRequests requests(owner,friends,{1},next,[&](const auto& value){return authorized&&same(value);});
+        check(requests.authenticatedNetwork(1,1),"zero-friend authenticated network rejected");
+        check(!requests.authenticatedNetwork(2,1),"stale authorization generation accepted");
+        check(owner.demandArchiveRoute(scope,30000,1,10),"archive demand rejected");
+        auto first=requests.take(10,0,32);check(first.size()==1&&same(first[0].authorization),"archive scope lost in request");
+        check(!requests.attach(first[0].id,other),"archive wrong device accepted");
+        check(requests.close(first[0].id,20,0,true),"archive failed attempt not retired");
+        check(owner.demandArchiveRoute(scope,30000,1,21)&&requests.take(21,0,32).empty(),"archive demand bypassed backoff");
+        auto retry=requests.take(1020,0,32);check(retry.size()==1,"archive reconnect lost scope");
+        check(requests.attach(retry[0].id,bob).has_value(),"authorized nonfriend attach rejected");
+        requests.failed(retry[0],1021,0,true);
+        authorized=false;check(requests.take(9999,0,32).empty(),"revoked archive request retried");
+        check(!friends.contains(bob),"archive established friendship");
+    }
+    std::cout<<"PASS: 1000 manager-owned relay lifecycles plus archive nonfriend scope, authenticated zero-friend network, retry, revocation, idle demand and retirement. HOST ONLY\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}}

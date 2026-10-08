@@ -56,6 +56,12 @@ public:
         require(bool(clock_)&&account>0);
     }
     Authorization& policy(){return policy_;}
+    std::string sourceIssuer(const std::string& source)const{
+        require(fresh()&&protocol::id(source)&&source!=local_.peerId);
+        for(const auto& entry:current_)if(entry.first.second==source&&
+            policy_.permits(entry.first.first,source,ServeHistory)&&policy_.permits(entry.first.first,local_.peerId,ReadHistory))return entry.first.first;
+        throw std::runtime_error("This archive source or reader is not authorized by a current trusted grant");
+    }
     bool matches(std::uint64_t account,std::uint64_t generation)const{return fresh()&&account==account_&&generation==generation_;}
     void authenticated(std::uint64_t generation){
         require(generation>generation_);generation_=generation;revision_=0;invalidate();

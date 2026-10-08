@@ -152,19 +152,24 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     }
     fun registerPush(token:String) {require(token.length in 1..2048);request("push_register",JSONObject().put("publicIdentity",device).put("provider","fcm").put("pushToken",token))}
     fun hint(peerAccount:Long,peerDevice:String){request("push_hint",JSONObject().put("publicIdentity",device).put("targetAccountId",peerAccount.toString()).put("targetPublicIdentity",peerDevice))}
-    fun openRelay(targetAccount: Long,targetDevice: String): RelayConnection {
+    fun openRelay(targetAccount: Long,targetDevice: String,archive:JSONObject?=null): RelayConnection {
         require(targetAccount>0 && targetDevice.matches(Regex("[0-9a-f]{64}")))
         val active=checkNotNull(session)
-        require(active.accountId!=targetAccount)
+        if(archive==null)require(active.accountId!=targetAccount)
+        else require(active.accountId==targetAccount&&archive.getString("purpose")=="archive_history"&&
+            ((archive.getString("archiveSource")==device&&archive.getString("archiveReader")==targetDevice)||(archive.getString("archiveReader")==device&&archive.getString("archiveSource")==targetDevice)))
         val channel=channel("relay_attach")
         try {
             channel.readTimeout(20000) // existing server pairing deadline is 15 s
             val fields=JSONObject().put("version",1).put("type","relay_attach").put("sessionToken",active.token)
                 .put("publicIdentity",device).put("targetAccountId",targetAccount.toString()).put("targetPublicIdentity",targetDevice)
+            archive?.keys()?.forEach{key->require(key in setOf("purpose","archiveIssuer","archiveSource","archiveReader","archiveSourceGeneration","archiveReaderGeneration","archiveSourceGrantId","archiveReaderGrantId"));fields.put(key,archive.get(key))}
             channel.write(fields.toString().toByteArray(Charsets.UTF_8),4096)
             val response=JSONObject(channel.read(16384).toString(Charsets.UTF_8))
             if(!response.optBoolean("ok"))throw ServerRejected(response.optString("error","relay_rejected"))
-            check(session===active && response.getString("type")=="relay_ready" && response.getString("purpose")=="friend" &&
+            check(session===active && response.getString("type")=="relay_ready" && response.getString("purpose")== (if(archive==null)"friend" else "archive_history"))
+            archive?.keys()?.forEach{key->check(response.getString(key)==archive.getString(key))}
+            check(
                 response.getString("groupId").isEmpty() && response.getLong("rosterGeneration")==0L)
             val id=response.getString("sessionId");com.peerchat.android.platform.tls.RelayFrames(id)
             val incoming=response.getBoolean("incoming");channel.readTimeout(0)

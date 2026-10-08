@@ -71,7 +71,7 @@ class NativeProjectionTest {
         rejected {connectionSnapshot(NativeRecordWriter(4).apply {number(2);number(0);number(0);number(0);number(1);text("none")}.bytes())}
     }
     @Test fun relayCommandsAreBoundedAndAttemptBound() {
-        val value=NativeRecordWriter(1).apply {number(1);number(23);text(a);number(5)}.bytes()
+        val value=NativeRecordWriter(1).apply {number(1);number(23);text(a);number(5);blob(ByteArray(0))}.bytes()
         assertEquals(RelayExecution(23,a,5),relayExecutions(value).single())
         rejected {relayExecutions(value.copyOf(value.size-1))}
         rejected {relayExecutions(NativeRecordWriter(1).apply {number(33)}.bytes())}
@@ -86,6 +86,15 @@ class NativeProjectionTest {
         assertEquals(2L,message.delivery);assertEquals(3L,message.sequence);assertEquals("Hello 日本語 😀",message.text)
         rejected {messageSnapshots(value.copyOf(value.size-1))}
         rejected {messageSnapshots(NativeRecordWriter(2).apply {number(9)}.bytes())}
+    }
+    @Test fun archiveRelayProjectionPreservesScopeWithoutFriendship() {
+        val scope=ArchiveRelayScope(8,a,a,b,2,3,"d".repeat(32),"e".repeat(32))
+        assertEquals(scope,ArchiveRelayScope.parse(scope.binding()))
+        val record=NativeRecordWriter(1).apply{number(1);number(77);text(a);number(5);blob(scope.binding())}.bytes()
+        assertEquals(RelayExecution(77,a,5,scope),relayExecutions(record).single())
+        rejected{ArchiveRelayScope.parse(scope.binding()+byteArrayOf(0))}
+        rejected{ArchiveRelayScope(8,a,a,b,0,3,"d".repeat(32),"e".repeat(32))}
+        rejected{relayExecutions(NativeRecordWriter(1).apply{number(1);number(77);text(c);number(5);blob(scope.binding())}.bytes())}
     }
     @Test fun malformedUtf8AndNegativeLengthsFailClosed() {
         val value=NativeRecordWriter(1).apply {number(1);number(1);text(a);number(1)}.bytes()
