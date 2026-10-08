@@ -175,6 +175,11 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     fun openEvents(): ServerChannel = openSubscription("events",JSONObject().put("clientHeartbeats",true))
     // Opaque mailbox application RPC over the existing authenticated/pinned
     // server TLS request adapter. No plaintext, local outbox, or retry owner here.
+    fun archive(operation: String, payload: JSONObject = JSONObject()): JSONObject {
+        require(operation in setOf("archive_descriptor_register","archive_grant_register","archive_authorization_state"))
+        check(supportsRpc&&rpcAuthorized&&session!=null) { "Archive requires authenticated RPC support" }
+        return rpc(operation,payload)
+    }
     fun mailbox(operation: String, payload: JSONObject): JSONObject {
         require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"))
         if(supportsRpc&&rpcAuthorized)return rpc(operation,payload)

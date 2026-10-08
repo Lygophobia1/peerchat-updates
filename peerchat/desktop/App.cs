@@ -2798,6 +2798,51 @@ public class DesktopApplication {
 		}catch(Exception error){window.IsEnabled=true;Notify("Profile maintenance could not start: "+error.Message);}
 	}
 
+    StackPanel ArchiveSettingsPanel(Window dialog){
+        var panel=new StackPanel();
+        panel.Children.Add(new TextBlock{Text="Archive devices",FontSize=19,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,18,0,6)});
+        panel.Children.Add(new TextBlock{Text="Archive access is separate from signing in. Refresh on each device to register its public identity, compare Peer IDs, then explicitly trust an authorizer and grant only the needed access. Revocation stops future sync; it cannot erase history already received.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
+        var devices=new ComboBox{Margin=new Thickness(0,10,0,6),MinHeight=32};
+        AutomationProperties.SetName(devices,"Archive device selector");
+        var details=new TextBlock{Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,8)};
+        var read=new CheckBox{Content="May receive historical messages",Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,4,0,4)};
+        var serve=new CheckBox{Content="May serve historical messages",Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,4,0,8)};
+        var status=new TextBlock{Text="Not refreshed. No archive access is granted automatically.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,4)};
+        var buttons=new WrapPanel();
+        panel.Children.Add(devices);panel.Children.Add(details);panel.Children.Add(read);panel.Children.Add(serve);panel.Children.Add(buttons);panel.Children.Add(status);
+        long displayedAccount=0;ulong displayedGeneration=0;
+        devices.SelectionChanged+=(s,e)=>{var d=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
+            details.Text=d==null?"":("Peer ID: "+d.PeerId+"\nTrusted authorizer: "+(d.ApprovedIssuer?"Yes":"No")+" · May receive: "+(d.MayRead?"Yes":"No")+" · May serve: "+(d.MayServe?"Yes":"No"));
+            read.IsChecked=d!=null&&d.MayRead;serve.IsChecked=d!=null&&d.MayServe;
+        };
+        Action<uint> run=async action=>{
+            var owner=discovery;var selected=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
+            long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
+            if(closing||owner==null||account<=0||mailboxContextAccount!=account||generation==0||generation>Int64.MaxValue){status.Text="Sign in and establish authenticated server presence first.";return;}
+            if(action!=0&&(selected==null||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
+            string target=selected==null?"":selected.PeerId;long capabilities=(read.IsChecked==true?1L:0L)|(serve.IsChecked==true?2L:0L);
+            if(action==5&&capabilities==0){status.Text="Select at least one capability, or use Revoke access.";return;}
+            if(action!=0&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
+            panel.IsEnabled=false;status.Text="Verifying archive authorization…";
+            try{
+                var rows=await Task.Run(()=>{
+                    var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
+                    execution.Refresh(account,(long)generation,local);
+                    if(action!=0)execution.Consent(account,(long)generation,action,target,capabilities,true);
+                    execution.PublishPending(account,(long)generation,local);
+                    return ArchiveEnrollmentExecution.Devices(execution.Refresh(account,(long)generation,local));
+                });
+                if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation||!dialog.IsVisible)return;
+                displayedAccount=account;displayedGeneration=generation;devices.ItemsSource=rows;
+                devices.SelectedItem=rows.FirstOrDefault(d=>d.PeerId==target)??rows.FirstOrDefault(d=>d.Local);
+                status.Text="Current signed metadata verified. Archive grants do not start synchronization. Text sync controls will be available when the route integration is complete.";
+            }catch(Exception error){status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
+            finally{panel.IsEnabled=true;}
+        };
+        Action<string,uint> button=(label,action)=>{var b=new Button{Content=label,Padding=new Thickness(10,7,10,7),Margin=new Thickness(0,4,6,4)};AutomationProperties.SetName(b,label);b.Click+=(s,e)=>run(action);buttons.Children.Add(b);};
+        button("Refresh archive devices",0);button("Trust archive authorizer",4);button("Authorize history access",5);button("Revoke access",6);button("Disable authorizer",7);
+        return panel;
+    }
 	private void SettingsPage()
 	{
 		string[] service = LoadDiscoveryService();
@@ -3127,6 +3172,7 @@ public class DesktopApplication {
         var mailboxToggle=new CheckBox{Content="Allow temporary encrypted server storage for offline messages",IsChecked=mailboxStorageAllowed,IsEnabled=core.MailboxSupported,Margin=new Thickness(0,16,0,8),Foreground=Brush("#EDF1F5")};
         mailboxToggle.Click+=(s,e)=>{try{SaveMailboxPolicy(mailboxToggle.IsChecked==true);mailboxNextUtc=DateTime.MinValue;mailboxExecution=null;mailboxService=null;}catch{mailboxToggle.IsChecked=mailboxStorageAllowed;Notify("Mailbox privacy preference could not be saved.",dialog);}};
         settingsPages["Privacy & Security"].Children.Add(mailboxToggle);
+        settingsPages["Privacy & Security"].Children.Add(ArchiveSettingsPanel(dialog));
         settingsPages["Privacy & Security"].Children.Add(new TextBlock{Text=core.MailboxSupported?"Evaluation only. Server acceptance is Stored, not Delivered. Plaintext and private keys are never uploaded.":"Mailbox encryption is unavailable: no approved shipping HPKE provider is configured.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
 		StackPanel voiceSettings = createInfoPage("Voice", "Profile-specific audio devices and working software levels. Call controls remain in the conversation header.");
 		StackPanel voiceDevicesPanel = new StackPanel();

@@ -7,7 +7,7 @@ inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){
-    require(operation>=1&&operation<=9&&bytes.size()<=MaxApplicationBytes);
+    require(operation>=1&&operation<=10&&bytes.size()<=MaxApplicationBytes);
     protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
     auto result=applicationHeader(operation);
     if(operation==1){r.end();return enrollment.registration(utc);}
@@ -30,12 +30,14 @@ inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation
         return result.data;
     }
     if(operation==9){r.end();enrollment.invalidate();return result.data;}
+    auto action=operation;
+    if(operation==10){auto account=r.number(),generation=r.number(),selected=r.number();require(selected>=4&&selected<=7&&enrollment.matches(account,generation));action=static_cast<unsigned>(selected);}
     auto device=r.string();require(protocol::id(device));
-    auto capability=operation==5?r.number():0;auto consent=r.number();require(consent<=1);r.end();
+    auto capability=action==5?r.number():0;auto consent=r.number();require(consent<=1);r.end();
     // Complete structural parsing before any user decision can mutate policy.
-    if(operation==4){enrollment.approveIssuer(device,consent!=0);return result.data;}
-    if(operation==5)return encodeGrant(enrollment.authorizeDevice(device,capability,utc,consent!=0));
-    if(operation==6)return encodeGrant(enrollment.revokeDevice(device,utc,consent!=0));
-    require(operation==7);enrollment.disableIssuer(device,consent!=0);return result.data;
+    if(action==4){enrollment.approveIssuer(device,consent!=0);return result.data;}
+    if(action==5)return encodeGrant(enrollment.authorizeDevice(device,capability,utc,consent!=0));
+    if(action==6)return encodeGrant(enrollment.revokeDevice(device,utc,consent!=0));
+    require(action==7);enrollment.disableIssuer(device,consent!=0);return result.data;
 }
 }

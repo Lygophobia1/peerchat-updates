@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using PeerChatDesktop;
 
 static class ArchiveApplicationBoundaryTest {
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string path,IntPtr file,uint flags);
@@ -73,6 +75,35 @@ static class ArchiveApplicationBoundaryTest {
                 Check(ui_authenticated_friends(handle,8,3,"")==1);Simple(handle,3,true); // Fresh login still needs fresh metadata.
                 Metadata(handle,peer,descriptor,grant,3,1);Views(handle,peer,true,true);
             }
+            Check(ui_authenticated_friends(handle,8,4,"")==1);
+            byte[] registeredGrant=grant;bool wrongAccount=false,failPublication=false;int registrations=0,publications=0;
+            var execution=new ArchiveEnrollmentExecution((op,input)=>{
+                var output=new byte[262144];int n=ui_archive(handle,op,input,(uint)input.Length,output,(uint)output.Length);
+                Check(n>0&&n<=output.Length);Array.Resize(ref output,n);return output;
+            },(operation,fields)=>{
+                var reply=new Dictionary<string,object>{{"ok",true},{"archiveVersion",1}};
+                if(operation=="archive_descriptor_register"){
+                    Check((string)fields["proof"]==Convert.ToBase64String(descriptor));registrations++;reply["state"]="accepted";
+                }else if(operation=="archive_grant_register"){
+                    if(failPublication)throw new IOException("Isolated ambiguous transport failure");
+                    registeredGrant=Convert.FromBase64String((string)fields["proof"]);publications++;reply["state"]="accepted";
+                }else{
+                    Check(operation=="archive_authorization_state");reply["accountId"]=wrongAccount?9:8;reply["serverEpoch"]="isolated-application-rpc-fixture";
+                    reply["devices"]=new[]{new Dictionary<string,object>{{"descriptor",Convert.ToBase64String(descriptor)}}};
+                    reply["grants"]=new[]{new Dictionary<string,object>{{"grant",Convert.ToBase64String(registeredGrant)},{"currentlyEligible",publications==0}}};
+                }
+                return reply;
+            });
+            execution.Refresh(8,4,peer);Views(handle,peer,true,true);Check(publications==0);
+            bool stale=false;try{execution.Consent(8,3,6,peer,0,true);}catch(Exception){stale=true;}Check(stale);Views(handle,peer,true,true);
+            execution.Consent(8,4,6,peer,0,true);
+            failPublication=true;bool failed=false;try{execution.PublishPending(8,4,peer);}catch(IOException){failed=true;}
+            Check(failed&&publications==0);Simple(handle,3,true);
+            failPublication=false;Check(execution.PublishPending(8,4,peer)==1&&publications==1);Views(handle,peer,true,false);
+            Check(execution.PublishPending(8,4,peer)==0&&publications==1);
+            wrongAccount=true;failed=false;try{execution.Refresh(8,4,peer);}catch(InvalidDataException){failed=true;}
+            Check(failed);Simple(handle,3,true);wrongAccount=false;execution.Refresh(8,4,peer);Views(handle,peer,true,false);
+            Check(registrations>=5&&ArchiveEnrollmentExecution.Devices(execution.Refresh(8,4,peer)).Length==1);
         }finally{ui_destroy(handle);}
         Console.WriteLine("PASS: packaged Windows archive C ABI, five actual Node profile-worker restarts, exact registration identity, explicit consent, publication gating, account rejection, logout/relogin and fresh metadata. HOST ONLY");
         return 0;

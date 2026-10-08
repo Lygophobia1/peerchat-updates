@@ -1501,7 +1501,7 @@ Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messa
     return future.get();
 }
 Blob Node::archive(unsigned operation,const Blob& input){
-    if(operation<1||operation>9||input.size()>archive::MaxApplicationBytes)throw std::invalid_argument("Invalid native archive command");
+    if(operation<1||operation>10||input.size()>archive::MaxApplicationBytes)throw std::invalid_argument("Invalid native archive command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.archive=true;command.sourceKind=operation;command.bytes=input;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");

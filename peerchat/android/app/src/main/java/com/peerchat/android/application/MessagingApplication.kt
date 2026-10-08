@@ -25,4 +25,6 @@ interface MessagingApplication:AutoCloseable {
     suspend fun respondFriend(accountId:Long,accept:Boolean)
     suspend fun signOut()
     suspend fun setMailboxStorageAllowed(allowed:Boolean){check(!allowed){"Mailbox configuration unavailable"}}
+    suspend fun archiveDevices():ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
+    suspend fun archiveConsent(snapshot:ArchiveEnrollmentSnapshot,action:ArchiveDeviceAction,device:String,read:Boolean,serve:Boolean):ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
 }

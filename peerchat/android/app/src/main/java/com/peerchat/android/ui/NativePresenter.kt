@@ -140,6 +140,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
         current=snapshot
+        if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
         mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed)
         if(snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
             mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
@@ -240,6 +241,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.MailboxStorage -> viewModelScope.launch {
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
+            }
+            UiAction.ArchiveRefresh, is UiAction.ArchiveConsent -> {
+                if(mutable.value.archiveBusy)return
+                val displayed=mutable.value.archiveEnrollment
+                if(action is UiAction.ArchiveConsent&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh and confirm again.");return}
+                mutable.value=mutable.value.copy(archiveBusy=true)
+                viewModelScope.launch {
+                    try{
+                        val result=if(action is UiAction.ArchiveConsent)backend.archiveConsent(checkNotNull(displayed),action.action,action.device,action.read,action.serve) else backend.archiveDevices()
+                        if(current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")
+                    }catch(_:Exception){mutable.value=mutable.value.copy(archiveEnrollment=null,notice="Archive operation failed closed. Refresh to retry pending public grants; login alone never grants history access.")}
+                    finally{mutable.value=mutable.value.copy(archiveBusy=false)}
+                }
             }
             is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()}
             is UiAction.RequestFriend -> viewModelScope.launch {

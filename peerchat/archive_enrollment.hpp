@@ -56,6 +56,7 @@ public:
         require(bool(clock_)&&account>0);
     }
     Authorization& policy(){return policy_;}
+    bool matches(std::uint64_t account,std::uint64_t generation)const{return fresh()&&account==account_&&generation==generation_;}
     void authenticated(std::uint64_t generation){
         require(generation>generation_);generation_=generation;revision_=0;invalidate();
     }

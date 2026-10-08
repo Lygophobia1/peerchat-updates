@@ -243,6 +243,11 @@ public sealed class DiscoveryClient {
         var tls=new SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>{if(certificate==null)return false;string observed=CertificateFingerprint(certificate);string trusted=CertificateSha256;if(trusted.Length==64&&String.Equals(observed,trusted,StringComparison.OrdinalIgnoreCase))return true;bool replacement=trusted.Length==64;bool accepted=certificateTrustPrompt!=null&&certificateTrustPrompt(Host,Port,observed,replacement);if(accepted)CertificateSha256=observed;return accepted;});
         try{tls.AuthenticateAsClient(Host,null,SslProtocols.Tls12|SslProtocols.Tls13,false);if(longLived)tcp.ReceiveTimeout=0;return tls;}catch{tls.Dispose();tcp.Close();throw;}
     }
+    public Dictionary<string,object> Archive(string operation,string device,Dictionary<string,object> payload){
+        if(!new[]{"archive_descriptor_register","archive_grant_register","archive_authorization_state"}.Contains(operation))throw new ArgumentException("Unsupported archive operation.");
+        if(!supportsRpc||AccountId<=0||String.IsNullOrEmpty(SessionToken))throw new InvalidOperationException("Archive requires authenticated RPC support.");
+        return Rpc(operation,device,payload);
+    }
     public Dictionary<string,object> Mailbox(string operation,string device,Dictionary<string,object> payload){
         if(!new[]{"mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"}.Contains(operation))throw new ArgumentException("Unsupported mailbox operation.");
         if(supportsRpc)return Rpc(operation,device,payload);

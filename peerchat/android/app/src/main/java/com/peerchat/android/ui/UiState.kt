@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.peerchat.android.platform.NotificationPreview
+import com.peerchat.android.application.ArchiveEnrollmentSnapshot
+import com.peerchat.android.application.ArchiveDeviceAction
 
 enum class Route { Welcome, Login, Server, Home, Conversation, Details, Diagnostics }
 enum class Tab { Chats, Calls, You }
@@ -65,6 +67,7 @@ data class PeerChatUiState(
     val drafts:Map<String,String> = emptyMap(),val notificationsEnabled:Boolean=true,
     val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,
     val mailboxStorageAllowed:Boolean=false,
+    val archiveEnrollment:ArchiveEnrollmentSnapshot?=null,val archiveBusy:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
     val diagnosticsReturn: Route = Route.Details,
     val theme: ThemeChoice = ThemeChoice.System, val incomingCallPreview: Boolean = false,
@@ -110,6 +113,8 @@ sealed interface UiAction {
     data class Draft(val conversationId:String,val text:String):UiAction
     data class NotificationSettings(val enabled:Boolean,val preview:NotificationPreview):UiAction
     data class MailboxStorage(val allowed:Boolean):UiAction
+    data object ArchiveRefresh:UiAction
+    data class ArchiveConsent(val context:ArchiveEnrollmentSnapshot,val action:ArchiveDeviceAction,val device:String,val read:Boolean=false,val serve:Boolean=false):UiAction
     data class PreviewMessage(val text: String) : UiAction
     data object Older : UiAction
     data object ToggleNotifications : UiAction
@@ -163,6 +168,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
+        UiAction.ArchiveRefresh, is UiAction.ArchiveConsent -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

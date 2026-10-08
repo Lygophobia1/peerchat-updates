@@ -25,6 +25,11 @@ int main(){try{
         m.device=device.peerId;m.serverEpoch="test-server-epoch";m.descriptors={da,db};m.grants=std::move(grants);return m;
     };
     source.refresh(metadata(pa,1,{}));reader.refresh(metadata(pb,1,{}));
+    auto bound=ar::applicationHeader(10);bound.number(9);bound.number(1);bound.number(4);bound.string(pa.peerId);bound.number(1);
+    rejects([&]{ar::executeEnrollmentOperation(source,10,bound.data,20);});
+    bound=ar::applicationHeader(10);bound.number(8);bound.number(2);bound.number(4);bound.string(pa.peerId);bound.number(1);
+    rejects([&]{ar::executeEnrollmentOperation(source,10,bound.data,20);});
+    check(!source.policy().trustsAuthority(pa.publicKey)); // Stale consent cannot authorize a new context.
     check(source.devices().size()==2&&reader.devices().size()==2);
     for(const auto& device:reader.devices())check(!device.mayRead&&!device.mayServe&&!device.approvedIssuer);
     rejects([&]{source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);});

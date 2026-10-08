@@ -65,6 +65,7 @@ import com.peerchat.android.platform.NotificationPreview
         }
         Text("Settings", style = MaterialTheme.typography.titleLarge)
         if(!state.demo){
+            ArchiveDevicesSection(state,dispatch)
             Text("Offline encrypted delivery",style=MaterialTheme.typography.titleMedium)
             Row(verticalAlignment=Alignment.CenterVertically){
                 Switch(state.mailboxStorageAllowed,{dispatch(UiAction.MailboxStorage(it))})

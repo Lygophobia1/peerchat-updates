@@ -25,6 +25,7 @@ internal class NativeRecordWriter(type: Int) {
     private val output=ByteArrayOutputStream().apply {write(byteArrayOf(80,84,1,type.toByte()))}
     fun number(value: Long) {require(value>=0);repeat(8){output.write((value ushr (it*8)).toInt())}}
     fun text(value: String) {val bytes=value.toByteArray(Charsets.UTF_8);require(bytes.size<=65536);number(bytes.size.toLong());output.write(bytes)}
+    fun blob(value: ByteArray) {require(value.size<=65536);number(value.size.toLong());output.write(value)}
     fun bytes(): ByteArray = output.toByteArray().also {require(it.size<=262144)}
 }
 data class RelayExecution(val attempt: Long,val peerId: String,val networkRevision: Long)
