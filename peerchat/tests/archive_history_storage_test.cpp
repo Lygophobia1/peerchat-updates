@@ -1,5 +1,5 @@
 #include "../storage.cpp"
-#include "../archive_history.hpp"
+#include "../archive_sync.hpp"
 #include <iostream>
 #include <set>
 #include <iomanip>
@@ -28,6 +28,23 @@ int main(){try{
     }
     Storage a((root/L"source").wstring()),b((root/L"reader").wstring()),c((root/L"friend").wstring());
     auto pa=a.profile(),pb=b.profile(),pc=c.profile();
+    check(!b.historicalDeviceAccount(pc.peerId));
+    b.rememberAuthenticatedDeviceAccount(pc.peerId,9);
+    b.rememberAuthenticatedDeviceAccount(pc.peerId,9); // Exact retry.
+    rejects([&]{b.rememberAuthenticatedDeviceAccount(pc.peerId,8);});
+    check(b.historicalDeviceAccount(pc.peerId)==std::optional<std::uint64_t>{9});
+    {Storage reopened((root/L"reader").wstring());check(reopened.historicalDeviceAccount(pc.peerId)==std::optional<std::uint64_t>{9});}
+    check(b.contacts().empty()); // Retained identity evidence grants no contact trust.
+    const auto tamperedDirectory=(root/L"tampered-directory").wstring();
+    {Storage fixture(tamperedDirectory);fixture.rememberAuthenticatedDeviceAccount(pc.peerId,9);}
+    {storage_detail::WindowsSqlDatabase raw(tamperedDirectory);
+        raw.execute("UPDATE objects SET b=x'00' WHERE k='authenticated-device-account/v1/"+pc.peerId+"';");
+    }
+    {Storage fixture(tamperedDirectory);
+        rejects([&]{fixture.historicalDeviceAccount(pc.peerId);});
+        rejects([&]{fixture.rememberAuthenticatedDeviceAccount(pc.peerId,9);}); // Never repair corrupt evidence by overwriting it.
+    }
+    check(a.archiveConversationPage(0,0).complete&&a.archiveConversationPage(0,0).conversations.empty());
     std::set<std::string> devices{pa.peerId,pb.peerId};
     std::map<std::string,ar::CurrentGrant> published;
     auto member=[&](std::uint64_t account,const std::string& peer){return account==8&&devices.count(peer);};
@@ -35,8 +52,9 @@ int main(){try{
         if(account!=8||issuer!=pa.peerId||!published.count(peer))return {};
         return published.at(peer);
     };
+    std::set<std::string> historicalPeers;
     auto directory=[&](const std::string& peer)->std::optional<std::uint64_t>{
-        if(peer==pc.peerId)return 9;
+        if(peer==pc.peerId||historicalPeers.count(peer))return 9;
         if(devices.count(peer))return 8;
         return {};
     };
@@ -56,6 +74,10 @@ int main(){try{
     }
     const auto storeId=a.archiveStoreId();
     const auto watermark=a.archiveHistoryWatermark();check(watermark==65);
+    auto manifest=a.archiveConversationPage(0,watermark,1);
+    check(manifest.complete&&manifest.conversations==std::vector<std::string>{pc.peerId}&&manifest.cursors==std::vector<std::int64_t>{1}&&manifest.nextCursor==watermark);
+    rejects([&]{a.archiveConversationPage(-1,watermark);});
+    rejects([&]{a.archiveConversationPage(0,watermark,1000);});
     auto first=a.archiveHistoryPage(pc.peerId,0,watermark,8);
     check(first.messages.size()==8&&first.messages.front().id==originals.front().id&&!first.complete);
     auto checkpoint=first.nextCursor;
@@ -157,6 +179,37 @@ int main(){try{
     big=bigPage.request;big.after=bigPage.next;
     bigPage=ar::decodeHistoryPage(ar::serveHistoryPage(a,pa,source,sourceScope,ar::encodeHistoryRequest(big),directory,300));
     check(bigPage.records.size()==1&&bigPage.complete);
+    // Multi-conversation discovery and restart reuse the same durable owner.
+    // No lexical message ID/timestamp cursor; one bounded manifest/page in flight.
+    for(unsigned n=0;n<17;++n){
+        std::ostringstream peer;peer<<std::setfill('0')<<std::setw(64)<<std::hex<<(100+n);historicalPeers.insert(peer.str());
+        auto m=newer;m.sender=peer.str();m.id=Storage::newMessageId();check(a.append(peer.str(),m));
+    }
+    auto firstManifest=ar::decodeManifestPage(ar::serveManifestPage(a,pa,source,sourceScope,
+        ar::encodeManifestRequest({Storage::newMessageId(),{},0,0})));
+    check(firstManifest.conversations.size()==8&&!firstManifest.complete);
+    auto malformedManifest=firstManifest;malformedManifest.conversations[1].cursor=malformedManifest.conversations[0].cursor;
+    rejects([&]{ar::encodeManifestPage(malformedManifest);});
+    auto whole=std::make_unique<ar::SyncReader>(b,pb,reader,deliveries,scope,directory);
+    unsigned steps=0;
+    while(!whole->snapshot().complete){
+        auto outgoing=whole->nextRequest();rejects([&]{whole->nextRequest();});
+        auto incoming=ar::serveSyncControl(a,pa,source,sourceScope,outgoing,directory,400);
+        if(steps==2){
+            whole->disconnected();outgoing=whole->nextRequest();incoming=ar::serveSyncControl(a,pa,source,sourceScope,outgoing,directory,400);
+        }
+        whole->accept(incoming);++steps;
+        if(steps==4){whole.reset();whole=std::make_unique<ar::SyncReader>(b,pb,reader,deliveries,scope,directory);}
+        check(steps<100);
+    }
+    check(whole->snapshot().conversations==18&&whole->nextRequest().empty());
+    for(const auto& peer:historicalPeers)check(b.history(peer).size()==1&&b.pending(peer).empty());
+    auto total=whole->snapshot().processed;whole.reset();
+    whole=std::make_unique<ar::SyncReader>(b,pb,reader,deliveries,scope,directory);
+    check(whole->snapshot().complete&&whole->snapshot().processed==total);
+    whole->rescan();auto outgoing=whole->nextRequest();
+    reader.setHistorySyncEnabled(false);rejects([&]{whole->accept(ar::serveSyncControl(a,pa,source,sourceScope,outgoing,directory,400));});
+    reader.setHistorySyncEnabled(true);whole->disconnected();whole->cancel();rejects([&]{whole->nextRequest();});
     a.eraseHistory(pc.peerId);check(a.archiveHistoryWatermark()>watermark);
     newer.id=Storage::newMessageId();check(a.append(pc.peerId,newer));
     check(a.archiveHistoryWatermark()>watermark+1); // Deleted positions cannot be reused.

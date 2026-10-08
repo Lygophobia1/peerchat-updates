@@ -264,7 +264,16 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
         }
         reader.end();peerchat::protocol::check(account||values.empty());
         if(instance->archiveApplication)instance->archiveApplication->invalidate();
-        instance->friends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
+        auto validatedFriends=instance->friends;
+        validatedFriends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
+        if(account){
+            instance->storage->rememberAuthenticatedDeviceAccount(instance->profile.peerId,static_cast<std::uint64_t>(account));
+            for(const auto& value:values){
+                instance->storage->rememberAuthenticatedDeviceAccount(value.expectedPeerId,value.accountId);
+                for(const auto& device:value.knownPeerIds)instance->storage->rememberAuthenticatedDeviceAccount(device,value.accountId);
+            }
+        }
+        instance->friends=std::move(validatedFriends);
         instance->relayRequests->revoke();
         for(auto& peer:instance->peers)if(!instance->friends.contains(peer.second->expected())){
             peer.second->close(false);instance->sessions.removePeer(peer.second->expected());

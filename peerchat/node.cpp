@@ -1147,7 +1147,16 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 for(const auto& value:command.friends){
                     snapshot.push_back({value.accountId,value.expectedPeerId,value.knownPeerIds});
                 }
-                authenticatedFriends.replace(command.accountId,command.sourceHandle,snapshot);
+                auto validatedFriends=authenticatedFriends;
+                validatedFriends.replace(command.accountId,command.sourceHandle,snapshot);
+                if(command.accountId){
+                    store->rememberAuthenticatedDeviceAccount(profile.peerId,command.accountId);
+                    for(const auto& value:snapshot){
+                        store->rememberAuthenticatedDeviceAccount(value.expectedPeerId,value.accountId);
+                        for(const auto& device:value.knownPeerIds)store->rememberAuthenticatedDeviceAccount(device,value.accountId);
+                    }
+                }
+                authenticatedFriends=std::move(validatedFriends);
             }
             else if(command.action==Action::PinInitialAuthenticatedFriendIdentity){
                 Connection* connection=nullptr;

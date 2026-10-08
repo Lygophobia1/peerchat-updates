@@ -94,6 +94,12 @@ public:
             if(registered.eligible)require(verified&&!g.revoked&&issuer!=descriptors.end()&&subject!=descriptors.end());
             require(current.emplace(std::make_pair(g.issuer,g.device),Current{g,registered.eligible,verified}).second);
         }
+        // Retain only fully verified authenticated metadata. This directory is
+        // historical evidence, never a source of friend/DM authorization.
+        for(const auto& entry:descriptors){
+            auto prior=storage_.historicalDeviceAccount(entry.first);require(!prior||*prior==account_);
+        }
+        for(const auto& entry:descriptors)storage_.rememberAuthenticatedDeviceAccount(entry.first,account_);
         descriptors_=std::move(descriptors);current_=std::move(current);revision_=metadata.revision;refreshed_=clock_();live_=true;
         try{
             acceptApproved();std::vector<Grant> registered;

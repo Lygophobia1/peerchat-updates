@@ -429,6 +429,38 @@ ArchiveHistoryPage Storage::archiveHistoryPage(const std::string& conversation,s
     if(page.complete)page.nextCursor=through;
     return page;
 }
+ArchiveConversationPage Storage::archiveConversationPage(std::int64_t after,std::int64_t through,int limit){
+    require(after>=0&&through>=after&&through<=archiveHistoryWatermark()&&limit>0&&limit<=16,"Invalid archive manifest bounds");
+    ArchiveConversationPage page;page.nextCursor=after;page.throughCursor=through;
+    // Discovery uses the first durable archive position, not a lexical message
+    // ID or timestamp. SQL limits the materialized result to one bounded page.
+    Statement query(impl_->sql,"SELECT m.peer,MIN(a.sequence) AS first_position FROM message_archive_index a JOIN messages m ON m.id=a.message_id WHERE a.sequence<=? GROUP BY m.peer HAVING MIN(a.sequence)>? ORDER BY first_position LIMIT ?");
+    query.number(1,through);query.number(2,after);query.number(3,limit+1);
+    page.complete=true;
+    while(query.row()){
+        if(page.conversations.size()==static_cast<size_t>(limit)){page.complete=false;break;}
+        auto peer=query.text(0);require(identifier(peer),"Invalid archived conversation identity");
+        auto cursor=query.number(1);require(cursor>page.nextCursor&&cursor<=through,"Invalid archived conversation cursor");
+        page.nextCursor=cursor;page.cursors.push_back(cursor);page.conversations.push_back(std::move(peer));
+    }
+    if(page.complete)page.nextCursor=through;
+    return page;
+}
+std::optional<std::uint64_t> Storage::historicalDeviceAccount(const std::string& device){
+    require(identifier(device),"Invalid historical device identity");
+    auto bytes=impl_->get("authenticated-device-account/v1/"+device);if(bytes.empty())return {};
+    Reader r(bytes);require(r.string()=="PeerChat/AuthenticatedDeviceAccount/v1"&&r.string()==device,"Historical account binding mismatch");
+    auto account=r.number();r.end();require(account>0,"Invalid historical account binding");return account;
+}
+void Storage::rememberAuthenticatedDeviceAccount(const std::string& device,std::uint64_t account){
+    require(identifier(device)&&account>0,"Invalid authenticated account binding");
+    auto cached=historicalDeviceAccount(device);
+    if(cached){require(*cached==account,"Conflicting authenticated device ownership");return;}
+    Transaction transaction(impl_->sql);auto previous=historicalDeviceAccount(device);
+    require(!previous||*previous==account,"Conflicting authenticated device ownership");
+    if(!previous){Writer w;w.string("PeerChat/AuthenticatedDeviceAccount/v1");w.string(device);w.number(account);impl_->put("authenticated-device-account/v1/"+device,w.data);}
+    transaction.commit();
+}
 void Storage::acknowledge(const std::string& id,Delivery delivery) {
     require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=3,"Invalid delivery acknowledgement");
     Transaction transaction(impl_->sql);

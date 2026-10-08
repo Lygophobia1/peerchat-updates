@@ -1,6 +1,7 @@
 #pragma once
 #include "delivery_manager.hpp"
 #include <limits>
+#include <set>
 
 namespace peerchat::archive {
 // A bounded request/response protocol carried ONLY inside an admitted archive
@@ -17,6 +18,17 @@ struct HistoryPage {
     std::uint64_t next=0;
     bool complete=false;
     std::vector<HistoryRecord> records;
+};
+struct ManifestRequest {
+    std::string id,store;
+    std::uint64_t after=0,through=0;
+};
+struct ManifestEntry {std::uint64_t cursor=0;std::string conversation;};
+struct ManifestPage {
+    ManifestRequest request;
+    std::uint64_t next=0;
+    bool complete=false;
+    std::vector<ManifestEntry> conversations;
 };
 inline void validHistoryRequest(const HistoryRequest& q){
     require(protocol::id(q.id,32)&&(q.store.empty()||protocol::id(q.store,32))&&protocol::id(q.conversation)&&
@@ -68,11 +80,59 @@ inline HistoryPage decodeHistoryPage(const Blob& bytes){
     }
     r.end();require(encodeHistoryPage(page)==bytes);return page;
 }
+inline void manifestFields(protocol::Writer& w,const ManifestRequest& q){
+    require(protocol::id(q.id,32)&&(q.store.empty()||protocol::id(q.store,32))&&
+        q.after<=static_cast<std::uint64_t>(INT64_MAX)&&q.through<=static_cast<std::uint64_t>(INT64_MAX)&&
+        (!q.through||q.after<=q.through)&&(!q.store.empty()||(!q.after&&!q.through)));
+    w.string(q.id);w.string(q.store);w.number(q.after);w.number(q.through);
+}
+inline ManifestRequest manifestFields(protocol::Reader& r){
+    ManifestRequest q;q.id=r.string();q.store=r.string();q.after=r.number();q.through=r.number();return q;
+}
+inline Blob encodeManifestRequest(const ManifestRequest& q){auto w=historyHeader(4);manifestFields(w,q);return w.data;}
+inline ManifestRequest decodeManifestRequest(const Blob& bytes){
+    require(bytes.size()<=512);protocol::Reader r(bytes);historyHeader(r,4);auto q=manifestFields(r);r.end();
+    require(encodeManifestRequest(q)==bytes);return q;
+}
+inline Blob encodeManifestPage(const ManifestPage& page){
+    const auto& q=page.request;
+    require(!q.store.empty()&&q.through>=q.after&&page.next>=q.after&&page.next<=q.through&&
+        page.conversations.size()<=HistoryPageRecords&&(!page.complete||page.next==q.through)&&
+        (page.complete||!page.conversations.empty()));
+    auto w=historyHeader(5);manifestFields(w,q);w.number(page.next);w.number(page.complete);w.number(page.conversations.size());
+    std::uint64_t previous=q.after;std::set<std::string> seen;
+    for(const auto& entry:page.conversations){
+        require(entry.cursor>previous&&entry.cursor<=page.next&&protocol::id(entry.conversation)&&seen.insert(entry.conversation).second);
+        previous=entry.cursor;w.number(entry.cursor);w.string(entry.conversation);
+    }
+    require(page.complete||page.next==previous);require(w.data.size()<=2048);return w.data;
+}
+inline ManifestPage decodeManifestPage(const Blob& bytes){
+    require(bytes.size()<=2048);protocol::Reader r(bytes);historyHeader(r,5);ManifestPage page;page.request=manifestFields(r);
+    page.next=r.number();auto complete=r.number();require(complete<=1);page.complete=complete!=0;
+    auto count=r.number();require(count<=HistoryPageRecords);
+    for(std::uint64_t n=0;n<count;++n){auto cursor=r.number();page.conversations.push_back({cursor,r.string()});}
+    r.end();require(encodeManifestPage(page)==bytes);return page;
+}
 inline void validateHistoryControl(const Blob& bytes){
     require(bytes.size()<=protocol::MaxPacket);protocol::Reader r(bytes);
     require(r.type()==protocol::ArchiveControl&&r.string()=="PeerChat/ArchiveHistory/v1"&&r.number()==1);
     auto kind=r.number();if(kind==2){decodeHistoryRequest(bytes);return;}
-    require(kind==3);decodeHistoryPage(bytes);
+    if(kind==3){decodeHistoryPage(bytes);return;}
+    if(kind==4){decodeManifestRequest(bytes);return;}
+    require(kind==5);decodeManifestPage(bytes);
+}
+inline Blob serveManifestPage(Storage& storage,const Profile& local,Authorization& authorization,
+        const session::ReliableAuthorization& scope,const Blob& request){
+    require(scope.archive.source==local.peerId&&currentSessionAuthorization(authorization,scope));
+    auto q=decodeManifestRequest(request);auto store=storage.archiveStoreId();require(q.store.empty()||q.store==store);q.store=store;
+    if(!q.through)q.through=static_cast<std::uint64_t>(storage.archiveHistoryWatermark());
+    require(q.through>=q.after);
+    auto source=storage.archiveConversationPage(static_cast<std::int64_t>(q.after),static_cast<std::int64_t>(q.through),HistoryPageRecords);
+    require(source.cursors.size()==source.conversations.size());ManifestPage page;page.request=q;
+    page.next=static_cast<std::uint64_t>(source.nextCursor);page.complete=source.complete;
+    for(size_t n=0;n<source.conversations.size();++n)page.conversations.push_back({static_cast<std::uint64_t>(source.cursors[n]),source.conversations[n]});
+    require(currentSessionAuthorization(authorization,scope));return encodeManifestPage(page);
 }
 inline Blob serveHistoryPage(Storage& storage,const Profile& local,Authorization& authorization,
         const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now){

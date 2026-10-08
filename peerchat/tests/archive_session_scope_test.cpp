@@ -44,6 +44,36 @@ int main(){try{
     SessionTransportManager receiver("archive-reader",reader,epoch);
     scope.expectedRemoteDeviceId=source;
     check(receiver.registerArchiveControlAttempt(epoch,{4},scope,relay,0));
+    SessionTransportManager bounded("bounded-reader",reader,epoch,5,100);
+    bounded.setDemandDriven(true);check(bounded.observeNetwork(epoch,1));
+    check(bounded.demandArchiveRoute(scope,100,1,0));
+    auto due=bounded.takeDueRelayAttempts(0);
+    check(due.size()==1&&due.front().remoteDeviceId==source&&due.front().authorization.continuityKey()==scope.continuityKey());
+    auto selected=relay;selected.networkRevision=1;
+    check(bounded.registerArchiveControlAttempt(epoch,{5},due.front().authorization,selected,0));
+    check(bounded.takeDueRelayAttempts(1).empty()); // Pending attempt coalesces.
+    // A restricted session to this device must not suppress unrelated friend
+    // demand or be mistaken for a usable direct-message representation.
+    check(bounded.replaceCandidates(epoch,source,{},true,1,0));
+    bounded.demandLiveRoute(source,100,0);
+    auto friendDue=bounded.takeDueRelayAttempts(1);
+    check(friendDue.size()==1&&friendDue.front().remoteDeviceId==source&&friendDue.front().authorization.scope==ReliableAuthorizationScope::Friend);
+    bounded.removePeer(source);
+    check(bounded.authorization(epoch,{5}).has_value()); // Removing DM demand cannot revoke archive identity.
+    bounded.closeTransport(epoch,{5},"test disconnect",true);
+    auto retry=bounded.scheduleRelayRetry(scope.continuityKey(),1,0);check(retry.scheduled);
+    check(bounded.demandArchiveRoute(scope,100,1,2)); // Ongoing work must not bypass backoff.
+    check(bounded.takeDueRelayAttempts(2).empty());
+    check(bounded.takeDueRelayAttempts(retry.dueMilliseconds).size()==1);
+    check(!bounded.demandArchiveRoute(scope,100000,1,2)); // No immortal lease.
+    check(bounded.registerArchiveControlAttempt(epoch,{6},scope,selected,3));
+    auto staleFinish=scope;staleFinish.archive.readerGeneration--;
+    check(bounded.finishArchiveRoute(staleFinish).empty()&&bounded.authorization(epoch,{6}).has_value());
+    check(bounded.retireIdleRoutes(101).size()==1&&!bounded.authorization(epoch,{6}));
+    bounded.finishArchiveRoute(scope);check(bounded.takeDueRelayAttempts(102).empty());
+    check(bounded.demandArchiveRoute(scope,200,1,103));
+    bounded.invalidateArchiveControl(epoch,scope.archive.issuer,reader,0);
+    check(bounded.takeDueRelayAttempts(104).empty()); // Revocation removes scheduled demand too.
     std::cout<<"PASS: archive purpose, device binding, isolated winner, generation invalidation and reconnect scope\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -48,11 +48,50 @@ public:
         auto found=liveDemand_.find(peer);
         return !demandDriven_||directOnly_||(found!=liveDemand_.end()&&found->second>now);
     }
+    // Archive jobs are bounded demand on this SAME retry/winner owner. They
+    // never borrow a friend's continuity or make a same-account device trusted.
+    bool demandArchiveRoute(const ReliableAuthorization& authorization,std::uint64_t until,
+                            std::uint64_t network,std::uint64_t now){
+        const auto& a=authorization.archive;
+        if(!authorization.valid()||authorization.scope!=ReliableAuthorizationScope::ArchiveControl||until<=now||until-now>60000||
+           network<networkRevision_||!((a.source==localDeviceId_&&a.reader==authorization.expectedRemoteDeviceId)||
+           (a.reader==localDeviceId_&&a.source==authorization.expectedRemoteDeviceId)))return false;
+        const auto key=authorization.continuityKey();auto found=plans_.find(key);
+        if(found==plans_.end()){
+            size_t scoped=0;for(const auto& entry:plans_)if(entry.second.authorization.scope==ReliableAuthorizationScope::ArchiveControl)++scoped;
+            if(scoped>=8)return false;
+        }else{
+            const auto& previous=found->second.authorization.archive;
+            if(previous.sourceGeneration!=a.sourceGeneration||previous.readerGeneration!=a.readerGeneration||
+               previous.sourceGrantId!=a.sourceGrantId||previous.readerGrantId!=a.readerGrantId)return false;
+        }
+        auto& plan=plans_[key];const bool changed=plan.networkRevision!=network||!plan.relayAvailable;
+        plan.authorization=authorization;plan.networkRevision=network;plan.relayAvailable=true;plan.suspended=false;
+        if(changed)plan.relayDueMilliseconds=now;
+        demandLiveRoute(key,until,now);return true;
+    }
+    std::vector<TransportInstanceId> finishArchiveRoute(const ReliableAuthorization& authorization){
+        std::vector<TransportInstanceId> retired;
+        if(authorization.scope!=ReliableAuthorizationScope::ArchiveControl||!authorization.valid())return retired;
+        const auto key=authorization.continuityKey();
+        const auto sameGeneration=[&](const ReliableAuthorization& value){
+            const auto& a=authorization.archive;const auto& b=value.archive;
+            return value.scope==ReliableAuthorizationScope::ArchiveControl&&value.continuityKey()==key&&
+                a.sourceGeneration==b.sourceGeneration&&a.readerGeneration==b.readerGeneration&&
+                a.sourceGrantId==b.sourceGrantId&&a.readerGrantId==b.readerGrantId;
+        };
+        auto plan=plans_.find(key);if(plan!=plans_.end()&&!sameGeneration(plan->second.authorization))return retired;
+        for(const auto& item:transports_)if(!item.second.closed&&item.second.continuityKey()==key&&!sameGeneration(item.second.authorization))return retired;
+        for(auto& item:transports_)if(!item.second.closed&&item.second.continuityKey()==key){
+            item.second.cancelled=true;retired.push_back(item.second.instance);closeTransport(epoch_,item.second.instance,"archive work finished or cancelled",false);
+        }
+        removePeer(key);return retired;
+    }
     std::vector<TransportInstanceId> retireIdleRoutes(std::uint64_t now) {
         std::vector<TransportInstanceId> result;
         for(auto& item:transports_) {
             auto& record=item.second;
-            if(record.closed||record.cancelled||record.authorization.scope!=ReliableAuthorizationScope::Friend||
+            if(record.closed||record.cancelled||record.authorization.scope==ReliableAuthorizationScope::GroupControl||
                record.route.kind!=TransportKind::Relay||p2p_.count(record.continuityKey())||liveRouteDemanded(record.continuityKey(),now))continue;
             record.cancelled=true;result.push_back(record.instance);
             closeTransport(epoch_,record.instance,"no live route demand",false);
@@ -159,6 +198,15 @@ public:
             record.cancelled=true;closed.push_back(record.instance);
             closeTransport(epoch,record.instance,"archive authorization superseded or revoked",false);
         }
+        std::vector<std::string> invalidPlans;
+        for(const auto& item:plans_){const auto& authorization=item.second.authorization;const auto& scope=authorization.archive;
+            if(authorization.scope!=ReliableAuthorizationScope::ArchiveControl||scope.issuer!=issuer)continue;
+            const bool source=scope.source==device,reader=scope.reader==device;
+            if(!source&&!reader&&!(device==issuer&&!currentGeneration))continue;
+            if(currentGeneration&&((source&&scope.sourceGeneration==currentGeneration)||(reader&&scope.readerGeneration==currentGeneration)))continue;
+            invalidPlans.push_back(item.first);
+        }
+        for(const auto& key:invalidPlans)removePeer(key);
         return closed;
     }
 
@@ -675,7 +723,7 @@ public:
         touch(peer);return true;
     }
 
-    struct RelayAttempt { std::string remoteDeviceId;std::uint64_t networkRevision=0; };
+    struct RelayAttempt { std::string remoteDeviceId;std::uint64_t networkRevision=0;ReliableAuthorization authorization{}; };
     std::vector<RelayAttempt> takeDueRelayAttempts(std::uint64_t nowMilliseconds) {
         std::vector<RelayAttempt> result;
         for(auto& item:plans_){auto& plan=item.second;
@@ -688,7 +736,8 @@ public:
             for(const auto& transport:transports_)if(!transport.second.closed&&!transport.second.cancelled&&
                 transport.second.matches(item.first)&&transport.second.route.kind==TransportKind::Relay){relayPending=true;break;}
             if(relayPending)continue;
-            plan.relayDueMilliseconds=never();result.push_back({item.first,plan.networkRevision});touch(item.first);
+            plan.relayDueMilliseconds=never();
+            result.push_back({plan.authorization.scope==ReliableAuthorizationScope::ArchiveControl?plan.authorization.expectedRemoteDeviceId:item.first,plan.networkRevision,plan.authorization});touch(item.first);
         }
         return result;
     }
@@ -845,6 +894,7 @@ private:
 
     struct CandidateRoute {RouteObservation route;unsigned priority=0;std::uint32_t failures=0,delayMilliseconds=0;std::uint64_t dueMilliseconds=never();};
     struct CandidatePlan {
+        ReliableAuthorization authorization{};
         std::vector<CandidateRoute> direct;bool relayAvailable=false,suspended=false;std::uint64_t networkRevision=0,beganMilliseconds=0;
         std::uint64_t relayDueMilliseconds=never();std::uint32_t relayFailures=0,relayDelayMilliseconds=0;
     };
@@ -871,7 +921,11 @@ private:
         std::string continuityKey() const { return authorization.scope != ReliableAuthorizationScope::Friend
             ? authorization.continuityKey()
             : (!locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId()); }
-        bool matches(const std::string& peer) const { return !peer.empty() && (expectedRemoteDeviceId == peer || presentedRemoteDeviceId == peer || continuityKey() == peer); }
+        bool matches(const std::string& peer) const {
+            if(peer.empty())return false;
+            if(authorization.scope!=ReliableAuthorizationScope::Friend)return continuityKey()==peer;
+            return expectedRemoteDeviceId==peer||presentedRemoteDeviceId==peer||continuityKey()==peer;
+        }
     };
 
     struct ContinuityState {

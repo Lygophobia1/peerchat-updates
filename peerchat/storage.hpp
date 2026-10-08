@@ -54,6 +54,12 @@ struct ArchiveHistoryPage {
     std::int64_t nextCursor=0,throughCursor=0;
     bool complete=false;
 };
+struct ArchiveConversationPage {
+    std::vector<std::string> conversations;
+    std::vector<std::int64_t> cursors;
+    std::int64_t nextCursor=0,throughCursor=0;
+    bool complete=false;
+};
 
 // Thread-confined embedded SQLite store. Construct/use on a worker, not the GUI.
 // Every profile/contact/message payload is protected before binding to SQLite:
@@ -83,6 +89,12 @@ public:
     Blob archiveHistoryProof(const std::string& messageId);
     std::string archiveStoreId();
     std::int64_t archiveHistoryWatermark();
+    ArchiveConversationPage archiveConversationPage(std::int64_t afterCursor,std::int64_t throughCursor,int limit=8);
+    // Retained authenticated directory evidence, NOT friendship/route permission.
+    // Call only with a server-authenticated account/device binding. Contradictory
+    // ownership fails closed; deleting a contact does not erase historical proof.
+    void rememberAuthenticatedDeviceAccount(const std::string& device,std::uint64_t account);
+    std::optional<std::uint64_t> historicalDeviceAccount(const std::string& device);
     ArchiveHistoryPage archiveHistoryPage(const std::string& conversation,std::int64_t afterCursor,
         std::int64_t throughCursor,int limit=8,size_t maximumBytes=256*1024);
     Blob archiveSyncState(const std::string& contextId);

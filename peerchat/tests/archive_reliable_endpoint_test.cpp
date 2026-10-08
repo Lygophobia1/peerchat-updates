@@ -1,4 +1,5 @@
 #include "../portable/reliable_endpoint.hpp"
+#include "../archive_sync.hpp"
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -66,15 +67,15 @@ int main(){try{
     }
     {
         auto scopedA=admissionA(),scopedB=admissionB();
-        archive::HistoryReader history(b,reader,reading,bd,scopedB.scope,contact.peerId,directory);
-        scopedA.control=[&](const Blob& bytes){return archive::serveHistoryPage(a,source,serving,scopedA.scope,bytes,directory,300);};
-        scopedB.control=[&](const Blob& bytes){history.acceptPage(bytes);return Blob{};};
+        archive::SyncReader history(b,reader,reading,bd,scopedB.scope,directory);
+        scopedA.control=[&](const Blob& bytes){return archive::serveSyncControl(a,source,serving,scopedA.scope,bytes,directory,300);};
+        scopedB.control=[&](const Blob& bytes){history.accept(bytes);return Blob{};};
         ReliableEndpoint sender(source,a,as,ad,af,{1},{90},std::make_unique<TlsSession>(ac,false),reader.peerId,route(90),++now,scopedA);
         ReliableEndpoint receiver(reader,b,bs,bd,bf,{1},{91},std::make_unique<TlsSession>(bc,true),source.peerId,route(91),++now,scopedB);
         sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
         unsigned pages=0;
         do{receiver.sendArchiveControl(history.nextRequest());exchange(receiver,sender);++pages;}while(!history.snapshot().complete);
-        check(pages==4&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
+        check(pages==5&&history.snapshot().conversations==1&&history.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
         check(a.contacts().empty()&&b.contacts().empty());
         protocol::Writer forbidden(protocol::Text);rejects([&]{receiver.sendArchiveControl(forbidden.data);});
     }
@@ -101,6 +102,6 @@ int main(){try{
     fresh=true;publish(serving.issue(reader.publicKey,0,true,210,true));
     check(!archive::currentSessionAuthorization(reading,altered.scope));
     check(a.profile().peerId==source.peerId&&b.profile().peerId==reader.peerId);
-    std::cout<<"PASS: 12 real mutual peer-TLS archive handshakes, 25 records over four bounded TLS pages, exact scope, no friend pin/DM/outbox authority, stale admission and revocation. HOST ONLY\n";
+    std::cout<<"PASS: 12 real mutual peer-TLS archive handshakes, manifest discovery and 25 records over four bounded TLS history pages, exact scope, no friend pin/DM/outbox authority, stale admission and revocation. HOST ONLY\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
