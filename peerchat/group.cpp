@@ -43,6 +43,10 @@ bool before(const GroupEvent& left,const GroupEvent& right){return left.logicalO
 }
 
 std::string newGroupId(){return Storage::newMessageId();}
+Blob digestDevicePayload(const Blob& payload){
+    if(payload.size()>70000)throw std::runtime_error("Invalid device digest input");
+    return sha256(payload);
+}
 
 Blob signDevicePayload(const Blob& payload,const Profile& device){
     if(payload.size()>70000||Storage::publicKeyId(device.publicKey)!=device.peerId)
