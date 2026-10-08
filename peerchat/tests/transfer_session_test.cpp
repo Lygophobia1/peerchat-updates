@@ -50,12 +50,26 @@ int main(){
         wait([&]{return right.fileTransfer(0).find(id)!=std::wstring::npos;},"offer not delivered over peer TLS");
         right.fileTransfer(2,"",narrow,destination.wstring());
         wait([&]{return right.fileTransfer(0).find(L"\"done\":32768")!=std::wstring::npos||right.fileTransfer(0).find(L"\"done\":65536")!=std::wstring::npos;},"first bounded chunks did not arrive");
+        auto originalA=a,originalB=b;
+        left.stop();right.stop();la=ra=0;readyLeft=readyRight=false;a.clear();b.clear();
+        require(std::filesystem::exists(destination/(id+L".peerchat-part")),"shutdown deleted resumable partial");
+        left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
+        wait([&]{return !a.empty()&&!b.empty();},"nodes did not reopen");
+        require(a==originalA&&b==originalB,"restart changed device identity");
+        require(left.fileTransfer(0).find(id)!=std::wstring::npos&&right.fileTransfer(0).find(id)!=std::wstring::npos,"restart lost transfer identity");
+        left.replaceAuthenticatedFriends(71,2,{{72,b,{b}}});right.replaceAuthenticatedFriends(72,2,{{71,a,{a}}});
+        left.setNetworkContext(2,L"file-restart-test");right.setNetworkContext(2,L"file-restart-test");
+        left.updateCandidates(b,L"",0,L"",0,true,2,true);right.updateCandidates(a,L"",0,L"",0,true,2,true);
+        wait([&]{return la&&ra;},"restart did not demand authenticated route");
+        require(left.relayReady(la,a>b)&&right.relayReady(ra,b>a),"restart relay rejected");
+        wait([&]{return readyLeft&&readyRight;},"restart peer TLS did not establish");
         auto oldLeft=la,oldRight=ra;left.relayClosed(la,L"file test reconnect");right.relayClosed(ra,L"file test reconnect");
         la=ra=0;readyLeft=readyRight=false;
         wait([&]{return la&&ra&&la!=oldLeft&&ra!=oldRight;},"existing manager failed to replace relay",15);
         require(left.relayReady(la,a>b)&&right.relayReady(ra,b>a),"replacement relay rejected");
         wait([&]{return readyLeft&&readyRight;},"replacement TLS did not establish");
-        wait([&]{return left.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&right.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"file did not resume and complete",30);
+        try{wait([&]{return left.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&right.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"file did not resume and complete",30);}
+        catch(...){std::cerr<<"sender "<<unicode::encode(left.fileTransfer(0))<<"\nreceiver "<<unicode::encode(right.fileTransfer(0))<<"\n";throw;}
         auto final=destination/(id+L"-"+name);std::ifstream file(final,std::ios::binary);std::vector<char> actual((std::istreambuf_iterator<char>(file)),{});
         require(actual==bytes,"completed file bytes mismatch");
         require(!std::filesystem::exists(destination/(id+L".peerchat-part")),"partial leaked after completion");
@@ -70,6 +84,6 @@ int main(){
         }
         require(delivered,"file transfer disturbed DeliveryManager message/ACK");
         left.stop();right.stop();
-        std::cout<<"Native file session: unverified rejection / mutual peer TLS / opaque relay / Unicode binary / reconnect resume / final hash / message ACK coexistence PASS\n";
+        std::cout<<"Native file session: unverified rejection / mutual peer TLS / opaque relay / Unicode binary / profile close-reopen resume / reconnect resume / final hash / message ACK coexistence PASS\n";
     }catch(const std::exception& error){left.stop();right.stop();std::cerr<<error.what()<<"\n";return 1;}
 }

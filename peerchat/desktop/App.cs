@@ -341,8 +341,8 @@ public class DesktopApplication {
                 var card=new StackPanel{Margin=new Thickness(0,6,0,10)};
                 var contact=model.FindByPeer(item.peer);
                 card.Children.Add(new TextBlock{Text=(item.sending?"To ":"From ")+(contact==null?item.peer:contact.Name)+" · "+item.name,Foreground=Brush("#E5EDF5"),TextWrapping=TextWrapping.Wrap});
-                string[] states={"Preparing / hashing","Waiting for recipient / route","Incoming — acceptance required","Transferring / resumes on reconnect","Complete — SHA-256 verified","Cancelled","Failed"};
-                card.Children.Add(new TextBlock{Text=states[Math.Max(0,Math.Min(6,item.state))]+" · "+item.done.ToString("N0")+" / "+item.size.ToString("N0")+" bytes",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap});
+                string[] states={"Preparing / hashing","Waiting for recipient / route","Incoming — acceptance required","Transferring / resumes on reconnect","Complete — SHA-256 verified","Cancelled","Failed","Revalidating retained file","Paused — retained for restart"};
+                card.Children.Add(new TextBlock{Text=states[Math.Max(0,Math.Min(states.Length-1,item.state))]+" · "+item.done.ToString("N0")+" / "+item.size.ToString("N0")+" bytes",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap});
                 if(!String.IsNullOrEmpty(item.error))card.Children.Add(new TextBlock{Text=item.error,Foreground=Brush("#FFB4AB")});
                 card.Children.Add(new ProgressBar{Minimum=0,Maximum=Math.Max(1,item.size),Value=item.done,Height=5,Margin=new Thickness(0,6,0,6)});
                 var actions=new StackPanel{Orientation=Orientation.Horizontal};
@@ -353,7 +353,7 @@ public class DesktopApplication {
                         if(choose.ShowDialog(fileTransferWindow)==true)await FileOperation(2,"",item.id,Path.GetDirectoryName(choose.FileName));
                     };actions.Children.Add(accept);
                 }
-                if(item.state<4){var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=async(s,e)=>await FileOperation(3,"",item.id,"");actions.Children.Add(cancel);}
+                if(item.state<4||item.state==7||item.state==8){var cancel=new Button{Content="Cancel",Margin=new Thickness(0,0,8,0)};cancel.Click+=async(s,e)=>await FileOperation(3,"",item.id,"");actions.Children.Add(cancel);}
                 if(item.state==4&&!item.sending&&!String.IsNullOrEmpty(item.path)){
                     var folder=new Button{Content="Open containing folder"};folder.Click+=(s,e)=>{try{Process.Start("explorer.exe","/select,\""+item.path+"\"");}catch{}};actions.Children.Add(folder);
                 }
@@ -368,7 +368,7 @@ public class DesktopApplication {
         var root=new DockPanel{Margin=new Thickness(18)};
         var header=new StackPanel();DockPanel.SetDock(header,Dock.Top);root.Children.Add(header);
         header.Children.Add(new TextBlock{Text="File transfers",FontSize=22,Foreground=Brush("#E5EDF5")});
-        header.Children.Add(new TextBlock{Text="Live encrypted transfer · up to 256 MiB · 4 active transfers\nReconnect resumes in this app session. Closing the app cancels partial transfers.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,12)});
+        header.Children.Add(new TextBlock{Text="Live encrypted transfer · up to 256 MiB · 4 active transfers\nReconnect and app restart resume verified progress. Retained transfers expire after 7 days; Cancel removes the owned partial.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,12)});
         var send=new Button{Content="Send file to selected conversation…",HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,0,0,12)};
         send.Click+=async(s,e)=>{
             var selected=model.Groups?null:model.Selected;

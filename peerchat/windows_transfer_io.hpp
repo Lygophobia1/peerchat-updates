@@ -3,10 +3,21 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <filesystem>
+#include <chrono>
 #include "platform/windows_record_protection.hpp"
 
 namespace peerchat::transfer::windows {
-inline void require(bool ok){if(!ok)throw std::runtime_error("File I/O failed");}
+inline void require(bool ok){if(!ok)throw std::runtime_error("File I/O failed (Win32 "+std::to_string(GetLastError())+")");}
+inline void fileIdentity(protocol::Writer& w,HANDLE file,bool source){
+    BY_HANDLE_FILE_INFORMATION i{};require(GetFileInformationByHandle(file,&i)!=0);
+    require(!(i.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)));
+    w.number(i.dwVolumeSerialNumber);w.number(i.nFileIndexHigh);w.number(i.nFileIndexLow);
+    if(source){w.number(i.ftLastWriteTime.dwHighDateTime);w.number(i.ftLastWriteTime.dwLowDateTime);}
+}
+inline void checkIdentity(protocol::Reader& r,HANDLE file,bool source){
+    protocol::Writer w(protocol::FileTransfer);fileIdentity(w,file,source);protocol::Reader expected(w.data);
+    for(unsigned n=0;n<(source?5u:3u);++n)require(r.number()==expected.number());
+}
 // Protected cleanup journal, not an outbox or retry owner. Abrupt process death
 // may leave a partial; next profile open removes only its authenticated exact
 // partial pathname. It never resumes or claims a completed file after restart.
@@ -75,6 +86,7 @@ class FileSource final:public Source {
     HANDLE handle_=INVALID_HANDLE_VALUE;
     std::uint64_t size_=0;
     std::string name_;
+    Blob token_;
 public:
     explicit FileSource(const std::wstring& path){
         name_=unicode::encode(std::filesystem::path(path).filename().wstring());require(safeName(name_));
@@ -85,10 +97,18 @@ public:
             CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;throw std::runtime_error("Unsupported source file");
         }
         size_=static_cast<std::uint64_t>(size.QuadPart);
+        try{protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(path).wstring());fileIdentity(token,handle_,true);token_=std::move(token.data);}
+        catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;throw;}
     }
     ~FileSource(){if(handle_!=INVALID_HANDLE_VALUE)CloseHandle(handle_);}
     std::uint64_t size()const override{return size_;}
     std::string name()const override{return name_;}
+    Blob resumeToken()const override{return token_;}
+    static std::unique_ptr<FileSource> reopen(const DurableState& d){
+        protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto path=r.text();
+        require(std::filesystem::path(path).is_absolute());auto source=std::make_unique<FileSource>(path);
+        checkIdentity(r,source->handle_,true);r.end();return source;
+    }
     Blob read(std::uint64_t offset,size_t limit)override{
         require(offset<=size_&&limit<=ChunkBytes&&limit<=size_-offset);LARGE_INTEGER position{};position.QuadPart=offset;
         require(SetFilePointerEx(handle_,position,nullptr,FILE_BEGIN)!=0);Blob result(limit);DWORD got=0;
@@ -99,8 +119,10 @@ class FileSink final:public Sink {
     HANDLE handle_=INVALID_HANDLE_VALUE,directory_=INVALID_HANDLE_VALUE;
     std::wstring partial_,final_,journal_;
     bool committed_=false;
+    bool durable_=false;
+    Blob token_;
 public:
-    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr){
+    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr,bool durable=false):durable_(durable){
         require(protocol::id(metadata.id,32)&&safeName(metadata.name));
         // Hold the destination directory without delete sharing. Reject junctions
         // and symlinks; never derive a destination directory from remote metadata.
@@ -113,22 +135,127 @@ public:
         auto base=std::filesystem::path(directory);
         final_=(base/(unicode::decode(metadata.id)+L"-"+unicode::decode(metadata.name))).wstring();
         partial_=(base/(unicode::decode(metadata.id)+L".peerchat-part")).wstring();
-        handle_=CreateFileW(partial_.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        handle_=CreateFileW(partial_.c_str(),GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle_==INVALID_HANDLE_VALUE){if(!journal_.empty())DeleteFileW(journal_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw std::runtime_error("Cannot create partial file");}
-        try{if(journal)journal_=journal->record(metadata.id,partial_,handle_);}
+        try{if(journal)journal_=journal->record(metadata.id,partial_,handle_);
+            protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(partial_).wstring());token.text(std::filesystem::absolute(final_).wstring());fileIdentity(token,handle_,false);token_=std::move(token.data);
+        }
         catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;DeleteFileW(partial_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw;}
     }
     ~FileSink(){
         if(handle_!=INVALID_HANDLE_VALUE)CloseHandle(handle_);
-        bool removed=committed_||partial_.empty()||DeleteFileW(partial_.c_str())||GetLastError()==ERROR_FILE_NOT_FOUND;
+        bool removed=committed_||(!durable_&&(partial_.empty()||DeleteFileW(partial_.c_str())||GetLastError()==ERROR_FILE_NOT_FOUND));
         if(removed&&!journal_.empty())DeleteFileW(journal_.c_str());
         if(directory_!=INVALID_HANDLE_VALUE)CloseHandle(directory_);
     }
     void append(const Blob& bytes)override{DWORD wrote=0;require(handle_!=INVALID_HANDLE_VALUE&&bytes.size()<=ChunkBytes&&WriteFile(handle_,bytes.data(),static_cast<DWORD>(bytes.size()),&wrote,nullptr)&&wrote==bytes.size());}
+    void flush()override{require(handle_!=INVALID_HANDLE_VALUE&&FlushFileBuffers(handle_));}
+    Blob resumeToken()const override{return token_;}
+    void discard()override{
+        if(committed_)return;
+        if(handle_!=INVALID_HANDLE_VALUE){FILE_DISPOSITION_INFO disposition{TRUE};
+            require(SetFileInformationByHandle(handle_,FileDispositionInfo,&disposition,sizeof(disposition))!=0);
+            CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;
+        }
+        durable_=false;
+    }
+    Blob read(std::uint64_t offset,size_t size)override{
+        require(size<=ChunkBytes);LARGE_INTEGER pos{};pos.QuadPart=offset;require(SetFilePointerEx(handle_,pos,nullptr,FILE_BEGIN));
+        Blob b(size);DWORD got=0;require(ReadFile(handle_,b.data(),static_cast<DWORD>(size),&got,nullptr)&&got==size);return b;
+    }
+    static std::unique_ptr<FileSink> reopen(const DurableState& d){
+        protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto partial=r.text(),final=r.text();
+        auto p=std::filesystem::path(partial),f=std::filesystem::path(final);
+        require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part"&&
+            f.filename()==unicode::decode(d.metadata.id+"-"+d.metadata.name));
+        auto sink=std::unique_ptr<FileSink>(new FileSink());
+        sink->durable_=true;sink->partial_=partial;sink->final_=final;sink->token_=d.location;
+        sink->directory_=CreateFileW(p.parent_path().c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        require(sink->directory_!=INVALID_HANDLE_VALUE);
+        BY_HANDLE_FILE_INFORMATION dir{};require(GetFileInformationByHandle(sink->directory_,&dir)&&
+            (dir.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&!(dir.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));
+        sink->handle_=CreateFileW(partial.c_str(),GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(sink->handle_==INVALID_HANDLE_VALUE){
+            require(GetLastError()==ERROR_FILE_NOT_FOUND&&d.done==d.metadata.size);
+            sink->handle_=CreateFileW(final.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+            require(sink->handle_!=INVALID_HANDLE_VALUE);sink->committed_=true;
+        }
+        checkIdentity(r,sink->handle_,false);r.end();LARGE_INTEGER size{};require(GetFileSizeEx(sink->handle_,&size)&&size.QuadPart>=0&&static_cast<std::uint64_t>(size.QuadPart)>=d.done);
+        if(sink->committed_)require(static_cast<std::uint64_t>(size.QuadPart)==d.metadata.size);
+        else{LARGE_INTEGER end{};end.QuadPart=d.done;require(SetFilePointerEx(sink->handle_,end,nullptr,FILE_BEGIN)&&SetEndOfFile(sink->handle_)&&FlushFileBuffers(sink->handle_));}
+        return sink;
+    }
     void commit()override{
+        if(committed_)return; // Rename completed before a prior process died.
         require(handle_!=INVALID_HANDLE_VALUE&&FlushFileBuffers(handle_));require(CloseHandle(handle_)!=0);handle_=INVALID_HANDLE_VALUE;
         require(MoveFileExW(partial_.c_str(),final_.c_str(),MOVEFILE_WRITE_THROUGH)!=0);committed_=true;
     }
     const std::wstring& path()const{return final_;}
+private:
+    FileSink()=default;
+};
+
+// One bounded, profile/device-bound protected snapshot; no scheduler or outbox.
+// Temp write + flush + atomic replace ensures old or new committed state.
+class DurableJournal final:public StateStore {
+    std::filesystem::path root_,path_;
+    std::string context_;
+    Blob previous_;
+    HANDLE lock_=INVALID_HANDLE_VALUE;
+    std::uint64_t serial_=GetTickCount64();
+    static Blob readFile(const std::filesystem::path& path){
+        HANDLE file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(file==INVALID_HANDLE_VALUE){if(GetLastError()==ERROR_FILE_NOT_FOUND)return {};throw std::runtime_error("Cannot open transfer journal");}
+        BY_HANDLE_FILE_INFORMATION info{};LARGE_INTEGER size{};
+        bool valid=GetFileInformationByHandle(file,&info)&&!(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))&&GetFileSizeEx(file,&size)&&size.QuadPart>0&&size.QuadPart<=1024*1024;
+        if(!valid){CloseHandle(file);throw std::runtime_error("Invalid transfer journal");}
+        Blob result(static_cast<size_t>(size.QuadPart));DWORD got=0;bool ok=ReadFile(file,result.data(),static_cast<DWORD>(result.size()),&got,nullptr)&&got==result.size();CloseHandle(file);require(ok);return result;
+    }
+public:
+    DurableJournal(const std::wstring& profile,const std::string& device):root_(std::filesystem::absolute(profile)/L"transfer-resume"),path_(root_/L"state.protected"){
+        require(protocol::id(device));std::filesystem::create_directory(root_);
+        auto attributes=GetFileAttributesW(root_.c_str());require(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)&&!(attributes&FILE_ATTRIBUTE_REPARSE_POINT));
+        context_="PeerChat/FileTransfer/Resume/v1/"+device+"/"+unicode::encode(std::filesystem::absolute(profile).wstring());
+        auto lockPath=root_/L"owner.lock";
+        lock_=CreateFileW(lockPath.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        require(lock_!=INVALID_HANDLE_VALUE);BY_HANDLE_FILE_INFORMATION info{};
+        if(!GetFileInformationByHandle(lock_,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){CloseHandle(lock_);lock_=INVALID_HANDLE_VALUE;throw std::runtime_error("Unsafe transfer journal lock");}
+    }
+    ~DurableJournal(){if(lock_!=INVALID_HANDLE_VALUE)CloseHandle(lock_);}
+    DurableJournal(const DurableJournal&)=delete;
+    DurableJournal& operator=(const DurableJournal&)=delete;
+    std::uint64_t wallTime()const override{return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
+    std::vector<DurableState> load()override{
+        auto encrypted=readFile(path_);if(encrypted.empty())return {};
+        platform::WindowsRecordProtector protector;auto plain=protector.unprotect(encrypted,context_);protocol::Reader r(plain);
+        require(r.type()==protocol::FileTransfer&&r.number()==1&&r.number()==ChunkBytes);auto count=r.number();require(count<=MaxRecords);
+        std::vector<DurableState> result;
+        for(std::uint64_t n=0;n<count;++n){
+            DurableState d;d.metadata.id=r.string();d.peer=r.string();d.metadata.name=r.string();d.metadata.size=r.number();
+            auto hash=r.bytes();require(hash.size()==32);std::copy(hash.begin(),hash.end(),d.metadata.digest.begin());
+            auto state=r.number(),sending=r.number(),ready=r.number();require(state<=static_cast<unsigned>(State::Suspended)&&sending<=1&&ready<=1);
+            d.state=static_cast<State>(state);d.sending=sending!=0;d.digestReady=ready!=0;
+            d.done=r.number();d.highWaterSent=r.number();d.created=r.number();d.updated=r.number();d.expires=r.number();d.location=r.bytes();d.error=r.string();
+            require(d.location.size()<=32768&&d.error.size()<=256);result.push_back(std::move(d));
+        }
+        r.end();previous_=plain;return result;
+    }
+    void save(const std::vector<DurableState>& records)override{
+        require(records.size()<=MaxRecords);protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(ChunkBytes);w.number(records.size());
+        for(auto& d:records){
+            w.string(d.metadata.id);w.string(d.peer);w.string(d.metadata.name);w.number(d.metadata.size);w.bytes(Blob(d.metadata.digest.begin(),d.metadata.digest.end()));
+            w.number(static_cast<unsigned>(d.state));w.number(d.sending);w.number(d.digestReady);w.number(d.done);w.number(d.highWaterSent);
+            w.number(d.created);w.number(d.updated);w.number(d.expires);w.bytes(d.location);w.string(d.error);
+        }
+        if(w.data==previous_)return;
+        require(w.data.size()<1024*1024);platform::WindowsRecordProtector protector;auto bytes=protector.protect(w.data,context_);
+        auto temp=root_/(L"state-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial_)+L".next");
+        HANDLE file=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        require(file!=INVALID_HANDLE_VALUE);DWORD wrote=0;bool ok=WriteFile(file,bytes.data(),static_cast<DWORD>(bytes.size()),&wrote,nullptr)&&wrote==bytes.size()&&FlushFileBuffers(file);CloseHandle(file);
+        if(ok)ok=MoveFileExW(temp.c_str(),path_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+        if(!ok){auto error=GetLastError();DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit transfer journal (Win32 "+std::to_string(error)+")");}previous_=std::move(w.data);
+    }
+    std::unique_ptr<Source> source(const DurableState& d)override{return FileSource::reopen(d);}
+    std::unique_ptr<Sink> sink(const DurableState& d)override{return FileSink::reopen(d);}
 };
 }

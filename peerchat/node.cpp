@@ -103,6 +103,11 @@ struct Node::Impl {
     std::unique_ptr<transfer::TransferManager> transfers;
     std::map<std::string,std::wstring> transferPaths;
     std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
+    std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
+    bool transferPersistenceReported=false;
+    void transferPersistenceFailure(){
+        if(!transferPersistenceReported){notice(NodeEvent::Kind::Error,L"File transfer progress is waiting for protected local storage; messaging is unaffected");transferPersistenceReported=true;}
+    }
     Connection* transferConnection(const std::string& peer){
         if(!sessionTransports)return nullptr;
         auto state=sessionTransports->snapshot(peer);auto contact=contacts.find(peer);
@@ -116,13 +121,13 @@ struct Node::Impl {
             auto state=sessionTransports->snapshot(peer);if(!state||!state->connected)continue;
             for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->online&&!c->dead&&!(c->remoteCapabilities&protocol::CapabilityFileTransfer))transfers->unsupportedPeer(peer);
         }
-        transfers->tick(nowMilliseconds(),[&](const std::string& peer){auto c=transferConnection(peer);return c?c->attemptId:0;},
+        try{transfers->tick(nowMilliseconds(),[&](const std::string& peer){auto c=transferConnection(peer);return c?c->attemptId:0;},
             [&](const std::string& peer,const Blob& bytes){
                 auto c=transferConnection(peer);if(!c||c->output.size()-c->sent>MaxQueue/4)return false;
                 if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
                 try{packet(*c,bytes);return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
-            });
+            });}catch(const transfer::PersistenceError&){transferPersistenceFailure();}
     }
     static std::wstring transferQuote(const std::wstring& value){
         std::wstring result=L"\"";for(auto ch:value){if(ch==L'\\'||ch==L'"')result+=L'\\';if(ch<32)result+=L' ';else result+=ch;}return result+L"\"";
@@ -140,7 +145,7 @@ struct Node::Impl {
             auto snapshots=transfers->snapshots();auto found=std::find_if(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==command.id&&!s.sending&&s.state==transfer::State::AwaitingAcceptance;});
             if(found==snapshots.end())throw std::runtime_error("File offer unavailable");
             for(auto i=transferPaths.begin();i!=transferPaths.end();)if(std::none_of(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==i->first;}))i=transferPaths.erase(i);else ++i;
-            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,transferCleanup.get());auto path=sink->path();
+            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,nullptr,true);auto path=sink->path();
             transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;return L"ok";
         }
         if(command.sourceKind==3){transfers->cancel(command.id);return L"ok";}
@@ -833,8 +838,11 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             throw std::runtime_error("Group-control session rejected an unrelated payload");
         }
         if(r.type()==protocol::FileTransfer){
-            protocol::check(transfers&&transferConnection(c.peerId)==&c);
-            auto before=transfers->snapshots().size();transfers->receive(c.peerId,frame,nowMilliseconds());
+            if(!transfers)return; // Local journal failure must not retire messaging.
+            protocol::check(transferConnection(c.peerId)==&c);
+            auto before=transfers->snapshots().size();
+            try{transfers->receive(c.peerId,frame,nowMilliseconds());}
+            catch(const transfer::PersistenceError&){transferPersistenceFailure();return;}
             if(transfers->snapshots().size()>before){NodeEvent event;event.kind=NodeEvent::Kind::FileTransfer;event.peerId=c.peerId;event.text=L"Incoming file offer";emit(std::move(event));}
             return;
         }
@@ -1362,9 +1370,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
-            transfers.reset();transferCleanup.reset();transferPaths.clear();
-            try{transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();});}
-            catch(...){notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected partial-file cleanup requires attention");}
+            transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;
+            try{
+                transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
+                transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
+                transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get());
+                transfers->restore(nowMilliseconds());
+                for(auto& d:transferJournal->load())if(!d.sending&&!d.location.empty()){
+                    protocol::Reader location(d.location);location.text();transferPaths[d.metadata.id]=location.text();
+                }
+            }
+            catch(...){transfers.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
@@ -1451,7 +1467,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
