@@ -1,0 +1,86 @@
+#include "../storage.cpp"
+#include "../archive_enrollment.hpp"
+#include <iostream>
+using namespace peerchat;
+namespace ar=peerchat::archive;
+static void check(bool ok){if(!ok)throw std::runtime_error("Archive enrollment regression");}
+template<class F>static void rejects(F f){bool rejected=false;try{f();}catch(const std::exception&){rejected=true;}check(rejected);}
+int main(){try{
+    auto root=std::filesystem::current_path()/L"build"/L"tests"/storage_detail::wide(Storage::newMessageId());
+    Storage a((root/L"source").wstring()),b((root/L"reader").wstring());auto pa=a.profile(),pb=b.profile();
+    std::uint64_t now=1000;auto clock=[&]{return now;};
+    ar::Enrollment source(a,pa,8,clock),reader(b,pb,8,clock);
+    rejects([&]{source.registration(10);});source.authenticated(1);reader.authenticated(1);
+    auto da=source.registration(10),db=reader.registration(10);
+    check(source.registration(11)==da&&reader.registration(11)==db);
+    auto metadata=[&](const Profile& device,std::uint64_t revision,std::vector<ar::RegisteredGrant> grants,
+            std::uint64_t generation=1){
+        ar::EnrollmentMetadata m;m.account=8;m.authenticationGeneration=generation;m.revision=revision;
+        m.device=device.peerId;m.serverEpoch="test-server-epoch";m.descriptors={da,db};m.grants=std::move(grants);return m;
+    };
+    source.refresh(metadata(pa,1,{}));reader.refresh(metadata(pb,1,{}));
+    check(source.devices().size()==2&&reader.devices().size()==2);
+    for(const auto& device:reader.devices())check(!device.mayRead&&!device.mayServe&&!device.approvedIssuer);
+    rejects([&]{source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);});
+    rejects([&]{source.approveIssuer(pa.peerId,false);});source.approveIssuer(pa.peerId,true);
+    auto serving=source.authorizeDevice(pa.peerId,ar::ServeHistory,20,true);
+    auto reading=source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);
+    check(source.pendingPublications().size()==2&&!source.policy().permits(pa.peerId,pa.peerId,ar::ServeHistory));
+    std::vector<ar::RegisteredGrant> registered{{ar::encodeGrant(serving),true},{ar::encodeGrant(reading),true}};
+    source.refresh(metadata(pa,2,registered));reader.refresh(metadata(pb,2,registered));
+    check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
+    check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    auto bad=metadata(pb,3,registered);bad.grants.back().proof.back()^=1;
+    rejects([&]{reader.refresh(bad);});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    reader.refresh(metadata(pb,3,registered));
+    rejects([&]{reader.refresh(metadata(pb,2,registered));});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    reader.refresh(metadata(pb,4,registered));now+=30000;
+    check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));rejects([&]{reader.devices();});
+    reader.refresh(metadata(pb,5,registered));reader.authenticated(2);
+    rejects([&]{reader.refresh(metadata(pb,6,registered));});
+    reader.refresh(metadata(pb,1,registered,2));check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    source.refresh(metadata(pa,3,registered));auto revoked=source.revokeDevice(pb.peerId,30,true);
+    auto renewed=source.authorizeDevice(pb.peerId,ar::ReadHistory,31,true);check(renewed.generation==3);
+    // Both intermediate generations survive process loss, even when local
+    // re-enrollment happened before the revoke reached the server.
+    {ar::Enrollment restarted(a,pa,8,clock);restarted.authenticated(1);
+        check(restarted.registration(40)==da&&restarted.pendingPublications().size()==2);
+        check(ar::encodeGrant(restarted.pendingPublications()[0])==ar::encodeGrant(revoked));
+        check(ar::encodeGrant(restarted.pendingPublications()[1])==ar::encodeGrant(renewed));
+    }
+    registered.back()={ar::encodeGrant(revoked),false};
+    source.refresh(metadata(pa,4,registered));reader.refresh(metadata(pb,2,registered,2));
+    check(source.pendingPublications().size()==1&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    registered.back()={ar::encodeGrant(renewed),true};
+    source.refresh(metadata(pa,5,registered));reader.refresh(metadata(pb,3,registered,2));
+    check(source.pendingPublications().empty()&&reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    // Stored-but-disabled tombstones confirm storage, NOT capability. They
+    // cannot strand the publication journal ahead of an explicit successor.
+    auto disabled=source.authorizeDevice(pb.peerId,ar::ReadHistory,32,true);
+    registered.back()={ar::encodeGrant(disabled),false};source.refresh(metadata(pa,6,registered));
+    check(source.pendingPublications().empty()&&!source.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    auto successor=source.authorizeDevice(pb.peerId,ar::ReadHistory,33,true);
+    check(successor.generation==disabled.generation+1);
+    registered.back()={ar::encodeGrant(successor),true};source.refresh(metadata(pa,7,registered));
+    check(source.pendingPublications().empty()&&source.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    auto removed=metadata(pb,4,registered,2);removed.descriptors={db};removed.grants[0].eligible=false;removed.grants[1].eligible=false;
+    reader.refresh(removed);check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    reader.refresh(metadata(pb,5,registered,2));reader.disableIssuer(pa.peerId,true);
+    check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    rejects([&]{reader.approveIssuer(pa.peerId,true);}); // No accidental resurrection.
+    auto wrong=metadata(pb,6,registered,2);wrong.account=9;rejects([&]{reader.refresh(wrong);});
+    wrong=metadata(pb,6,registered,2);wrong.device=pa.peerId;rejects([&]{reader.refresh(wrong);});
+    wrong=metadata(pb,6,registered,2);wrong.descriptors.push_back(db);rejects([&]{reader.refresh(wrong);});
+    // Bounded durable publication queue; exceeding it cannot partly mutate a
+    // grant or drop an earlier intermediate generation.
+    for(size_t n=0;n<ar::MaxPendingGrants;++n)source.authorizeDevice(pb.peerId,ar::ReadHistory,100+n,true);
+    auto last=source.policy().grant(pa.peerId,pb.peerId);
+    rejects([&]{source.authorizeDevice(pb.peerId,ar::ReadHistory,200,true);});
+    check(source.policy().grant(pa.peerId,pb.peerId).generation==last.generation&&
+        source.pendingPublications().size()==ar::MaxPendingGrants);
+    {ar::Enrollment restarted(a,pa,8,clock);check(restarted.pendingPublications().size()==ar::MaxPendingGrants);}
+    check(a.profile().peerId==pa.peerId&&b.profile().peerId==pb.peerId);
+    std::cout<<"PASS: explicit source/reader consent, authenticated metadata binding/freshness, no same-account grant, durable exact descriptor and grant retries, generation-ordered revoke/re-enroll, removal and fail-closed tamper/reconnect\n";
+    return 0;
+}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

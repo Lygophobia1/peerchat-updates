@@ -3,12 +3,14 @@
 #include "protocol.hpp"
 #include <functional>
 #include <map>
+#include <algorithm>
 
 namespace peerchat::archive {
 // Deliberately separate from Friend and GroupControl permissions. No socket,
 // retry owner, plaintext server archive, or new permanent signing identity.
 constexpr std::uint64_t ReadHistory=1,ServeHistory=2,AllCapabilities=3;
 constexpr size_t MaxAuthorities=8,MaxGrants=64;
+constexpr size_t MaxPendingGrants=32;
 constexpr auto LocalFormat=static_cast<protocol::Type>(31);
 inline void require(bool ok){if(!ok)throw std::runtime_error("Archive authorization/provenance rejected");}
 struct Grant {
@@ -77,11 +79,13 @@ class Authorization {
     std::function<std::optional<CurrentGrant>(std::uint64_t,const std::string&,const std::string&)> currentGrant_;
     std::map<std::string,Authority> authorities_;
     std::map<std::pair<std::string,std::string>,Grant> grants_;
+    std::vector<Grant> pending_; // Signed public metadata, atomically durable with local policy.
     Blob saved_;
     void persist(){
-        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveLocalPolicy/v1");w.number(account_);w.string(local_.peerId);
+        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveLocalPolicy/v2");w.number(account_);w.string(local_.peerId);
         w.number(authorities_.size());for(auto& item:authorities_){w.string(item.first);w.bytes(item.second.publicKey);w.number(item.second.enabled);}
         w.number(grants_.size());for(auto& item:grants_)w.bytes(encodeGrant(item.second));
+        w.number(pending_.size());for(const auto& grant:pending_)w.bytes(encodeGrant(grant));
         storage_.saveArchiveAuthorizationState(saved_,w.data);saved_=std::move(w.data);
     }
     void validateGrant(const Grant& g)const{
@@ -98,12 +102,23 @@ public:
         :storage_(storage),local_(local),account_(account),currentDevice_(std::move(current)),currentGrant_(std::move(grants)){
         require(account>0&&protocol::id(local.peerId)&&Storage::publicKeyId(local.publicKey)==local.peerId&&bool(currentDevice_)&&bool(currentGrant_));
         saved_=storage_.archiveAuthorizationState();if(saved_.empty())return;
-        protocol::Reader r(saved_);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveLocalPolicy/v1"&&r.number()==account&&r.string()==local.peerId);
+        protocol::Reader r(saved_);require(r.type()==LocalFormat);auto version=r.string();
+        require((version=="PeerChat/ArchiveLocalPolicy/v1"||version=="PeerChat/ArchiveLocalPolicy/v2")&&r.number()==account&&r.string()==local.peerId);
         auto count=r.number();require(count<=MaxAuthorities);
         for(std::uint64_t n=0;n<count;++n){auto id=r.string();auto key=r.bytes();auto enabled=r.number();
             require(enabled<=1&&protocol::id(id)&&key.size()==72&&Storage::publicKeyId(key)==id&&authorities_.emplace(id,Authority{key,enabled!=0}).second);}
         count=r.number();require(count<=MaxGrants);
         for(std::uint64_t n=0;n<count;++n){auto g=decodeGrant(r.bytes());validateGrant(g);require(grants_.emplace(std::make_pair(g.issuer,g.device),g).second);}
+        if(version=="PeerChat/ArchiveLocalPolicy/v2"){
+            count=r.number();require(count<=MaxPendingGrants);
+            std::map<std::string,std::uint64_t> generations;
+            for(std::uint64_t n=0;n<count;++n){
+                auto g=decodeGrant(r.bytes());validateGrant(g);auto latest=grants_.find({g.issuer,g.device});
+                require(g.issuer==local_.peerId&&latest!=grants_.end()&&g.generation<=latest->second.generation&&
+                    (!generations.count(g.device)||g.generation==generations.at(g.device)+1));
+                generations[g.device]=g.generation;pending_.push_back(std::move(g));
+            }
+        }
         r.end();
     }
     // Interactive, explicit trust decision only. A server list/login/friendship
@@ -140,7 +155,14 @@ public:
         require(revoke||currentDevice_(account_,id));auto old=grants_.find({local_.peerId,id});
         Grant g;g.account=account_;g.issuer=local_.peerId;g.device=id;g.publicKey=subject;g.capabilities=revoke?0:capabilities;g.revoked=revoke;
         g.generation=old==grants_.end()?1:old->second.generation+1;g.issued=now;g.issuanceId=Storage::newMessageId();
-        g.signature=signDevicePayload(grantPayload(g),local_);accept(g);return g;
+        require(pending_.size()<MaxPendingGrants);
+        g.signature=signDevicePayload(grantPayload(g),local_);
+        // One protected CAS commit contains BOTH policy and publication intent.
+        // A failed RPC/restart cannot lose an intermediate revoke/re-enroll
+        // generation or regenerate different proof bytes for the same operation.
+        pending_.push_back(g);
+        try{accept(g);}catch(...){pending_.pop_back();throw;}
+        return g;
     }
     bool permits(const std::string& issuer,const std::string& device,std::uint64_t capability)const{
         usable();auto a=authorities_.find(issuer);auto g=grants_.find({issuer,device});
@@ -152,5 +174,52 @@ public:
             currentDevice_(account_,issuer)&&currentDevice_(account_,device);
     }
     Grant grant(const std::string& issuer,const std::string& device)const{usable();auto g=grants_.find({issuer,device});require(g!=grants_.end());return g->second;}
+    std::vector<Grant> pendingPublications()const{usable();return pending_;}
+    // Call after refreshing authenticated server metadata. Only a locally
+    // verified exact signed generation confirms publication; login/HTTP success
+    // alone is not enough. Higher matching generations retire older intents.
+    size_t reconcilePublications(const std::vector<Grant>& registered={}){
+        usable();auto previous=pending_;
+        std::map<std::string,std::uint64_t> confirmed;
+        for(const auto& g:pending_){
+            auto current=currentGrant_(account_,g.issuer,g.device);
+            if(current&&current->generation==g.generation&&current->capabilities==g.capabilities&&
+                current->issuanceId==g.issuanceId&&current->revoked==g.revoked)confirmed[g.device]=g.generation;
+        }
+        for(const auto& entry:grants_){
+            const auto& g=entry.second;if(g.issuer!=local_.peerId)continue;
+            auto current=currentGrant_(account_,g.issuer,g.device);
+            if(current&&current->generation==g.generation&&current->capabilities==g.capabilities&&
+                current->issuanceId==g.issuanceId&&current->revoked==g.revoked)confirmed[g.device]=g.generation;
+        }
+        // An exact server-registered signed record confirms publication even
+        // when device-removal tombstones make it ineligible for authorization.
+        // Otherwise an already-stored disabled generation could indefinitely
+        // block publishing its explicit re-enrollment successor.
+        for(const auto& g:registered){
+            require(g.issuer==local_.peerId);validateGrant(g);bool known=false;
+            auto latest=grants_.find({g.issuer,g.device});
+            if(latest!=grants_.end()&&encodeGrant(latest->second)==encodeGrant(g))known=true;
+            for(const auto& pending:pending_)if(encodeGrant(pending)==encodeGrant(g)){known=true;break;}
+            if(known)confirmed[g.device]=std::max(confirmed[g.device],g.generation);
+        }
+        pending_.erase(std::remove_if(pending_.begin(),pending_.end(),[&](const Grant& g){
+            return confirmed.count(g.device)&&g.generation<=confirmed.at(g.device);
+        }),pending_.end());
+        auto removed=previous.size()-pending_.size();
+        if(removed)try{persist();}catch(...){pending_=std::move(previous);throw;}
+        return removed;
+    }
+    bool trustsAuthority(const Blob& key)const{
+        usable();if(key.size()!=72)return false;auto found=authorities_.find(Storage::publicKeyId(key));
+        return found!=authorities_.end()&&found->second.enabled&&found->second.publicKey==key;
+    }
+    std::optional<Blob> authorityKey(const std::string& issuer)const{
+        usable();auto found=authorities_.find(issuer);if(found==authorities_.end())return {};
+        return found->second.publicKey; // Public verification key, never private material.
+    }
+    std::optional<Grant> cachedGrant(const std::string& issuer,const std::string& device)const{
+        usable();auto found=grants_.find({issuer,device});if(found==grants_.end())return {};return found->second;
+    }
 };
 }

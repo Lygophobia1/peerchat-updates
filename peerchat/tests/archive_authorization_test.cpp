@@ -56,9 +56,11 @@ int main(int argc,char** argv){try{
     signer->fail=true;
     rejects([&]{source.issue(pb.publicKey,0,true,101,true);});
     signer->fail=false;
+    check(source.pendingPublications().size()==2);
     check(source.grant(pa.peerId,pb.peerId).generation==1&&pa.privateKey.empty());
     check(!source.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     publish(serve);publish(read);
+    check(source.reconcilePublications()==2&&source.pendingPublications().empty());
     rejects([&]{reader.accept(read);}); // Same account/device membership is not consent.
     reader.approveAuthority(pa.publicKey,true);check(reader.accept(serve));check(reader.accept(read));
     check(!reader.accept(ar::decodeGrant(ar::encodeGrant(read)))); // Idempotent.
@@ -78,6 +80,11 @@ int main(int argc,char** argv){try{
     {ar::Authorization reopened(b,pb,8,current,authoritative);check(reopened.permits(pa.peerId,pb.peerId,ar::ReadHistory));}
     rejects([&]{ar::Authorization wrongAccount(b,pb,9,current,authoritative);});
     auto revoked=source.issue(pb.publicKey,0,true,110,true);check(revoked.generation==2);
+    check(source.pendingPublications().size()==1);
+    {ar::Authorization restarted(a,pa,8,current,authoritative);
+        check(ar::encodeGrant(restarted.pendingPublications().front())==ar::encodeGrant(revoked));
+        check(restarted.reconcilePublications()==0); // No server acknowledgement: retain exact retry bytes.
+    }
     fixture("revoke.bin",ar::encodeGrant(revoked));
     publish(revoked);
     check(!ar::currentSessionAuthorization(reader,admitted,&pa.publicKey));
@@ -88,6 +95,7 @@ int main(int argc,char** argv){try{
     fixture("reenroll.bin",ar::encodeGrant(reenrolled));
     auto next=reenrolled;next.generation=4;next.issuanceId=Storage::newMessageId();next.signature=signDevicePayload(ar::grantPayload(next),pa);fixture("reenroll-after-removal.bin",ar::encodeGrant(next));
     publish(reenrolled);reader.accept(reenrolled);check(reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    check(source.pendingPublications().size()==2&&source.reconcilePublications()==2&&source.pendingPublications().empty());
     rejects([&]{reader.accept(revoked);});
     fresh=false;check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));fresh=true;
     members.erase(pb.peerId);check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
@@ -99,7 +107,13 @@ int main(int argc,char** argv){try{
     check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.accept(reenrolled);});
     rejects([&]{reader.approveAuthority(pa.publicKey,true);});
+    // Backward-compatible protected local-policy v1 read; signed wire records
+    // remain v1 and are not rewritten by the local publication journal format.
+    auto v2=a.archiveAuthorizationState(),v1=v2;const std::string domain="PeerChat/ArchiveLocalPolicy/v2";
+    v1[4+8+domain.size()-1]='1';v1.resize(v1.size()-8); // Empty v2 pending count.
+    a.saveArchiveAuthorizationState(v2,v1);
+    {ar::Authorization legacy(a,pa,8,current,authoritative);check(legacy.trustsAuthority(pa.publicKey)&&legacy.pendingPublications().empty());}
     check(a.profile().peerId==pa.peerId&&b.profile().peerId==pb.peerId);
-    std::cout<<"PASS: explicit archive grants, account/device binding, tamper, protected reopen, revocation, stale generation, re-enrollment, device removal, CAS stale owner and current metadata freshness\n";
+    std::cout<<"PASS: explicit archive grants, durable publication/restart/exact retry, revocation generations, v1 compatibility, account/device binding, tamper, removal, stale CAS and metadata freshness\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
