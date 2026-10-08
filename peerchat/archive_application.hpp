@@ -7,7 +7,7 @@ inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){
-    require(operation>=1&&operation<=10&&bytes.size()<=MaxApplicationBytes);
+    require(operation>=1&&operation<=11&&bytes.size()<=MaxApplicationBytes);
     protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
     auto result=applicationHeader(operation);
     if(operation==1){r.end();return enrollment.registration(utc);}
@@ -30,6 +30,12 @@ inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation
         return result.data;
     }
     if(operation==9){r.end();enrollment.invalidate();return result.data;}
+    if(operation==11){
+        auto account=r.number(),generation=r.number(),write=r.number();require(enrollment.matches(account,generation)&&write<=1);
+        auto enabled=write?r.number():0;require(enabled<=1);r.end();
+        if(write)enrollment.policy().setHistorySyncEnabled(enabled!=0);
+        result.number(enrollment.policy().historySyncEnabled());return result.data;
+    }
     auto action=operation;
     if(operation==10){auto account=r.number(),generation=r.number(),selected=r.number();require(selected>=4&&selected<=7&&enrollment.matches(account,generation));action=static_cast<unsigned>(selected);}
     auto device=r.string();require(protocol::id(device));

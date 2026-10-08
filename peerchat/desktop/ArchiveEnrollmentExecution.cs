@@ -41,6 +41,11 @@ internal sealed class ArchiveEnrollmentExecution {
         object version;Check(result.TryGetValue("archiveVersion",out version)&&Convert.ToInt64(version)==1);return result;
     }
     void Invalidate(){native(9,Command(9));}
+    public bool HistorySync(long account,long generation,bool? enabled=null){
+        var bytes=native(11,Command(11,w=>{w.Write(account);w.Write(generation);w.Write(enabled.HasValue?1L:0L);if(enabled.HasValue)w.Write(enabled.Value?1L:0L);}));
+        var header=Command(11);Check(bytes.Length==header.Length+8&&bytes.Take(header.Length).SequenceEqual(header));
+        long value=BitConverter.ToInt64(bytes,header.Length);Check(value==0||value==1);return value==1;
+    }
     void RefreshState(long account,long generation,string device){
         var reply=Request("archive_authorization_state",new Dictionary<string,object>());
         object id;Check(reply.TryGetValue("accountId",out id)&&Convert.ToInt64(id)==account);

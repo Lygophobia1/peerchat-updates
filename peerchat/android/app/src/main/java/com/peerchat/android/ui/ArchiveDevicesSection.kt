@@ -15,6 +15,11 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     Text("Archive access is separate from signing in. Refresh on each device, compare Peer IDs, then explicitly trust an authorizer and grant only needed access. Revocation cannot erase history already received.",style=MaterialTheme.typography.bodySmall)
     OutlinedButton({dispatch(UiAction.ArchiveRefresh)},enabled=!state.archiveBusy&&state.account!=null){Text(if(state.archiveBusy)"Verifying…" else "Refresh archive devices")}
     val enrollment=state.archiveEnrollment
+    if(enrollment!=null)Row {
+        Switch(enrollment.historySyncEnabled,{value->dispatch(UiAction.HistorySync(enrollment,value))},enabled=!state.archiveBusy)
+        Text("History synchronization")
+    }else Text("History synchronization: refresh to load saved choice.")
+    Text("On participates only when explicitly authorized. Off preserves local history, grants and resume cursors. Refresh to load this account's saved choice.",style=MaterialTheme.typography.bodySmall)
     enrollment?.devices?.forEach {device->
         var read by remember(device.peerId,device.mayRead){mutableStateOf(device.mayRead)}
         var serve by remember(device.peerId,device.mayServe){mutableStateOf(device.mayServe)}

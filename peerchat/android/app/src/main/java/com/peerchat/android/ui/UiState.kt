@@ -12,7 +12,7 @@ import com.peerchat.android.platform.NotificationPreview
 import com.peerchat.android.application.ArchiveEnrollmentSnapshot
 import com.peerchat.android.application.ArchiveDeviceAction
 
-enum class Route { Welcome, Login, Server, Home, Conversation, Details, Diagnostics }
+enum class Route { Welcome, Login, Register, Server, Home, Conversation, Details, Diagnostics }
 enum class Tab { Chats, Calls, You }
 enum class ChatKind { Direct, Group }
 enum class LoadState { Ready, Loading, Empty, Error }
@@ -114,6 +114,7 @@ sealed interface UiAction {
     data class NotificationSettings(val enabled:Boolean,val preview:NotificationPreview):UiAction
     data class MailboxStorage(val allowed:Boolean):UiAction
     data object ArchiveRefresh:UiAction
+    data class HistorySync(val context:ArchiveEnrollmentSnapshot,val enabled:Boolean):UiAction
     data class ArchiveConsent(val context:ArchiveEnrollmentSnapshot,val action:ArchiveDeviceAction,val device:String,val read:Boolean=false,val serve:Boolean=false):UiAction
     data class PreviewMessage(val text: String) : UiAction
     data object Older : UiAction
@@ -149,6 +150,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
             Route.Details -> Route.Conversation
             Route.Diagnostics -> state.diagnosticsReturn
             Route.Login -> Route.Welcome
+            Route.Register -> Route.Login
             Route.Server -> state.serverReturn
             else -> Route.Welcome
         }, notice = null)
@@ -168,7 +170,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
-        UiAction.ArchiveRefresh, is UiAction.ArchiveConsent -> state // Real application commands only, never demo trust.
+        UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(
@@ -233,6 +235,7 @@ class PeerChatUiModel(
         }
     }
     override fun login(username: String, password: String) {
+        if(mutable.value.route==Route.Register){mutable.value=mutable.value.copy(loginError="Account creation is unavailable in UI demo mode.");return}
         if (mutable.value.loginBusy) return
         if (username.isBlank() || password.isEmpty()) {
             mutable.value = mutable.value.copy(loginError = "Enter your username and password.")

@@ -96,7 +96,13 @@ int main(){try{
     auto sourceScope=ar::sessionAuthorization(source,pa.peerId,pa.peerId,pb.peerId);
     auto sync=std::make_unique<ar::HistoryReader>(b,pb,reader,deliveries,scope,pc.peerId,directory);
     auto request=sync->nextRequest();rejects([&]{sync->nextRequest();}); // Backpressure.
+    source.setHistorySyncEnabled(false);
+    rejects([&]{ar::serveHistoryPage(a,pa,source,sourceScope,request,directory,300);});
+    source.setHistorySyncEnabled(true);
     auto response=ar::serveHistoryPage(a,pa,source,sourceScope,request,directory,300);
+    reader.setHistorySyncEnabled(false);rejects([&]{sync->acceptPage(response);});
+    check(b.history(pc.peerId,100).empty()); // In-flight pages cannot bypass OFF.
+    reader.setHistorySyncEnabled(true);
     auto decoded=ar::decodeHistoryPage(response);check(decoded.records.size()==8);
     auto bad=decoded;bad.records.back().assertion.signature[0]^=1;
     rejects([&]{sync->acceptPage(ar::encodeHistoryPage(bad));});
@@ -107,6 +113,10 @@ int main(){try{
     check(sync->snapshot().cursor==0);
     request=sync->nextRequest();response=ar::serveHistoryPage(a,pa,source,sourceScope,request,directory,300);
     check(sync->acceptPage(response)==7);rejects([&]{sync->acceptPage(response);});
+    auto pausedCursor=sync->snapshot().cursor;reader.setHistorySyncEnabled(false);
+    rejects([&]{sync->nextRequest();});check(sync->snapshot().cursor==pausedCursor);
+    check(b.history(pc.peerId,100).size()==8); // OFF never erases imported history.
+    reader.setHistorySyncEnabled(true); // Continue below with the same stable cursor/grant.
     const auto sealed=sync->snapshot().through;check(sealed==66);
     auto late=newer;late.id=Storage::newMessageId();late.logicalOrder++;
     check(a.append(pc.peerId,late));

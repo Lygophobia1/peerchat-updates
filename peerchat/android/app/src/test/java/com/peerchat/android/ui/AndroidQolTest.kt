@@ -23,6 +23,21 @@ class AndroidQolTest {
         }
     }
     private fun snapshot()=MessagingSnapshot(19,"Jonah","a".repeat(64),true,"Authenticated")
+    @Test fun mailboxDefaultAndExplicitOffSurviveProtectedReopen() {
+        var disk:ByteArray?=null
+        fun open()=ProtectedAndroidQolStore({disk},{disk=it.copyOf()},{records})
+        assertTrue(open().load().mailboxStorageAllowed)
+        open().save(AndroidQolState(mailboxStorageAllowed=false))
+        repeat(32){assertFalse(open().load().mailboxStorageAllowed)}
+        val label="android-qol-v1".toByteArray(Charsets.US_ASCII)
+        val old=org.json.JSONObject(records.unprotect(disk!!,label).toString(Charsets.UTF_8))
+        old.remove("mailboxStorageAllowed")
+        disk=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
+        assertTrue(open().load().mailboxStorageAllowed)
+        old.put("mailboxStorageAllowed","invalid")
+        disk=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
+        assertThrows(Exception::class.java){open().load()}
+    }
     private fun conversation()=ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),listOf(
         MessageSnapshot("c".repeat(32),"b".repeat(64),"a".repeat(64),100,1,9,2,"PRIVATE received text"),
         MessageSnapshot("d".repeat(32),"a".repeat(64),"b".repeat(64),101,2,10,2,"outgoing")))

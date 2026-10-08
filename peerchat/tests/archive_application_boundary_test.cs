@@ -95,6 +95,10 @@ static class ArchiveApplicationBoundaryTest {
                 return reply;
             });
             execution.Refresh(8,4,peer);Views(handle,peer,true,true);Check(publications==0);
+            Check(execution.HistorySync(8,4));
+            Check(!execution.HistorySync(8,4,false));Views(handle,peer,true,false);
+            bool stalePolicy=false;try{execution.HistorySync(8,3,true);}catch(Exception){stalePolicy=true;}Check(stalePolicy);
+            Check(!execution.HistorySync(8,4));Check(execution.HistorySync(8,4,true));Views(handle,peer,true,true);
             bool stale=false;try{execution.Consent(8,3,6,peer,0,true);}catch(Exception){stale=true;}Check(stale);Views(handle,peer,true,true);
             execution.Consent(8,4,6,peer,0,true);
             failPublication=true;bool failed=false;try{execution.PublishPending(8,4,peer);}catch(IOException){failed=true;}

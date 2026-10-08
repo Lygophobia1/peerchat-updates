@@ -97,7 +97,7 @@ public class DesktopApplication {
     long mailboxContextAccount;
     bool mailboxStorageAllowed;
     string MailboxPolicyPath {get{return Path.Combine(directory,"mailbox-policy.dat");}}
-    bool LoadMailboxPolicy(){try{return File.Exists(MailboxPolicyPath)&&Encoding.ASCII.GetString(ProtectedData.Unprotect(File.ReadAllBytes(MailboxPolicyPath),null,DataProtectionScope.CurrentUser))=="PeerChat/mailbox-policy/v1/ALLOWED";}catch{return false;}}
+    bool LoadMailboxPolicy(){try{return !File.Exists(MailboxPolicyPath)||Encoding.ASCII.GetString(ProtectedData.Unprotect(File.ReadAllBytes(MailboxPolicyPath),null,DataProtectionScope.CurrentUser))=="PeerChat/mailbox-policy/v1/ALLOWED";}catch{return false;}}
     void SaveMailboxPolicy(bool allowed){var data=ProtectedData.Protect(Encoding.ASCII.GetBytes("PeerChat/mailbox-policy/v1/"+(allowed?"ALLOWED":"FORBIDDEN")),null,DataProtectionScope.CurrentUser);string temporary=MailboxPolicyPath+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,data);if(File.Exists(MailboxPolicyPath))File.Replace(temporary,MailboxPolicyPath,null);else File.Move(temporary,MailboxPolicyPath);mailboxStorageAllowed=allowed;}
     void PumpMailbox(){
         if(closing||busy||discovery==null||!MailboxExecution.CanStart(discovery.AccountId,mailboxContextAccount,closing)||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||(!mailboxRequested&&DateTime.UtcNow<mailboxNextUtc))return;
@@ -1496,6 +1496,7 @@ public class DesktopApplication {
 
 	private string[] AccountDialog(string title, string accept, string presetUsername = "", bool lockUsername = false)
 	{
+		bool switchAccountMode=false;
 		Window dialog = new Window
 		{
 			Title = title,
@@ -1570,12 +1571,17 @@ public class DesktopApplication {
 		stackPanel4.Children.Add(button2);
 		stackPanel4.Children.Add(button4);
 		stackPanel2.Children.Add(stackPanel4);
+		var switchMode=new Button{Content=accept=="Sign in"?"Create Account":"Back to Sign In",Margin=new Thickness(0,12,0,0)};
+		switchMode.Click+=(s,e)=>{switchAccountMode=true;dialog.DialogResult=false;};
+		stackPanel2.Children.Add(new TextBlock{Text=accept=="Sign in"?"Don't have an account?":"Already have an account?",Margin=new Thickness(0,16,0,0)});
+		stackPanel2.Children.Add(switchMode);
 		dialog.Loaded += delegate
 		{
 			username.Focus();
 		};
 		if (dialog.ShowDialog() != true)
 		{
+			if(switchAccountMode)return new string[0];
 			return null;
 		}
 		return new string[2] { username.Text, passwordBox.Password };
@@ -1604,6 +1610,7 @@ public class DesktopApplication {
 		{
 			return;
 		}
+		if(values.Length==0){window.Dispatcher.BeginInvoke((Action)(()=>Account(!login)));return;}
 		DiscoveryClient candidate = null;
 		try
 		{
@@ -1654,7 +1661,7 @@ public class DesktopApplication {
 		}
 		catch (Exception ex)
 		{
-			string message=AccountFailureMessage(ex,login);
+			string message=AccountFailureMessage(ex,login,candidate!=null&&candidate.AccountId>0);
 			model.Status = message;
 			Notify(message);
 		}
@@ -1666,7 +1673,7 @@ public class DesktopApplication {
 		RefreshFriendState();
 	}
 
-	static string AccountFailureMessage(Exception error,bool login)
+	static string AccountFailureMessage(Exception error,bool login,bool authenticated=false)
 	{
 		var rejected=error as DiscoveryRequestException;
 		if(rejected!=null)
@@ -1676,12 +1683,14 @@ public class DesktopApplication {
 				case "login_failed": return "Couldn't sign in. Check the username and password, then try again.";
 				case "registration_failed": return "Couldn't create the account. That username may already be in use; try another.";
 				case "invalid_registration": return "Choose a valid username and enter a password to create the account.";
-				case "device_already_registered": return "This device identity is already linked to an account. Sign in with that account or switch local profiles.";
+				case "device_already_registered": case "device_account_mismatch": return "This device identity is already linked to an account. Sign in with that account or switch local profiles.";
 				case "session_invalid": return "The sign-in session is no longer valid. Please sign in again.";
 				case "session_superseded": return "This profile was signed in again elsewhere. Sign in again to continue.";
 			}
 		}
 		if((error.Message??"").Contains("This local profile is linked to"))return "This local profile is already linked to another account. Switch local profiles to use a different account.";
+		for(var cause=error;cause!=null;cause=cause.InnerException)if(cause is System.Security.Authentication.AuthenticationException)return "Server TLS identity validation failed. Verify the server and trusted fingerprint; account creation will not fix a certificate failure.";
+		if(authenticated)return "Account authentication succeeded, but messaging startup failed. Existing identity and local history are unchanged; retry the connection.";
 		return login?"Couldn't sign in to PeerChat. Check your connection and try again.":"Couldn't create the PeerChat account. Check your connection and try again.";
 	}
 
@@ -2800,6 +2809,9 @@ public class DesktopApplication {
 
     StackPanel ArchiveSettingsPanel(Window dialog){
         var panel=new StackPanel();
+        var sync=new CheckBox{Content="History synchronization",IsThreeState=true,IsChecked=null,IsEnabled=false,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,14,0,6)};
+        panel.Children.Add(sync);
+        panel.Children.Add(new TextBlock{Text="On participates only after explicit archive authorization. Off pauses archive access without deleting history or revoking grants. Refresh after sign-in to load this account's saved choice.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
         panel.Children.Add(new TextBlock{Text="Archive devices",FontSize=19,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,18,0,6)});
         panel.Children.Add(new TextBlock{Text="Archive access is separate from signing in. Refresh on each device to register its public identity, compare Peer IDs, then explicitly trust an authorizer and grant only the needed access. Revocation stops future sync; it cannot erase history already received.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
         var devices=new ComboBox{Margin=new Thickness(0,10,0,6),MinHeight=32};
@@ -2819,26 +2831,30 @@ public class DesktopApplication {
             var owner=discovery;var selected=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
             long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
             if(closing||owner==null||account<=0||mailboxContextAccount!=account||generation==0||generation>Int64.MaxValue){status.Text="Sign in and establish authenticated server presence first.";return;}
-            if(action!=0&&(selected==null||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
+            if(action!=0&&((action!=11&&selected==null)||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
             string target=selected==null?"":selected.PeerId;long capabilities=(read.IsChecked==true?1L:0L)|(serve.IsChecked==true?2L:0L);
             if(action==5&&capabilities==0){status.Text="Select at least one capability, or use Revoke access.";return;}
-            if(action!=0&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
+            if(action!=0&&action!=11&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
+            bool desiredSync=sync.IsChecked==true;
             panel.IsEnabled=false;status.Text="Verifying archive authorization…";
             try{
                 var rows=await Task.Run(()=>{
                     var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
                     execution.Refresh(account,(long)generation,local);
-                    if(action!=0)execution.Consent(account,(long)generation,action,target,capabilities,true);
+                    if(action!=0&&action!=11)execution.Consent(account,(long)generation,action,target,capabilities,true);
+                    bool enabled=execution.HistorySync(account,(long)generation,action==11?(bool?)desiredSync:null);
                     execution.PublishPending(account,(long)generation,local);
-                    return ArchiveEnrollmentExecution.Devices(execution.Refresh(account,(long)generation,local));
+                    return new {Rows=ArchiveEnrollmentExecution.Devices(execution.Refresh(account,(long)generation,local)),Enabled=enabled};
                 });
                 if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation||!dialog.IsVisible)return;
-                displayedAccount=account;displayedGeneration=generation;devices.ItemsSource=rows;
-                devices.SelectedItem=rows.FirstOrDefault(d=>d.PeerId==target)??rows.FirstOrDefault(d=>d.Local);
+                displayedAccount=account;displayedGeneration=generation;devices.ItemsSource=rows.Rows;
+                devices.SelectedItem=rows.Rows.FirstOrDefault(d=>d.PeerId==target)??rows.Rows.FirstOrDefault(d=>d.Local);
+                sync.IsThreeState=false;sync.IsChecked=rows.Enabled;sync.IsEnabled=true;
                 status.Text="Current signed metadata verified. Archive grants do not start synchronization. Text sync controls will be available when the route integration is complete.";
-            }catch(Exception error){status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
+            }catch(Exception error){sync.IsEnabled=false;sync.IsChecked=null;status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
             finally{panel.IsEnabled=true;}
         };
+        sync.Click+=(s,e)=>run(11);
         Action<string,uint> button=(label,action)=>{var b=new Button{Content=label,Padding=new Thickness(10,7,10,7),Margin=new Thickness(0,4,6,4)};AutomationProperties.SetName(b,label);b.Click+=(s,e)=>run(action);buttons.Children.Add(b);};
         button("Refresh archive devices",0);button("Trust archive authorizer",4);button("Authorize history access",5);button("Revoke access",6);button("Disable authorizer",7);
         return panel;
@@ -3173,7 +3189,7 @@ public class DesktopApplication {
         mailboxToggle.Click+=(s,e)=>{try{SaveMailboxPolicy(mailboxToggle.IsChecked==true);mailboxNextUtc=DateTime.MinValue;mailboxExecution=null;mailboxService=null;}catch{mailboxToggle.IsChecked=mailboxStorageAllowed;Notify("Mailbox privacy preference could not be saved.",dialog);}};
         settingsPages["Privacy & Security"].Children.Add(mailboxToggle);
         settingsPages["Privacy & Security"].Children.Add(ArchiveSettingsPanel(dialog));
-        settingsPages["Privacy & Security"].Children.Add(new TextBlock{Text=core.MailboxSupported?"Evaluation only. Server acceptance is Stored, not Delivered. Plaintext and private keys are never uploaded.":"Mailbox encryption is unavailable: no approved shipping HPKE provider is configured.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
+        settingsPages["Privacy & Security"].Children.Add(new TextBlock{Text=core.MailboxSupported?"On lets the server temporarily store encrypted messages for offline delivery. Off keeps new outgoing messages on this device until a live route is available. Stored is not Delivered; only recipient acknowledgement confirms delivery. Plaintext and private keys are never uploaded.":"Mailbox encryption is unavailable: no approved shipping HPKE provider is configured.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
 		StackPanel voiceSettings = createInfoPage("Voice", "Profile-specific audio devices and working software levels. Call controls remain in the conversation header.");
 		StackPanel voiceDevicesPanel = new StackPanel();
 		voiceDevicesPanel.Children.Add(new TextBlock { Text = "Input device", Foreground = Brush("#AAB7C4") });

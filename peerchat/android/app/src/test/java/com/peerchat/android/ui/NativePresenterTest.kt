@@ -34,6 +34,10 @@ class NativePresenterTest {
         override val state=MutableStateFlow(MessagingSnapshot())
         var reject=true;var sends=0;var failSend=false;var closed=false
         var signIns=0;var endpoint:ServerEndpoint?=null
+        var registrations=0
+        override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession {
+            registrations++;return signInRemembered(endpoint,username,password,remember)
+        }
         var resume=false;var remembered=false
         var resumeFailure:Exception?=null
         var resumeDelay=0L
@@ -95,6 +99,25 @@ class NativePresenterTest {
         dispatcher.scheduler.advanceUntilIdle();assertEquals("server.example",settings.saved!!.host)
         second.dispatch(UiAction.SignOut);dispatcher.scheduler.advanceUntilIdle()
         assertEquals("f".repeat(64),second.state.value.server.certificatePin)
+    }
+    @Test fun createAccountNavigationPreservesEndpointPinAndUsesApplicationRegistration() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        val server=p.state.value.server
+        p.dispatch(UiAction.Navigate(Route.Login));p.dispatch(UiAction.Navigate(Route.Register))
+        assertEquals(server,p.state.value.server)
+        p.dispatch(UiAction.Back);assertEquals(Route.Login,p.state.value.route)
+        p.dispatch(UiAction.Navigate(Route.Register));p.dispatch(UiAction.RememberMe(true))
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1,commands.registrations);assertTrue(commands.remembered)
+        assertEquals(ServerEndpoint(server.host,server.port.toInt(),server.certificatePin),commands.endpoint)
+        assertEquals(Route.Home,p.state.value.route)
+    }
+    @Test fun ownershipAndSecurityErrorsDoNotSuggestReplacingIdentity() {
+        assertTrue(accountFailureText(ServerRejected("device_account_mismatch"),false).contains("belongs to another account"))
+        assertTrue(accountFailureText(ServerRejected("login_failed"),false).contains("Username or password"))
+        assertFalse(accountFailureText(java.io.IOException("test-only"),false).contains("Create Account"))
+        assertTrue(accountFailureText(MessagingStartupFailure(java.io.IOException("test-only")),false).contains("Authentication succeeded"))
+        assertTrue(accountFailureText(MessagingStartupFailure(ServerRejected("device_account_mismatch")),true).contains("belongs to another account"))
     }
     @Test fun coldStartHistoryRemainsVisibleWhenNetworkAuthenticationFails() {
         val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"f".repeat(64))}

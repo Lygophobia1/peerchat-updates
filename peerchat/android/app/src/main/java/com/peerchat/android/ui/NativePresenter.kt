@@ -181,6 +181,9 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }finally{configurationReady=true;project()}
     }}
     override fun login(username:String,password:String) {
+        authenticate(username,password,mutable.value.route==Route.Register)
+    }
+    private fun authenticate(username:String,password:String,creating:Boolean) {
         val s=mutable.value
         if(s.loginBusy)return
         if(!configurationReady||configurationInvalid||configurationSaving){mutable.value=s.copy(loginError="Verify and save trusted server settings before signing in.");return}
@@ -189,7 +192,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
         if(!validServerDraft(s.server)) {mutable.value=s.copy(loginError="Configure a valid server first.");return}
         if(s.server.certificatePin.isEmpty()){
-            loginAfterTrust={login(username,password)}
+            loginAfterTrust={authenticate(username,password,creating)}
             mutable.value=s.copy(loginError="Confirm the server fingerprint before signing in.")
             dispatch(UiAction.SaveServer(s.server));return
         }
@@ -199,14 +202,15 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         mutable.value=s.copy(loginBusy=true,loginError=null)
         viewModelScope.launch {
             try {
-                backend.signInRemembered(ServerEndpoint(s.server.host.trim(),s.server.port.toInt(),s.server.certificatePin.lowercase()),username,password,s.rememberMe)
+                val endpoint=ServerEndpoint(s.server.host.trim(),s.server.port.toInt(),s.server.certificatePin.lowercase())
+                if(creating)backend.createAccountRemembered(endpoint,username,password,s.rememberMe)
+                else backend.signInRemembered(endpoint,username,password,s.rememberMe)
                 mutable.value=mutable.value.copy(loginBusy=false,loginError=null,route=Route.Home)
             } catch(failure:Exception) {
                 ServerChannel.identityChange(failure)?.let { changed ->
                     mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(s.server,changed.observed,changed.expected),serverIdentityChanged=s.server)
                 }
-                mutable.value=mutable.value.copy(loginBusy=false,loginError=if(failure is ServerRejected)
-                    "Sign-in rejected by server." else "Sign-in failed; check server and certificate configuration.")
+                mutable.value=mutable.value.copy(loginBusy=false,loginError=accountFailureText(failure,creating))
             }
         }
     }
@@ -242,14 +246,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
             }
-            UiAction.ArchiveRefresh, is UiAction.ArchiveConsent -> {
+            UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync -> {
                 if(mutable.value.archiveBusy)return
                 val displayed=mutable.value.archiveEnrollment
                 if(action is UiAction.ArchiveConsent&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh and confirm again.");return}
+                if(action is UiAction.HistorySync&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh before changing history policy.");return}
                 mutable.value=mutable.value.copy(archiveBusy=true)
                 viewModelScope.launch {
                     try{
-                        val result=if(action is UiAction.ArchiveConsent)backend.archiveConsent(checkNotNull(displayed),action.action,action.device,action.read,action.serve) else backend.archiveDevices()
+                        val result=when(action){
+                            is UiAction.ArchiveConsent->backend.archiveConsent(checkNotNull(displayed),action.action,action.device,action.read,action.serve)
+                            is UiAction.HistorySync->backend.setHistorySync(checkNotNull(displayed),action.enabled)
+                            else->backend.archiveDevices()
+                        }
                         if(current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")
                     }catch(_:Exception){mutable.value=mutable.value.copy(archiveEnrollment=null,notice="Archive operation failed closed. Refresh to retry pending public grants; login alone never grants history access.")}
                     finally{mutable.value=mutable.value.copy(archiveBusy=false)}

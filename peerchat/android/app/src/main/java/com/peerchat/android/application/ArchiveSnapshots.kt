@@ -1,7 +1,7 @@
 package com.peerchat.android.application
 
 data class ArchiveDeviceSnapshot(val peerId:String,val local:Boolean,val approvedIssuer:Boolean,val mayRead:Boolean,val mayServe:Boolean)
-data class ArchiveEnrollmentSnapshot(val accountId:Long,val authenticationGeneration:Long,val localPeerId:String,val devices:List<ArchiveDeviceSnapshot>)
+data class ArchiveEnrollmentSnapshot(val accountId:Long,val authenticationGeneration:Long,val localPeerId:String,val devices:List<ArchiveDeviceSnapshot>,val historySyncEnabled:Boolean=true)
 enum class ArchiveDeviceAction { TrustAuthorizer, Authorize, Revoke, DisableAuthorizer }
 internal fun archiveDeviceSnapshots(bytes:ByteArray):List<ArchiveDeviceSnapshot> {
     val record=NativeRecord(bytes,31)

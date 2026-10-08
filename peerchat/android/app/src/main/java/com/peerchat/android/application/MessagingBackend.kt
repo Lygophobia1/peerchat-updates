@@ -46,8 +46,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastMailboxAcknowledgedNanos=0L
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
-    // Explicit profile-local consent; absence is FORBIDDEN. Retention/history
-    // policy is separate. The settings UI will expose this preference.
+    // Profile-local product default is ON only when absent. Explicit OFF persists;
+    // unreadable protected preferences fail closed. History policy is separate.
     private val mailboxPreferences=AndroidQolStore(this.context,profileName)
     private fun mailboxAllowed():Boolean=try{mailboxPreferences.load().mailboxStorageAllowed}catch(_:Exception){false}
     override suspend fun setMailboxStorageAllowed(allowed:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
@@ -62,7 +62,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val owner=checkNotNull(accounts);val session=checkNotNull(owner.session);val native=checkNotNull(profile)
         val local=mutable.value.localPeerId;val execution=archiveExecution(owner,native)
         execution.publishPending(session.accountId,generation,local)
-        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)))
+        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
     }}
     override suspend fun archiveConsent(snapshot:ArchiveEnrollmentSnapshot,action:ArchiveDeviceAction,device:String,read:Boolean,serve:Boolean):ArchiveEnrollmentSnapshot=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled&&mutable.value.serverPresenceLive)
@@ -76,7 +76,15 @@ class MessagingBackend(context: Context,private val profileName: String="default
         require(action!=ArchiveDeviceAction.Authorize||capabilities!=0L)
         execution.consent(session.accountId,generation,operation,device,capabilities,true)
         execution.publishPending(session.accountId,generation,local)
-        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)))
+        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
+    }}
+    override suspend fun setHistorySync(snapshot:ArchiveEnrollmentSnapshot,enabled:Boolean):ArchiveEnrollmentSnapshot=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled&&mutable.value.serverPresenceLive)
+        val owner=checkNotNull(accounts);val session=checkNotNull(owner.session);val native=checkNotNull(profile);val local=mutable.value.localPeerId
+        require(snapshot.accountId==session.accountId&&snapshot.authenticationGeneration==generation&&snapshot.localPeerId==local)
+        val execution=archiveExecution(owner,native);execution.refresh(session.accountId,generation,local)
+        execution.historySync(session.accountId,generation,enabled)
+        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
     }}
     private val remembered=AndroidRememberedLoginStore(this.context,profileName)
     private val pushRegistration=AndroidPushRegistration(this.context,profileName)
@@ -133,7 +141,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         },125,125,TimeUnit.MILLISECONDS)
     }
     override suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = signInRemembered(endpoint,username,password,false)
-    override suspend fun signInRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession = withContext(Dispatchers.IO) {
+    override suspend fun signInRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession =
+        authenticate(endpoint,username,password,remember,false)
+    override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession =
+        authenticate(endpoint,username,password,remember,true)
+    private suspend fun authenticate(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean,creating:Boolean):AccountSession = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&accounts==null)
             val native=profile ?: NativeProfile(context,profileName).also {profile=it}
@@ -144,7 +156,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // durable revocation. Network failure leaves a non-login tombstone.
             revokeSaved(native,key)
             val connection=ServerAccounts(endpoint,device,operations)
-            val authenticated=connection.login(username,password)
+            // The same identity, trust, presence/bootstrap and Remember Me path.
+            // Server registration rejects an identity already owned by another account.
+            val authenticated=if(creating)connection.register(username,password) else connection.login(username,password)
             try {
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
@@ -168,7 +182,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 accounts?.closeRpc();accounts=null;index=null;friends=emptyList();generation++
                 clearAuthorization();try {connection.logout()}catch(_: Exception){}
                 mutable.value=MessagingSnapshot(localPeerId=device,status="Login setup failed closed")
-                throw failure
+                throw MessagingStartupFailure(failure)
             }
         }
     }

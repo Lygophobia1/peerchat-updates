@@ -81,6 +81,11 @@ class Authorization {
     std::map<std::pair<std::string,std::string>,Grant> grants_;
     std::vector<Grant> pending_; // Signed public metadata, atomically durable with local policy.
     Blob saved_;
+    std::string syncPreferenceContext()const{
+        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveSyncPreference/v1");w.number(account_);w.string(local_.peerId);
+        auto digest=digestDevicePayload(w.data);static const char hex[]="0123456789abcdef";std::string result;
+        for(auto byte:digest){result+=hex[byte>>4];result+=hex[byte&15];}return result;
+    }
     void persist(){
         protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveLocalPolicy/v2");w.number(account_);w.string(local_.peerId);
         w.number(authorities_.size());for(auto& item:authorities_){w.string(item.first);w.bytes(item.second.publicKey);w.number(item.second.enabled);}
@@ -94,6 +99,20 @@ class Authorization {
     }
     void usable()const{require(storage_.archiveAuthorizationState()==saved_);} // Fail closed after another owner revokes/changes policy.
 public:
+    // Participation policy, NOT a grant. Stored in the existing protected local
+    // record store. Every admission re-reads it so OFF also stops an older owner.
+    bool historySyncEnabled()const{
+        auto bytes=storage_.archiveSyncState(syncPreferenceContext());if(bytes.empty())return true;
+        protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveSyncPreference/v1"&&r.number()==account_&&r.string()==local_.peerId);
+        auto value=r.number();require(value<=1);r.end();return value!=0;
+    }
+    void setHistorySyncEnabled(bool enabled){
+        auto context=syncPreferenceContext();auto previous=storage_.archiveSyncState(context);
+        (void)historySyncEnabled(); // Corrupt/missing protected material is not silently replaced.
+        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveSyncPreference/v1");w.number(account_);w.string(local_.peerId);w.number(enabled);
+        storage_.saveArchiveSyncState(context,previous,w.data);
+        // Grants, local history and stable per-conversation cursors are untouched.
+    }
     std::uint64_t account()const noexcept{return account_;}
     const std::string& localDevice()const noexcept{return local_.peerId;}
     Authorization(Storage& storage,const Profile& local,std::uint64_t account,
@@ -167,7 +186,7 @@ public:
     bool permits(const std::string& issuer,const std::string& device,std::uint64_t capability)const{
         usable();auto a=authorities_.find(issuer);auto g=grants_.find({issuer,device});
         const auto current=currentGrant_(account_,issuer,device);
-        return capability>0&&capability<=AllCapabilities&&a!=authorities_.end()&&a->second.enabled&&
+        return historySyncEnabled()&&capability>0&&capability<=AllCapabilities&&a!=authorities_.end()&&a->second.enabled&&
             g!=grants_.end()&&!g->second.revoked&&(g->second.capabilities&capability)==capability&&
             current&&!current->revoked&&current->generation==g->second.generation&&
             current->capabilities==g->second.capabilities&&current->issuanceId==g->second.issuanceId&&

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 interface MessagingApplication:AutoCloseable {
     val state:StateFlow<MessagingSnapshot>
     suspend fun signIn(endpoint:ServerEndpoint,username:String,password:String):AccountSession
+    suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession = error("Account creation unavailable")
     suspend fun signInRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession {
         check(!remember){"Remember Me is unavailable in this application binding"}
         return signIn(endpoint,username,password)
@@ -26,5 +27,6 @@ interface MessagingApplication:AutoCloseable {
     suspend fun signOut()
     suspend fun setMailboxStorageAllowed(allowed:Boolean){check(!allowed){"Mailbox configuration unavailable"}}
     suspend fun archiveDevices():ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
+    suspend fun setHistorySync(snapshot:ArchiveEnrollmentSnapshot,enabled:Boolean):ArchiveEnrollmentSnapshot = error("History policy unavailable")
     suspend fun archiveConsent(snapshot:ArchiveEnrollmentSnapshot,action:ArchiveDeviceAction,device:String,read:Boolean,serve:Boolean):ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
 }

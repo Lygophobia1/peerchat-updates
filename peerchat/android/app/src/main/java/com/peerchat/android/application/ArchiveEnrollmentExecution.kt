@@ -63,4 +63,9 @@ internal class ArchiveEnrollmentExecution(
         require(account>0&&generation>0&&action in 4..7&&device.matches(Regex("[0-9a-f]{64}"))&&capabilities in 0..3)
         return native(10,command(10){w->w.number(account);w.number(generation);w.number(action.toLong());w.text(device);if(action==5)w.number(capabilities);w.number(if(consent)1 else 0)})
     }
+    fun historySync(account:Long,generation:Long,enabled:Boolean?=null):Boolean {
+        val r=NativeRecord(native(11,command(11){w->w.number(account);w.number(generation);w.number(if(enabled!=null)1 else 0);if(enabled!=null)w.number(if(enabled)1 else 0)}),31)
+        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==11L)
+        val value=r.number();require(value<=1);r.end();return value==1L
+    }
 }

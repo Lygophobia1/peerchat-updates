@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,6 +26,31 @@ static class ArchiveSettingsSmoke {
             Window dialog=null;
             try{
                 await Task.Delay(900);
+                var flags=BindingFlags.Instance|BindingFlags.NonPublic;
+                var failureText=typeof(DesktopApplication).GetMethod("AccountFailureMessage",BindingFlags.Static|BindingFlags.NonPublic);
+                Check(((string)failureText.Invoke(null,new object[]{new DiscoveryRequestException("device_account_mismatch"),true,true})).Contains("identity is already linked"));
+                Check(((string)failureText.Invoke(null,new object[]{new System.Security.Authentication.AuthenticationException("test-only"),true,false})).Contains("TLS identity validation failed"));
+                Check(((string)failureText.Invoke(null,new object[]{new IOException("test-only"),true,true})).Contains("authentication succeeded"));
+                var loadPolicy=typeof(DesktopApplication).GetMethod("LoadMailboxPolicy",flags);
+                var savePolicy=typeof(DesktopApplication).GetMethod("SaveMailboxPolicy",flags);
+                Check((bool)loadPolicy.Invoke(desktop,null)); // Missing profile value defaults ON.
+                savePolicy.Invoke(desktop,new object[]{false});
+                foreach(string accept in new[]{"Sign in","Create account"}){
+                    string expected=accept=="Sign in"?"Create Account":"Back to Sign In";
+                    window.Dispatcher.BeginInvoke((Action)(()=>{
+                        var accountDialog=window.OwnedWindows.Cast<Window>().Single(w=>w.Title=="Isolated account navigation");
+                        var content=(StackPanel)accountDialog.Content;
+                        var change=content.Children.OfType<Button>().Single(b=>Object.Equals(b.Content,expected));
+                        Check(change.IsEnabled);change.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    }));
+                    var navigation=(string[])typeof(DesktopApplication).GetMethod("AccountDialog",flags).Invoke(desktop,new object[]{"Isolated account navigation",accept,"",false});
+                    Check(navigation!=null&&navigation.Length==0); // Navigation only, no registration/login/identity mutation.
+                }
+                for(int cycle=0;cycle<32;cycle++)Check(!(bool)loadPolicy.Invoke(desktop,null));
+                savePolicy.Invoke(desktop,new object[]{true});Check((bool)loadPolicy.Invoke(desktop,null));
+                string policy=(string)typeof(DesktopApplication).GetProperty("MailboxPolicyPath",flags).GetValue(desktop,null);
+                File.WriteAllBytes(policy,new byte[]{1,2,3});Check(!(bool)loadPolicy.Invoke(desktop,null)); // Corruption fails closed.
+                savePolicy.Invoke(desktop,new object[]{false});
                 dialog=new Window{Owner=window,Width=700,Height=650,ShowInTaskbar=false,ShowActivated=false,Left=-20000,WindowStartupLocation=WindowStartupLocation.Manual};
                 var panel=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,new object[]{dialog});
                 dialog.Content=new ScrollViewer{Content=panel};dialog.Show();dialog.UpdateLayout();

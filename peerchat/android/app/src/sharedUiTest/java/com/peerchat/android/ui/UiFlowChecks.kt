@@ -104,8 +104,9 @@ abstract class UiFlowChecks {
     @Test fun loginFailurePreviewsAreExplicitAndNeverNavigateToChats() {
         launch()
         compose.onNodeWithText("Create account").performClick()
-        compose.onNodeWithText("Account creation will be available", substring = true).assertExists()
-        compose.onNodeWithText("Sign in").performClick()
+        compose.onNodeWithText("Create your account").assertExists()
+        compose.onNodeWithTag("conversation-list").assertDoesNotExist()
+        compose.onNodeWithTag("account-mode-switch").performScrollTo().performClick()
         compose.onNodeWithText("Preview sign-in errors").performScrollTo().performClick()
         compose.onNodeWithText("Server unreachable").performClick()
         compose.onNodeWithTag("login-error").assertTextContains("Preview only", substring = true)

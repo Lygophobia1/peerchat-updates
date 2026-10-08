@@ -1,5 +1,8 @@
 package com.peerchat.android.application
 
+// Stage only; never copies server payloads/credentials into the presentation error.
+class MessagingStartupFailure(cause:Exception):Exception("Messaging startup failed after authentication",cause)
+
 data class FriendIdentity(val accountId: Long,val username: String,val peerId: String,val online: Boolean,
     val knownPeerIds: List<String> = listOf(peerId))
 data class MessageSnapshot(val id: String,val senderDevice: String,val recipientDevice: String,

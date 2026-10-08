@@ -42,6 +42,12 @@ int main(){try{
     check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    check(reader.policy().historySyncEnabled());
+    reader.policy().setHistorySyncEnabled(false);
+    check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    {ar::Authorization reopened(b,pb,8,[](auto,const auto&){return true;},[](auto,const auto&,const auto&)->std::optional<ar::CurrentGrant>{return {};});check(!reopened.historySyncEnabled());}
+    reader.policy().setHistorySyncEnabled(true);
+    check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory)); // Same grant, not re-enrollment.
     auto bad=metadata(pb,3,registered);bad.grants.back().proof.back()^=1;
     rejects([&]{reader.refresh(bad);});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.refresh(metadata(pb,3,registered));

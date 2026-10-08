@@ -75,7 +75,7 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             }
         } else when (state.route) {
             Route.Welcome -> Welcome(state, dispatch)
-            Route.Login -> Login(state, dispatch, login)
+            Route.Login, Route.Register -> Login(state, dispatch, login)
             Route.Server -> ServerSettings(state, dispatch)
             Route.Home -> Home(state, dispatch)
             Route.Conversation -> state.selected?.let { ConversationScreen(it, state, dispatch) }
@@ -115,10 +115,10 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
         Text("Your people. Your space.", Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text("Private conversations, made simple.", Modifier.padding(top = 24.dp))
         Button({ dispatch(UiAction.Navigate(Route.Login)) }, Modifier.fillMaxWidth().padding(top = 32.dp)) { Text("Sign in") }
-        OutlinedButton({ dispatch(UiAction.Notice("Account creation will be available when the secure account backend is connected.")) }, Modifier.fillMaxWidth()) { Text("Create account") }
+        OutlinedButton({ dispatch(UiAction.Navigate(Route.Register)) }, Modifier.fillMaxWidth()) { Text("Create account") }
         if(state.demo) TextButton({ dispatch(UiAction.Explore) }, Modifier.testTag("explore")) { Text("Explore UI demo") }
         TextButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Advanced / server settings") }
-        Text(if(state.demo) "Sign-in and account creation are not connected in this UI-only build." else "Sign in to an existing account. Account creation UI is not available yet.", style = MaterialTheme.typography.bodySmall,
+        Text(if(state.demo) "Sign-in and account creation are not connected in this UI-only build." else "Sign in or create an account on your trusted server.", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         state.notice?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.primary) }
         if(state.demo) Text("No credentials or messages leave this preview.", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.bodySmall)
@@ -128,14 +128,15 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun Login(state: PeerChatUiState, dispatch: (UiAction) -> Unit, login: (String, String) -> Unit) {
     // Intentionally not rememberSaveable: passwords must not enter saved-instance state.
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    val creating=state.route==Route.Register
+    var username by remember(creating) { mutableStateOf("") }
+    var password by remember(creating) { mutableStateOf("") }
     var visible by remember { mutableStateOf(false) }
     var previewMenu by remember { mutableStateOf(false) }
-    Scaffold(topBar = { PageBar("Sign in", dispatch) }) { padding ->
+    Scaffold(topBar = { PageBar(if(creating)"Create account" else "Sign in", dispatch) }) { padding ->
         Column(Modifier.padding(padding).imePadding().padding(24.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("Welcome back", style = MaterialTheme.typography.headlineMedium)
+            Text(if(creating)"Create your account" else "Welcome back", style = MaterialTheme.typography.headlineMedium)
             Text("Connect with your PeerChat account.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(username, { username = it.take(64) }, label = { Text("Username or account") },
                 singleLine = true, enabled = !state.loginBusy, modifier = Modifier.fillMaxWidth().testTag("username"))
@@ -150,8 +151,13 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             }
             Button({ login(username, password); password = "" }, enabled = !state.loginBusy, modifier = Modifier.fillMaxWidth().testTag("sign-in-submit")) {
                 if (state.loginBusy) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
-                Text(if (state.loginBusy) "Checking configuration…" else "Sign in")
+                Text(if (state.loginBusy) "Connecting…" else if(creating)"Create account" else "Sign in")
             }
+            Text(if(creating)"Already have an account?" else "Don't have an account?")
+            TextButton({dispatch(UiAction.Navigate(if(creating)Route.Login else Route.Register))},enabled=!state.loginBusy,modifier=Modifier.testTag("account-mode-switch")){
+                Text(if(creating)"Back to Sign In" else "Create Account")
+            }
+            if(creating)Text("This device identity can belong to only one server account. Switching screens does not replace it.",style=MaterialTheme.typography.bodySmall)
             Text(if(state.demo) "UI preview: secure sign-in is not connected. This action never authenticates an account." else "Server TLS is verified; peer messages use authenticated end-to-end TLS.", style = MaterialTheme.typography.bodySmall)
             TextButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Server settings") }
             if(state.demo) Box {
