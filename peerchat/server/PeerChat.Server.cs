@@ -645,6 +645,7 @@ namespace PeerChat.Server {
             if(type=="remember_challenge"||type=="remember_resume"||type=="remember_revoke")return RememberedRequest(request,type,identity);
             long accountId=accounts.Authenticate(TokenHash(token)); if(accountId==0)return Error("session_invalid");
             if(!String.IsNullOrEmpty(identity)&&!accounts.SessionAllowsDevice(TokenHash(token),identity))return Error("device_session_mismatch");
+            if(type=="archive_descriptor_register"||type=="archive_grant_register"||type=="archive_authorization_state")return ArchiveAuthorizationRequest(accountId,identity,type,request);
             if(type=="remember_enroll_challenge"||type=="remember_enroll")return EnrollRemembered(request,type,accountId,identity,TokenHash(token));
             if(type=="messaging_bootstrap"){
                 object bootstrapVersion;

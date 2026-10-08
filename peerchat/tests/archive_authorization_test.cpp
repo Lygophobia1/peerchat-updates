@@ -3,6 +3,7 @@
 #include "../platform/identity_provider.hpp"
 #include <iostream>
 #include <set>
+#include <fstream>
 using namespace peerchat;
 namespace ar=peerchat::archive;
 static void check(bool value){if(!value)throw std::runtime_error("Archive security regression failed");}
@@ -15,10 +16,21 @@ struct TestSigner final:platform::IdentityProvider {
     Blob publicKey()override{return backing.publicKey;}
     Blob sign(const Blob& bytes)override{if(fail)throw std::runtime_error("Test signer unavailable");return signDevicePayload(bytes,backing);}
 };
-int main(){try{
+int main(int argc,char** argv){try{
     auto directory=std::filesystem::current_path()/L"build"/L"tests"/L"archive-security"/storage_detail::wide(Storage::newMessageId());
     Storage a((directory/L"a").wstring()),b((directory/L"b").wstring()),c((directory/L"c").wstring());
     auto pa=a.profile(),pb=b.profile(),pc=c.profile();
+    auto fixture=[&](const char* name,const Blob& bytes){if(argc<2)return;
+        std::ofstream out(std::filesystem::path(argv[1])/name,std::ios::binary);out.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
+        if(!out)throw std::runtime_error("Fixture write failed");};
+    auto descriptor=ar::describeDevice(pa,8,100);
+    check(ar::decodeDescriptor(ar::encodeDescriptor(descriptor)).device==pa.peerId);
+    auto invalidDescriptor=descriptor;invalidDescriptor.account=9;
+    rejects([&]{ar::decodeDescriptor(ar::encodeDescriptor(invalidDescriptor));});
+    fixture("issuer-descriptor.bin",ar::encodeDescriptor(descriptor));
+    fixture("reader-descriptor.bin",ar::encodeDescriptor(ar::describeDevice(pb,8,100)));
+    fixture("other-descriptor.bin",ar::encodeDescriptor(ar::describeDevice(pc,8,100)));
+    fixture("issuer-public.bin",pa.publicKey);
     auto signer=std::make_shared<TestSigner>(pa);pa.identity=signer;pa.privateKey.clear();
     std::set<std::string> members{pa.peerId,pb.peerId,pc.peerId};
     auto current=[&](std::uint64_t account,const std::string& device){return account==8&&members.count(device)!=0;};
@@ -37,6 +49,9 @@ int main(){try{
     source.approveAuthority(pa.publicKey,true);
     auto serve=source.issue(pa.publicKey,ar::ServeHistory,false,100,true);
     auto read=source.issue(pb.publicKey,ar::ReadHistory,false,100,true);
+    fixture("serve.bin",ar::encodeGrant(serve));fixture("read.bin",ar::encodeGrant(read));
+    auto foreign=read;foreign.account=9;foreign.signature=signDevicePayload(ar::grantPayload(foreign),pa);fixture("foreign.bin",ar::encodeGrant(foreign));
+    auto conflict=read;conflict.capabilities=ar::AllCapabilities;conflict.signature=signDevicePayload(ar::grantPayload(conflict),pa);fixture("conflict.bin",ar::encodeGrant(conflict));
     signer->fail=true;
     rejects([&]{source.issue(pb.publicKey,0,true,101,true);});
     signer->fail=false;
@@ -56,11 +71,14 @@ int main(){try{
     {ar::Authorization reopened(b,pb,8,current,authoritative);check(reopened.permits(pa.peerId,pb.peerId,ar::ReadHistory));}
     rejects([&]{ar::Authorization wrongAccount(b,pb,9,current,authoritative);});
     auto revoked=source.issue(pb.publicKey,0,true,110,true);check(revoked.generation==2);
+    fixture("revoke.bin",ar::encodeGrant(revoked));
     publish(revoked);
     check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.accept(revoked);check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.accept(read);});
     auto reenrolled=source.issue(pb.publicKey,ar::ReadHistory,false,120,true);check(reenrolled.generation==3);
+    fixture("reenroll.bin",ar::encodeGrant(reenrolled));
+    auto next=reenrolled;next.generation=4;next.issuanceId=Storage::newMessageId();next.signature=signDevicePayload(ar::grantPayload(next),pa);fixture("reenroll-after-removal.bin",ar::encodeGrant(next));
     publish(reenrolled);reader.accept(reenrolled);check(reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.accept(revoked);});
     fresh=false;check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));fresh=true;

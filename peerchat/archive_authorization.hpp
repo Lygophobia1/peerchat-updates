@@ -24,8 +24,35 @@ struct CurrentGrant {
     std::string issuanceId;
     bool revoked=true;
 };
+// Public directory metadata only. Publishing an existing device identity does
+// not approve an authority or confer any archive capability.
+struct DeviceDescriptor {
+    std::uint64_t account=0,issued=0;
+    std::string device;
+    Blob publicKey,signature;
+};
+inline Blob descriptorPayload(const DeviceDescriptor& d){
+    require(d.account>0&&d.account<INT64_MAX&&d.issued>0&&d.issued<INT64_MAX&&
+        protocol::id(d.device)&&d.publicKey.size()==72&&Storage::publicKeyId(d.publicKey)==d.device);
+    protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveDeviceDescriptor/v1");w.number(1);
+    w.number(d.account);w.string(d.device);w.bytes(d.publicKey);w.number(d.issued);return w.data;
+}
+inline Blob encodeDescriptor(const DeviceDescriptor& d){
+    require(d.signature.size()==64);protocol::Writer w(LocalFormat);w.bytes(descriptorPayload(d));w.bytes(d.signature);return w.data;
+}
+inline DeviceDescriptor describeDevice(const Profile& device,std::uint64_t account,std::uint64_t now){
+    DeviceDescriptor d;d.account=account;d.issued=now;d.device=device.peerId;d.publicKey=device.publicKey;
+    d.signature=signDevicePayload(descriptorPayload(d),device);return d;
+}
+inline DeviceDescriptor decodeDescriptor(const Blob& bytes){
+    require(bytes.size()<=1024);protocol::Reader r(bytes);require(r.type()==LocalFormat);
+    auto payload=r.bytes(),signature=r.bytes();r.end();protocol::Reader p(payload);
+    require(p.type()==LocalFormat&&p.string()=="PeerChat/ArchiveDeviceDescriptor/v1"&&p.number()==1);
+    DeviceDescriptor d;d.account=p.number();d.device=p.string();d.publicKey=p.bytes();d.issued=p.number();p.end();d.signature=std::move(signature);
+    require(descriptorPayload(d)==payload&&d.signature.size()==64&&verifyDevicePayload(payload,d.signature,d.publicKey));return d;
+}
 inline Blob grantPayload(const Grant& g){
-    require(g.account>0&&g.generation>0&&g.generation<INT64_MAX&&g.issued>0&&
+    require(g.account>0&&g.account<INT64_MAX&&g.generation>0&&g.generation<INT64_MAX&&g.issued>0&&g.issued<INT64_MAX&&
         protocol::id(g.issuer)&&protocol::id(g.device)&&protocol::id(g.issuanceId,32)&&
         g.publicKey.size()==72&&Storage::publicKeyId(g.publicKey)==g.device&&
         (g.revoked?g.capabilities==0:g.capabilities>0&&g.capabilities<=AllCapabilities));
