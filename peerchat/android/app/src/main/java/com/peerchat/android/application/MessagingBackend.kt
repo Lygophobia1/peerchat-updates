@@ -104,15 +104,19 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val executions=mutableMapOf<Long,AndroidRelayExecution>()
     private val operations= com.peerchat.android.platform.tls.ServerChannel.OperationScope()
     @Volatile private var stopped=false
+    @Volatile private var resetting=false
+    @Volatile private var resumeSuppressed=false
     @Volatile private var inUse=true
+    @Volatile private var operationDeadline=Long.MAX_VALUE
     @Volatile private var livePeerWorkAllowed=true
     @Volatile private var quiescent=java.util.concurrent.CountDownLatch(0)
     internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE) {
         inUse=value
+        operationDeadline=deadlineNanos
         // A finite wake lease services server mailbox only. It never starts a
         // friend reconnect cycle to obtain history or bootstrap sender trust.
         livePeerWorkAllowed=deadlineNanos==Long.MAX_VALUE
-        operations.configure(value,deadlineNanos)
+        operations.configure(value&&!resetting,deadlineNanos)
         if(!value){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
             executor.execute {try{synchronized(gate){if(!inUse&&!stopped){
             generation++;clearAuthorization();try{if(remembered.load()==null)accounts?.logout()}catch(_:Exception){}
@@ -131,7 +135,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     init {
         executor.scheduleWithFixedDelay({
-            if(!stopped)try {synchronized(gate){tick()}}catch(failure: Exception){
+            if(!stopped&&!resetting)try {synchronized(gate){if(!resetting)tick()}}catch(failure: Exception){
                 if(loggedTickFailure!=failure.javaClass.simpleName){
                     loggedTickFailure=failure.javaClass.simpleName
                     android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+loggedTickFailure)
@@ -159,7 +163,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         authenticate(endpoint,username,password,remember,true)
     private suspend fun authenticate(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean,creating:Boolean):AccountSession = withContext(Dispatchers.IO) {
         synchronized(gate) {
-            check(!stopped&&accounts==null)
+            check(!stopped&&!resetting&&accounts==null)
+            resumeSuppressed=false
             val native=profile ?: NativeProfile(context,profileName).also {profile=it}
             val key=checkNotNull(ProfileBridge.publicKey(native.handle))
             val device=PeerIdentityFormat.peerId(key)
@@ -224,7 +229,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 FriendIdentityIndex(context,profileName,endpoint,saved.accountId).localHistoryBindings())
         } ?: return false
         val native=profile ?: measured("profile_open"){NativeProfile(context,profileName)}.also{profile=it}
-        val identity=PeerIdentityFormat.peerId(checkNotNull(ProfileBridge.publicKey(native.handle)))
+        val identity=measured("local_history_identity"){PeerIdentityFormat.peerId(checkNotNull(ProfileBridge.publicKey(native.handle)))}
         check(identity==cached.device)
         // Cached names/bindings project local Storage ONLY. Never install them
         // into ReliableBridge.friends or grant route/mailbox authorization.
@@ -232,12 +237,13 @@ class MessagingBackend(context: Context,private val profileName: String="default
         localEndpoint=endpoint
         mutable.value=MessagingSnapshot(cached.account,cached.username,identity,false,"Offline; local history available",
             localHistoryReady=true)
-        publish()
+        measured("local_history_projection"){publish()}
         android.util.Log.i("PeerChatWake","stage=local_history_projected contacts=${friends.size}")
         return true
     }
     private fun restoreRememberedLocked(endpoint:ServerEndpoint):Boolean {
         check(!stopped&&inUse)
+        if(resetting||resumeSuppressed)return false
         operations.check()
         accounts?.let{check(it.endpoint==endpoint);publish();return true}
         restoreLocalLocked(endpoint)
@@ -311,6 +317,26 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
+    }
+    override suspend fun resetNetworkSession() {
+        // Interrupt socket I/O BEFORE acquiring the coordinator lock held by
+        // startup. Otherwise recovery queues behind the operation it must stop.
+        resetting=true;resumeSuppressed=true
+        operations.configure(false,Long.MAX_VALUE)
+        try {withContext(Dispatchers.IO){synchronized(gate){
+            generation++;network++
+            rememberedRetryEndpoint=null;rememberedRetryAt=0L;rememberedRetryDelay=1000L
+            val old=accounts;accounts=null;index=null;pushRegisteredToken=null
+            old?.closeRpc()
+            try {clearAuthorization()}finally {
+                executions.values.forEach{it.close()};executions.clear()
+                friends=friends.map{it.copy(online=false)}
+                refreshAt=0L;archiveMetadataAt=0L;archiveServingUntil=0L;archiveLoadedGeneration=-1L
+                contactsDirty=false;loggedTickFailure=null
+                mutable.value=localOfflineSnapshot(mutable.value,"Network session reset; sign in to reconnect")
+            }
+            android.util.Log.i("PeerChatNetwork","event=session_reset result=disconnected generation=$generation")
+        }}}finally {resetting=false;operations.configure(inUse&&!stopped,operationDeadline)}
     }
     override suspend fun signOut():Unit = withContext(Dispatchers.IO) {
         synchronized(gate) {

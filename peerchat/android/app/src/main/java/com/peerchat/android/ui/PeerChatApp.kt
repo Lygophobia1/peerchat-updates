@@ -71,7 +71,8 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
                 verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
                 Text(state.startupStatus,Modifier.padding(top=16.dp).testTag("startup-status"))
-                TextButton({dispatch(UiAction.SignOut)}) {Text("Return to sign in")}
+                TextButton({dispatch(UiAction.ResetNetworkSession)},Modifier.testTag("startup-reset-network")) {Text("Reset Network Session / Return to sign in")}
+                TextButton({dispatch(UiAction.DisconnectChangeServer)}) {Text("Disconnect and change server")}
             }
         } else when (state.route) {
             Route.Welcome -> Welcome(state, dispatch)
@@ -160,6 +161,10 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             if(creating)Text("This device identity can belong to only one server account. Switching screens does not replace it.",style=MaterialTheme.typography.bodySmall)
             Text(if(state.demo) "UI preview: secure sign-in is not connected. This action never authenticates an account." else "Server TLS is verified; peer messages use authenticated end-to-end TLS.", style = MaterialTheme.typography.bodySmall)
             TextButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Server settings") }
+            if(!state.demo) {
+                TextButton({dispatch(UiAction.ResetNetworkSession)},Modifier.testTag("login-reset-network")) {Text("Reset Network Session")}
+                TextButton({dispatch(UiAction.DisconnectChangeServer)},Modifier.testTag("login-change-server")) {Text("Disconnect and change server")}
+            }
             if(state.demo) Box {
                 TextButton({ previewMenu = true }) { Text("Preview sign-in errors") }
                 DropdownMenu(previewMenu, { previewMenu = false }) {
@@ -186,6 +191,9 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Connect to your server", style = MaterialTheme.typography.titleLarge)
             Text("Changes apply to the next sign-in. Certificate verification cannot be disabled.")
+            if(state.loginBusy||state.connection!=ConnectionState.Offline) {
+                OutlinedButton({dispatch(UiAction.DisconnectChangeServer)},Modifier.testTag("disconnect-change-server")) {Text("Disconnect and change server")}
+            }
             val trust=serverTrustState(ServerEndpoint(host,port.toIntOrNull() ?: 0),
                 ServerEndpoint(state.server.host,state.server.port.toIntOrNull() ?: 0,state.server.certificatePin),
                 state.serverIdentityChanged?.let{ServerEndpoint(it.host,it.port.toIntOrNull() ?: 0,it.certificatePin)})

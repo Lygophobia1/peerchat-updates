@@ -18,6 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -72,6 +75,44 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var configurationReady=false
     private var configurationInvalid=false
     private var configurationSaving=false
+    private var startupJob:Job?=null
+    private var loginJob:Job?=null
+    private var startupWatchdog:Job?=null
+    private var recovering=false
+    private var automaticResumeSuppressed=false
+    private var uiGeneration=0L
+    private val retainedDiagnostics=ArrayDeque<String>()
+    private fun retainDiagnostic(category:String,reason:String) {
+        if(retainedDiagnostics.size>=16)retainedDiagnostics.removeFirst()
+        retainedDiagnostics.addLast("generation=$uiGeneration category=$category $reason")
+    }
+    private fun watchStartup() {
+        if(startupWatchdog?.isActive==true)return
+        startupWatchdog=viewModelScope.launch {
+            delay(30000)
+            if(mutable.value.loginBusy||mutable.value.startupStatus!=null||(current.authenticated&&!current.serverPresenceLive)) {
+                retainDiagnostic("Messaging startup","Authenticated presence did not become live within startup budget")
+                recoverNetwork(Route.Login,"Connection startup timed out. Sign in to retry; saved authorization is retained.")
+            }
+        }
+    }
+    private fun recoverNetwork(destination:Route,message:String="Network session reset. Your identity, keys, history and settings are unchanged.",after:(()->Unit)?=null) {
+        if(recovering)return
+        recovering=true;automaticResumeSuppressed=true;uiGeneration++
+        startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
+        mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline)
+        viewModelScope.launch {
+            var completed=false
+            try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
+                mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,notice=message)
+            }catch(failure:Exception){
+                if(failure is CancellationException)throw failure
+                retainDiagnostic("Network recovery","Teardown failed closed")
+                mutable.value=mutable.value.copy(notice="Network teardown could not complete. Retry Reset Network Session; no profile data was removed.")
+            }finally {recovering=false;project()}
+            if(completed)after?.invoke()
+        }
+    }
     // In-memory continuation only; never persists or logs a password.
     private var loginAfterTrust:(()->Unit)?=null
     private var foreground=true
@@ -109,6 +150,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->
             c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
         })}
+        if(retainedDiagnostics.isNotEmpty())mutable.value=mutable.value.copy(diagnostics=mutable.value.diagnostics+"\nRetained application diagnostics:\n"+retainedDiagnostics.joinToString("\n"))
         val accountKey=preferenceAccountKey() ?: return
         pendingOpen?.let{(owner,id)->if(current.authenticated){
             if(owner!=accountKey)pendingOpen=null
@@ -138,11 +180,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     init {
     // Collect during authentication, rather than only after restore completes.
     viewModelScope.launch {backend.state.collect {snapshot ->
+        if(recovering)return@collect
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
         current=snapshot
         if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
         mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress)
-        if(snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
+        if(!automaticResumeSuppressed&&snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
             mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
         }
         if(mutable.value.startupStatus!=null) {
@@ -153,13 +196,18 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 else -> mutable.value
             }
         }
+        if(snapshot.authenticated&&!snapshot.serverPresenceLive)watchStartup()
+        if(snapshot.serverPresenceLive)startupWatchdog?.cancel()
         project()
     }}
-    viewModelScope.launch {
+    startupJob=viewModelScope.launch {
+        watchStartup()
         try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true}
-        catch(_:Exception){mutable.value=mutable.value.copy(notificationsEnabled=false,notice="Local preferences could not be verified; notifications remain unavailable.")}
+        catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notificationsEnabled=false,notice="Local preferences could not be verified; notifications remain unavailable.")}
+        var settingsVerified=false
         try {
             val saved=withContext(configurationDispatcher){serverConfiguration.load()}
+            settingsVerified=true
             if(saved!=null){
                 mutable.value=mutable.value.copy(server=ServerUi(saved.host,saved.port.toString(),saved.certificatePin),loginBusy=true,startupStatus="Signing in…")
                 if(backend.restoreLocalHistory(saved))mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
@@ -167,6 +215,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     mutable.value=mutable.value.copy(rememberMe=true,startupStatus=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)null else "Connecting…",route=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)Route.Home else mutable.value.route)
                 } else mutable.value=mutable.value.copy(startupStatus=null)}
                 catch(failure:Exception){
+                    if(failure is CancellationException)throw failure
+                    retainDiagnostic(if(failure is ServerRejected)"Authentication" else "Server connection","Remembered startup failed; see current sign-in status")
                     val changed=ServerChannel.identityChange(failure)
                     if(changed!=null)mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(mutable.value.server,changed.observed,changed.expected),serverIdentityChanged=mutable.value.server)
                     mutable.value=mutable.value.copy(
@@ -175,10 +225,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     loginError=if(failure is ServerRejected)"Saved sign-in was rejected. Please sign in again." else "Unable to connect. Verify the server and trusted fingerprint.")}
                 finally{mutable.value=mutable.value.copy(loginBusy=false)}
             } else mutable.value=mutable.value.copy(startupStatus=null)
-        }catch(_:Exception){
-            configurationInvalid=true
-            mutable.value=mutable.value.copy(startupStatus=null,notice="Saved server configuration could not be verified. Re-enter trusted server settings before signing in.")
-        }finally{configurationReady=true;project()}
+        }catch(failure:Exception){
+            if(failure is CancellationException)throw failure
+            android.util.Log.w("PeerChatStartup","stage=local_startup_failed category="+failure.javaClass.simpleName)
+            configurationInvalid=!settingsVerified
+            retainDiagnostic(if(settingsVerified)"Messaging startup" else "Server configuration",if(settingsVerified)"Local startup failed before remembered authentication" else "Protected server configuration could not be verified")
+            mutable.value=mutable.value.copy(route=Route.Login,startupStatus=null,loginBusy=false,loginError=if(settingsVerified)"Local startup failed. Reset Network Session to retry; existing data is retained." else "Saved server configuration could not be verified. Verify trusted Server Settings before signing in.")
+        }finally{configurationReady=true;if(!recovering){mutable.value=mutable.value.copy(loginBusy=false);project()}}
     }}
     override fun login(username:String,password:String) {
         authenticate(username,password,mutable.value.route==Route.Register)
@@ -186,6 +239,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private fun authenticate(username:String,password:String,creating:Boolean) {
         val s=mutable.value
         if(s.loginBusy)return
+        if(recovering)return
         if(!configurationReady||configurationInvalid||configurationSaving){mutable.value=s.copy(loginError="Verify and save trusted server settings before signing in.");return}
         if(username.isBlank()||password.isEmpty()||username.length>64||password.length>1024) {
             mutable.value=s.copy(loginError="Enter your username and password.");return
@@ -199,14 +253,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         if(s.rememberMe&&!s.server.certificatePin.matches(Regex("[0-9a-f]{64}"))){
             mutable.value=s.copy(loginError="Remember Me requires a verified server fingerprint. Save trusted server settings first.");return
         }
-        mutable.value=s.copy(loginBusy=true,loginError=null)
-        viewModelScope.launch {
+        automaticResumeSuppressed=false
+        mutable.value=s.copy(loginBusy=true,loginError=null,notice=null)
+        watchStartup()
+        loginJob=viewModelScope.launch {
             try {
                 val endpoint=ServerEndpoint(s.server.host.trim(),s.server.port.toInt(),s.server.certificatePin.lowercase())
                 if(creating)backend.createAccountRemembered(endpoint,username,password,s.rememberMe)
                 else backend.signInRemembered(endpoint,username,password,s.rememberMe)
+                coroutineContext.ensureActive()
                 mutable.value=mutable.value.copy(loginBusy=false,loginError=null,route=Route.Home)
             } catch(failure:Exception) {
+                if(failure is CancellationException)throw failure
+                retainDiagnostic(if(failure is MessagingStartupFailure)"Messaging startup" else if(ServerChannel.identityChange(failure)!=null)"Server trust" else "Authentication","Sign-in attempt failed")
                 ServerChannel.identityChange(failure)?.let { changed ->
                     mutable.value=mutable.value.copy(serverTrust=ServerTrustUi(s.server,changed.observed,changed.expected),serverIdentityChanged=s.server)
                 }
@@ -217,12 +276,20 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     fun setForeground(active:Boolean) {
         foreground=active
         backend.setForeground(active)
-        if(active&&configurationReady&&!configurationInvalid&&!mutable.value.loginBusy){
+        if(active&&!automaticResumeSuppressed&&!recovering&&configurationReady&&!configurationInvalid&&!mutable.value.loginBusy){
             val s=mutable.value
             if(!validServerDraft(s.server))return
-            viewModelScope.launch {
-                try{if(!backend.restoreRemembered(ServerEndpoint(s.server.host,s.server.port.toInt(),s.server.certificatePin)))mutable.value=mutable.value.copy(route=Route.Welcome)}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Reconnect unavailable; retry when the server is reachable.")}
+            val epoch=uiGeneration
+            loginJob?.cancel()
+            loginJob=viewModelScope.launch {
+                try{val restored=backend.restoreRemembered(ServerEndpoint(s.server.host,s.server.port.toInt(),s.server.certificatePin))
+                    coroutineContext.ensureActive()
+                    if(epoch==uiGeneration&&!restored&&!current.localHistoryReady)mutable.value=mutable.value.copy(route=Route.Welcome)
+                }catch(failure:Exception){
+                    if(failure is CancellationException)throw failure
+                    retainDiagnostic("Server connection","Foreground resume failed")
+                    if(epoch==uiGeneration)mutable.value=mutable.value.copy(notice="Reconnect unavailable; retry when the server is reachable.")
+                }
             }
         }
     }
@@ -253,6 +320,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(action is UiAction.ArchiveConsent&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh and confirm again.");return}
                 if(action is UiAction.HistorySync&&(displayed==null||displayed!=action.context)){mutable.value=mutable.value.copy(notice="Archive account context changed. Refresh before changing history policy.");return}
                 mutable.value=mutable.value.copy(archiveBusy=true)
+                val epoch=uiGeneration
                 viewModelScope.launch {
                     try{
                         val result=when(action){
@@ -261,9 +329,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                             is UiAction.ArchiveSynchronize->backend.synchronizeArchive(checkNotNull(displayed),action.source,action.pause)
                             else->backend.archiveDevices()
                         }
-                        if(current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")
-                    }catch(_:Exception){mutable.value=mutable.value.copy(archiveEnrollment=null,notice="Archive operation failed closed. Refresh to retry pending public grants; login alone never grants history access.")}
-                    finally{mutable.value=mutable.value.copy(archiveBusy=false)}
+                        if(epoch==uiGeneration&&current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")
+                    }catch(failure:Exception){
+                        if(failure is CancellationException)throw failure
+                        retainDiagnostic("Archive","Archive operation failed closed")
+                        if(epoch==uiGeneration)mutable.value=mutable.value.copy(archiveEnrollment=null,notice="Archive operation failed closed. Refresh to retry pending public grants; login alone never grants history access.")
+                    }finally{if(epoch==uiGeneration)mutable.value=mutable.value.copy(archiveBusy=false)}
                 }
             }
             is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()}
@@ -313,6 +384,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             UiAction.SignOut -> viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome,startupStatus=null,rememberMe=false)}
                 catch(_:Exception){mutable.value=mutable.value.copy(route=Route.Login,startupStatus=null,notice="Sign-out revocation is pending; saved sign-in will not be reused.")}}
+            UiAction.ResetNetworkSession -> recoverNetwork(Route.Login)
+            UiAction.DisconnectChangeServer -> recoverNetwork(Route.Server)
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
             is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen,
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,
@@ -328,7 +401,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     dispatch(UiAction.SaveServer(prompt.server.copy(certificatePin=prompt.observed)))
                 }
             }
-            is UiAction.SaveServer -> if(current.authenticated||mutable.value.loginBusy) mutable.value=mutable.value.copy(notice="Sign out before changing server.")
+            is UiAction.SaveServer -> if(current.authenticated||mutable.value.loginBusy) recoverNetwork(Route.Server,after={dispatch(action)})
                 else if(configurationReady&&!configurationSaving&&validServerDraft(action.server)) {
                     configurationSaving=true
                     viewModelScope.launch {

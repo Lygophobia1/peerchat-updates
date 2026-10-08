@@ -12,6 +12,15 @@ import org.junit.Test
 /** UI-only: does not create native handles, identities, aliases or secure records. */
 abstract class UiFlowChecks {
     @get:Rule val compose = createComposeRule()
+    @Test fun stalledSignInKeepsBothRecoveryActionsEnabled() {
+        var action:UiAction?=null
+        compose.setContent {PeerChatTheme(true){PeerChatShell(PeerChatUiState(demo=false,route=Route.Login,loginBusy=true,startupStatus=null),{action=it})}}
+        compose.onNodeWithTag("sign-in-submit").assertIsNotEnabled()
+        compose.onNodeWithTag("login-reset-network").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle{assertEquals(UiAction.ResetNetworkSession,action)}
+        compose.onNodeWithTag("login-change-server").performScrollTo().assertIsEnabled().performClick()
+        compose.runOnIdle{assertEquals(UiAction.DisconnectChangeServer,action)}
+    }
     @Test fun serverSettingsRefreshesSavedPinAndDistinguishesCertificateChange() {
         var state by mutableStateOf(PeerChatUiState(route=Route.Server,
             server=ServerUi("server.example","7443")))

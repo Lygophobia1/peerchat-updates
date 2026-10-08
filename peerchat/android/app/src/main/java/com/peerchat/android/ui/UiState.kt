@@ -95,6 +95,8 @@ class UnconnectedAccountAccess : AccountAccess {
 sealed interface UiAction {
     data object Explore : UiAction
     data object SignOut : UiAction
+    data object ResetNetworkSession : UiAction
+    data object DisconnectChangeServer : UiAction
     data class RequestFriend(val username:String):UiAction
     data class RespondFriend(val accountId:Long,val accept:Boolean):UiAction
     data class Navigate(val route: Route) : UiAction
@@ -141,6 +143,8 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         state.conversations.map { if (it.id == state.selectedId) transform(it) else it })
     return when (action) {
         UiAction.Explore -> state.copy(route = Route.Home, notice = null)
+        UiAction.ResetNetworkSession -> state.copy(route=Route.Login,startupStatus=null,loginBusy=false,connection=ConnectionState.Offline)
+        UiAction.DisconnectChangeServer -> state.copy(route=Route.Server,startupStatus=null,loginBusy=false,connection=ConnectionState.Offline)
         UiAction.SignOut -> state.copy(account=null,route=Route.Welcome)
         is UiAction.RequestFriend,is UiAction.RespondFriend -> state.copy(notice="Friend management is not connected in demo mode.")
         is UiAction.Navigate -> state.copy(route = action.route, notice = null, loginError = null,

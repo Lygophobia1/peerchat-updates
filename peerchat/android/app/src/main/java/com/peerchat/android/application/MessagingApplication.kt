@@ -25,6 +25,8 @@ interface MessagingApplication:AutoCloseable {
     suspend fun requestFriend(username:String)
     suspend fun respondFriend(accountId:Long,accept:Boolean)
     suspend fun signOut()
+    /** Recovery only: retain protected credentials, Profile, keys and history. */
+    suspend fun resetNetworkSession() { error("Network recovery unavailable") }
     suspend fun setMailboxStorageAllowed(allowed:Boolean){check(!allowed){"Mailbox configuration unavailable"}}
     suspend fun archiveDevices():ArchiveEnrollmentSnapshot = error("Archive enrollment unavailable")
     suspend fun synchronizeArchive(snapshot:ArchiveEnrollmentSnapshot,source:String?,pause:Boolean):ArchiveEnrollmentSnapshot = error("Archive synchronization unavailable")

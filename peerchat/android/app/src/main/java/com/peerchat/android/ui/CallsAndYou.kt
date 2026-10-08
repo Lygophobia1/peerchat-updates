@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import android.app.Activity
@@ -101,6 +102,10 @@ import com.peerchat.android.platform.NotificationPreview
         }
         Text("Appearance choice is session-local in this preview.", style = MaterialTheme.typography.bodySmall)
         OutlinedButton({ dispatch(UiAction.Navigate(Route.Server)) }) { Text("Advanced / server & trust") }
+        if(!state.demo) {
+            OutlinedButton({dispatch(UiAction.ResetNetworkSession)},Modifier.testTag("reset-network-session")) {Text("Reset Network Session")}
+            Text("Disconnects PeerChat from the server and peers and clears temporary connection state. Your account, messages, identity, keys and settings are not deleted.",style=MaterialTheme.typography.bodySmall)
+        }
         OutlinedButton({ dispatch(UiAction.Navigate(Route.Diagnostics)) }) { Text("Application diagnostics") }
         Text("PeerChat · ${com.peerchat.android.BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
         state.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall) }

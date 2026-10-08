@@ -42,7 +42,11 @@ class NativePresenterTest {
         var resumeFailure:Exception?=null
         var resumeDelay=0L
         var localHistory=false
+        var localFailure=false
+        var resets=0
+        var signOuts=0
         override suspend fun restoreLocalHistory(endpoint:ServerEndpoint):Boolean {
+            if(localFailure)error("test-only local history failure")
             if(!localHistory)return false
             state.value=MessagingSnapshot(19,"Jonah","a".repeat(64),false,"Offline; local history available",listOf(
                 ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),false),ConnectionSnapshot(),listOf(
@@ -70,7 +74,8 @@ class NativePresenterTest {
         override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
         override suspend fun requestFriend(username:String) {}
         override suspend fun respondFriend(accountId:Long,accept:Boolean) {}
-        override suspend fun signOut(){state.value=MessagingSnapshot()}
+        override suspend fun signOut(){signOuts++;state.value=MessagingSnapshot()}
+        override suspend fun resetNetworkSession(){resets++;state.value=state.value.copy(authenticated=false,serverPresenceLive=false,status="Network session reset")}
         override fun close(){closed=true}
     }
     @Before fun start(){Dispatchers.setMain(dispatcher)}
@@ -147,7 +152,7 @@ class NativePresenterTest {
         val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
         val commands=Commands().apply {resume=true}
         val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("remember",p)
-        dispatcher.scheduler.advanceUntilIdle()
+        dispatcher.scheduler.runCurrent()
         assertEquals("Connecting…",p.state.value.startupStatus);assertTrue(p.state.value.rememberMe)
         assertNotEquals(Route.Home,p.state.value.route);assertEquals(0,commands.signIns)
         assertEquals(ConnectionState.Reconnecting,p.state.value.connection)
@@ -174,7 +179,7 @@ class NativePresenterTest {
         val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
         val commands=Commands().apply{resumeFailure=java.net.ConnectException()}
         val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("network",p)
-        dispatcher.scheduler.advanceUntilIdle()
+        dispatcher.scheduler.runCurrent()
         assertEquals("Reconnecting…",p.state.value.startupStatus)
         assertEquals(ConnectionState.Offline,p.state.value.connection);assertEquals(0,commands.signIns)
         p.dispatch(UiAction.SignOut);dispatcher.scheduler.advanceUntilIdle()
@@ -185,6 +190,53 @@ class NativePresenterTest {
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443","a".repeat(64))));dispatcher.scheduler.advanceUntilIdle()
         p.dispatch(UiAction.RememberMe(true));p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
         assertTrue(commands.remembered);assertEquals(1,commands.signIns)
+    }
+    @Test fun localHistoryFailureReleasesSignInAndDoesNotInvalidateTrustedSettings() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val commands=Commands().apply{localFailure=true;reject=false}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("local-failure",p)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(p.state.value.loginBusy);assertNull(p.state.value.startupStatus)
+        assertEquals(Route.Login,p.state.value.route);assertNotNull(p.state.value.loginError)
+        assertTrue(p.state.value.diagnostics.contains("Messaging startup"))
+        p.dispatch(UiAction.DisconnectChangeServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Server,p.state.value.route);assertEquals(1,commands.resets)
+        assertEquals("a".repeat(64),settings.saved!!.certificatePin)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1,commands.signIns);assertEquals(ConnectionState.Online,p.state.value.connection)
+    }
+    @Test fun resetCancelsOldRememberedStartupWithoutRevocationOrHistoryLoss() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val commands=Commands().apply{localHistory=true;resume=true;resumeDelay=60000}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("reset-startup",p)
+        dispatcher.scheduler.runCurrent();assertTrue(p.state.value.loginBusy)
+        val history=p.state.value.conversations
+        p.dispatch(UiAction.ResetNetworkSession);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(1,commands.resets);assertEquals(0,commands.signOuts)
+        assertFalse(p.state.value.loginBusy);assertEquals(Route.Login,p.state.value.route)
+        assertEquals(history,p.state.value.conversations);assertEquals("a".repeat(64),p.state.value.server.certificatePin)
+        p.setForeground(true);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Login,p.state.value.route);assertFalse(commands.state.value.authenticated)
+    }
+    @Test fun authenticationWithoutLivePresenceTimesOutAndRetainsFailureEvidence() {
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
+        val commands=Commands().apply{resume=true}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences());store.put("presence-timeout",p)
+        dispatcher.scheduler.runCurrent();assertEquals(ConnectionState.Reconnecting,p.state.value.connection)
+        dispatcher.scheduler.advanceTimeBy(30001);dispatcher.scheduler.runCurrent()
+        assertEquals(1,commands.resets);assertEquals(0,commands.signOuts)
+        assertEquals(Route.Login,p.state.value.route);assertEquals(ConnectionState.Offline,p.state.value.connection)
+        assertTrue(p.state.value.notice!!.contains("timed out"))
+        assertTrue(p.state.value.diagnostics.contains("startup budget"))
+    }
+    @Test fun disconnectDuringAuthenticatedSessionAllowsVerifiedSettingsSave() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.DisconnectChangeServer);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Server,p.state.value.route);assertEquals(0,commands.signOuts)
+        p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443","a".repeat(64))))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertNull(p.state.value.serverTrust);assertTrue(p.state.value.notice!!.contains("saved securely"))
     }
     @Test fun rememberDoesNotPermitAnUnpinnedServerOrSendThePassword() {
         val commands=Commands().apply{reject=false};val p=presenter(commands)
