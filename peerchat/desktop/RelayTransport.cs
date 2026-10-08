@@ -16,7 +16,7 @@ public sealed class RelayTransport : IDisposable {
     const int MaximumPayload=64*1024;
     readonly DiscoveryClient discovery;readonly CoreAdapter core;readonly ulong attempt;readonly string localPeer,targetPeer,groupId;readonly long targetAccount,rosterGeneration;readonly Action<ulong> completed;
     readonly JavaScriptSerializer json=new JavaScriptSerializer{MaxJsonLength=16*1024};
-    Thread worker;TcpClient tcp;volatile bool stopping;
+    Thread worker;TcpClient tcp;volatile bool stopping;volatile string writerCloseReason;
     readonly ArchiveRelayScope archive;
     public RelayTransport(DiscoveryClient discovery,CoreAdapter core,ulong attempt,string localPeer,long targetAccount,string targetPeer,Action<ulong> completed,string groupId=null,long rosterGeneration=0,ArchiveRelayScope archive=null){this.discovery=discovery;this.core=core;this.attempt=attempt;this.localPeer=localPeer;this.targetAccount=targetAccount;this.targetPeer=targetPeer;this.completed=completed;this.groupId=groupId;this.rosterGeneration=rosterGeneration;this.archive=archive;}
     public void Start(){worker=new Thread(Run){IsBackground=true,Name="PeerChat opaque relay"};worker.Start();}
@@ -41,9 +41,9 @@ public sealed class RelayTransport : IDisposable {
         string sessionId=(string)sessionValue;bool incoming=Convert.ToBoolean(incomingValue);if(!core.RelayReady(attempt,incoming))throw new InvalidOperationException("Relay attempt is no longer current.");
         writer=new Thread(()=>WriteLoop(tls,sessionId)){IsBackground=true,Name="PeerChat relay writer"};writer.Start();byte[] session=Encoding.ASCII.GetBytes(sessionId);
         while(!stopping){byte[] frame=DiscoveryClient.ReadFrame(tls,session.Length+MaximumPayload);if(frame.Length<=session.Length)throw new InvalidDataException("Relay frame was empty.");for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])throw new InvalidDataException("Relay session binding changed.");int count=frame.Length-session.Length;var payload=new byte[count];Buffer.BlockCopy(frame,session.Length,payload,0,count);if(!core.RelayReceive(attempt,payload,count))throw new InvalidOperationException("Relay attempt was superseded.");}
-    }catch(Exception ex){failure=stopping?"Relay stopped":ex.GetType().Name+": "+ex.Message;}
+    }catch(Exception ex){failure=stopping?"Relay stopped":writerCloseReason??(ex.GetType().Name+": "+ex.Message);}
     finally{stopping=true;try{if(tcp!=null)tcp.Close();}catch{}if(writer!=null&&writer!=Thread.CurrentThread)writer.Join(1500);try{if(tls!=null)tls.Dispose();}catch{}core.RelayClosed(attempt,failure);if(completed!=null)completed(attempt);}}
-    void WriteLoop(SslStream tls,string sessionId){byte[] output=new byte[MaximumPayload];byte[] session=Encoding.ASCII.GetBytes(sessionId);try{while(!stopping){int count=core.TakeRelayOutput(attempt,output,1000);if(count<0)return;if(count==0)continue;var frame=new byte[session.Length+count];Buffer.BlockCopy(session,0,frame,0,session.Length);Buffer.BlockCopy(output,0,frame,session.Length,count);DiscoveryClient.WriteFrame(tls,frame);}}catch{try{if(tcp!=null)tcp.Close();}catch{}}}
+    void WriteLoop(SslStream tls,string sessionId){byte[] output=new byte[MaximumPayload];byte[] session=Encoding.ASCII.GetBytes(sessionId);try{while(!stopping){int count=core.TakeRelayOutput(attempt,output,1000);if(count<0){writerCloseReason="Native relay owner retired attempt";return;}if(count==0)continue;var frame=new byte[session.Length+count];Buffer.BlockCopy(session,0,frame,0,session.Length);Buffer.BlockCopy(output,0,frame,session.Length,count);DiscoveryClient.WriteFrame(tls,frame);}}catch(Exception ex){writerCloseReason="Relay writer failed: "+ex.GetType().Name;}finally{try{if(tcp!=null)tcp.Close();}catch{}}}
     public void Dispose(){stopping=true;try{if(tcp!=null)tcp.Close();}catch{}if(worker!=null&&worker!=Thread.CurrentThread)worker.Join(2000);}
 }
 }
