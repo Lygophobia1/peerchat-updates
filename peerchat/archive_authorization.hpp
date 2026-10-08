@@ -90,6 +90,8 @@ class Authorization {
     }
     void usable()const{require(storage_.archiveAuthorizationState()==saved_);} // Fail closed after another owner revokes/changes policy.
 public:
+    std::uint64_t account()const noexcept{return account_;}
+    const std::string& localDevice()const noexcept{return local_.peerId;}
     Authorization(Storage& storage,const Profile& local,std::uint64_t account,
         std::function<bool(std::uint64_t,const std::string&)> current,
         std::function<std::optional<CurrentGrant>(std::uint64_t,const std::string&,const std::string&)> grants)

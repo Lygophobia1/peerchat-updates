@@ -1,5 +1,6 @@
 #include "../storage.cpp"
 #include "../archive_authorization.hpp"
+#include "../archive_session.hpp"
 #include "../platform/identity_provider.hpp"
 #include <iostream>
 #include <set>
@@ -62,6 +63,12 @@ int main(int argc,char** argv){try{
     reader.approveAuthority(pa.publicKey,true);check(reader.accept(serve));check(reader.accept(read));
     check(!reader.accept(ar::decodeGrant(ar::encodeGrant(read)))); // Idempotent.
     check(reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    const auto admitted=ar::sessionAuthorization(reader,pa.peerId,pa.peerId,pb.peerId);
+    check(ar::currentSessionAuthorization(reader,admitted,&pa.publicKey));
+    check(!ar::currentSessionAuthorization(reader,admitted,&pc.publicKey));
+    rejects([&]{ar::sessionAuthorization(reader,pa.peerId,pa.peerId,pc.peerId);});
+    auto mismatched=admitted;mismatched.archive.account=9;
+    check(!ar::currentSessionAuthorization(reader,mismatched,&pa.publicKey));
     check(!reader.permits(pa.peerId,pc.peerId,ar::ReadHistory));
     auto modified=read;modified.account=9;rejects([&]{reader.accept(modified);});
     modified=read;modified.device=pc.peerId;rejects([&]{reader.accept(modified);});
@@ -73,6 +80,7 @@ int main(int argc,char** argv){try{
     auto revoked=source.issue(pb.publicKey,0,true,110,true);check(revoked.generation==2);
     fixture("revoke.bin",ar::encodeGrant(revoked));
     publish(revoked);
+    check(!ar::currentSessionAuthorization(reader,admitted,&pa.publicKey));
     check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.accept(revoked);check(!reader.permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.accept(read);});

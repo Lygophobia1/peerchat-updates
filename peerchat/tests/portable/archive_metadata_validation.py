@@ -52,6 +52,7 @@ reader = descriptor_device("reader-descriptor")
 other = descriptor_device("other-descriptor")
 assert descriptor_device("issuer-descriptor") == owner
 assert not (data / "server.pid").exists(), "isolated instance must be stopped for seeding"
+resuming = False
 with sqlite3.connect(db_path) as db:
     existing = db.execute("SELECT id,username FROM accounts WHERE id IN (8,9) ORDER BY id").fetchall()
     if not existing:
@@ -59,12 +60,14 @@ with sqlite3.connect(db_path) as db:
         for device in (owner, reader, other):
             db.execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES(8,?,1)", (device,))
     else:
-        # Retry only a fixture that failed before granting anything. Never
-        # reset/delete a populated archive DB, even inside this test harness.
+        # Resume only the exact pre-revocation fixture. Never reset/delete a
+        # populated archive DB, even inside this test harness.
         assert existing == [(8, 'archive-rpc-test'), (9, 'archive-other')]
         assert set(row[0] for row in db.execute("SELECT public_identity FROM devices WHERE account_id=8")) == {owner, reader, other}
         if db.execute("SELECT count(*) FROM sqlite_master WHERE name='archive_device_grants'").fetchone()[0]:
-            assert db.execute("SELECT count(*) FROM archive_device_grants").fetchone()[0] == 0
+            rows = db.execute("SELECT proof FROM archive_device_grants ORDER BY device").fetchall()
+            assert not rows or sorted(row[0] for row in rows) == sorted((proof("serve"), proof("read")))
+            resuming = bool(rows)
     db.execute("INSERT INTO sessions(token_hash,account_id,expires_utc) VALUES(?,8,?)", (token_hash, int(time.time()) + 600))
 
 pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert((config_dir / "server.crt").read_text())).hexdigest()
@@ -113,12 +116,91 @@ def state():
     assert result.get("ok")
     return result
 
+def open_tls():
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls = context.wrap_socket(socket.create_connection(("127.0.0.1", args.port), timeout=5), server_hostname="localhost")
+    assert hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest() == pin
+    return tls
+
+def write_frame(tls, wire):
+    assert len(wire) <= 100000
+    tls.sendall(len(wire).to_bytes(4, "big") + wire)
+
+def read_frame(tls):
+    size = int.from_bytes(exact(tls, 4), "big")
+    assert 0 < size <= 100000
+    return exact(tls, size)
+
+def grant_scope(name):
+    wire = proof(name)
+    payload = wire[12:12+int.from_bytes(wire[4:12], "little")]
+    offset = 4
+    def number():
+        nonlocal offset
+        value = int.from_bytes(payload[offset:offset+8], "little")
+        offset += 8
+        return value
+    def field():
+        nonlocal offset
+        size = number()
+        value = payload[offset:offset+size]
+        offset += size
+        return value
+    assert field() == b"PeerChat/ArchiveAuthorization/v1" and number() == 1
+    assert number() == 8
+    assert field().decode() == owner
+    field(); field(); number()
+    generation = number()
+    number()
+    issuance = field().decode()
+    return generation, issuance
+
+def relay_request(device, target, read_name="read"):
+    source_generation, source_id = grant_scope("serve")
+    reader_generation, reader_id = grant_scope(read_name)
+    return dict(version=1, type="relay_attach", sessionToken=token, publicIdentity=device,
+        targetAccountId="8", targetPublicIdentity=target, purpose="archive_history",
+        archiveIssuer=owner, archiveSource=owner, archiveReader=reader,
+        archiveSourceGeneration=str(source_generation), archiveReaderGeneration=str(reader_generation),
+        archiveSourceGrantId=source_id, archiveReaderGrantId=reader_id)
+
+def reject_relay(request):
+    with open_tls() as tls:
+        write_frame(tls, json.dumps(request).encode())
+        assert not json.loads(read_frame(tls)).get("ok")
+
+def pair_relay(read_name="read"):
+    left, right = open_tls(), open_tls()
+    try:
+        write_frame(left, json.dumps(relay_request(owner, reader, read_name)).encode())
+        write_frame(right, json.dumps(relay_request(reader, owner, read_name)).encode())
+        l, r = json.loads(read_frame(left)), json.loads(read_frame(right))
+        assert l.get("ok") and r.get("ok"), "relay admission failed: " + str(l.get("error")) + " / " + str(r.get("error"))
+        assert l["purpose"] == r["purpose"] == "archive_history"
+        assert l["sessionId"] == r["sessionId"] and l["incoming"] != r["incoming"]
+        assert l["archiveReaderGrantId"] == r["archiveReaderGrantId"] == grant_scope(read_name)[1]
+        # Public fixture bytes test opaque routing only. Real mutually
+        # authenticated peer TLS is covered by archive_reliable_endpoint_test.
+        wire = l["sessionId"].encode() + b"opaque-public-relay-fixture"
+        write_frame(left, wire)
+        assert read_frame(right) == wire
+        write_frame(right, wire)
+        assert read_frame(left) == wire
+        return left, right
+    except BaseException:
+        left.close(); right.close()
+        raise
+
 running = False
 try:
     lifecycle("start"); running = True
     assert not rpc("archive_authorization_state", auth=False).get("ok")
     assert not rpc("archive_authorization_state", device="f"*64).get("ok")
-    assert not rpc("archive_grant_register", name="read").get("ok")
+    if not resuming:
+        assert not rpc("archive_grant_register", name="read").get("ok")
     accepted("archive_descriptor_register", "issuer-descriptor")
     accepted("archive_descriptor_register", "reader-descriptor", reader)
     accepted("archive_descriptor_register", "other-descriptor", other)
@@ -130,12 +212,31 @@ try:
     before = state()
     assert len(before["devices"]) == 3 and len(before["grants"]) == 2
     assert all(row["currentlyEligible"] for row in before["grants"])
+    invalid = relay_request(owner, reader); invalid["purpose"] = "friend"
+    reject_relay(invalid)  # Account membership is not a friend/DM route.
+    reject_relay(relay_request(other, reader))
+    invalid = relay_request(owner, reader); invalid["archiveReaderGrantId"] = "0"*32
+    reject_relay(invalid)
+    invalid = relay_request(owner, reader); invalid["targetAccountId"] = "9"
+    reject_relay(invalid)
+    left, right = pair_relay()
     accepted("archive_grant_register", "revoke")
+    for tls in (left, right):
+        try:
+            read_frame(tls)
+            raise AssertionError("revoked archive relay remained open")
+        except (EOFError, ssl.SSLError, ConnectionResetError):
+            pass
+        finally:
+            tls.close()
+    reject_relay(relay_request(owner, reader))
     assert not rpc("archive_grant_register", name="read").get("ok")
     revoked = state()
     target = next(row for row in revoked["grants"] if row["grantId"] == owner+":"+reader)
     assert not target["currentlyEligible"]
     accepted("archive_grant_register", "reenroll")
+    left, right = pair_relay("reenroll")
+    left.close(); right.close()
     lifecycle("stop"); running = False
     lifecycle("start"); running = True
     restarted = state()
@@ -153,7 +254,7 @@ try:
     accepted("archive_grant_register", "reenroll-after-removal")
     target = next(row for row in state()["grants"] if row["grantId"] == owner+":"+reader)
     assert target["currentlyEligible"]
-    print("PASS: Linux ARM32 real TLS/archive RPC; native signatures, account/device binding, same-account non-grant, generation conflicts, revocation/re-enrollment, restart and device-removal fail-closed.")
+    print("PASS: Linux ARM32 real TLS/archive RPC and opaque relay; exact signed grant-pair admission, no friend/DM substitution, bidirectional pairing, active revocation closure, re-enrollment, restart and device-removal fail-closed.")
 finally:
     if running:
         lifecycle("stop")

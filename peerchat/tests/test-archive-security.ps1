@@ -1,4 +1,4 @@
-param([switch]$Provenance,[switch]$ServerMetadata)
+param([switch]$Provenance,[switch]$ServerMetadata,[switch]$SessionScope,[switch]$PeerTls)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $out=Join-Path $root ('build\tests\archive-security-'+[Guid]::NewGuid().ToString('N'))
@@ -6,6 +6,22 @@ New-Item -ItemType Directory -Path $out|Out-Null
 $compiler=if(Get-Command g++ -ErrorAction SilentlyContinue){(Get-Command g++).Source}else{'C:\TDM-GCC-64\bin\g++.exe'}
 Push-Location $root
 try {
+    if($PeerTls){
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_reliable_endpoint_test.cpp tls.cpp storage.cpp group.cpp -o "$out\archive-peer-tls-test.exe" -lbcrypt -lcrypt32 -lncrypt -lsecur32
+        if($LASTEXITCODE -ne 0){throw 'Archive peer TLS compilation failed'}
+        & "$out\archive-peer-tls-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Archive peer TLS regression failed'}
+    }
+    if($SessionScope){
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_session_scope_test.cpp -o "$out\archive-session-scope-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Archive session scope compilation failed'}
+        & "$out\archive-session-scope-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Archive session scope regression failed'}
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/group_control_scope_test.cpp -o "$out\group-session-scope-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Existing group scope compilation failed'}
+        & "$out\group-session-scope-test.exe"
+        if($LASTEXITCODE -ne 0){throw 'Existing group scope regression failed'}
+    }
     $test=if($Provenance){'tests/archive_provenance_test.cpp'}else{'tests/archive_authorization_test.cpp'}
     & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. $test group.cpp -o "$out\archive-security-test.exe" -lbcrypt -lcrypt32 -lncrypt
     if($LASTEXITCODE -ne 0){throw 'Archive security test compilation failed'}

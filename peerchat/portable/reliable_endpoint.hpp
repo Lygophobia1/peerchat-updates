@@ -2,6 +2,7 @@
 #include "../shared_peer_runtime.hpp"
 #include "../session_transport_manager.hpp"
 #include "../direct_transport_adapter.hpp"
+#include "../archive_session.hpp"
 #include <deque>
 
 namespace peerchat::portable {
@@ -11,6 +12,10 @@ class ReliableEndpoint {
 public:
     enum class EventKind { TrustRequired, Ready, Message, Delivered, Closed };
     struct Event { EventKind kind;std::string peer,id;std::optional<StoredMessage> message; };
+    struct ArchiveAdmission {
+        archive::Authorization* policy=nullptr; // Existing profile owner outlives endpoint.
+        session::ReliableAuthorization scope;
+    };
 private:
     const Profile& local_;
     Storage& store_;
@@ -25,6 +30,12 @@ private:
     Blob output_;
     std::deque<Event> events_;
     bool closed_=false;
+    std::optional<ArchiveAdmission> archive_;
+    bool archiveBound_=false,archiveBindingSent_=false;
+    bool authorized()const{
+        return archive_?archive_->policy&&archive::currentSessionAuthorization(*archive_->policy,archive_->scope):
+            friends_.contains(runtime_.expected);
+    }
     std::vector<session::TransportInstanceId> retired_;
     static constexpr size_t MaxOutput=2*1024*1024;
     std::map<std::string,Contact> contacts()const{
@@ -51,15 +62,25 @@ private:
         if(!runtime_.approved||!runtime_.remoteApproved||sessions_.active(id_))return;
         auto result=sessions_.arbitrateWinner(epoch_,id_,now_);
         protocol::check(result.activated());
-        protocol::check(deliveries_.authorizeTransport(id_,runtime_.peerId));
+        if(!archive_)protocol::check(deliveries_.authorizeTransport(id_,runtime_.peerId));
         retired_.insert(retired_.end(),result.retire.begin(),result.retire.end());
+        if(archive_){
+            protocol::check(authorized());
+            if(!archiveBindingSent_){archiveBindingSent_=true;auto bind=archive::sessionBinding(archive_->scope);packet(bind);}
+            return;
+        }
         event({EventKind::Ready,runtime_.peerId,{},std::nullopt});pump();
     }
     void approve(){
-        protocol::check(!closed_&&runtime_.hello&&!runtime_.identityMismatch&&friends_.contains(runtime_.peerId));
-        auto known=contacts();auto found=known.find(runtime_.peerId);
-        protocol::check(found==known.end()||found->second.publicKey.empty()||found->second.publicKey==tls_->remotePublicKey());
-        reliable::persistAuthenticatedContact(store_,runtime_,found==known.end()?nullptr:&found->second,tls_->remotePublicKey());
+        protocol::check(!closed_&&runtime_.hello&&!runtime_.identityMismatch&&authorized());
+        if(archive_){
+            auto key=tls_->remotePublicKey();
+            protocol::check(archive::currentSessionAuthorization(*archive_->policy,archive_->scope,&key));
+        }else{
+            auto known=contacts();auto found=known.find(runtime_.peerId);
+            protocol::check(found==known.end()||found->second.publicKey.empty()||found->second.publicKey==tls_->remotePublicKey());
+            reliable::persistAuthenticatedContact(store_,runtime_,found==known.end()?nullptr:&found->second,tls_->remotePublicKey());
+        }
         runtime_.locallyTrusted();
         sessions_.observeTransport(observation_.locallyTrusted(),now_);
         protocol::check(sessions_.markLocallyTrusted(epoch_,id_));
@@ -70,8 +91,11 @@ private:
         protocol::Reader reader(bytes);
         auto kind=runtime_.enter(reader,true,tls_->remotePublicKey(),local_.peerId);
         if(kind==reliable::SharedPeerRuntime::FrameKind::Hello){
-            protocol::check(!runtime_.identityMismatch&&friends_.contains(runtime_.peerId));
+            protocol::check(!runtime_.identityMismatch&&authorized());
             protocol::check(sessions_.observeTransport(observation_.identityPresented(runtime_.peerId,runtime_.remoteCapabilities),now_));
+            if(archive_){
+                protocol::check((runtime_.remoteCapabilities&protocol::CapabilityArchiveControl)!=0);approve();return;
+            }
             auto known=contacts();auto found=known.find(runtime_.peerId);
             if(runtime_.verifiedContactMatches(found==known.end()?nullptr:&found->second,tls_->remotePublicKey()))approve();
             else event({EventKind::TrustRequired,runtime_.peerId,{},std::nullopt});
@@ -81,6 +105,11 @@ private:
             protocol::check(sessions_.markRemoteAccepted(epoch_,id_));activate();return;
         }
         runtime_.requireOnline(sessions_.active(id_));
+        if(archive_){
+            protocol::check(authorized()&&!archiveBound_);
+            archive::verifySessionBinding(reader,archive_->scope);
+            archiveBound_=true;event({EventKind::Ready,runtime_.peerId,{},std::nullopt});return;
+        }
         protocol::check(friends_.contains(runtime_.peerId));
         if(reader.type()==protocol::Text){
             auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_);
@@ -98,29 +127,39 @@ public:
     ReliableEndpoint(const Profile& local,Storage& store,session::SessionTransportManager& sessions,
             delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
             session::SessionEpoch epoch,session::TransportInstanceId id,std::unique_ptr<TlsSession> tls,
-            const std::string& expected,session::RouteObservation route,std::uint64_t now)
+            const std::string& expected,session::RouteObservation route,std::uint64_t now,
+            std::optional<ArchiveAdmission> archiveAdmission={})
         :local_(local),store_(store),sessions_(sessions),deliveries_(deliveries),friends_(friends),
-         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),now_(now),began_(now){
-        protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&friends.contains(expected)&&
-            route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
+         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
+         archive_(std::move(archiveAdmission)),now_(now),began_(now){
         runtime_.expected=expected;
-        protocol::check(sessions_.registerAttempt(epoch,id,expected,route,now));
+        protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&authorized()&&
+            route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
+        if(archive_){
+            protocol::check(archive_->policy->localDevice()==local.peerId&&archive_->scope.expectedRemoteDeviceId==expected);
+            protocol::check(sessions_.registerArchiveControlAttempt(epoch,id,archive_->scope,route,now));
+        }else protocol::check(sessions_.registerAttempt(epoch,id,expected,route,now));
     }
     ~ReliableEndpoint(){close(false);}
-    bool ready()const{return !closed_&&sessions_.active(id_);}
+    bool ready()const{return !closed_&&sessions_.active(id_)&&(!archive_||archiveBound_)&&authorized();}
     bool closed()const noexcept{return closed_;}
     bool authenticationExpired(std::uint64_t now)const noexcept{return now>=began_&&now-began_>=20000;}
     const std::string& expected()const noexcept{return runtime_.expected;}
     void receive(const Blob& bytes,std::uint64_t now){
-        protocol::check(!closed_&&friends_.contains(runtime_.expected)&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{runtime_.expected});now_=now;
+        protocol::check(!closed_);now_=now;
         try{
+            const auto continuity=archive_?archive_->scope.continuityKey():runtime_.expected;
+            protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
-            bool live=runtime_.receive(*tls_,bytes,local_,protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering,0,
+            const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
+                (archive_?protocol::CapabilityArchiveControl:0);
+            bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
             if(!live)close(true);
         }catch(...){close(false);throw;}
     }
     bool initialPin(std::uint64_t generation,std::uint64_t now){
+        if(archive_)return false;
         now_=now;auto key=tls_->ready()?tls_->remotePublicKey():Blob{};
         auto pins=contacts();
         auto decision=friends_.initialPin(&runtime_,!closed_,runtime_.expected,generation,tls_->ready()?&key:nullptr,pins);
@@ -128,7 +167,7 @@ public:
         approve();return true;
     }
     void pump(){
-        if(!ready()||!friends_.contains(runtime_.expected))return;
+        if(archive_||!ready()||!friends_.contains(runtime_.expected))return;
         for(const auto& message:deliveries_.pendingMessages(runtime_.peerId,100)){
             if(deliveries_.wasSubmittedMessage(runtime_.peerId,message.id,id_))continue;
             if(deliveries_.inFlightCount(id_)>=16||output_.size()>MaxOutput/2)break;
@@ -137,6 +176,7 @@ public:
         }
     }
     Blob takeOutput(){
+        if(archive_&&!authorized()){close(false);return {};}
         auto count=std::min<size_t>(65536,output_.size());
         Blob bytes(output_.begin(),output_.begin()+count);
         output_.erase(output_.begin(),output_.begin()+count);

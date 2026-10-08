@@ -86,8 +86,23 @@ public:
     bool registerGroupControlAttempt(SessionEpoch epoch, TransportInstanceId instance,
                                      ReliableAuthorization authorization,
                                      RouteObservation route, std::uint64_t nowMilliseconds) {
+        return authorization.scope==ReliableAuthorizationScope::GroupControl&&
+            registerScopedAttempt(epoch,instance,std::move(authorization),std::move(route),nowMilliseconds);
+    }
+    bool registerArchiveControlAttempt(SessionEpoch epoch,TransportInstanceId instance,
+                                      ReliableAuthorization authorization,RouteObservation route,std::uint64_t nowMilliseconds){
+        const auto& scope=authorization.archive;
+        if(authorization.scope!=ReliableAuthorizationScope::ArchiveControl||
+            !((scope.source==localDeviceId_&&scope.reader==authorization.expectedRemoteDeviceId)||
+              (scope.reader==localDeviceId_&&scope.source==authorization.expectedRemoteDeviceId)))return false;
+        return registerScopedAttempt(epoch,instance,std::move(authorization),std::move(route),nowMilliseconds);
+    }
+private:
+    // The same lifetime/winner machinery owns both restricted purposes.
+    bool registerScopedAttempt(SessionEpoch epoch,TransportInstanceId instance,
+                               ReliableAuthorization authorization,RouteObservation route,std::uint64_t nowMilliseconds){
         if (epoch != epoch_ || !instance.value || !authorization.valid() ||
-            authorization.scope != ReliableAuthorizationScope::GroupControl ||
+            authorization.scope == ReliableAuthorizationScope::Friend ||
             route.kind != TransportKind::Relay || route.routeClass != RouteClass::ServerRelay ||
             transports_.count(instance.value)) return false;
         const auto remote = authorization.expectedRemoteDeviceId;
@@ -104,7 +119,7 @@ public:
         touch(key);
         return true;
     }
-
+public:
     std::optional<ReliableAuthorization> authorization(SessionEpoch epoch,
                                                         TransportInstanceId instance) const {
         if (epoch != epoch_) return {};
@@ -132,6 +147,21 @@ public:
         return closed;
     }
 
+    std::vector<TransportInstanceId> invalidateArchiveControl(SessionEpoch epoch,const std::string& issuer,
+                                                              const std::string& device,std::uint64_t currentGeneration){
+        std::vector<TransportInstanceId> closed;
+        if(epoch!=epoch_||!ReliableAuthorization::hexId(issuer,64)||!ReliableAuthorization::hexId(device,64))return closed;
+        for(auto& item:transports_){auto& record=item.second;const auto& scope=record.authorization.archive;
+            if(record.closed||record.cancelled||record.authorization.scope!=ReliableAuthorizationScope::ArchiveControl||scope.issuer!=issuer)continue;
+            const bool source=scope.source==device,reader=scope.reader==device;
+            if(!source&&!reader&&!(device==issuer&&!currentGeneration))continue;
+            if(currentGeneration&&((source&&scope.sourceGeneration==currentGeneration)||(reader&&scope.readerGeneration==currentGeneration)))continue;
+            record.cancelled=true;closed.push_back(record.instance);
+            closeTransport(epoch,record.instance,"archive authorization superseded or revoked",false);
+        }
+        return closed;
+    }
+
     bool observeTransport(const TransportEvent& event, std::uint64_t nowMilliseconds) {
         if (event.sessionEpoch() != epoch_ || !event.transportInstance().value) return false;
         auto found = transports_.find(event.transportInstance().value);
@@ -142,7 +172,7 @@ public:
         }
         auto& record = found->second;
         if (record.closed || record.cancelled) return false;
-        if (record.authorization.scope == ReliableAuthorizationScope::GroupControl &&
+        if (record.authorization.scope != ReliableAuthorizationScope::Friend &&
             ((!event.expectedRemoteDeviceId().empty() &&
               event.expectedRemoteDeviceId() != record.authorization.expectedRemoteDeviceId) ||
              event.route().kind != TransportKind::Relay ||
@@ -225,7 +255,7 @@ public:
             decision.reasonUtf8 = "transport is not mutually authenticated and trusted";
             return decision;
         }
-        if (candidate.authorization.scope == ReliableAuthorizationScope::GroupControl) {
+        if (candidate.authorization.scope != ReliableAuthorizationScope::Friend) {
             if (candidate.route.kind != TransportKind::Relay ||
                 candidate.route.routeClass != RouteClass::ServerRelay ||
                 candidate.expectedRemoteDeviceId != candidate.presentedRemoteDeviceId ||
@@ -838,7 +868,7 @@ private:
         bool standby = false;
         std::uint64_t handoffBegan = 0;
         std::string remoteDeviceId() const { return presentedRemoteDeviceId.empty() ? expectedRemoteDeviceId : presentedRemoteDeviceId; }
-        std::string continuityKey() const { return authorization.scope == ReliableAuthorizationScope::GroupControl
+        std::string continuityKey() const { return authorization.scope != ReliableAuthorizationScope::Friend
             ? authorization.continuityKey()
             : (!locallyTrusted&&!expectedRemoteDeviceId.empty() ? expectedRemoteDeviceId : remoteDeviceId()); }
         bool matches(const std::string& peer) const { return !peer.empty() && (expectedRemoteDeviceId == peer || presentedRemoteDeviceId == peer || continuityKey() == peer); }

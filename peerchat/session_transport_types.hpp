@@ -32,12 +32,18 @@ enum class RouteClass : std::uint8_t { Unknown, DirectLan, DirectInternet, Serve
 // Authorization is independent of the physical relay route. A group-only
 // session never inherits the permissions of a friend conversation with the
 // same device, or vice versa.
-enum class ReliableAuthorizationScope : std::uint8_t { Friend, GroupControl };
+enum class ReliableAuthorizationScope : std::uint8_t { Friend, GroupControl, ArchiveControl };
+struct ArchiveControlScope {
+    std::uint64_t account=0,sourceGeneration=0,readerGeneration=0;
+    std::string issuer,source,reader,sourceGrantId,readerGrantId;
+    bool empty()const{return !account&&!sourceGeneration&&!readerGeneration&&issuer.empty()&&source.empty()&&reader.empty()&&sourceGrantId.empty()&&readerGrantId.empty();}
+};
 struct ReliableAuthorization {
     ReliableAuthorizationScope scope = ReliableAuthorizationScope::Friend;
     std::string groupId;
     std::uint64_t rosterGeneration = 0;
     std::string expectedRemoteDeviceId;
+    ArchiveControlScope archive{};
 
     static bool hexId(const std::string& value, std::size_t length) {
         if (value.size() != length) return false;
@@ -47,18 +53,23 @@ struct ReliableAuthorization {
     }
     bool valid() const {
         if (!hexId(expectedRemoteDeviceId, 64)) return false;
-        return scope == ReliableAuthorizationScope::Friend
-            ? groupId.empty() && rosterGeneration == 0
-            : scope == ReliableAuthorizationScope::GroupControl &&
-              hexId(groupId, 32) && rosterGeneration > 0;
+        if(scope==ReliableAuthorizationScope::Friend)return groupId.empty()&&rosterGeneration==0&&archive.empty();
+        if(scope==ReliableAuthorizationScope::GroupControl)return hexId(groupId,32)&&rosterGeneration>0&&archive.empty();
+        return scope==ReliableAuthorizationScope::ArchiveControl&&groupId.empty()&&!rosterGeneration&&
+            archive.account>0&&archive.sourceGeneration>0&&archive.readerGeneration>0&&
+            hexId(archive.issuer,64)&&hexId(archive.source,64)&&hexId(archive.reader,64)&&archive.source!=archive.reader&&
+            hexId(archive.sourceGrantId,32)&&hexId(archive.readerGrantId,32)&&
+            (expectedRemoteDeviceId==archive.source||expectedRemoteDeviceId==archive.reader);
     }
     std::string continuityKey() const {
-        return scope == ReliableAuthorizationScope::Friend
-            ? expectedRemoteDeviceId
-            : "group-control:" + groupId + ":" + expectedRemoteDeviceId;
+        if(scope==ReliableAuthorizationScope::Friend)return expectedRemoteDeviceId;
+        if(scope==ReliableAuthorizationScope::GroupControl)return "group-control:"+groupId+":"+expectedRemoteDeviceId;
+        if(scope==ReliableAuthorizationScope::ArchiveControl)return "archive-control:"+std::to_string(archive.account)+":"+archive.issuer+":"+archive.source+":"+archive.reader;
+        return {};
     }
     bool permitsDirectMessage() const { return scope == ReliableAuthorizationScope::Friend; }
     bool permitsGroupKeyControl() const { return scope == ReliableAuthorizationScope::GroupControl; }
+    bool permitsArchiveControl() const { return scope == ReliableAuthorizationScope::ArchiveControl; }
 };
 
 struct PeerSessionIdentity {

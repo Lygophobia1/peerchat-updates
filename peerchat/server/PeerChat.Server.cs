@@ -560,7 +560,9 @@ namespace PeerChat.Server {
         sealed class RelayEndpoint {
             public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId,RosterGeneration;public readonly string DeviceId,TargetDeviceId,Binding,Scope,GroupId,SessionTokenHash;public readonly object WriteGate=new object();public readonly ManualResetEvent Ready=new ManualResetEvent(false);
             public RelayEndpoint Peer;public string SessionId;public bool Incoming;
-            public RelayEndpoint(TcpClient client,SslStream tls,long account,string device,long target,string targetDevice,string scope,string groupId,long rosterGeneration,string tokenHash){Client=client;Tls=tls;AccountId=account;DeviceId=device;TargetAccountId=target;TargetDeviceId=targetDevice;Scope=scope;GroupId=groupId;RosterGeneration=rosterGeneration;SessionTokenHash=tokenHash;Binding=scope+":"+groupId+":"+rosterGeneration+":"+account+":"+device+">"+target+":"+targetDevice;}
+            public readonly ArchiveRelayAuthorization Archive;
+            public string ArchiveKey {get{return Archive==null?"":Archive.Key;}}
+            public RelayEndpoint(TcpClient client,SslStream tls,long account,string device,long target,string targetDevice,string scope,string groupId,long rosterGeneration,string tokenHash,ArchiveRelayAuthorization archive=null){Client=client;Tls=tls;AccountId=account;DeviceId=device;TargetAccountId=target;TargetDeviceId=targetDevice;Scope=scope;GroupId=groupId;RosterGeneration=rosterGeneration;SessionTokenHash=tokenHash;Archive=archive;Binding=scope+":"+groupId+":"+rosterGeneration+":"+account+":"+device+">"+target+":"+targetDevice+(archive==null?"":":"+archive.Key);}
         }
         readonly object relayGate=new object();readonly List<RelayEndpoint> waitingRelays=new List<RelayEndpoint>();readonly List<RelayEndpoint> relayEndpoints=new List<RelayEndpoint>();readonly HashSet<string> activeRelayBindings=new HashSet<string>(StringComparer.Ordinal);
         readonly object directProbeGate=new object();readonly Dictionary<string,DirectProbe> directProbes=new Dictionary<string,DirectProbe>(StringComparer.Ordinal);const int DirectProbeLifetimeSeconds=60;
@@ -803,7 +805,7 @@ namespace PeerChat.Server {
             lock(relayGate){
                 if(activeRelayBindings.Contains(endpoint.Binding))return false;
                 activeRelayBindings.Add(endpoint.Binding);
-                RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.Scope==endpoint.Scope&&value.GroupId==endpoint.GroupId&&value.RosterGeneration==endpoint.RosterGeneration&&value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
+                RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.Scope==endpoint.Scope&&value.ArchiveKey==endpoint.ArchiveKey&&value.GroupId==endpoint.GroupId&&value.RosterGeneration==endpoint.RosterGeneration&&value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
                 if(peer==null){waitingRelays.Add(endpoint);return true;}
                 waitingRelays.Remove(peer);string session=RandomToken();endpoint.Peer=peer;peer.Peer=endpoint;endpoint.SessionId=peer.SessionId=session;
                 endpoint.Incoming=String.CompareOrdinal(endpoint.DeviceId,peer.DeviceId)>0;peer.Incoming=!endpoint.Incoming;endpoint.Ready.Set();peer.Ready.Set();return true;
@@ -827,25 +829,35 @@ namespace PeerChat.Server {
         void ServeRelay(TcpClient client,SslStream tls,Dictionary<string,object> request){
             string tokenHash=TokenHash(Text(request,"sessionToken"));long accountId=accounts.Authenticate(tokenHash),targetAccountId;string device=Text(request,"publicIdentity"),targetDevice=Text(request,"targetPublicIdentity");
             if(accountId==0){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
-            if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||accountId==targetAccountId||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.SessionAllowsDevice(tokenHash,device)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
             string scope=Text(request,"purpose")??"friend",groupId=Text(request,"groupId")??"";long rosterGeneration=0;
+            if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||
+               (scope=="archive_history"?accountId!=targetAccountId:accountId==targetAccountId)||
+               device==targetDevice||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.SessionAllowsDevice(tokenHash,device)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
             if(scope=="group_key"&&(!Int64.TryParse(Text(request,"rosterGeneration"),out rosterGeneration)||rosterGeneration<1)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("group_roster_generation_invalid"))));return;}
+            var archive=scope=="archive_history"?ReadArchiveRelay(request):null;
+            string requestedRoster=Text(request,"rosterGeneration");
             bool authorized=scope=="friend"&&groupId.Length==0&&rosterGeneration==0&&accounts.RelayAuthorized(accountId,targetAccountId)
-                ||scope=="group_key"&&accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration);
+                ||scope=="group_key"&&accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)
+                ||scope=="archive_history"&&groupId.Length==0&&(String.IsNullOrEmpty(requestedRoster)||requestedRoster=="0")&&
+                    accounts.ArchiveRelayAuthorized(accountId,device,targetDevice,archive);
             if(!authorized){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_not_authorized"))));return;}
             // An authorized route request is demand, not friendship/presence.
             // The recipient's existing session owner still authenticates peer TLS.
-            Notify(targetAccountId,new Dictionary<string,object>{{"event","relay_demand"},{"accountId",accountId},{"publicIdentity",device},{"targetPublicIdentity",targetDevice},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}});
+            var demand=new Dictionary<string,object>{{"event","relay_demand"},{"accountId",accountId},{"publicIdentity",device},{"targetPublicIdentity",targetDevice},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}};
+            if(archive!=null)archive.AddFields(demand);Notify(targetAccountId,demand);
             // Supplement native sender-owned retry/outbox; this is not a mailbox.
             // A hint carries no TLS records or plaintext and cannot authorize delivery.
             pushWakes.Hint(targetAccountId,targetDevice);
-            var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice,scope,groupId,rosterGeneration,tokenHash);lock(relayGate)relayEndpoints.Add(endpoint);
+            var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice,scope,groupId,rosterGeneration,tokenHash,archive);lock(relayGate)relayEndpoints.Add(endpoint);
             if(!PairRelay(endpoint)){lock(relayGate)relayEndpoints.Remove(endpoint);WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
             try{
                 if(!endpoint.Ready.WaitOne(TimeSpan.FromSeconds(15))){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_pair_timeout"))));return;}
-                var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}})));lock(endpoint.WriteGate)WriteFrame(tls,ready);
+                if(scope=="archive_history"&&!CurrentArchiveRelay(endpoint))return;
+                var readyFields=new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}};
+                if(archive!=null)archive.AddFields(readyFields);
+                var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(readyFields)));lock(endpoint.WriteGate)WriteFrame(tls,ready);
                 byte[] session=Encoding.ASCII.GetBytes(endpoint.SessionId);
-                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
+                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;if(scope=="archive_history"&&!CurrentArchiveRelay(endpoint))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
             }finally{RemoveRelay(endpoint);Log("DEBUG","Authenticated opaque relay channel closed for account "+accountId+".");}
         }
         void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);string correlation=Guid.NewGuid().ToString("N").Substring(0,12),kind="unknown",stage="tls_handshake";long diagnosticAccount=0;Log("DEBUG","Discovery client connected request_id="+correlation+".");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);stage="request_read";var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");kind=ReliableIoDiagnostics.RequestKind(requestType);string diagnosticToken=Text(request,"sessionToken");if(!String.IsNullOrEmpty(diagnosticToken))diagnosticAccount=accounts.Authenticate(TokenHash(diagnosticToken));

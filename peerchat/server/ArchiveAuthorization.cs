@@ -52,6 +52,20 @@ internal static class ArchiveAuthorizationProof {
         }
     }
 }
+// Exact public grant-pair context for the existing opaque relay. This does not
+// authorize a client to trust the issuer or disclose any history on its own.
+internal sealed class ArchiveRelayAuthorization {
+    internal string Issuer,Source,Reader,SourceGrantId,ReaderGrantId;
+    internal long SourceGeneration,ReaderGeneration;
+    internal string Key { get { return Issuer+":"+Source+":"+Reader+":"+SourceGeneration+":"+ReaderGeneration+":"+SourceGrantId+":"+ReaderGrantId; } }
+    internal bool Valid { get { return MailboxProtocol.Id(Issuer,64)&&MailboxProtocol.Id(Source,64)&&MailboxProtocol.Id(Reader,64)&&Source!=Reader&&
+        SourceGeneration>0&&ReaderGeneration>0&&MailboxProtocol.Id(SourceGrantId,32)&&MailboxProtocol.Id(ReaderGrantId,32); } }
+    internal Dictionary<string,object> AddFields(Dictionary<string,object> fields){
+        fields["archiveIssuer"]=Issuer;fields["archiveSource"]=Source;fields["archiveReader"]=Reader;
+        fields["archiveSourceGeneration"]=SourceGeneration;fields["archiveReaderGeneration"]=ReaderGeneration;
+        fields["archiveSourceGrantId"]=SourceGrantId;fields["archiveReaderGrantId"]=ReaderGrantId;return fields;
+    }
+}
 sealed partial class AccountDatabase {
     bool archiveAuthorizationInitialized;
     internal void InitializeArchiveAuthorization(){lock(gate){if(archiveAuthorizationInitialized)return;Execute(
@@ -130,8 +144,33 @@ sealed partial class AccountDatabase {
         return ScalarLong(database,"SELECT count(*) FROM archive_device_grants WHERE account_id="+account+" AND issuer="+Quote(issuer)+" AND device="+Quote(device)+
             " AND generation="+generation+" AND revoked=0 AND disabled=0 AND (capabilities & "+capability+")="+capability)==1;
     }}
+    internal bool ArchiveRelayAuthorized(long account,string local,string target,ArchiveRelayAuthorization scope){lock(gate){
+        if(scope==null||!scope.Valid||!((local==scope.Source&&target==scope.Reader)||(local==scope.Reader&&target==scope.Source)))return false;
+        if(!ArchiveAuthorized(account,scope.Issuer,scope.Source,scope.SourceGeneration,2)||
+           !ArchiveAuthorized(account,scope.Issuer,scope.Reader,scope.ReaderGeneration,1))return false;
+        return ScalarLong(database,"SELECT count(*) FROM archive_device_grants WHERE account_id="+account+" AND issuer="+Quote(scope.Issuer)+
+            " AND ((device="+Quote(scope.Source)+" AND issuance_id="+Quote(scope.SourceGrantId)+") OR (device="+Quote(scope.Reader)+" AND issuance_id="+Quote(scope.ReaderGrantId)+"))")==2;
+    }}
 }
 sealed partial class DiscoveryServer {
+    static ArchiveRelayAuthorization ReadArchiveRelay(Dictionary<string,object> request){
+        long source,reader;
+        if(!Int64.TryParse(Text(request,"archiveSourceGeneration"),out source)||!Int64.TryParse(Text(request,"archiveReaderGeneration"),out reader))return null;
+        var scope=new ArchiveRelayAuthorization{Issuer=Text(request,"archiveIssuer"),Source=Text(request,"archiveSource"),Reader=Text(request,"archiveReader"),
+            SourceGeneration=source,ReaderGeneration=reader,SourceGrantId=Text(request,"archiveSourceGrantId"),ReaderGrantId=Text(request,"archiveReaderGrantId")};
+        return scope.Valid?scope:null;
+    }
+    bool CurrentArchiveRelay(RelayEndpoint endpoint){
+        var peer=endpoint.Peer;
+        return endpoint.Scope=="archive_history"&&endpoint.AccountId==endpoint.TargetAccountId&&
+            accounts.Authenticate(endpoint.SessionTokenHash)==endpoint.AccountId&&accounts.SessionAllowsDevice(endpoint.SessionTokenHash,endpoint.DeviceId)&&
+            (peer==null||(accounts.Authenticate(peer.SessionTokenHash)==peer.AccountId&&accounts.SessionAllowsDevice(peer.SessionTokenHash,peer.DeviceId)))&&
+            accounts.ArchiveRelayAuthorized(endpoint.AccountId,endpoint.DeviceId,endpoint.TargetDeviceId,endpoint.Archive);
+    }
+    void RetireArchiveRelays(long account){
+        List<RelayEndpoint> candidates;lock(relayGate)candidates=relayEndpoints.Where(value=>value.Scope=="archive_history"&&value.AccountId==account).ToList();
+        foreach(var endpoint in candidates)if(!CurrentArchiveRelay(endpoint))try{endpoint.Client.Close();}catch{}
+    }
     Dictionary<string,object> ArchiveAuthorizationRequest(long account,string device,string type,Dictionary<string,object> request){
         if(!ValidIdentity(device)||!accounts.OwnsDevice(account,device))return Error("archive_device_not_authorized");
         if(type=="archive_authorization_state")return Ok(new Dictionary<string,object>{
@@ -146,6 +185,7 @@ sealed partial class DiscoveryServer {
         catch(InvalidOperationException){return Error("archive_invalid_proof_or_storage_failure");}
         catch(ArgumentException){return Error("archive_invalid_proof");}
         if(result!="accepted")return Error("archive_"+result);
+        if(type=="archive_grant_register")RetireArchiveRelays(account);
         // Public metadata notification only, never a grant of UI/native trust.
         Notify(account,new Dictionary<string,object>{{"event","archive_authorization_changed"}});
         return Ok(new Dictionary<string,object>{{"state","accepted"},{"archiveVersion",1}});

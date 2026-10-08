@@ -40,11 +40,18 @@ internal static class ArchiveAuthorizationServerTest {
             Check(db.RegisterArchiveGrant(8,owner.Device,Read(root,"conflict"))=="stale_or_conflicting_generation");
             Check(db.ArchiveAuthorized(8,owner.Device,owner.Device,1,2));
             Check(db.ArchiveAuthorized(8,owner.Device,reader.Device,1,1));
+            var scope=new ArchiveRelayAuthorization{Issuer=owner.Device,Source=owner.Device,Reader=reader.Device,SourceGeneration=1,ReaderGeneration=1,
+                SourceGrantId=ArchiveAuthorizationProof.Grant.Parse(serve,owner.Public).IssuanceId,ReaderGrantId=ArchiveAuthorizationProof.Grant.Parse(read,owner.Public).IssuanceId};
+            Check(db.ArchiveRelayAuthorized(8,owner.Device,reader.Device,scope)&&db.ArchiveRelayAuthorized(8,reader.Device,owner.Device,scope));
+            Check(!db.ArchiveRelayAuthorized(9,owner.Device,reader.Device,scope)&&!db.ArchiveRelayAuthorized(8,other.Device,reader.Device,scope));
+            scope.ReaderGrantId=new string('0',32);Check(!db.ArchiveRelayAuthorized(8,owner.Device,reader.Device,scope));
+            scope.ReaderGrantId=ArchiveAuthorizationProof.Grant.Parse(read,owner.Public).IssuanceId;
             Check(!db.ArchiveAuthorized(8,owner.Device,reader.Device,1,2));
             Check(!db.ArchiveAuthorized(8,owner.Device,other.Device,1,1));
             Check(!db.ArchiveAuthorized(9,owner.Device,reader.Device,1,1));
             Check(db.ArchiveDescriptors(8,reader.Device).Count==3&&db.ArchiveGrants(8,reader.Device).Count==2);
             Check(db.RegisterArchiveGrant(8,owner.Device,revoke)=="accepted");
+            Check(!db.ArchiveRelayAuthorized(8,owner.Device,reader.Device,scope));
             Check(!db.ArchiveAuthorized(8,owner.Device,reader.Device,1,1));
             Check(!db.ArchiveAuthorized(8,owner.Device,reader.Device,2,1));
             Check(db.RegisterArchiveGrant(8,owner.Device,read)=="stale_or_conflicting_generation");
