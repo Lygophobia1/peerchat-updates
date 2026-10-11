@@ -34,6 +34,15 @@ public:
     }
     const std::optional<session::ReliableAuthorization>& scope()const{return scope_;}
     bool running()const{return running_;}
+    // Read-only application diagnostics; holding a route does not imply pages
+    // have transferred. No fabricated provider counters or percentage.
+    std::vector<std::string> providingDevices(std::uint64_t now)const{
+        std::vector<std::string> result;
+        for(const auto& entry:serving_)if(now<entry.second.second&&entry.second.first.archive.source==local_.peerId&&currentSessionAuthorization(policy_,entry.second.first)){
+            auto route=sessions_.snapshot(entry.first);if(route&&route->connected)result.push_back(entry.second.first.archive.reader);
+        }
+        return result;
+    }
     // Initial participation only. A durable pause/completion is never silently
     // replaced, and this predicate cannot enroll a device or issue a grant.
     bool needsInitialSync()const{return savedIntent_.empty()&&!reader_&&!running_&&policy_.historySyncEnabled();}

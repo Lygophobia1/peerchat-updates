@@ -67,15 +67,30 @@ static class ArchiveSettingsSmoke {
                 var switchState=(TextBlock)toggle.Template.FindName("SwitchState",toggle);
                 Check(switchState.Text=="OFF");toggle.IsChecked=true;dialog.UpdateLayout();Check(switchState.Text=="ON");
                 toggle.IsChecked=false;dialog.UpdateLayout();Check(switchState.Text=="OFF");
-                Check(Find(dialog,"Archive device selector") is ComboBox);
+                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="THIS DEVICE"));
+                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="YOUR HISTORY DEVICES"));
+                Check(Find(dialog,"Archive device selector")==null);
+                Check(panel.Children.OfType<CheckBox>().Single(c=>Object.Equals(c.Content,"History Sync")).Template!=null);
+                var security=panel.Children.OfType<Expander>().Single();Check(!security.IsExpanded);security.IsExpanded=true;dialog.UpdateLayout();
+                var fileSection=((StackPanel)security.Content).Children.OfType<Expander>().Single();fileSection.IsExpanded=true;dialog.UpdateLayout();
                 Check(Find(dialog,"Historical attachment selector") is ComboBox);
                 foreach(var label in new[]{"Refresh attachments","Next attachment page","Download selected attachment…"})Check(Find(dialog,label) is Button);
                 Check(!((Button)Find(dialog,"Next attachment page")).IsEnabled);
-                foreach(var label in new[]{"Refresh archive devices","Trust archive authorizer","Authorize history access","Revoke access","Disable authorizer","Synchronize from selected archive","Pause synchronization"})Check(Find(dialog,label) is Button);
-                var selector=(ComboBox)Find(dialog,"Archive device selector");Check(selector.Items.Count==0);
-                ((Button)Find(dialog,"Refresh archive devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                foreach(var label in new[]{"+ Authorize a device","Pause","Refresh history devices"})Check(Find(dialog,label) is Button);
+                Check(!panel.Children.OfType<Button>().Any(b=>Object.Equals(b.Content,"Refresh history devices")));
+                ((Button)Find(dialog,"Refresh history devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));
-                Check(selector.Items.Count==0&&panel.IsEnabled);
+                Check(panel.IsEnabled);
+                var names=new HistoryDeviceNames(args[0]);string first=new string('a',64),second=new string('b',64);
+                names.Set(8,first,"Work VM");names.Set(8,second,"Work VM");names.Set(9,first,"Other account");
+                for(int cycle=0;cycle<32;cycle++){var reopen=new HistoryDeviceNames(args[0]);Check(reopen.Get(8,first,"")=="Work VM"&&reopen.Get(8,second,"")=="Work VM"&&reopen.Get(9,first,"")=="Other account");}
+                names.Set(8,first,"Main PC");Check(names.Get(8,first,"")=="Main PC"&&names.Get(8,second,"")=="Work VM");
+                bool bad=false;try{names.Set(8,"Work VM","Replacement identity");}catch{bad=true;}Check(bad);
+                var assembly=typeof(DesktopApplication).Assembly;var progressType=assembly.GetType("PeerChatDesktop.ArchiveEnrollmentExecution+SyncProgress");
+                Func<string,bool,bool,long,long?,HistoryProgressView> project=(state,running,complete,count,total)=>{var p=Activator.CreateInstance(progressType);progressType.GetField("State").SetValue(p,state);progressType.GetField("Running").SetValue(p,running);progressType.GetField("Complete").SetValue(p,complete);progressType.GetField("Processed").SetValue(p,count);progressType.GetField("Conversations").SetValue(p,4L);return (HistoryProgressView)typeof(HistoryProgressView).GetMethod("Create",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,new object[]{p,"Work VM",new string[0],total});};
+                foreach(var pair in new[]{new[]{"Connecting to archive","Connecting"},new[]{"Synchronizing history","Downloading history"},new[]{"Archive route unavailable","Waiting for device"},new[]{"Archive authorization unavailable","Authorization required"},new[]{"Paused","Paused"},new[]{"History synchronization is off","Permission disabled"},new[]{"Archive data rejected","Failed"}})Check(project(pair[0],true,false,842,null).State==pair[1]);
+                var download=project("Synchronizing history",true,false,50,null);Check(download.Indeterminate&&download.Direction.Contains("Work VM")&&download.Counters.Contains("50 messages")&&download.Counters.Contains("4 conversations"));
+                var known=project("Synchronizing history",true,false,50,100);Check(!known.Indeterminate&&known.Percent==50);Check(!project("History synchronized",false,true,50,null).Active);
                 Console.WriteLine("PASS: explicit mailbox OFF protected persistence, corruption fails closed, rendered ON/OFF slider states; archive Settings render without automatic enrollment or unsigned-in consent. Host smoke only.");
             }catch(Exception error){Console.Error.WriteLine(error);result=1;}
             finally{if(dialog!=null)dialog.Close();window.Close();}

@@ -25,6 +25,10 @@ int main(){try{
         m.device=device.peerId;m.serverEpoch="test-server-epoch";m.descriptors={da,db};m.grants=std::move(grants);return m;
     };
     source.refresh(metadata(pa,1,{}));reader.refresh(metadata(pb,1,{}));
+    check(reader.automaticSync(pa.peerId));reader.automaticSync(pa.peerId,false);check(!reader.automaticSync(pa.peerId));
+    {ar::Enrollment reopened(b,pb,8,clock);reopened.authenticated(1);reopened.refresh(metadata(pb,1,{}));check(!reopened.automaticSync(pa.peerId));}
+    check(reader.pendingPublications().empty()&&!reader.policy().trustsAuthority(pa.publicKey));
+    rejects([&]{reader.automaticSync(std::string(64,'f'),true);});reader.automaticSync(pa.peerId,true);check(reader.automaticSync(pa.peerId));
     auto bound=ar::applicationHeader(10);bound.number(9);bound.number(1);bound.number(4);bound.string(pa.peerId);bound.number(1);
     rejects([&]{ar::executeEnrollmentOperation(source,10,bound.data,20);});
     bound=ar::applicationHeader(10);bound.number(8);bound.number(2);bound.number(4);bound.string(pa.peerId);bound.number(1);
@@ -48,8 +52,11 @@ int main(){try{
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.policy().setHistorySyncEnabled(false);
     ar::reconcileInitialSync(reader,execution);check(!execution.running());
-    for(const auto& device:reader.devices())if(device.peerId==pb.peerId)check(device.authorized&&!device.mayRead);
+    for(const auto& device:reader.devices())if(device.peerId==pb.peerId)check(device.authorized&&!device.mayRead&&device.grantedRead&&!device.grantedServe);
     reader.policy().setHistorySyncEnabled(true);
+    reader.automaticSync(pa.peerId,false);ar::reconcileInitialSync(reader,execution);check(!execution.running());
+    reader.automaticSync(pa.peerId,true);reader.automaticSync(pb.peerId,false);ar::reconcileInitialSync(reader,execution);check(!execution.running());
+    reader.automaticSync(pb.peerId,true);
     ar::reconcileInitialSync(reader,execution);check(execution.running()&&execution.scope()->archive.source==pa.peerId);
     check(source.pendingPublications().empty()&&reader.pendingPublications().empty()); // Starting cannot create a grant.
     execution.stop();ar::reconcileInitialSync(reader,execution);check(!execution.running());
@@ -111,6 +118,16 @@ int main(){try{
         source.pendingPublications().size()==ar::MaxPendingGrants);
     {ar::Enrollment restarted(a,pa,8,clock);check(restarted.pendingPublications().size()==ar::MaxPendingGrants);}
     check(a.profile().peerId==pa.peerId&&b.profile().peerId==pb.peerId);
+    // Independent permissions are signed replacements, not whole-device revoke.
+    Storage permissionStore((root/L"permissions").wstring());auto identity=permissionStore.profile();ar::Enrollment permissions(permissionStore,identity,18,clock);permissions.authenticated(1);
+    auto descriptor=permissions.registration(100);ar::EnrollmentMetadata view;view.account=18;view.authenticationGeneration=1;view.revision=1;view.device=identity.peerId;view.serverEpoch="permissions";view.descriptors={descriptor};permissions.refresh(view);permissions.approveIssuer(identity.peerId,true);
+    auto both=permissions.authorizeDevice(identity.peerId,ar::AllCapabilities,101,true);view.revision++;view.grants={{ar::encodeGrant(both),true}};permissions.refresh(view);
+    auto provideOnly=permissions.authorizeDevice(identity.peerId,ar::ServeHistory,102,true);view.revision++;view.grants={{ar::encodeGrant(provideOnly),true}};permissions.refresh(view);check(!provideOnly.revoked&&!permissions.devices()[0].grantedRead&&permissions.devices()[0].grantedServe);
+    auto receiveOnly=permissions.authorizeDevice(identity.peerId,ar::ReadHistory,103,true);view.revision++;view.grants={{ar::encodeGrant(receiveOnly),true}};permissions.refresh(view);check(!receiveOnly.revoked&&permissions.devices()[0].grantedRead&&!permissions.devices()[0].grantedServe);
+    rejects([&]{permissions.authorizeDevice(identity.peerId,0,104,true);});check(permissions.policy().cachedGrant(identity.peerId,identity.peerId)->generation==receiveOnly.generation);
+    {ar::Enrollment reopened(permissionStore,identity,18,clock);reopened.authenticated(1);reopened.refresh(view);check(reopened.devices()[0].grantedRead&&!reopened.devices()[0].grantedServe);}
+    auto gone=permissions.revokeDevice(identity.peerId,105,true);view.revision++;view.grants={{ar::encodeGrant(gone),false}};permissions.refresh(view);check(permissions.devices()[0].revoked&&!permissions.devices()[0].authorized);
+    auto context=permissions.automaticContext(identity.peerId);permissions.automaticSync(identity.peerId,false);auto saved=permissionStore.archiveSyncState(context);auto damaged=saved;damaged.back()^=2;permissionStore.saveArchiveSyncState(context,saved,damaged);rejects([&]{permissions.automaticSync(identity.peerId);});check(permissionStore.profile().peerId==identity.peerId);
     std::cout<<"PASS: explicit source/reader consent, authenticated metadata binding/freshness, no same-account grant, durable exact descriptor and grant retries, generation-ordered revoke/re-enroll, removal and fail-closed tamper/reconnect\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

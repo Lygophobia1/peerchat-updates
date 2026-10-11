@@ -100,15 +100,15 @@ public partial class DesktopApplication {
         var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
         if(closing||busy||owner==null||account<=0||mailboxContextAccount!=account||generation==0||!archiveTask.IsCompleted||DateTime.UtcNow<archiveNextUtc)return;
         bool initial=archiveLoadedOwner!=owner||archiveLoadedGeneration!=generation;
-        if(!initial&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc)return;
+        if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc)return;
         archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
         archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
         archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
-            if(refresh)execution.RefreshCurrent(account,(long)generation,local);return execution.Progress(account,(long)generation);
+            if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};
         }).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
-            if(task.IsFaulted){archiveProgress=null;TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
-            archiveProgress=task.Result;
+            if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            archiveProgress=task.Result.Progress;historyDevices=task.Result.Devices;historyProviding=task.Result.Providing;historyAccount=account;historyGeneration=generation;
             if(archiveProgress.Processed!=archiveProjectedCount){
                 archiveProjectedCount=archiveProgress.Processed;
                 if(model.Selected!=null&&!model.Groups){
@@ -428,8 +428,8 @@ public partial class DesktopApplication {
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
-        Click("Attachment",ChooseChatFiles);BindChatAttachments();
-        Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",SettingsPage);
+        Click("Attachment",ChooseChatFiles);BindChatAttachments();BindHistoryIndicator();
+        Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",()=>SettingsPage());
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
         Click("EmptyAction",()=>{if(model.Groups)CreateGroup();else AddFriend();});
@@ -2869,82 +2869,8 @@ public partial class DesktopApplication {
 		}catch(Exception error){window.IsEnabled=true;Notify("Profile maintenance could not start: "+error.Message);}
 	}
 
-    StackPanel ArchiveSettingsPanel(Window dialog){
-        var panel=new StackPanel();
-        var sync=VoiceProcessingSwitch("History synchronization",false);
-        sync.IsThreeState=true;sync.IsChecked=null;sync.IsEnabled=false;sync.Foreground=Brush("#EDF1F5");sync.Margin=new Thickness(0,14,0,6);
-        panel.Children.Add(sync);
-        panel.Children.Add(new TextBlock{Text="On participates only after explicit archive authorization. Off pauses archive access without deleting history or revoking grants. Refresh after sign-in to load this account's saved choice.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
-        panel.Children.Add(new TextBlock{Text="Archive devices",FontSize=19,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,18,0,6)});
-        panel.Children.Add(new TextBlock{Text="Archive access is separate from signing in. Refresh on each device to register its public identity, compare Peer IDs, then explicitly trust an authorizer and grant only the needed access. Revocation stops future sync; it cannot erase history already received.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
-        var devices=new ComboBox{Margin=new Thickness(0,10,0,6),MinHeight=32};
-        AutomationProperties.SetName(devices,"Archive device selector");
-        var details=new TextBlock{Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,8)};
-        var read=new CheckBox{Content="May receive historical messages",Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,4,0,4)};
-        var serve=new CheckBox{Content="May serve historical messages",Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,4,0,8)};
-        var status=new TextBlock{Text="Not refreshed. No archive access is granted automatically.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,4)};
-        var buttons=new WrapPanel();
-        panel.Children.Add(devices);panel.Children.Add(details);panel.Children.Add(read);panel.Children.Add(serve);panel.Children.Add(buttons);panel.Children.Add(status);
-        long displayedAccount=0;ulong displayedGeneration=0;
-        devices.SelectionChanged+=(s,e)=>{var d=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
-            details.Text=d==null?"":("Peer ID: "+d.PeerId+"\nArchive authorization: "+d.AuthorizationState+"\nTrusted authorizer: "+(d.ApprovedIssuer?"Yes":"No")+" · May receive: "+(d.MayRead?"Yes":"No")+" · May serve: "+(d.MayServe?"Yes":"No"));
-            read.IsChecked=d!=null&&d.MayRead;serve.IsChecked=d!=null&&d.MayServe;
-        };
-        Action<uint> run=async action=>{
-            var owner=discovery;var selected=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
-            long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
-            if(closing||owner==null||account<=0||mailboxContextAccount!=account||generation==0||generation>Int64.MaxValue){status.Text="Sign in and establish authenticated server presence first.";return;}
-            if(action!=0&&((action!=11&&action!=14&&selected==null)||displayedAccount!=account||displayedGeneration!=generation)){status.Text="Account context changed. Refresh devices before confirming archive access.";return;}
-            string target=selected==null?"":selected.PeerId;long capabilities=(read.IsChecked==true?1L:0L)|(serve.IsChecked==true?2L:0L);
-            if(action==5&&capabilities==0){status.Text="Select at least one capability, or use Revoke access.";return;}
-            if(action>=4&&action<=7&&!Confirm("Archive device authorization","Account "+account+"\nDevice Peer ID:\n"+target+"\n\n"+(action==4?"Trust this device to sign archive grants?":action==5?"Authorize the selected history capabilities?":action==6?"Revoke archive access granted by this device?":"Disable this archive authorizer locally?")+"\n\nThis does not alter the device signing identity or erase received history.","Confirm"))return;
-            bool desiredSync=sync.IsChecked==true;
-            panel.IsEnabled=false;status.Text="Verifying archive authorization…";
-            try{
-                var rows=await Task.Run(()=>{
-                    var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
-                    execution.Refresh(account,(long)generation,local);
-                    if(action>=4&&action<=7)execution.Consent(account,(long)generation,action,target,capabilities,true);
-                    bool enabled=execution.HistorySync(account,(long)generation,action==11?(bool?)desiredSync:null);
-                    execution.PublishPending(account,(long)generation,local);
-                    if(action==12)execution.StartSync(account,(long)generation,target,true);
-                    if(action==14)execution.PauseSync(account,(long)generation);
-                    return new {Rows=ArchiveEnrollmentExecution.Devices(execution.RefreshCurrent(account,(long)generation,local)),Enabled=enabled,Progress=execution.Progress(account,(long)generation)};
-                });
-                if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation||!dialog.IsVisible)return;
-                displayedAccount=account;displayedGeneration=generation;devices.ItemsSource=rows.Rows;
-                devices.SelectedItem=rows.Rows.FirstOrDefault(d=>d.PeerId==target)??rows.Rows.FirstOrDefault(d=>d.Local);
-                sync.IsThreeState=false;sync.IsChecked=rows.Enabled;sync.IsEnabled=true;
-                archiveProgress=rows.Progress;archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
-                status.Text=rows.Progress.Summary+"\nNo access is inferred from login.";
-            }catch(Exception error){sync.IsEnabled=false;sync.IsChecked=null;status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
-            finally{panel.IsEnabled=true;}
-        };
-        sync.Click+=(s,e)=>run(11);
-        Action<string,uint> button=(label,action)=>{var b=new Button{Content=label,Padding=new Thickness(10,7,10,7),Margin=new Thickness(0,4,6,4)};AutomationProperties.SetName(b,label);b.Click+=(s,e)=>run(action);buttons.Children.Add(b);};
-        button("Refresh archive devices",0);button("Trust archive authorizer",4);button("Authorize history access",5);button("Revoke access",6);button("Disable authorizer",7);
-        button("Synchronize from selected archive",12);button("Pause synchronization",14);
-        panel.Children.Add(new TextBlock{Text="Historical attachments",FontSize=18,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,14,0,6)});
-        panel.Children.Add(new TextBlock{Text="Synchronize from an authorized archive first. Files are fetched only when requested; metadata is archive-attested, not an original-sender signature. The source must still possess the unchanged file.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
-        var attachments=new ComboBox{Margin=new Thickness(0,8,0,6),MinHeight=32};AutomationProperties.SetName(attachments,"Historical attachment selector");panel.Children.Add(attachments);
-        var fileButtons=new WrapPanel();panel.Children.Add(fileButtons);long attachmentCursor=0;
-        var firstFiles=new Button{Content="Refresh attachments",Margin=new Thickness(0,4,6,4)};
-        var nextFiles=new Button{Content="Next attachment page",IsEnabled=false,Margin=new Thickness(0,4,6,4)};
-        Action<bool> loadFiles=async reset=>{try{var page=await Task.Run(()=>core.ArchiveAttachments(reset?0:attachmentCursor));if(!dialog.IsVisible)return;attachments.ItemsSource=page.records;attachments.SelectedIndex=page.records.Length>0?0:-1;attachmentCursor=page.next;nextFiles.IsEnabled=!page.complete;}catch(Exception error){status.Text="Attachment catalog unavailable: "+error.Message;}};
-        firstFiles.Click+=(s,e)=>loadFiles(true);nextFiles.Click+=(s,e)=>loadFiles(false);fileButtons.Children.Add(firstFiles);fileButtons.Children.Add(nextFiles);
-        var download=new Button{Content="Download selected attachment…",Margin=new Thickness(0,4,6,4)};fileButtons.Children.Add(download);
-        download.Click+=async(s,e)=>{
-            var file=attachments.SelectedItem as CoreAdapter.ArchiveAttachment;var source=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
-            if(file==null||source==null||!source.MayServe||archiveProgress==null||archiveProgress.Source!=source.PeerId||displayedAccount!=(discovery==null?0:discovery.AccountId)||displayedGeneration!=authenticatedFriendSnapshotGeneration){status.Text="Refresh, select an authorized source, and synchronize from it before downloading.";return;}
-            var choose=new Microsoft.Win32.SaveFileDialog{Title="Choose download folder — a unique ID prefix prevents overwrites",FileName=file.name,OverwritePrompt=false};
-            if(choose.ShowDialog(dialog)!=true)return;
-            try{await Task.Run(()=>core.FileTransfer(5,source.PeerId,file.id,Path.GetDirectoryName(choose.FileName)));ShowFileTransfers();status.Text="Attachment requested. File transfers shows verified progress and cancellation.";}catch(Exception error){status.Text="Attachment request failed closed: "+error.Message;}
-        };
-        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.Summary;};
-        voiceTimer.Tick+=progressTick;dialog.Closed+=(s,e)=>voiceTimer.Tick-=progressTick;
-        return panel;
-    }
-	private void SettingsPage()
+    StackPanel ArchiveSettingsPanel(Window dialog){return HistorySettingsPanel(dialog);}
+	private void SettingsPage(string initialPage="Advanced")
 	{
 		string[] service = LoadDiscoveryService();
 		Window dialog = new Window
@@ -3363,7 +3289,7 @@ public partial class DesktopApplication {
 				item.Value.Foreground = Brush((item.Key == page) ? "#EDF1F5" : "#A1AEBB");
 			}
 		};
-		showSettingsPage("Advanced");
+		showSettingsPage(initialPage);
 		dialog.ShowDialog();
 	}
 

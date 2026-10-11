@@ -70,6 +70,14 @@ internal sealed class ArchiveEnrollmentExecution {
     void Invalidate(){native(9,Command(9));}
     public void StartSync(long account,long generation,string source,bool newScan){native(12,Command(12,w=>{w.Write(account);w.Write(generation);WriteText(w,source);w.Write(newScan?1L:0L);}));}
     public void PauseSync(long account,long generation){native(14,Command(14,w=>{w.Write(account);w.Write(generation);}));}
+    public bool AutomaticSync(long account,long generation,string peer,bool? enabled=null){
+        var bytes=native(19,Command(19,w=>{w.Write(account);w.Write(generation);WriteText(w,peer);w.Write(enabled.HasValue?1L:0L);if(enabled.HasValue)w.Write(enabled.Value?1L:0L);}));
+        var header=Command(19);Check(bytes.Length==header.Length+8&&bytes.Take(header.Length).SequenceEqual(header));long value=BitConverter.ToInt64(bytes,header.Length);Check(value==0||value==1);return value==1;
+    }
+    public string[] Providing(long account,long generation){
+        var bytes=native(20,Command(20,w=>{w.Write(account);w.Write(generation);}));var header=Command(20);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,Encoding.UTF8)){stream.Position=header.Length;long count=r.ReadInt64();Check(count>=0&&count<=8);var result=new List<string>();for(long i=0;i<count;i++){Check(r.ReadInt64()==64);var peer=Encoding.ASCII.GetString(r.ReadBytes(64));Check(peer.Length==64&&peer.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f'));result.Add(peer);}Check(stream.Position==stream.Length);return result.Distinct().ToArray();}
+    }
     public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
     public sealed class SyncProgress {
         public string State,Source;public long Processed,Conversations,Attachments;public bool Complete,Running;
@@ -155,7 +163,13 @@ internal sealed class ArchiveEnrollmentExecution {
         Check(account>0&&generation>0&&action>=4&&action<=7&&device!=null&&device.Length==64&&device.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f')&&capabilities>=0&&capabilities<=3);
         return native(10,Command(10,w=>{w.Write(account);w.Write(generation);w.Write((long)action);WriteText(w,device);if(action==5)w.Write(capabilities);w.Write(consent?1L:0L);}));
     }
+    public Device[] SnapshotDevices(long account,long generation){
+        var rows=Devices(native(3,Command(3)));foreach(var d in rows)d.Automatic=AutomaticSync(account,generation,d.PeerId);
+        var bytes=native(21,Command(21,w=>{w.Write(account);w.Write(generation);}));var header=Command(21);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,Encoding.UTF8)){stream.Position=header.Length;Check(r.ReadInt64()==rows.Length);var seen=new HashSet<string>();foreach(var item in rows){Check(r.ReadInt64()==64);var peer=Encoding.ASCII.GetString(r.ReadBytes(64));var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));long read=r.ReadInt64(),serve=r.ReadInt64();Check(read>=0&&read<=1&&serve>=0&&serve<=1);d.GrantedRead=read==1;d.GrantedServe=serve==1;}Check(stream.Position==stream.Length);}return rows;
+    }
     public sealed class Device {
+        public bool Automatic=true,GrantedRead,GrantedServe;
         public string PeerId;public bool Local,ApprovedIssuer,MayRead,MayServe,Revoked,Authorized;
         public string AuthorizationState {get {return Authorized||MayRead||MayServe?"Authorized":Revoked?"Revoked":"Not authorized";}}
         public override string ToString(){return (Local?"This device · ":"Device · ")+PeerId;}

@@ -44,7 +44,7 @@ class Enrollment {
 public:
     struct DeviceView {
         std::string peerId;bool local=false,approvedIssuer=false;
-        bool mayRead=false,mayServe=false,revoked=false,authorized=false;
+        bool mayRead=false,mayServe=false,revoked=false,authorized=false,grantedRead=false,grantedServe=false;
     };
     // This profile-worker component owns only archive authorization application
     // state. SessionTransportManager/DeliveryManager remain the media-free route
@@ -56,6 +56,23 @@ public:
         require(bool(clock_)&&account>0);
     }
     Authorization& policy(){return policy_;}
+    std::string automaticContext(const std::string& peer)const{
+        protocol::Writer w(LocalFormat);w.string("PeerChat/HistoryAutomatic/v1");w.number(account_);w.string(local_.peerId);w.string(peer);
+        std::string context;static const char hex[]="0123456789abcdef";for(auto byte:digestDevicePayload(w.data)){context+=hex[byte>>4];context+=hex[byte&15];}return context;
+    }
+    // Local scheduling preference only: never grants access or changes grants.
+    bool automaticSync(const std::string& peer)const{
+        require(fresh()&&member(account_,peer));
+        auto context=automaticContext(peer);
+        auto bytes=storage_.archiveSyncState(context);if(bytes.empty())return true;
+        protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()==context);auto value=r.number();r.end();require(value<=1);return value!=0;
+    }
+    void automaticSync(const std::string& peer,bool enabled){
+        (void)automaticSync(peer);
+        auto context=automaticContext(peer);
+        auto previous=storage_.archiveSyncState(context);protocol::Writer w(LocalFormat);w.string(context);w.number(enabled);
+        storage_.saveArchiveSyncState(context,previous,w.data);
+    }
     std::string sourceIssuer(const std::string& source)const{
         require(fresh()&&protocol::id(source)&&source!=local_.peerId);
         for(const auto& entry:current_)if(entry.first.second==source&&
@@ -139,6 +156,8 @@ public:
                 // Saved authorization is independent of the participation OFF
                 // switch. OFF suspends use, not the signed current grant.
                 row.authorized=row.authorized||(grant.second.verified&&grant.second.eligible&&!grant.second.grant.revoked&&grant.second.grant.capabilities&&authority&&policy_.trustsAuthority(*authority));
+                auto cached=policy_.cachedGrant(grant.first.first,d.device);
+                if(grant.second.verified&&grant.second.eligible&&!grant.second.grant.revoked&&authority&&policy_.trustsAuthority(*authority)&&cached&&cached->generation==grant.second.grant.generation&&cached->issuanceId==grant.second.grant.issuanceId){row.grantedRead=row.grantedRead||(grant.second.grant.capabilities&ReadHistory);row.grantedServe=row.grantedServe||(grant.second.grant.capabilities&ServeHistory);}
             }
             result.push_back(std::move(row));
         }
