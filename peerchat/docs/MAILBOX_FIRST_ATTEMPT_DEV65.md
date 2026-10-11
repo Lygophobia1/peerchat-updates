@@ -1,8 +1,10 @@
 # Windows mailbox first-attempt fallback — 4.0.2-dev.65
 
 The user accepted dev.63 Android login/live messaging, but observed Windows
-remaining Queued while Android was backgrounded. Physical retest of this
-correction is pending; FCM delivery architecture is unchanged.
+remaining Queued while Android was backgrounded. The user subsequently physically
+accepted this correction on dev.65 / d6c7153: one bounded live-route failure,
+encrypted fallback, Queued -> Stored -> Delivered and Android FCM notification.
+FCM delivery architecture is unchanged. Do not treat this gate as pending.
 
 ## Code gap and correction
 

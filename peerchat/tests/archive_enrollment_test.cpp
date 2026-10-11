@@ -32,6 +32,10 @@ int main(){try{
     check(!source.policy().trustsAuthority(pa.publicKey)); // Stale consent cannot authorize a new context.
     check(source.devices().size()==2&&reader.devices().size()==2);
     for(const auto& device:reader.devices())check(!device.mayRead&&!device.mayServe&&!device.approvedIssuer);
+    delivery::DeliveryManager deliveries(b,pb.peerId);
+    session::SessionTransportManager sessions("archive-enrollment",pb.peerId,{1});
+    ar::Execution execution(b,pb,reader.policy(),deliveries,sessions);
+    ar::reconcileInitialSync(reader,execution);check(!execution.running()); // No implicit same-account permission.
     rejects([&]{source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);});
     rejects([&]{source.approveIssuer(pa.peerId,false);});source.approveIssuer(pa.peerId,true);
     auto serving=source.authorizeDevice(pa.peerId,ar::ServeHistory,20,true);
@@ -42,6 +46,14 @@ int main(){try{
     check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    reader.policy().setHistorySyncEnabled(false);
+    ar::reconcileInitialSync(reader,execution);check(!execution.running());
+    for(const auto& device:reader.devices())if(device.peerId==pb.peerId)check(device.authorized&&!device.mayRead);
+    reader.policy().setHistorySyncEnabled(true);
+    ar::reconcileInitialSync(reader,execution);check(execution.running()&&execution.scope()->archive.source==pa.peerId);
+    check(source.pendingPublications().empty()&&reader.pendingPublications().empty()); // Starting cannot create a grant.
+    execution.stop();ar::reconcileInitialSync(reader,execution);check(!execution.running());
+    {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);ar::reconcileInitialSync(reader,reopened);check(!reopened.running());}
     check(reader.policy().historySyncEnabled());
     reader.policy().setHistorySyncEnabled(false);
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
@@ -68,6 +80,7 @@ int main(){try{
     }
     registered.back()={ar::encodeGrant(revoked),false};
     source.refresh(metadata(pa,4,registered));reader.refresh(metadata(pb,2,registered,2));
+    for(const auto& device:reader.devices())if(device.peerId==pb.peerId)check(device.revoked&&!device.mayRead);
     check(source.pendingPublications().size()==1&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     registered.back()={ar::encodeGrant(renewed),true};
     source.refresh(metadata(pa,5,registered));reader.refresh(metadata(pb,3,registered,2));

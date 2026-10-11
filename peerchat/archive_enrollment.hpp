@@ -44,7 +44,7 @@ class Enrollment {
 public:
     struct DeviceView {
         std::string peerId;bool local=false,approvedIssuer=false;
-        bool mayRead=false,mayServe=false;
+        bool mayRead=false,mayServe=false,revoked=false,authorized=false;
     };
     // This profile-worker component owns only archive authorization application
     // state. SessionTransportManager/DeliveryManager remain the media-free route
@@ -134,6 +134,11 @@ public:
             for(const auto& grant:current_)if(grant.second.grant.device==d.device){
                 row.mayRead=row.mayRead||policy_.permits(grant.first.first,d.device,ReadHistory);
                 row.mayServe=row.mayServe||policy_.permits(grant.first.first,d.device,ServeHistory);
+                auto authority=policy_.authorityKey(grant.first.first);
+                row.revoked=row.revoked||(grant.second.verified&&grant.second.grant.revoked&&authority&&policy_.trustsAuthority(*authority));
+                // Saved authorization is independent of the participation OFF
+                // switch. OFF suspends use, not the signed current grant.
+                row.authorized=row.authorized||(grant.second.verified&&grant.second.eligible&&!grant.second.grant.revoked&&grant.second.grant.capabilities&&authority&&policy_.trustsAuthority(*authority));
             }
             result.push_back(std::move(row));
         }

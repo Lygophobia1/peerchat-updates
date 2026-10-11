@@ -71,7 +71,25 @@ internal sealed class ArchiveEnrollmentExecution {
     public void StartSync(long account,long generation,string source,bool newScan){native(12,Command(12,w=>{w.Write(account);w.Write(generation);WriteText(w,source);w.Write(newScan?1L:0L);}));}
     public void PauseSync(long account,long generation){native(14,Command(14,w=>{w.Write(account);w.Write(generation);}));}
     public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
-    public sealed class SyncProgress {public string State,Source;public long Processed,Conversations,Attachments;public bool Complete,Running;}
+    public sealed class SyncProgress {
+        public string State,Source;public long Processed,Conversations,Attachments;public bool Complete,Running;
+        public string DisplayState {get {
+            string value=(State??"").ToLowerInvariant();
+            if(value.Contains("failed")||value.Contains("rejected"))return "Error";
+            if(value.Contains("off")||value.Contains("paused"))return "Paused";
+            if(Complete)return "Complete";
+            if(value.Contains("unavailable")||value.Contains("waiting")||value.Contains("timed out"))return "Waiting";
+            if(value.Contains("synchronizing"))return "Syncing";
+            if(value.Contains("connecting"))return "Connecting";
+            return "Idle";
+        }}
+        public string SourceState {get {return DisplayState=="Syncing"?"Available":DisplayState=="Connecting"?"Connecting":"Unavailable";}}
+        public string Summary {get {return "Archive source: "+SourceState+" · Sync: "+DisplayState+"\n"+(State??"")+" · "+Processed+" messages processed · "+Conversations+" conversations completed · "+Attachments+" attachment records (not downloaded)";}}
+    }
+    public static bool IsArchiveEvent(string scope,string peer,string expected,int kind,string text){
+        return !String.IsNullOrEmpty(scope)||(peer??"").StartsWith("archive-control:",StringComparison.Ordinal)||
+            (expected??"").StartsWith("archive-control:",StringComparison.Ordinal)||(kind==8&&(text??"").StartsWith("Archive ",StringComparison.Ordinal));
+    }
     public SyncProgress Progress(long account,long generation){
         var bytes=native(13,Command(13,w=>{w.Write(account);w.Write(generation);}));var header=Command(13);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
         using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,new UTF8Encoding(false,true))){stream.Position=header.Length;
@@ -138,7 +156,8 @@ internal sealed class ArchiveEnrollmentExecution {
         return native(10,Command(10,w=>{w.Write(account);w.Write(generation);w.Write((long)action);WriteText(w,device);if(action==5)w.Write(capabilities);w.Write(consent?1L:0L);}));
     }
     public sealed class Device {
-        public string PeerId;public bool Local,ApprovedIssuer,MayRead,MayServe;
+        public string PeerId;public bool Local,ApprovedIssuer,MayRead,MayServe,Revoked,Authorized;
+        public string AuthorizationState {get {return Authorized||MayRead||MayServe?"Authorized":Revoked?"Revoked":"Not authorized";}}
         public override string ToString(){return (Local?"This device · ":"Device · ")+PeerId;}
     }
     public static Device[] Devices(byte[] bytes){
@@ -150,6 +169,12 @@ internal sealed class ArchiveEnrollmentExecution {
             Check(text()=="PeerChat/ArchiveApplication/v1"&&r.ReadInt64()==1&&r.ReadInt64()==3);
             long count=r.ReadInt64();Check(count>=0&&count<=32);var devices=new List<Device>();
             for(long i=0;i<count;i++){var peer=text();Check(peer.Length==64&&peer.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f')&&!devices.Any(d=>d.PeerId==peer));devices.Add(new Device{PeerId=peer,Local=flag(),ApprovedIssuer=flag(),MayRead=flag(),MayServe=flag()});}
+            if(stream.Position<stream.Length){
+                Check(text()=="PeerChat/ArchiveDeviceStatus/v1");long revoked=r.ReadInt64();Check(revoked>=0&&revoked<=count);
+                for(long i=0;i<revoked;i++){var peer=text();var device=devices.SingleOrDefault(d=>d.PeerId==peer);Check(device!=null&&!device.Revoked);device.Revoked=true;}
+                long authorized=r.ReadInt64();Check(authorized>=0&&authorized<=count);
+                for(long i=0;i<authorized;i++){var peer=text();var device=devices.SingleOrDefault(d=>d.PeerId==peer);Check(device!=null&&!device.Authorized);device.Authorized=true;}
+            }
             Check(stream.Position==stream.Length);return devices.ToArray();
         }
     }

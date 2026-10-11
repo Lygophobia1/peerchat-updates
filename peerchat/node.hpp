@@ -6,6 +6,7 @@
 #include "group_key_manager.hpp"
 #include "screen_share_manager.hpp"
 #include <memory>
+#include <set>
 
 namespace peerchat {
 // A profile-scoped projection of the authenticated account/friend snapshot.
@@ -63,6 +64,8 @@ struct NodeEvent {
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;
+    // Native-verified account projection only. Original sender IDs stay intact.
+    std::set<std::string> localMessageAuthors;
     std::vector<GroupState> groups;
     std::vector<GroupEvent> groupEvents;
 };

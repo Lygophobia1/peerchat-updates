@@ -65,7 +65,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val owner=checkNotNull(accounts);val session=checkNotNull(owner.session);val native=checkNotNull(profile)
         val local=mutable.value.localPeerId;val execution=archiveExecution(owner,native)
         execution.publishPending(session.accountId,generation,local)
-        ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
+        val devices=archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local))
+        mutable.value=mutable.value.copy(archiveProgress=execution.progress(session.accountId,generation))
+        ArchiveEnrollmentSnapshot(session.accountId,generation,local,devices,execution.historySync(session.accountId,generation))
     }}
     override suspend fun synchronizeArchive(snapshot:ArchiveEnrollmentSnapshot,source:String?,pause:Boolean):ArchiveEnrollmentSnapshot=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled&&mutable.value.serverPresenceLive&&livePeerWorkAllowed)
@@ -88,6 +90,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         require(action!=ArchiveDeviceAction.Authorize||capabilities!=0L)
         execution.consent(session.accountId,generation,operation,device,capabilities,true)
         execution.publishPending(session.accountId,generation,local)
+        mutable.value=mutable.value.copy(archiveProgress=execution.progress(session.accountId,generation))
         ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
     }}
     override suspend fun setHistorySync(snapshot:ArchiveEnrollmentSnapshot,enabled:Boolean):ArchiveEnrollmentSnapshot=withContext(Dispatchers.IO){synchronized(gate){
@@ -96,6 +99,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         require(snapshot.accountId==session.accountId&&snapshot.authenticationGeneration==generation&&snapshot.localPeerId==local)
         val execution=archiveExecution(owner,native);execution.refresh(session.accountId,generation,local)
         execution.historySync(session.accountId,generation,enabled)
+        mutable.value=mutable.value.copy(archiveProgress=execution.progress(session.accountId,generation))
         ArchiveEnrollmentSnapshot(session.accountId,generation,local,archiveDeviceSnapshots(execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
     }}
     private val remembered=AndroidRememberedLoginStore(this.context,profileName)

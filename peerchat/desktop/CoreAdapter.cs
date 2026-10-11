@@ -225,7 +225,7 @@ public sealed class CoreAdapter : IDisposable {
 }
 public class CoreEvent { public int kind; public string peer,expected,text,detail,candidate,source,route,screenSummary,screenDetails,screenFailureDomain,screenFailureReason,screenRecoveryTrigger,authorizationGroupId,authorizationArchive; public ushort port; public long attempt,sessionEpoch,sessionRevision,networkGeneration,callLifetime,mediaGeneration,shareLifetime,shareGeneration,screenRecoveryGenerationFrom,screenRecoveryGenerationTo,authorizationRosterGeneration,authorizationTargetAccountId; public int retryMs,callState,callType,mediaState,reliableRoute,p2pAvailability,mediaRoute,shareState,screenRoute,screenWidth,screenHeight,screenFps; public double screenBitrateMbps; public bool connected,callMuted,callDeafened,callControlAvailable,screenMediaFailed; public ContactData[] contacts; public MessageData[] messages; public GroupData[] groups; public GroupEventData[] groupEvents; }
 public class ContactData { public string peer,name,host,publicHost; public ushort port,publicPort; public bool verified; }
-public class MessageData { public string id,sender,text,status; public long time,logical,sequence; public int delivery; }
+public class MessageData { public string id,sender,text,status; public long time,logical,sequence; public int delivery; public bool localAuthor; }
 public class GroupData { public string id,name; public long owner; public GroupMemberData[] members,invites; }
 public class GroupMemberData { public long account; public string peer,name; public int role; }
 public class GroupEventData { public string id,group,sender,text,status; public long account,time,logical,sequence; }

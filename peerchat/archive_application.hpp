@@ -7,6 +7,18 @@ constexpr size_t MaxApplicationBytes=262144;
 inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
 }
+inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution){
+    if(!execution.needsInitialSync())return;
+    for(const auto& device:enrollment.devices()){
+        if(device.local||!device.mayServe)continue;
+        std::string issuer;
+        // Capability bits alone are insufficient: source and reader must have
+        // current verified grants from the SAME explicitly trusted authority.
+        try{issuer=enrollment.sourceIssuer(device.peerId);}catch(const std::exception&){continue;}
+        // Do not swallow a corrupt durable cursor as an unavailable source.
+        execution.start(issuer,device.peerId,false);return;
+    }
+}
 inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,unsigned operation,const Blob& bytes,
     std::uint64_t now,std::uint64_t network){
     require(operation>=12&&operation<=15&&bytes.size()<=MaxApplicationBytes);
@@ -17,7 +29,7 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     if(operation==14){r.end();execution.stop();}
     if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();
         auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
-    if(operation==13){r.end();execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
+    if(operation==13){r.end();reconcileInitialSync(enrollment,execution);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
         result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
         result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);}
     return result.data;
@@ -38,6 +50,12 @@ inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation
     if(operation==3){
         r.end();auto devices=enrollment.devices();result.number(devices.size());
         for(const auto& d:devices){result.string(d.peerId);result.number(d.local);result.number(d.approvedIssuer);result.number(d.mayRead);result.number(d.mayServe);}
+        // Local application projection extension; peer/server wire is unchanged.
+        result.string("PeerChat/ArchiveDeviceStatus/v1");
+        size_t revoked=0;for(const auto& d:devices)if(d.revoked)++revoked;
+        result.number(revoked);for(const auto& d:devices)if(d.revoked)result.string(d.peerId);
+        size_t authorized=0;for(const auto& d:devices)if(d.authorized)++authorized;
+        result.number(authorized);for(const auto& d:devices)if(d.authorized)result.string(d.peerId);
         return result.data;
     }
     if(operation==8){

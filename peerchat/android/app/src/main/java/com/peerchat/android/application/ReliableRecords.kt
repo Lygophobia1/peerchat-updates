@@ -20,6 +20,7 @@ internal class NativeRecord(bytes: ByteArray, type: Int) {
         return ByteArray(count.toInt()).also { input.get(it) }
     }
     fun end() { require(!input.hasRemaining()) }
+    fun hasRemaining():Boolean=input.hasRemaining()
 }
 internal class NativeRecordWriter(type: Int) {
     private val output=ByteArrayOutputStream().apply {write(byteArrayOf(80,84,1,type.toByte()))}

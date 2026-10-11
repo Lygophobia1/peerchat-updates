@@ -16,6 +16,7 @@ static class ArchiveApplicationBoundaryTest {
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_archive(IntPtr h,uint op,byte[] input,uint length,[Out] byte[] output,uint capacity);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_network_context(IntPtr h,ulong generation,string fingerprint);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_poll(IntPtr h);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_history(IntPtr h,string peer,long before);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr h,uint op,string peer,string id,string path);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl)] static extern int ui_relay_ready(IntPtr h,ulong attempt,int incoming);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern void ui_relay_closed(IntPtr h,ulong attempt,string reason);
@@ -52,8 +53,9 @@ static class ArchiveApplicationBoundaryTest {
         }
     }
     static void Views(IntPtr h,string peer,bool approved,bool serving){
-        var record=new Record(Simple(h,3));Check(record.Text()=="PeerChat/ArchiveApplication/v1"&&record.Number()==1&&record.Number()==3&&record.Number()==1);
-        Check(record.Text()==peer&&record.Number()==1&&record.Number()==(approved?1UL:0UL)&&record.Number()==0&&record.Number()==(serving?1UL:0UL));record.End();
+        var devices=ArchiveEnrollmentExecution.Devices(Simple(h,3));Check(devices.Length==1);
+        var device=devices[0];Check(device.PeerId==peer&&device.Local&&device.ApprovedIssuer==approved&&!device.MayRead&&device.MayServe==serving);
+        if(serving)Check(device.AuthorizationState=="Authorized");
     }
     static string Device(byte[] descriptor){var outer=new Record(descriptor);var payload=outer.Bytes();outer.Bytes();outer.End();var r=new Record(payload);Check(r.Text()=="PeerChat/ArchiveDeviceDescriptor/v1"&&r.Number()==1&&r.Number()==8);return r.Text();}
     static void PairMetadata(IntPtr h,string peer,byte[][] descriptors,byte[][] grants,ulong revision){using(var w=new Wire(2)){
@@ -77,7 +79,7 @@ static class ArchiveApplicationBoundaryTest {
         byte[] serve,read;using(var w=new Wire(5)){w.Text(pa);w.Number(2);w.Number(1);serve=Request(a,5,w);}
         using(var w=new Wire(5)){w.Text(pb);w.Number(1);w.Number(1);read=Request(a,5,w);}
         PairMetadata(a,pa,descriptors,new[]{serve,read},2);PairMetadata(b,pb,descriptors,new[]{serve,read},2);
-        var source=Client(a);var reader=Client(b);reader.StartSync(8,1,pa,false);
+        var source=Client(a);var reader=Client(b);Check(reader.Progress(8,1).Running); // Actual native automatic authorized initial sync.
         ulong ra=0,rb=0;ArchiveRelayScope scope;var until=DateTime.UtcNow.AddSeconds(10);
         while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb!=0)source.IncomingArchive(8,1,scope);else Thread.Sleep(10);}
         while(ra==0&&DateTime.UtcNow<until){ra=Relay(a,out scope);if(ra==0)Thread.Sleep(10);}
@@ -86,9 +88,23 @@ static class ArchiveApplicationBoundaryTest {
         while(DateTime.UtcNow<until){
             int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);
             n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
-            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==0);complete=true;break;}Thread.Sleep(10);
+            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==25);complete=true;break;}Thread.Sleep(10);
         }
         Check(complete);Check(reader.Progress(8,1).Attachments==1);
+        Check(ui_history(b,new string('a',64),Int64.MaxValue)==1);
+        int historyCount=0,localAuthors=0;until=DateTime.UtcNow.AddSeconds(3);
+        while(historyCount==0&&DateTime.UtcNow<until){
+            foreach(Dictionary<string,object> e in new JavaScriptSerializer().Deserialize<object[]>(Marshal.PtrToStringUni(ui_poll(b))))if(Convert.ToInt32(e["kind"])==6){
+                foreach(Dictionary<string,object> message in (object[])e["messages"]){
+                    historyCount++;string sender=(string)message["sender"];
+                    Check(sender==pa||sender==new string('a',64));
+                    Check(Convert.ToInt32(message["delivery"])==1); // Imported Sent, never manufactured Delivered.
+                    Check((bool)message["localAuthor"]==(sender==pa));if((bool)message["localAuthor"])localAuthors++;
+                }
+            }
+            if(historyCount==0)Thread.Sleep(10);
+        }
+        Check(historyCount==25&&localAuthors==12); // Preserved authors, rendered account-local without a DM route.
         // The byte-only fixture must also propagate EOF when history demand
         // retires. A real RelayTransport does this; silently leaving its old
         // opposite pipe alive would manufacture a stale winner in the harness.
@@ -110,6 +126,14 @@ static class ArchiveApplicationBoundaryTest {
         Console.WriteLine("PASS: actual paired Node workers, zero friends, scoped opaque relay, mutual Schannel TLS, catalog sync and verified Unicode attachment download through ONE TransferManager. HOST ONLY");
     }finally{ui_destroy(b);ui_destroy(a);}}
     public static int Main(string[] args){try{
+        Check(ArchiveEnrollmentExecution.IsArchiveEvent("scope","a","b",8,"TLS failed"));
+        Check(ArchiveEnrollmentExecution.IsArchiveEvent("","archive-control:8","",17,"Connecting"));
+        Check(ArchiveEnrollmentExecution.IsArchiveEvent("","","",8,"Archive authorization/provenance rejected"));
+        Check(!ArchiveEnrollmentExecution.IsArchiveEvent("","a","b",8,"TLS failed"));
+        Check(new ArchiveEnrollmentExecution.SyncProgress{State="Connecting to archive",Running=true}.DisplayState=="Connecting");
+        Check(new ArchiveEnrollmentExecution.SyncProgress{State="Archive authorization unavailable",Running=true}.DisplayState=="Waiting");
+        Check(new ArchiveEnrollmentExecution.SyncProgress{State="Archive synchronization failed closed"}.DisplayState=="Error");
+        Check(new ArchiveEnrollmentExecution.SyncProgress{State="History synchronized",Complete=true}.DisplayState=="Complete");
         Check(args.Length==2&&LoadLibraryEx(Path.Combine(args[0],"PeerChat.Core.dll"),IntPtr.Zero,0x1100)!=IntPtr.Zero);
         IntPtr handle=ui_create();Check(handle!=IntPtr.Zero);byte[] descriptor=null,grant=null;string peer=null;
         try{

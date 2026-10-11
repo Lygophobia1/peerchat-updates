@@ -34,6 +34,9 @@ public:
     }
     const std::optional<session::ReliableAuthorization>& scope()const{return scope_;}
     bool running()const{return running_;}
+    // Initial participation only. A durable pause/completion is never silently
+    // replaced, and this predicate cannot enroll a device or issue a grant.
+    bool needsInitialSync()const{return savedIntent_.empty()&&!reader_&&!running_&&policy_.historySyncEnabled();}
     const std::string& state()const{return state_;}
     // A corrupt checkpoint/page stops only archive work, never the profile's
     // ordinary messaging worker. The protected record is not overwritten.

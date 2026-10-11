@@ -17,7 +17,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     val enrollment=state.archiveEnrollment
     if(enrollment!=null)Row {
         Switch(enrollment.historySyncEnabled,{value->dispatch(UiAction.HistorySync(enrollment,value))},enabled=!state.archiveBusy)
-        Text("History synchronization")
+        Text("History Sync: "+if(enrollment.historySyncEnabled)"ON" else "OFF")
     }else Text("History synchronization: refresh to load saved choice.")
     Text("On participates only when explicitly authorized. Off preserves local history, grants and resume cursors. Refresh to load this account's saved choice.",style=MaterialTheme.typography.bodySmall)
     enrollment?.devices?.forEach {device->
@@ -27,6 +27,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
             Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
                 Text(if(device.local)"This device" else "Account device",style=MaterialTheme.typography.titleSmall)
                 Text("Peer ID: "+device.peerId,style=MaterialTheme.typography.bodySmall)
+                Text("Archive authorization: "+device.authorizationState,style=MaterialTheme.typography.bodySmall)
                 Text("Trusted authorizer: "+(if(device.approvedIssuer)"Yes" else "No")+" · May receive: "+(if(device.mayRead)"Yes" else "No")+" · May serve: "+(if(device.mayServe)"Yes" else "No"),style=MaterialTheme.typography.bodySmall)
                 Row{Checkbox(read,{read=it},enabled=!state.archiveBusy);Text("May receive historical messages")}
                 Row{Checkbox(serve,{serve=it},enabled=!state.archiveBusy);Text("May serve historical messages")}
@@ -38,6 +39,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
             }
         }
     }
+    Text("Archive source: "+state.archiveProgress.sourceState+" · Sync: "+state.archiveProgress.displayState,style=MaterialTheme.typography.bodySmall)
     Text(state.archiveProgress.state+" · "+state.archiveProgress.processed+" messages processed · "+state.archiveProgress.conversations+" conversations completed · "+state.archiveProgress.attachments+" attachment records (not downloaded)",style=MaterialTheme.typography.bodySmall)
     if(enrollment!=null&&state.archiveProgress.running)OutlinedButton({dispatch(UiAction.ArchiveSynchronize(enrollment,pause=true))},enabled=!state.archiveBusy){Text("Pause synchronization")}
     pending?.let {p->

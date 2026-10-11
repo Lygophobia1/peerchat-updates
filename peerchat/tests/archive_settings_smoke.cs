@@ -27,6 +27,11 @@ static class ArchiveSettingsSmoke {
             try{
                 await Task.Delay(900);
                 var flags=BindingFlags.Instance|BindingFlags.NonPublic;
+                var history=new ChatViewModel();history.Apply(new CoreEvent{kind=0,peer=new string('b',64),text="Reader"});
+                var original=new MessageData{id=new string('1',32),sender=new string('c',64),text="Archived local-account message",delivery=1,localAuthor=true};
+                history.Apply(new CoreEvent{kind=6,peer=new string('a',64),messages=new[]{original}});
+                var rendered=history.Get(new string('a',64)).Messages.Single();
+                Check(rendered.Outgoing&&rendered.Data.sender==original.sender&&rendered.Data.delivery==1);
                 var failureText=typeof(DesktopApplication).GetMethod("AccountFailureMessage",BindingFlags.Static|BindingFlags.NonPublic);
                 Check(((string)failureText.Invoke(null,new object[]{new DiscoveryRequestException("device_account_mismatch"),true,true})).Contains("identity is already linked"));
                 Check(((string)failureText.Invoke(null,new object[]{new System.Security.Authentication.AuthenticationException("test-only"),true,false})).Contains("TLS identity validation failed"));

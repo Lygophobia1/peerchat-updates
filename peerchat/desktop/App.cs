@@ -109,7 +109,15 @@ public class DesktopApplication {
             if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
             if(task.IsFaulted){archiveProgress=null;TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
             archiveProgress=task.Result;
-            if(archiveProgress.Processed!=archiveProjectedCount){archiveProjectedCount=archiveProgress.Processed;if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);}
+            if(archiveProgress.Processed!=archiveProjectedCount){
+                archiveProjectedCount=archiveProgress.Processed;
+                if(model.Selected!=null&&!model.Groups){
+                    // Native imports change history after the initial request;
+                    // bypass only the one-time UI request guard, never storage.
+                    var conversation=model.Selected;
+                    foreach(var peer in conversation.KnownPeerIds.Concat(new[]{conversation.Contact==null?"":conversation.Contact.peer}).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal))core.History(peer,long.MaxValue);
+                }
+            }
         })));
     }
     void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
@@ -567,6 +575,17 @@ public class DesktopApplication {
                     continue;
                 }
                 if(e.kind==21){if(discovery!=null)discovery.QueueGroupAck(e.expected,e.detail,e.text);continue;}
+                if(ArchiveEnrollmentExecution.IsArchiveEvent(e.authorizationArchive,e.peer,e.expected,e.kind,e.text)){
+                    if(e.kind==18)StartRelay(e);
+                    if(e.kind==8){
+                        if(archiveProgress==null)archiveProgress=new ArchiveEnrollmentExecution.SyncProgress();
+                        archiveProgress.State="Archive synchronization failed closed";
+                        TraceUi("archive route failure · attempt="+e.attempt+" · "+(e.text??"Archive operation rejected"));
+                    }
+                    // Archive lifecycle is not DM connectivity and must not
+                    // project a generic offline state or connection popup.
+                    continue;
+                }
                 if(!String.IsNullOrEmpty(e.authorizationGroupId)){
                     ObserveGroupControl(e);
                     if(e.kind==18)StartRelay(e);
@@ -2868,7 +2887,7 @@ public class DesktopApplication {
         panel.Children.Add(devices);panel.Children.Add(details);panel.Children.Add(read);panel.Children.Add(serve);panel.Children.Add(buttons);panel.Children.Add(status);
         long displayedAccount=0;ulong displayedGeneration=0;
         devices.SelectionChanged+=(s,e)=>{var d=devices.SelectedItem as ArchiveEnrollmentExecution.Device;
-            details.Text=d==null?"":("Peer ID: "+d.PeerId+"\nTrusted authorizer: "+(d.ApprovedIssuer?"Yes":"No")+" · May receive: "+(d.MayRead?"Yes":"No")+" · May serve: "+(d.MayServe?"Yes":"No"));
+            details.Text=d==null?"":("Peer ID: "+d.PeerId+"\nArchive authorization: "+d.AuthorizationState+"\nTrusted authorizer: "+(d.ApprovedIssuer?"Yes":"No")+" · May receive: "+(d.MayRead?"Yes":"No")+" · May serve: "+(d.MayServe?"Yes":"No"));
             read.IsChecked=d!=null&&d.MayRead;serve.IsChecked=d!=null&&d.MayServe;
         };
         Action<uint> run=async action=>{
@@ -2897,7 +2916,7 @@ public class DesktopApplication {
                 devices.SelectedItem=rows.Rows.FirstOrDefault(d=>d.PeerId==target)??rows.Rows.FirstOrDefault(d=>d.Local);
                 sync.IsThreeState=false;sync.IsChecked=rows.Enabled;sync.IsEnabled=true;
                 archiveProgress=rows.Progress;archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
-                status.Text=rows.Progress.State+" · "+rows.Progress.Processed+" messages processed · "+rows.Progress.Conversations+" conversations completed. No access is inferred from login.";
+                status.Text=rows.Progress.Summary+"\nNo access is inferred from login.";
             }catch(Exception error){sync.IsEnabled=false;sync.IsChecked=null;status.Text="Archive operation failed closed. Refresh to retry pending public grants. No access is inferred from login.";TraceUi("archive settings operation failed: "+error.GetType().Name);}
             finally{panel.IsEnabled=true;}
         };
@@ -2921,7 +2940,7 @@ public class DesktopApplication {
             if(choose.ShowDialog(dialog)!=true)return;
             try{await Task.Run(()=>core.FileTransfer(5,source.PeerId,file.id,Path.GetDirectoryName(choose.FileName)));ShowFileTransfers();status.Text="Attachment requested. File transfers shows verified progress and cancellation.";}catch(Exception error){status.Text="Attachment request failed closed: "+error.Message;}
         };
-        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.State+" · "+archiveProgress.Processed+" messages processed · "+archiveProgress.Conversations+" conversations completed · "+archiveProgress.Attachments+" attachment records (not downloaded)";};
+        EventHandler progressTick=(s,e)=>{if(dialog.IsVisible&&archiveProgress!=null)status.Text=archiveProgress.Summary;};
         voiceTimer.Tick+=progressTick;dialog.Closed+=(s,e)=>voiceTimer.Tick-=progressTick;
         return panel;
     }
