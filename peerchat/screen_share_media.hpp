@@ -87,7 +87,8 @@ public:
         bool encoderCbrSupported = false, encoderCbrApplied = false;
         bool encoderLowLatencySupported = false, encoderLowLatencyApplied = false;
         bool encoderForceKeyframeSupported = false, encoderForceKeyframeApplied = false;
-        std::wstring encoderName, adapterName, encoderOutputTypeName;
+        std::wstring encoderName, adapterName, encoderOutputTypeName,encoderPerformance,decoderPerformance;
+        std::uint64_t decoderOldestQueueAgeMs=0;
         std::uint64_t adapterDriverVersion = 0;
         std::uint32_t decoderQueueDepth = 0, decoderWorkerStage = 0;
         std::uint32_t decoderLastCompletedStage = 0;
@@ -359,6 +360,7 @@ public:
                 value.encoderForceKeyframeSupported = status.force_keyframe_control_supported != 0;
                 value.encoderForceKeyframeApplied = status.force_keyframe_control_applied != 0;
                 value.encoderName = status.encoder_name;
+                value.encoderPerformance = status.performance;
                 value.adapterName = status.adapter_name;
                 value.encoderOutputTypeName = status.output_type_name;
                 value.adapterDriverVersion = status.driver_version;
@@ -379,6 +381,7 @@ public:
                 value.height = status.decoded_height;
                 value.droppedDecodeQueue = status.dropped_decode_queue;
                 value.decoderQueueDepth = status.queue_depth;
+                value.decoderPerformance=status.performance;value.decoderOldestQueueAgeMs=status.oldest_queue_age_ms;
                 value.decoderWorkerStage = status.worker_stage;
                 value.decoderLastCompletedStage = status.last_completed_stage;
                 value.decoderD3d11MultithreadProtected = status.d3d11_multithread_protected != 0;
@@ -554,6 +557,7 @@ public:
             << L"\nh264_receiver_idr=" << data.receiverIdr << L"\nh264_receiver_non_idr=" << data.receiverNonIdr
             << L"\nh264_first_access_units=" << firstAccessUnits
             << L"\nkeyframe_requests=" << data.keyframeRequests
+            << data.encoderPerformance<<data.decoderPerformance<<L"\ndecoder_oldest_queue_age_ms="<<data.decoderOldestQueueAgeMs
             << L"\ndropped_decode_queue=" << data.droppedDecodeQueue
             << L"\ndecoder_queue_depth=" << data.decoderQueueDepth
             << L"\ndecoder_worker_stage=" << data.decoderWorkerStage

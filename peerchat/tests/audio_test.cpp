@@ -31,6 +31,7 @@ int main() {
     using namespace std::chrono_literals;
     try {
         const Clock::time_point now{};
+        require(deviceCandidates(999,false)==std::vector<UINT>({999}),"Missing explicit speaker must not silently switch to another device");
         const std::vector<peerchat::Audio::Device> devices{{-1,L"Windows default microphone"},{0,L"Other mic"},{3,L"JLab Hands-Free"}};
         require(captureCandidates(-1,devices,3,false)==std::vector<UINT>({3,0}),
                 "Default must resolve to the concrete JLab ID before fallback");
@@ -116,8 +117,8 @@ int main() {
         require(!defaults.empty() && defaults.front() == WAVE_MAPPER,
                 "Default capture fallback must try the Windows mapper first");
         const auto stale = deviceCandidates(12345, false);
-        require(stale.size() >= 2 && stale[0] == 12345 && stale[1] == WAVE_MAPPER,
-                "A stale selected output must fall back to the Windows mapper");
+        require(stale == std::vector<UINT>({12345}),
+                "Explicit stale output must fail rather than silently substitute a different speaker");
         std::cout << "PASS: PCM mixing, four peers, jitter, clipping, bounded queues, stale frames/devices, closed lifecycle. No audio devices opened.\n";
         return 0;
     } catch (const std::exception& error) {

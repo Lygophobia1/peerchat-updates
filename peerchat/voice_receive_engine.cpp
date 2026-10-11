@@ -13,7 +13,7 @@ template<class T> T symbol(HMODULE module,const char* name){
 }
 VoiceReceiveEngine::~VoiceReceiveEngine(){close();}
 bool VoiceReceiveEngine::open(const std::wstring& path){
-    std::lock_guard<std::mutex> guard(mutex_);closeLocked();counters_={};busyPullBlocks_=0;
+    std::lock_guard<std::mutex> guard(mutex_);closeLocked();counters_={};busyPullBlocks_=0;busyInserts_=0;performance_.reset();
     if(path.size()<3||!(path[1]==L':'||(path[0]==L'\\'&&path[1]==L'\\')))return false;
     module_=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!module_){counters_.lastError=PC_RX_FAILED;return false;}
@@ -50,7 +50,7 @@ void VoiceReceiveEngine::retire(const std::string& key){
     sources_.erase(found);
 }
 int VoiceReceiveEngine::insertRtp(const std::string& key,std::uint64_t generation,const unsigned char* bytes,std::size_t count){
-    std::unique_lock<std::mutex> guard(mutex_,std::try_to_lock);if(!guard.owns_lock())return PC_RX_BUSY;
+    std::unique_lock<std::mutex> guard(mutex_,std::try_to_lock);if(!guard.owns_lock()){++busyInserts_;return PC_RX_BUSY;}
     auto reject=[this](int status){++counters_.rejectedPackets;counters_.lastError=status;return status;};
     auto found=sources_.find(key);
     if(!engine_||found==sources_.end()||generation!=found->second.generation||!bytes||count<12||count>8192||(bytes[0]>>6)!=2)return reject(PC_RX_INVALID);
@@ -64,12 +64,16 @@ int VoiceReceiveEngine::insertRtp(const std::string& key,std::uint64_t generatio
         pc_rx_source_config config{sizeof(config),1,ssrc,pt,generation};
         int status=add_(engine_,&config,&source.handle);if(status!=PC_RX_OK)return reject(status);source.ssrc=ssrc;
     }else if(source.ssrc!=ssrc)return reject(PC_RX_INVALID);
+    const auto arrival=MediaPerformance::nowUs();
+    if(source.observation.lastUs)performance_.observe(MediaPerformance::RtpArrival,arrival-source.observation.lastUs,40000);
+    source.observation.packet(static_cast<std::uint16_t>((unsigned(bytes[2])<<8)|bytes[3]),be32(bytes+4),arrival,count);
     pc_rx_packet packet{sizeof(packet),1,ssrc,be32(bytes+4),std::uint32_t((unsigned(bytes[2])<<8)|bytes[3]),pt,generation,0};
     int status=insert_(engine_,source.handle,&packet,bytes+offset,static_cast<std::uint32_t>(end-offset));
     if(status!=PC_RX_OK)return reject(status);
     ++counters_.acceptedPackets;return PC_RX_OK;
 }
 bool VoiceReceiveEngine::pull20ms(std::int16_t* pcm,std::size_t samples,bool deafened){
+    MediaPerformance::Span timed(performance_,MediaPerformance::ReceivePull,20000);
     if(!pcm||samples!=320)return false;
     std::fill_n(pcm,320,0);
     std::unique_lock<std::mutex> guard(mutex_,std::try_to_lock);if(!guard.owns_lock()){busyPullBlocks_+=2;return false;}
@@ -86,6 +90,8 @@ VoiceReceiveEngine::Snapshot VoiceReceiveEngine::snapshot(){
     std::lock_guard<std::mutex> guard(mutex_);auto result=counters_;
     result.underrunBlocks+=busyPullBlocks_.load();
     result.authorizedSources=static_cast<unsigned>(sources_.size());
+    result.performance=performance_.text();result.busyInserts=busyInserts_;
+    for(const auto& item:sources_)result.rtp.emplace(item.first,item.second.observation);
     for(const auto& item:sources_)if(item.second.handle){++result.activeSources;pc_rx_source_stats value{};value.size=sizeof(value);value.version=1;
         if(stats_(engine_,item.second.handle,&value)==PC_RX_OK)result.sources.emplace(item.first,value);
     }

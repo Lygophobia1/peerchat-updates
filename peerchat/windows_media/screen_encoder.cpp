@@ -27,6 +27,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include "../media_performance.hpp"
 #include <thread>
 #include <utility>
 #include <vector>
@@ -178,6 +179,7 @@ public:
         wcsncpy_s(value->adapter_name, adapterName_.c_str(), _TRUNCATE);
         wcsncpy_s(value->output_type_name, outputTypeName_.c_str(), _TRUNCATE);
         value->driver_version = driverVersion_;
+        wcsncpy_s(value->performance, performance_.text().c_str(), _TRUNCATE);
         return 1;
     }
 
@@ -427,6 +429,9 @@ private:
 
     void onCapture(Direct3D11CaptureFramePool const& sender) {
         if (!running_) return;
+        peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenCapture,1000000/std::max<uint32_t>(1,options_.frames_per_second));
+        auto tick=peerchat::MediaPerformance::nowUs();auto previous=lastCaptureUs_.exchange(tick);
+        if(previous)performance_.observe(peerchat::MediaPerformance::CaptureInterval,tick-previous,2000000/std::max<uint32_t>(1,options_.frames_per_second));
         ++captureCallbackCount_;
         lastCaptureCallbackTick_ = GetTickCount64();
         setCaptureStage(PC_SCREEN_CAPTURE_NEXT);
@@ -459,6 +464,7 @@ private:
     }
 
     bool submit(CapturedFrame frame) {
+        peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenInput,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         auto access = frame.frame.Surface().as<
             ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
         ComPtr<ID3D11Texture2D> source;
@@ -620,6 +626,7 @@ private:
     }
 
     bool collect() {
+        peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenOutput,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         setWorkerStage(PC_SCREEN_ENCODER_OUTPUT);
         MFT_OUTPUT_STREAM_INFO info{};
         if (FAILED(encoder_->GetOutputStreamInfo(0, &info))) return false;
@@ -793,6 +800,7 @@ private:
     std::thread worker_;
     std::atomic<bool> running_{true};
     std::mutex mutex_;
+    peerchat::MediaPerformance performance_;std::atomic<uint64_t> lastCaptureUs_{0};
     std::condition_variable condition_;
     bool initialized_ = false, failed_ = false, inputReady_ = false;
     bool mediaFoundationStarted_ = false;

@@ -10,6 +10,14 @@ public sealed class DiagnosticsSection {
     public string Name {get;set;}
     public string Details {get;set;}
 }
+
+public static class MediaPerformanceSummary {
+    static string Value(string raw,string key){foreach(var line in (raw??"").Split('\n'))if(line.StartsWith(key+"=",StringComparison.Ordinal)){var value=line.Substring(key.Length+1).Trim();return value.Length>160?value.Substring(0,160):value;}return "Unavailable";}
+    static string Peak(string raw,string key){var value=Value(raw,key);foreach(var field in value.Split(';'))if(field.StartsWith("max_us:"))return field.Substring(7)+" µs";return "Unavailable";}
+    public static string Voice(string raw){return "Opus · 20 ms · NetEq\nReceive delay: "+Value(raw,"neteq_current_delay_ms")+" ms / target "+Value(raw,"neteq_target_delay_ms")+" ms\nArrival jitter: "+Value(raw,"rtp_arrival_jitter_ms")+" ms · unresolved gaps (estimate): "+Value(raw,"rtp_missing_estimate")+"\nRecovered reorder: "+Value(raw,"rtp_reordered_recovered")+" · late beyond observer window: "+Value(raw,"rtp_late_beyond_64")+"\nPLC events: "+Value(raw,"neteq_concealment_events")+" · FEC decoded rate Q14: "+Value(raw,"neteq_secondary_decoded_rate_q14")+"\nPlayback all-buffers-returned events: "+Value(raw,"playback_all_buffers_returned_events")+"\nProcessing peak (AEC/NS/AGC combined): "+Peak(raw,"perf_apm_capture")+" · receive/decode/mix peak: "+Peak(raw,"perf_receive_pull")+"\nRTT: unavailable in pinned media API. Expand Advanced for queues, devices and recent anomalies.";}
+    public static string Screen(string raw){return "Rendered FPS: "+Value(raw,"rendered_fps")+" · decode queue: "+Value(raw,"decoder_queue_depth")+"\nOldest queued frame: "+Value(raw,"decoder_oldest_queue_age_ms")+" ms · queue drops: "+Value(raw,"dropped_decode_queue")+"\nDecode + present peak: "+Peak(raw,"perf_screen_decode_and_present")+" · present peak: "+Peak(raw,"perf_screen_present")+"\nAwaiting recovery IDR: "+Value(raw,"awaiting_recovery_idr")+". Advanced contains encoder/backend/rate and recovery counters.";}
+    public static string ProcessSnapshot(){try{using(var p=System.Diagnostics.Process.GetCurrentProcess()){return "\nprocess_cpu_total_ms="+p.TotalProcessorTime.TotalMilliseconds.ToString("F0",System.Globalization.CultureInfo.InvariantCulture)+"\nprocess_working_set_bytes="+p.WorkingSet64+"\nmanaged_gc_collections="+GC.CollectionCount(0)+","+GC.CollectionCount(1)+","+GC.CollectionCount(2)+"\nprocess_cpu_semantics=cumulative; compare snapshots; GPU/per-thread utilization not measured";}}catch{return "\nprocess_performance=unavailable";}}
+}
 public sealed class DiagnosticsSnapshot {
     public string SnapshotId {get;set;}
     public string TimestampUtc {get;set;}

@@ -2,6 +2,7 @@
 
 #include "audio_processing/peerchat_audio_processing.h"
 #include "voice_processing_presets.hpp"
+#include "media_performance.hpp"
 #include <windows.h>
 #include <array>
 #include <atomic>
@@ -27,6 +28,7 @@ public:
               AutomaticGainStrength gainStrength = AutomaticGainStrength::Balanced,
               bool echoCancellation = false) {
         close();
+        performance_.reset();
         captureCalls_ = 0;
         processedFrames_ = 0;
         bypassedFrames_ = 0;
@@ -81,6 +83,7 @@ public:
 
     // On failure the caller's original 320 samples remain untouched.
     bool processFrame(std::int16_t* pcm) {
+        MediaPerformance::Span timed(performance_,MediaPerformance::ApmCapture,20000);
         if (!pcm) return false;
         if (!active_) { ++bypassedFrames_; return false; }
         if(!applyReset()){++bypassedFrames_;return false;}
@@ -117,6 +120,7 @@ public:
     // Capture/render are serialized by the Audio device worker, not by a new
     // thread/queue. Reference data is the final remote-only speaker mix.
     bool processRender20ms(const std::int16_t* pcm,std::size_t samples,unsigned delayMs){
+        MediaPerformance::Span timed(performance_,MediaPerformance::ApmRender,20000);
         if(!echoCancellation_||!active_||!pcm||samples!=320)return false;
         if(!applyReset())return false;
         delayMs_=delayMs>2000?2000:delayMs;
@@ -133,6 +137,7 @@ public:
     std::uint64_t renderCalls()const{return renderCalls_;}
     std::uint64_t referenceUnderruns()const{return referenceUnderruns_;}
     std::uint64_t resets()const{return resets_;}
+    std::wstring performanceText()const{return performance_.text()+L"\napm_component_cost=AEC/NS/AGC bundled by pinned APM; split timing unavailable";}
     unsigned delayMs()const{return delayMs_;}
     bool active() const { return active_; }
     unsigned failure() const { return failure_; }
@@ -161,6 +166,7 @@ public:
     }
 
 private:
+    MediaPerformance performance_;
     static std::int64_t nowMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();}
     void fail(pc_apm_result error){failure_=100+static_cast<unsigned>(error);active_=false;}

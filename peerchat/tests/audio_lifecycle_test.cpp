@@ -27,7 +27,7 @@ MMRESULT start(HWAVEIN){if(failStart)return MMSYSERR_ERROR;for(auto* header:head
 MMRESULT resetIn(HWAVEIN){return 0;}
 MMRESULT unprepareIn(HWAVEIN,WAVEHDR* header,UINT){header->dwFlags=0;return 0;}
 MMRESULT closeIn(HWAVEIN){--inputs;headers.clear();return 0;}
-MMRESULT openOut(LPHWAVEOUT handle,UINT,LPCWAVEFORMATEX,DWORD_PTR,DWORD_PTR,DWORD){*handle=reinterpret_cast<HWAVEOUT>(2);++outputs;return 0;}
+MMRESULT openOut(LPHWAVEOUT handle,UINT id,LPCWAVEFORMATEX,DWORD_PTR,DWORD_PTR,DWORD){if(id!=0&&id!=WAVE_MAPPER)return MMSYSERR_BADDEVICEID;*handle=reinterpret_cast<HWAVEOUT>(2);++outputs;return 0;}
 MMRESULT prepareOut(HWAVEOUT,WAVEHDR* header,UINT){header->dwFlags=WHDR_PREPARED;return 0;}
 MMRESULT write(HWAVEOUT,WAVEHDR* header,UINT){++outputWrites;header->dwFlags=WHDR_PREPARED|WHDR_INQUEUE;if(renderTest&&outputWrites<=3)header->dwFlags|=WHDR_DONE;return 0;}
 MMRESULT resetOut(HWAVEOUT){return 0;}
@@ -55,6 +55,9 @@ MMRESULT closeOut(HWAVEOUT){--outputs;return 0;}
 void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 int main(){try{
     peerchat::Audio audio;std::wstring error;std::atomic<int> delivered{0};
+    peerchat::Audio missingSpeaker;missingSpeaker.setDevices(0,12345);
+    require(!missingSpeaker.start(error)&&!error.empty(),"Missing explicit speaker silently opened another output");
+    missingSpeaker.stop();require(fake::inputs==0&&fake::outputs==0,"Missing speaker left partial device initialization");
     audio.setDevices(0,0);
     audio.setCaptureHandler([&](const std::vector<unsigned char>&){std::wstring ignored;audio.setMuted(true,ignored);++delivered;});
     for(int cycle=0;cycle<3;++cycle){
@@ -73,6 +76,7 @@ int main(){try{
     metered.play(1,std::vector<unsigned char>(640,0x40));levels=metered.telemetry();
     require(levels.active&&levels.inputAvailable&&levels.outputAvailable&&levels.inputLevel>0.1f&&levels.outputLevel>0,
             "Existing capture/playback PCM did not update generic telemetry");
+    require(metered.diagnostics().find(L"capture_queue_depth=0")!=std::wstring::npos,"Handler capture unnecessarily retained legacy PCM queue");
     metered.stop();levels=metered.telemetry();require(!levels.active&&levels.inputLevel==0&&levels.outputLevel==0,
             "Media telemetry did not reset after device teardown");
     fake::failOpen=true;

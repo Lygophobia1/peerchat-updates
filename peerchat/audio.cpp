@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "audio.hpp"
+#include "media_performance.hpp"
 #include <windows.h>
 #include <mmsystem.h>
 #include <sstream>
@@ -165,7 +166,7 @@ std::vector<UINT> deviceCandidates(int selected, bool input) {
     auto add = [&](UINT id) {
         if (std::find(result.begin(), result.end(), id) == result.end()) result.push_back(id);
     };
-    if (selected >= 0) add(static_cast<UINT>(selected));
+    if (selected >= 0) { add(static_cast<UINT>(selected)); return result; }
     add(WAVE_MAPPER);
     const UINT count = input ? waveInGetNumDevs() : waveOutGetNumDevs();
     for (UINT id = 0; id < count; ++id) add(id);
@@ -273,10 +274,14 @@ struct Audio::Impl {
     std::uint64_t inputGeneration = 0;
     float inputLevel = 0.0f, outputLevel = 0.0f;
     audio_detail::Clock::time_point inputLevelUpdated{}, outputLevelUpdated{};
+    MediaPerformance performance;
+    std::uint64_t lastCaptureUs=0,lastPlaybackUs=0,captureQueueDrops=0,playbackStarvations=0,deviceRestarts=0;
+    unsigned captureBacklogPeak=0;
 
     // Called with the lock held, never while a worker touches these headers.
     void closeInput() {
         ++inputGeneration;
+        lastCaptureUs=0;
         inputLevel = 0.0f;
         inputLevelUpdated = {};
         if (input) {
@@ -328,6 +333,11 @@ struct Audio::Impl {
             }
             if (wait == WAIT_OBJECT_0 + 1) ++inputWakes;
             if (wait == WAIT_OBJECT_0 + 2) ++outputWakes;
+            unsigned captureBacklog=0,playbackDone=0;
+            for(const auto& b:inputBuffers)if(b.header.dwFlags&WHDR_DONE)++captureBacklog;
+            for(const auto& b:outputBuffers)if(b.header.dwFlags&WHDR_DONE)++playbackDone;
+            captureBacklogPeak=std::max(captureBacklogPeak,captureBacklog);
+            if(output&&playbackDone==outputBuffers.size())++playbackStarvations;
             // Consume ring buffers in submission order, including when several
             // finish between wakeups. Scanning from index zero would reorder PCM.
             for (std::size_t n = 0; input && n < inputBuffers.size(); ++n) {
@@ -338,18 +348,22 @@ struct Audio::Impl {
                 if (buffer.header.dwBytesRecorded != audio_detail::frameBytes) ++partialBuffers;
                 if (buffer.header.dwBytesRecorded == audio_detail::frameBytes) {
                     const auto levelNow = audio_detail::Clock::now();
+                    const auto captureUs=MediaPerformance::nowUs();
+                    if(lastCaptureUs)performance.observe(MediaPerformance::CaptureInterval,captureUs-lastCaptureUs,35000,captureBacklog);
+                    lastCaptureUs=captureUs;
                     std::vector<unsigned char> frame(buffer.data.begin(), buffer.data.end());
                     audio_detail::scalePcm(frame, inputGain);
                     inputLevel = std::max(audio_detail::pcmLevel(frame),
                         audio_detail::decayedLevel(inputLevel, inputLevelUpdated, levelNow));
                     inputLevelUpdated = levelNow;
-                    if (captured.size() == audio_detail::maxQueuedFrames) captured.pop_front();
-                    captured.push_back(buffer.data);
+                    // The synchronous handler already consumes this frame. Do
+                    // not duplicate an unused 8-frame legacy capture queue.
+                    if(!captureHandler){if (captured.size() == audio_detail::maxQueuedFrames){captured.pop_front();++captureQueueDrops;}captured.push_back(buffer.data);}
                     auto handler = captureHandler;
                     const auto generation = inputGeneration;
                     if (handler) ++deliveredFrames;
                     lock.unlock();
-                    if (handler) handler(frame);
+                    if (handler) {MediaPerformance::Span timed(performance,MediaPerformance::CaptureWork,20000);handler(frame);}
                     lock.lock();
                     if (!started) return;
                     // Mute/reopen may run while the capture callback is outside
@@ -368,6 +382,9 @@ struct Audio::Impl {
             for (std::size_t n = 0; n < outputBuffers.size(); ++n) {
                 auto& buffer = outputBuffers[nextOutput];
                 if (!(buffer.header.dwFlags & WHDR_DONE)) break;
+                const auto playbackUs=MediaPerformance::nowUs();
+                if(lastPlaybackUs)performance.observe(MediaPerformance::PlaybackInterval,playbackUs-lastPlaybackUs,35000,playbackDone);
+                lastPlaybackUs=playbackUs;
                 if(playoutHandler){
                     std::array<std::int16_t,320> samples{};
                     // Provider is immutable until stop has joined this worker.
@@ -445,6 +462,7 @@ bool Audio::start(std::wstring& error) {
     state.prepareResult = state.queueResult = state.startResult = -1;
     state.inputWakes = state.outputWakes = state.completedBuffers = state.completedBytes = 0;
     state.deliveredFrames = state.partialBuffers = 0;
+    state.performance.reset();state.lastCaptureUs=state.lastPlaybackUs=0;state.captureQueueDrops=state.playbackStarvations=0;state.captureBacklogPeak=0;++state.deviceRestarts;
     state.stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     state.inputEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     state.outputEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -679,6 +697,7 @@ std::wstring Audio::diagnostics() {
         << L"\ncapture_event_wakes=" << state.inputWakes << L"\nplayback_event_wakes=" << state.outputWakes
         << L"\ncapture_completed_buffers=" << state.completedBuffers << L"\ncapture_completed_bytes=" << state.completedBytes
         << L"\ncapture_partial_buffers=" << state.partialBuffers << L"\ncapture_handler_frames=" << state.deliveredFrames;
+    out<<state.performance.text()<<L"\ncapture_frame_duration_ms=20\ncapture_queue_depth="<<state.captured.size()<<L"\ncapture_legacy_queue_drops="<<state.captureQueueDrops<<L"\ncapture_device_backlog_peak="<<state.captureBacklogPeak<<L"\nplayback_all_buffers_returned_events="<<state.playbackStarvations<<L"\naudio_device_starts="<<state.deviceRestarts<<L"\naudio_input_generation="<<state.inputGeneration<<L"\naudio_interval_semantics=device worker service; batched buffers have near-zero intervals";
     const auto levelNow = audio_detail::Clock::now();
     out << L"\nmedia_input_level=" << (state.input ? audio_detail::decayedLevel(state.inputLevel,state.inputLevelUpdated,levelNow) : 0.0f)
         << L"\nmedia_output_level=" << (state.output ? audio_detail::decayedLevel(state.outputLevel,state.outputLevelUpdated,levelNow) : 0.0f)

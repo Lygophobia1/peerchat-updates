@@ -130,6 +130,7 @@ typedef struct pc_screen_encoder_status {
     wchar_t adapter_name[128];
     wchar_t output_type_name[64];
     uint64_t driver_version;
+    wchar_t performance[4096];
 } pc_screen_encoder_status;
 // Stages identify the current native operation; no per-frame content is logged.
 enum {
@@ -218,6 +219,8 @@ typedef struct pc_screen_decoder_status {
     int32_t last_presentation_hresult;
     uint64_t last_decoded_timestamp;
     uint32_t last_decoded_timestamp_valid;
+    wchar_t performance[4096];
+    uint64_t oldest_queue_age_ms;
 } pc_screen_decoder_status;
 
 // A snapshot of the decoder worker, not a separate recovery or lifecycle owner.

@@ -39,6 +39,8 @@ int main(int argc,char** argv){
  source.setMuted(false);CHECK(!source.process20ms(mutedPcm.data(),639,mutedPacket));
  auto state=receive.snapshot();CHECK(energy>100000&&state.authorizedSources==1&&state.activeSources==1&&state.mixedBlocks==120&&state.underrunBlocks==0);
  CHECK(state.sources.at("account:1/device-a").pulled_blocks==120);
+ CHECK(state.rtp.at("account:1/device-a").packets==60&&state.rtp.at("account:1/device-a").gapPackets==0);
+ CHECK(state.performance.find(L"perf_receive_pull=")!=std::wstring::npos);
  std::array<unsigned char,12> malformed{};CHECK(receive.insertRtp("account:1/device-a",1,malformed.data(),12)==PC_RX_INVALID);
  malformed[1]=111;put32(malformed.data()+8,1234);
  for(unsigned char flags:{0x90,0xa0,0x8f}){malformed[0]=flags;CHECK(receive.insertRtp("account:1/device-a",1,malformed.data(),12)==PC_RX_INVALID);}
@@ -46,6 +48,6 @@ int main(int argc,char** argv){
  CHECK(receive.insertRtp("account:1/device-a",1,malformed.data(),12)==PC_RX_INVALID);
  CHECK(!receive.pull20ms(nullptr,320,false));std::array<std::int16_t,320> output{};CHECK(!receive.pull20ms(output.data(),319,false));
  for(unsigned cycle=0;cycle<50;++cycle){receive.close();CHECK(receive.open(dll));CHECK(receive.pull20ms(output.data(),320,false));for(auto sample:output)CHECK(sample==0);}
- receive.close();CHECK(!receive.pull20ms(output.data(),320,false));source.close();
+ CHECK(receive.snapshot().rtp.empty());receive.close();CHECK(!receive.pull20ms(output.data(),320,false));source.close();
  std::puts("PASS: reusable receiver, authenticated source/generation checks, same-SSRC isolation, retire-one/preserve-other, 20 ms paired pulls, deafen advances silently, bounds and 50 lifetimes");
 }

@@ -20,6 +20,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include "../media_performance.hpp"
 #include <thread>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@ namespace {
 struct QueuedFrame {
     std::vector<uint8_t> bytes;
     uint64_t timestamp = 0;
+    uint64_t queuedUs = 0;
 };
 
 class DecoderState {
@@ -61,7 +63,7 @@ public:
         std::lock_guard lock(mutex_);
         if (!running_ || failed_) return -1;
         if (queue_.size() >= 8) { ++droppedDecodeQueue_; return 0; }
-        queue_.push_back({std::vector<uint8_t>(data, data + length), timestamp});
+        queue_.push_back({std::vector<uint8_t>(data, data + length), timestamp,peerchat::MediaPerformance::nowUs()});
         largestAccessUnitBytes_ = std::max(largestAccessUnitBytes_, length);
         ++accepted_;
         condition_.notify_one();
@@ -82,6 +84,8 @@ public:
             streamChangeCount_, needMoreInputCount_, outputSuccessCount_,
             d3d11MultithreadProtected_ ? 1u : 0u, lastCompletedStage_.load(),
             lastPresentationHresult_.load(), lastDecodedTimestamp_, lastDecodedTimestampValid_ ? 1u : 0u};
+        wcsncpy_s(value->performance,performance_.text().c_str(),_TRUNCATE);
+        value->oldest_queue_age_ms=queue_.empty()?0:(peerchat::MediaPerformance::nowUs()-queue_.front().queuedUs)/1000;
         return 1;
     }
 
@@ -197,6 +201,7 @@ private:
     }
 
     bool present(IMFSample* sample) {
+        peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenPresent,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         setStage(PC_SCREEN_DECODER_PRESENT_SETUP);
         ComPtr<IMFMediaBuffer> buffer;
         ComPtr<IMFDXGIBuffer> surface;
@@ -371,15 +376,17 @@ private:
                 condition_.notify_all();
                 while (running_) {
                     setStage(PC_SCREEN_DECODER_WAITING);
-                    QueuedFrame frame;
+                    QueuedFrame frame;unsigned queueDepth=0;
                     {
                         std::unique_lock lock(mutex_);
                         condition_.wait(lock, [this] { return !running_ || !queue_.empty(); });
                         if (!running_) break;
                         frame = std::move(queue_.front());
                         queue_.pop_front();
+                        queueDepth=static_cast<unsigned>(queue_.size());
                     }
                     const auto started = std::chrono::steady_clock::now();
+                    performance_.observe(peerchat::MediaPerformance::ScreenQueueAge,peerchat::MediaPerformance::nowUs()-frame.queuedUs,100000,queueDepth);
                     const bool decoded = decode(std::move(frame));
                     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - started).count();
@@ -387,6 +394,7 @@ private:
                         std::lock_guard lock(mutex_);
                         ++decodeOperations_;
                         decodeLatencyMicrosecondsTotal_ += static_cast<uint64_t>(std::max<int64_t>(0, elapsed));
+                        performance_.observe(peerchat::MediaPerformance::ScreenDecode,static_cast<uint64_t>(std::max<int64_t>(0,elapsed)),1000000/std::max<uint32_t>(1,options_.frames_per_second),unsigned(queue_.size()));
                     }
                     if (!decoded) fail();
                 }
@@ -403,6 +411,7 @@ private:
     }
 
     pc_screen_decoder_options options_{};
+    peerchat::MediaPerformance performance_;
     std::thread worker_;
     std::atomic<bool> running_{true};
     std::mutex mutex_;

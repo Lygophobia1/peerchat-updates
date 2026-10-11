@@ -1,5 +1,6 @@
 #pragma once
 #include "audio_receive/peerchat_audio_receive.h"
+#include "media_performance.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -32,10 +33,13 @@ public:
         std::uint64_t acceptedPackets=0,rejectedPackets=0,mixedBlocks=0,underrunBlocks=0;
         int lastError=0;
         std::map<std::string,pc_rx_source_stats> sources;
+        std::map<std::string,MediaRtpObservation> rtp;
+        std::wstring performance;
+        std::uint64_t busyInserts=0;
     };
     Snapshot snapshot();
 private:
-    struct Source {std::uint64_t generation=0;pc_rx_source handle=0;std::uint32_t ssrc=0;};
+    struct Source {std::uint64_t generation=0;pc_rx_source handle=0;std::uint32_t ssrc=0;MediaRtpObservation observation{};};
     using Create=decltype(&pc_rx_create);using Destroy=decltype(&pc_rx_destroy);
     using Add=decltype(&pc_rx_source_add);using Remove=decltype(&pc_rx_source_remove);
     using Insert=decltype(&pc_rx_insert);using Pull=decltype(&pc_rx_pull_10ms);using Stats=decltype(&pc_rx_get_source_stats);
@@ -44,6 +48,7 @@ private:
     Insert insert_=nullptr;Pull pull_=nullptr;Stats stats_=nullptr;
     std::mutex mutex_;std::map<std::string,Source> sources_;Snapshot counters_;
     std::atomic<std::uint64_t> busyPullBlocks_{0};
+    std::atomic<std::uint64_t> busyInserts_{0};MediaPerformance performance_;
     void closeLocked();
 };
 }
