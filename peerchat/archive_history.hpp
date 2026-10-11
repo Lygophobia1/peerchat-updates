@@ -167,7 +167,7 @@ inline Blob serveHistoryPage(Storage& storage,const Profile& local,Authorization
 // Crash between records replays/dedupes that page; disconnect never loses cursor.
 class HistoryReader {
     Storage& storage_;const Profile& local_;Authorization& authorization_;delivery::DeliveryManager& deliveries_;
-    session::ReliableAuthorization scope_;DeviceAccounts directory_;
+    session::ReliableAuthorization scope_;DeviceAccounts directory_;std::function<void()> committed_;
     HistoryRequest position_;std::string context_;Blob saved_;
     std::uint64_t processed_=0;bool complete_=false,pending_=false,cancelled_=false;
     const char* acceptStage_="not_started";
@@ -183,8 +183,8 @@ class HistoryReader {
 public:
     struct Snapshot {std::uint64_t cursor,through,processed;bool complete,pending,cancelled;};
     HistoryReader(Storage& storage,const Profile& local,Authorization& authorization,delivery::DeliveryManager& deliveries,
-            session::ReliableAuthorization scope,const std::string& conversation,DeviceAccounts directory)
-        :storage_(storage),local_(local),authorization_(authorization),deliveries_(deliveries),scope_(std::move(scope)),directory_(std::move(directory)){
+            session::ReliableAuthorization scope,const std::string& conversation,DeviceAccounts directory,std::function<void()> committed={})
+        :storage_(storage),local_(local),authorization_(authorization),deliveries_(deliveries),scope_(std::move(scope)),directory_(std::move(directory)),committed_(std::move(committed)){
         require(bool(directory_)&&protocol::id(conversation)&&scope_.archive.reader==local.peerId&&currentSessionAuthorization(authorization_,scope_));
         auto w=historyHeader(7);w.number(scope_.archive.account);w.string(local.peerId);w.string(scope_.archive.issuer);
         w.string(scope_.archive.source);w.string(conversation);auto digest=digestDevicePayload(w.data);
@@ -220,7 +220,7 @@ public:
         size_t inserted=0;
         for(const auto& item:page.records){
             acceptStage_="history_durable_import";
-            current();if(deliveries_.acceptArchiveHistory(local_,authorization_,scope_,item.assertion,directory_))++inserted;
+            current();if(deliveries_.acceptArchiveHistory(local_,authorization_,scope_,item.assertion,directory_)){++inserted;if(committed_)committed_();}
         }
         acceptStage_="history_cursor_commit";current();position_=q;position_.after=page.next;complete_=page.complete;processed_+=page.records.size();persist();pending_=false;acceptStage_="history_page_accepted";
         return inserted;

@@ -90,7 +90,7 @@ static class ArchiveApplicationBoundaryTest {
         while(DateTime.UtcNow<until){
             int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);
             n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
-            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==25);complete=true;break;}Thread.Sleep(10);
+            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==25&&progress.Received==25&&progress.HistoryRevision>0&&progress.LastSuccessful>0);complete=true;break;}Thread.Sleep(10);
         }
         Check(complete);Check(reader.Progress(8,1).Attachments==1);
         Check(ui_history(b,new string('a',64),Int64.MaxValue)==1);

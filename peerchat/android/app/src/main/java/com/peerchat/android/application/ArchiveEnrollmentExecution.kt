@@ -24,11 +24,20 @@ internal class ArchiveEnrollmentExecution(
     fun pauseSync(account:Long,generation:Long){native(14,command(14){w->w.number(account);w.number(generation)})}
     fun incoming(account:Long,generation:Long,scope:ArchiveRelayScope){native(15,command(15){w->w.number(account);w.number(generation);w.blob(scope.binding())})}
     fun progress(account:Long,generation:Long):ArchiveSyncProgress {
-        val r=NativeRecord(native(13,command(13){w->w.number(account);w.number(generation)}),31)
-        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==13L)
+        val r=NativeRecord(native(23,command(23){w->w.number(account);w.number(generation)}),31)
+        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==23L)
         val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text();val attachments=r.number()
-        require(state.length<=128&&complete<=1&&running<=1&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
-        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments)
+        val received=r.number();val revision=r.number();val success=r.number();val scan=r.number();val enabled=r.number()
+        require(state.length<=128&&complete<=1&&running<=1&&enabled<=1&&success<=253402300799999L&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
+        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments,received,revision,success,scan,enabled==1L,generation)
+    }
+    fun devices(account:Long,generation:Long,base:ByteArray):List<ArchiveDeviceSnapshot>{
+        val rows=archiveDeviceSnapshots(base)
+        val r=NativeRecord(native(21,command(21){it.number(account);it.number(generation)}),31)
+        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==21L&&r.number()==rows.size.toLong())
+        val grants=mutableMapOf<String,Pair<Boolean,Boolean>>()
+        repeat(rows.size){val peer=r.text();val read=r.number();val serve=r.number();require(read<=1&&serve<=1&&rows.any{it.peerId==peer}&&!grants.containsKey(peer));grants[peer]=(read==1L) to (serve==1L)}
+        r.end();return rows.map{it.copy(grantedRead=grants.getValue(it.peerId).first,grantedServe=grants.getValue(it.peerId).second)}
     }
     private fun proof(value:String,max:Int):ByteArray {
         require(value.length<=((max+2)/3)*4)

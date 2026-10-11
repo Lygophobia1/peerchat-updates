@@ -32,7 +32,7 @@ inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution,std
 }
 inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,unsigned operation,const Blob& bytes,
     std::uint64_t now,std::uint64_t network){
-    require(((operation>=12&&operation<=15)||(operation>=19&&operation<=22))&&bytes.size()<=MaxApplicationBytes);
+    require(((operation>=12&&operation<=15)||(operation>=19&&operation<=23))&&bytes.size()<=MaxApplicationBytes);
     protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
     auto account=r.number(),generation=r.number();
     if(operation==22){r.end();auto result=applicationHeader(operation);auto details=execution.diagnostics()+enrollment.authorizationDiagnostics(account,generation);if(details.size()>49152)details.resize(49152);result.string(details);return result.data;}
@@ -45,9 +45,10 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     if(operation==14){r.end();execution.stop();}
     if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();
         auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
-    if(operation==13){r.end();reconcileInitialSync(enrollment,execution,now);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
+    if(operation==13||operation==23){r.end();reconcileInitialSync(enrollment,execution,now);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
         result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
-        result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);}
+        result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);
+        if(operation==23){result.number(execution.received());result.number(execution.historyRevision());result.number(execution.lastSuccessful());result.number(execution.scanGeneration());result.number(enrollment.policy().historySyncEnabled());}}
     return result.data;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){

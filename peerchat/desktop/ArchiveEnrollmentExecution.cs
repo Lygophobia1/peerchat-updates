@@ -86,7 +86,7 @@ internal sealed class ArchiveEnrollmentExecution {
     }
     public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
     public sealed class SyncProgress {
-        public string State,Source;public long Processed,Conversations,Attachments;public bool Complete,Running;
+        public string State,Source;public long Processed,Conversations,Attachments,Received,HistoryRevision,LastSuccessful,ScanGeneration;public bool Complete,Running,Enabled;
         public string DisplayState {get {
             string value=(State??"").ToLowerInvariant();
             if(value.Contains("failed")||value.Contains("rejected"))return "Error";
@@ -105,10 +105,13 @@ internal sealed class ArchiveEnrollmentExecution {
             (expected??"").StartsWith("archive-control:",StringComparison.Ordinal)||(kind==8&&(text??"").StartsWith("Archive ",StringComparison.Ordinal));
     }
     public SyncProgress Progress(long account,long generation){
-        var bytes=native(13,Command(13,w=>{w.Write(account);w.Write(generation);}));var header=Command(13);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        var bytes=native(23,Command(23,w=>{w.Write(account);w.Write(generation);}));var header=Command(23);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
         using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,new UTF8Encoding(false,true))){stream.Position=header.Length;
             Func<string> text=()=>{long n=r.ReadInt64();Check(n>=0&&n<=128&&n<=stream.Length-stream.Position);return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
             var result=new SyncProgress{State=text(),Processed=r.ReadInt64(),Conversations=r.ReadInt64()};long complete=r.ReadInt64(),running=r.ReadInt64();result.Source=text();result.Attachments=r.ReadInt64();
+            result.Received=r.ReadInt64();result.HistoryRevision=r.ReadInt64();result.LastSuccessful=r.ReadInt64();result.ScanGeneration=r.ReadInt64();
+            long enabled=r.ReadInt64();Check(enabled==0||enabled==1);result.Enabled=enabled==1;
+            Check(result.Received>=0&&result.HistoryRevision>=0&&result.LastSuccessful>=0&&result.LastSuccessful<=253402300799999L&&result.ScanGeneration>=0);
             Check(result.Processed>=0&&result.Conversations>=0&&result.Attachments>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
         }
     }

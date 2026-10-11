@@ -100,36 +100,40 @@ public partial class DesktopApplication {
     Task archiveTask=Task.FromResult(0);DateTime archiveNextUtc=DateTime.MinValue,archiveMetadataUtc=DateTime.MinValue,archiveServingUntilUtc=DateTime.MinValue;
     ArchiveEnrollmentExecution.SyncProgress archiveProgress;
     string archiveAuthorizationDiagnostic="No authenticated History Sync snapshot yet.";
-    long archiveProjectedCount=-1;
+    long archiveProjectedCount=-1,archiveUiEpoch;
+    bool historyCommandInFlight;
+    event EventHandler HistoryPresentationChanged;
+    bool IsHistoryCallbackCurrent(DiscoveryClient owner,ulong generation,long epoch){return !closing&&discovery==owner&&authenticatedFriendSnapshotGeneration==generation&&epoch==archiveUiEpoch;}
+    void PublishHistoryPresentation(){
+        if(archiveProgress!=null&&archiveProgress.HistoryRevision!=archiveProjectedCount){
+            archiveProjectedCount=archiveProgress.HistoryRevision;
+            foreach(var conversation in model.Conversations.Values){conversation.RequestedHistory=false;conversation.HistoryExhaustedPeers.Clear();conversation.HistoryExhausted=false;}
+            if(!model.Groups)RequestConversationHistory(model.Selected);
+        }
+        var changed=HistoryPresentationChanged;if(changed!=null)changed(this,EventArgs.Empty);
+    }
     DiscoveryClient archiveLoadedOwner;ulong archiveLoadedGeneration;
     void PumpArchive(){
         var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
-        if(closing||busy||owner==null||account<=0||mailboxContextAccount!=account||generation==0||!archiveTask.IsCompleted||DateTime.UtcNow<archiveNextUtc)return;
+        if(closing||busy||historyCommandInFlight||owner==null||account<=0||mailboxContextAccount!=account||generation==0||!archiveTask.IsCompleted||DateTime.UtcNow<archiveNextUtc)return;
         bool initial=archiveLoadedOwner!=owner||archiveLoadedGeneration!=generation;
         if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc&&DateTime.UtcNow<archiveMetadataUtc)return;
         archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;
         // Authorization metadata expires after 30 seconds in the native owner.
         if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(archiveProgress!=null&&archiveProgress.Running?10:20);
-        string admission="History Sync snapshot unavailable.";
+        long uiEpoch=archiveUiEpoch;string admission="History Sync snapshot unavailable.";
         archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
             try{if(initial)execution.PublishPending(account,(long)generation,local);else if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};}
             finally{try{admission=execution.AuthorizationDiagnostics(account,(long)generation);}catch(Exception error){admission="Admission snapshot unavailable: "+error.GetType().Name;}}
         }).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
-            if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
+            if(!IsHistoryCallbackCurrent(owner,generation,uiEpoch))return;
             archiveAuthorizationDiagnostic=admission;
-            if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];archiveNextUtc=DateTime.UtcNow.AddSeconds(60);TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];archiveNextUtc=DateTime.UtcNow.AddSeconds(60);PublishHistoryPresentation();TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            if(initial)archiveProjectedCount=-1;
             archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
             archiveProgress=task.Result.Progress;historyDevices=task.Result.Devices;historyProviding=task.Result.Providing;historyAccount=account;historyGeneration=generation;
             if(archiveProgress.Running&&archiveMetadataUtc>DateTime.UtcNow.AddSeconds(10))archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
-            if(archiveProgress.Processed!=archiveProjectedCount){
-                archiveProjectedCount=archiveProgress.Processed;
-                if(model.Selected!=null&&!model.Groups){
-                    // Native imports change history after the initial request;
-                    // bypass only the one-time UI request guard, never storage.
-                    var conversation=model.Selected;
-                    foreach(var peer in conversation.KnownPeerIds.Concat(new[]{conversation.Contact==null?"":conversation.Contact.peer}).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal))core.History(peer,long.MaxValue);
-                }
-            }
+            PublishHistoryPresentation();
         })));
     }
     void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
@@ -3544,7 +3548,7 @@ public partial class DesktopApplication {
 		conversation.RequestedPeerHistory.Add(peer);
 		conversation.LoadingHistoryPeer = peer;
 		conversation.HistoryLoading = true;
-		core.History(peer, long.MaxValue);
+		foreach(var known in conversation.KnownPeerIds.Concat(new[]{peer}).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal))core.History(known,long.MaxValue);
 		conversation.RequestedHistory = true;
 	}
 

@@ -331,7 +331,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                             is UiAction.ArchiveSynchronize->backend.synchronizeArchive(checkNotNull(displayed),action.source,action.pause)
                             else->backend.archiveDevices()
                         }
-                        if(epoch==uiGeneration&&current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed archive metadata verified. Grants do not start synchronization.")
+                        if(epoch==uiGeneration&&current.authenticated&&current.serverPresenceLive&&current.accountId==result.accountId&&current.archiveProgress.authenticationGeneration==result.authenticationGeneration)mutable.value=mutable.value.copy(archiveEnrollment=result,notice="Signed history metadata verified; existing permissions are preserved.")
                     }catch(failure:Exception){
                         if(failure is CancellationException)throw failure
                         retainDiagnostic("Archive","Archive operation failed closed")

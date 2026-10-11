@@ -7,7 +7,7 @@ namespace peerchat::archive {
 // one request and informs it of disconnect/cancel. DeliveryManager commits data.
 class SyncReader {
     Storage& storage_;const Profile& local_;Authorization& authorization_;delivery::DeliveryManager& deliveries_;
-    session::ReliableAuthorization scope_;DeviceAccounts directory_;
+    session::ReliableAuthorization scope_;DeviceAccounts directory_;std::function<void()> committed_;
     std::string context_;Blob saved_;ManifestRequest position_;
     std::optional<ManifestPage> page_;size_t index_=0;
     std::unique_ptr<HistoryReader> history_;
@@ -31,8 +31,8 @@ class SyncReader {
 public:
     struct Snapshot {std::uint64_t processed,conversations;bool complete,pending,cancelled;std::uint64_t attachments=0;};
     SyncReader(Storage& storage,const Profile& local,Authorization& authorization,delivery::DeliveryManager& deliveries,
-        session::ReliableAuthorization scope,DeviceAccounts directory)
-        :storage_(storage),local_(local),authorization_(authorization),deliveries_(deliveries),scope_(std::move(scope)),directory_(std::move(directory)){
+        session::ReliableAuthorization scope,DeviceAccounts directory,std::function<void()> committed={})
+        :storage_(storage),local_(local),authorization_(authorization),deliveries_(deliveries),scope_(std::move(scope)),directory_(std::move(directory)),committed_(std::move(committed)){
         require(bool(directory_)&&scope_.archive.reader==local.peerId&&currentSessionAuthorization(authorization_,scope_));
         auto w=historyHeader(9);w.number(scope_.archive.account);w.string(local.peerId);w.string(scope_.archive.issuer);w.string(scope_.archive.source);
         static const char hex[]="0123456789abcdef";for(auto b:digestDevicePayload(w.data)){context_+=hex[b>>4];context_+=hex[b&15];}
@@ -52,7 +52,7 @@ public:
         Blob request;
         if(page_){
             require(index_<page_->conversations.size());
-            if(!history_)history_=std::make_unique<HistoryReader>(storage_,local_,authorization_,deliveries_,scope_,page_->conversations[index_].conversation,directory_);
+            if(!history_)history_=std::make_unique<HistoryReader>(storage_,local_,authorization_,deliveries_,scope_,page_->conversations[index_].conversation,directory_,committed_);
             request=history_->nextRequest();
         }else{position_.id=Storage::newMessageId();persist();request=encodeManifestRequest(position_);}
         pending_=true;return request;

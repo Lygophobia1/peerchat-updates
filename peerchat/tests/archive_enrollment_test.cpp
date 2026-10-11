@@ -87,10 +87,16 @@ int main(){try{
     StoredMessage received{Storage::newMessageId(),pc.peerId,pa.peerId,L"received",101,Delivery::Delivered,0,2};
     check(a.append(pc.peerId,sent)&&a.append(pc.peerId,received));
     ar::reconcileInitialSync(reader,execution,60000);check(execution.running());drain();
+    check(execution.received()==2&&execution.lastSuccessful()==100&&execution.historyRevision()>0);
     auto copies=b.history(pc.peerId);check(copies.size()==2&&b.message(sent.id)->sender==pa.peerId&&b.message(received.id)->sender==pc.peerId&&b.message(sent.id)->text==sent.text);
     check(b.pending(pc.peerId).empty()&&b.pendingMailboxUploads().empty());
     // Completion survives reopen and remains eligible; explicit Pause does not.
-    {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);check(reopened.needsAutomaticSync(0));}
+    {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);check(reopened.needsAutomaticSync(0)&&reopened.lastSuccessful()==100&&reopened.received()==0);}
+    execution.start(pa.peerId,pa.peerId,true);drain();check(execution.received()==0); // Replay is not newly received history.
+    auto presentation=ar::applicationHeader(23);presentation.number(8);presentation.number(1);
+    check(!ar::executeSyncOperation(reader,execution,23,presentation.data,1001,1).empty());
+    presentation=ar::applicationHeader(23);presentation.number(9);presentation.number(1);
+    rejects([&]{ar::executeSyncOperation(reader,execution,23,presentation.data,1001,1);});
     execution.stop();ar::reconcileInitialSync(reader,execution);check(!execution.running());
     {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);ar::reconcileInitialSync(reader,reopened);check(!reopened.running());}
     // A legacy inactive bit is indistinguishable from explicit Pause. Preserve
