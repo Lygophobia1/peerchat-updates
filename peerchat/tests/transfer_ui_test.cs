@@ -25,9 +25,11 @@ class TransferUiTest {
                 var attach=(Button)window.FindName("Attachment");Require(attach!=null,"Attachment control missing");
                 Require(attach.IsEnabled&&attach.IsHitTestVisible&&attach.Focusable,
                     "Paperclip cannot be activated by a user");
-                Require(Convert.ToString(attach.ToolTip)=="File transfers","Stale attachment-unavailable tooltip");
-                attach.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                attach.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Require(Convert.ToString(attach.ToolTip)=="Attach file to this conversation","Paperclip must target conversation");
+                var scroll=(ScrollViewer)window.FindName("MessageScroll");Require(((Grid)scroll.Parent).AllowDrop,"Empty-conversation overlay hides drop target");
+                Require(((TextBox)window.FindName("Composer")).MaxLength==0,"Oversized paste silently truncated by composer");
+                typeof(DesktopApplication).GetMethod("ShowFileTransfers",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,null);
+                typeof(DesktopApplication).GetMethod("ShowFileTransfers",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,null);
                 var timer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(2)};
                 timer.Tick+=(sender,unused)=>{
                     timer.Stop();
@@ -38,7 +40,7 @@ class TransferUiTest {
                         Require(HasText(view,"Live encrypted transfer")&&HasText(view,"256 MiB")&&HasText(view,"Send file"),"Transfer controls/limits missing");
                         Require(HasText(view,"No file transfers"),"Native empty snapshot did not project");
                         var color=(view.Background as SolidColorBrush).Color;Require(color.R<40&&color.G<40,"Dark theme not preserved");
-                        view.Close();result=0;Console.WriteLine("PASS: Attachment opens one dark transfer view, native empty snapshot, limits/send action, minimum layout, close.");
+                        view.Close();result=0;Console.WriteLine("PASS: Conversation paperclip target and one secondary dark transfer view, native empty snapshot, limits/send action, minimum layout, close.");
                     }catch(Exception error){Console.Error.WriteLine(error);}
                     window.Close();
                 };timer.Start();

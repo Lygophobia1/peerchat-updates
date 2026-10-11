@@ -48,7 +48,7 @@ public class ChatText : TextBlock {
         var menu=new ContextMenu();var copy=new MenuItem{Header="Copy message"};copy.Click+=(s,a)=>{try{Clipboard.SetText(text);}catch{}};menu.Items.Add(copy);view.ContextMenu=menu;
     }
 }
-public class DesktopApplication {
+public partial class DesktopApplication {
     static readonly Stopwatch UiTiming=new Stopwatch();
     static void TraceUi(string message){string line="PeerChat UI timing "+DateTime.UtcNow.ToString("O")+" "+message;System.Diagnostics.Debug.WriteLine(line);try{File.AppendAllText(Path.Combine(Path.GetTempPath(),"PeerChat-ui-timing.log"),line+Environment.NewLine);}catch{}}
     static void TraceStartup(string installRoot,string message){try{Directory.CreateDirectory(installRoot);File.AppendAllText(Path.Combine(installRoot,"startup.log"),DateTime.UtcNow.ToString("O")+" pid="+Process.GetCurrentProcess().Id+" "+message+Environment.NewLine,new UTF8Encoding(false));}catch{}}
@@ -357,7 +357,7 @@ public class DesktopApplication {
         fileTransferOperating=true;
         try{await Task.Run(()=>core.FileTransfer(operation,peer,id,path));}
         catch(Exception error){if(!closing)MessageBox.Show(fileTransferWindow??window,error.Message,"File transfer",MessageBoxButton.OK,MessageBoxImage.Warning);}
-        finally{fileTransferOperating=false;await RefreshFileTransfers();}
+        finally{fileTransferOperating=false;await RefreshFileTransfers();await RefreshChatAttachments();}
     }
     async Task RefreshFileTransfers(){
         if(closing||fileTransferWindow==null||fileTransferRefreshing||fileTransferOperating)return;
@@ -428,7 +428,7 @@ public class DesktopApplication {
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
-        Click("Attachment",ShowFileTransfers);
+        Click("Attachment",ChooseChatFiles);BindChatAttachments();
         Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",SettingsPage);
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
@@ -569,7 +569,7 @@ public class DesktopApplication {
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
-                if(e.kind==22){ShowFileTransfers();continue;}
+                if(e.kind==22){_ = RefreshChatAttachments();continue;}
                 if(e.kind==20){
                     if(discovery==null||!discovery.QueueGroupMessage(e.expected,e.text,e.attempt,e.detail))core.GroupMessageStatus(e.expected,e.text,"Not sent: authenticated server channel unavailable");
                     continue;
@@ -4506,6 +4506,7 @@ public class DesktopApplication {
     async void Send(){
         if(!Find<Button>("Send").IsEnabled||directSendInFlight)return;
         string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;
+        if(ChatAttachmentProjection.RequiresSnippet(text)){directSendInFlight=true;try{await SendChatSnippet(text);}finally{directSendInFlight=false;}return;}
         if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}
         var conversation=model.Selected;if(conversation==null||conversation.Contact==null)return;
         string peer=conversation.Contact.peer;directSendInFlight=true;

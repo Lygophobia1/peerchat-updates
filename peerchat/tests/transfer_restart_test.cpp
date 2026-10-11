@@ -64,6 +64,16 @@ int main(int argc,char** argv){
     try{
         check(std::filesystem::create_directory(root));
         {
+            auto id=std::string(32,'e');auto path=root/(id+".snippet");std::string text="protected generated message\r\nUnicode \xe6\x97\xa5\xf0\x9f\x99\x82";Blob plain(text.begin(),text.end());
+            auto source=windows::ProtectedSnippetSource::create(path.wstring(),plain);check(source->name()=="message.txt"&&source->size()==plain.size()&&source->read(0,plain.size())==plain);
+            DurableState d;d.location=source->resumeToken();d.metadata={id,"message.txt",plain.size(),{}};source.reset();
+            check(windows::protectedSnippetToken(d.location));source=windows::reopenSource(d);check(source->read(0,plain.size())==plain);source.reset();
+            std::ifstream input(path,std::ios::binary);Blob sealed(std::istreambuf_iterator<char>(input),{});input.close();check(std::search(sealed.begin(),sealed.end(),plain.begin(),plain.end())==sealed.end());
+            auto other=root/(std::string(32,'f')+".snippet");write(other,sealed);rejected([&]{windows::ProtectedSnippetSource wrong(other.wstring());});
+            sealed[sealed.size()/2]^=1;write(path,sealed);rejected([&]{windows::reopenSource(d);});
+            rejected([&]{windows::ProtectedSnippetSource::create((root/(std::string(32,'f')+".snippet")).wstring(),Blob(windows::ProtectedSnippetSource::MaxBytes+1,42));});
+        }
+        {
             wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768)!=0);
             auto childRoot=root/L"actual-process-death";
             std::wstring command=L"\""+std::wstring(executable)+L"\" --crash-fixture \""+childRoot.wstring()+L"\"";

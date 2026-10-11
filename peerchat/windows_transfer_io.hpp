@@ -118,6 +118,41 @@ public:
         require(ReadFile(handle_,result.data(),static_cast<DWORD>(limit),&got,nullptr)!=0);result.resize(got);return result;
     }
 };
+// Generated chat text is not a user-owned plaintext input file. Keep its one
+// resumable source DPAPI-protected; decrypt only inside the existing Source.
+class ProtectedSnippetSource final:public Source {
+    std::unique_ptr<FileSource> record_;Blob plain_,token_;
+public:
+    static constexpr const char* Domain="PeerChat/ProtectedSnippetSource/v1";
+    static constexpr size_t MaxBytes=512*1024;
+    explicit ProtectedSnippetSource(const std::wstring& path){
+        auto id=std::filesystem::path(path).stem().string();require(protocol::id(id,32));
+        record_=std::make_unique<FileSource>(path);require(record_->size()<=1024*1024);
+        Blob sealed;for(std::uint64_t offset=0;offset<record_->size();offset+=ChunkBytes){auto part=record_->read(offset,std::min<std::uint64_t>(ChunkBytes,record_->size()-offset));sealed.insert(sealed.end(),part.begin(),part.end());}
+        platform::WindowsRecordProtector protector;plain_=protector.unprotect(sealed,std::string(Domain)+"/"+id);require(plain_.size()<=MaxBytes);
+        protocol::Writer token(protocol::FileTransfer);token.data=record_->resumeToken();token.string(Domain);token.string("message.txt");token_=std::move(token.data);
+    }
+    ~ProtectedSnippetSource(){if(!plain_.empty())SecureZeroMemory(plain_.data(),plain_.size());}
+    std::uint64_t size()const override{return plain_.size();}
+    std::string name()const override{return "message.txt";}
+    Blob read(std::uint64_t offset,size_t count)override{require(offset<=plain_.size()&&count<=ChunkBytes&&count<=plain_.size()-offset);return Blob(plain_.begin()+offset,plain_.begin()+offset+count);}
+    Blob resumeToken()const override{return token_;}
+    static std::unique_ptr<Source> create(const std::wstring& path,const Blob& bytes){
+        require(!bytes.empty()&&bytes.size()<=MaxBytes);auto id=std::filesystem::path(path).stem().string();require(protocol::id(id,32));
+        platform::WindowsRecordProtector protector;auto sealed=protector.protect(bytes,std::string(Domain)+"/"+id);
+        HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);require(file!=INVALID_HANDLE_VALUE);DWORD written=0;
+        bool ok=WriteFile(file,sealed.data(),static_cast<DWORD>(sealed.size()),&written,nullptr)&&written==sealed.size()&&FlushFileBuffers(file);CloseHandle(file);
+        if(!ok){DeleteFileW(path.c_str());throw std::runtime_error("Could not persist protected snippet");}
+        try{return std::make_unique<ProtectedSnippetSource>(path);}catch(...){DeleteFileW(path.c_str());throw;}
+    }
+    static std::unique_ptr<Source> reopen(const DurableState& state){
+        protocol::Reader r(state.location);require(r.type()==protocol::FileTransfer);auto source=std::make_unique<ProtectedSnippetSource>(r.text());require(source->resumeToken()==state.location);return source;
+    }
+};
+inline bool protectedSnippetToken(const Blob& token){
+    try{protocol::Reader r(token);require(r.type()==protocol::FileTransfer);r.text();for(int n=0;n<5;n++)r.number();if(!r.remaining())return false;auto domain=r.string();if(domain!=ProtectedSnippetSource::Domain)return false;require(r.string()=="message.txt");r.end();return true;}catch(...){return false;}
+}
+inline std::unique_ptr<Source> reopenSource(const DurableState& state){return protectedSnippetToken(state.location)?ProtectedSnippetSource::reopen(state):FileSource::reopen(state);}
 class FileSink final:public Sink {
     HANDLE handle_=INVALID_HANDLE_VALUE,directory_=INVALID_HANDLE_VALUE;
     std::wstring partial_,final_,journal_;
@@ -258,7 +293,7 @@ public:
         if(ok)ok=MoveFileExW(temp.c_str(),path_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
         if(!ok){auto error=GetLastError();DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit transfer journal (Win32 "+std::to_string(error)+")");}previous_=std::move(w.data);
     }
-    std::unique_ptr<Source> source(const DurableState& d)override{return FileSource::reopen(d);}
+    std::unique_ptr<Source> source(const DurableState& d)override{return reopenSource(d);}
     std::unique_ptr<Sink> sink(const DurableState& d)override{return FileSink::reopen(d);}
 };
 }

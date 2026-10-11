@@ -71,6 +71,13 @@ public:
     // Persisted purpose survives completion; a completed archive transfer must
     // never be re-catalogued as a new original live attachment.
     bool wasArchiveTransfer(const std::string& transferId)const{return !storage_.archiveSyncState(context(transferId)).empty();}
+    // Read-only LOCAL projection of an existing protected restore binding. This
+    // grants no authorization and changes no archive control or storage format.
+    std::optional<Attachment> originalAttachment(const std::string& transferId)const{
+        auto found=entries_.find(transferId);if(found!=entries_.end())return found->second.attachment;
+        auto bytes=storage_.archiveSyncState(context(transferId));if(bytes.empty())return {};
+        auto entry=decode(bytes);require(entry.transferId==transferId);return entry.attachment;
+    }
     void cancel(const std::string& transferId){
         auto found=entries_.find(transferId);require(found!=entries_.end());
         transfers_.cancel(transferId);

@@ -13,7 +13,7 @@ namespace PeerChatDesktop {
 public sealed class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
-    public sealed class FileTransferData {public string id,peer,name,error,path;public long size,done;public int state;public bool sending;}
+    public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer;public long size,done,time,account;public int state;public bool sending,isArchive,originalSending,protectedSource;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr handle,uint operation,string peer,string id,string path);
     public string FileTransfer(uint operation,string peer="",string id="",string path=""){lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
@@ -22,7 +22,7 @@ public sealed class CoreAdapter : IDisposable {
         return Marshal.PtrToStringUni(result);
     }}
     public FileTransferData[] FileTransfers(){return new JavaScriptSerializer().Deserialize<FileTransferData[]>(FileTransfer(0))??new FileTransferData[0];}
-    public sealed class ArchiveAttachment {public string id,name;public long size;public bool availableLocally,archiveAttested;public override string ToString(){return name+" · "+size.ToString("N0")+" bytes · "+(availableLocally?"local file recorded":archiveAttested?"archive-attested":"local metadata");}}
+    public sealed class ArchiveAttachment {public string id,name,peer,path,senderPeer;public long size,time,account;public bool sending,availableLocally,archiveAttested,protectedSource;public override string ToString(){return name+" · "+size.ToString("N0")+" bytes · "+(availableLocally?"local file recorded":archiveAttested?"archive-attested":"local metadata");}}
     public sealed class ArchiveAttachmentPage {public long next;public bool complete;public ArchiveAttachment[] records;}
     public ArchiveAttachmentPage ArchiveAttachments(long after){return new JavaScriptSerializer().Deserialize<ArchiveAttachmentPage>(FileTransfer(4,id:after.ToString(System.Globalization.CultureInfo.InvariantCulture)));}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();

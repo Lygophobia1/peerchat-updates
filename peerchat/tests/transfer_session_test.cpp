@@ -83,6 +83,31 @@ int main(){
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         require(delivered,"file transfer disturbed DeliveryManager message/ACK");
+        std::wstring snippet=L"Unicode \u65e5\u672c \U0001f642\r\n<script>not executed</script>\n"+std::wstring(5000,L'x');
+        require(!left.send(b,std::wstring(protocol::MaxChatCharacters,L'x')).empty(),"at-limit text rejected");
+        require(left.send(b,std::wstring(protocol::MaxChatCharacters+1,L'x')).empty(),"oversized inline text accepted");
+        auto snippetId=left.fileTransfer(7,b,"",snippet);std::string snippetNarrow(snippetId.begin(),snippetId.end());
+        wait([&]{return right.fileTransfer(0).find(snippetId)!=std::wstring::npos;},"snippet offer missing");
+        right.fileTransfer(2,"",snippetNarrow,destination.wstring());
+        auto snippetPath=destination/(snippetId+L"-message.txt");
+        wait([&]{return std::filesystem::exists(snippetPath);},"snippet not completed");
+        std::ifstream snippetFile(snippetPath,std::ios::binary);std::string snippetBytes((std::istreambuf_iterator<char>(snippetFile)),{});
+        require(snippetBytes==unicode::encode(snippet),"snippet content normalized or truncated");
+        wait([&]{return left.fileTransfer(0).find(L"\"protectedSource\":true")!=std::wstring::npos;},"protected snippet sender did not complete");
+        require(left.fileTransfer(9,"",snippetNarrow,L"")==snippet,"protected full preview mismatch");
+        auto copy=root/L"explicit-snippet-copy.txt";left.fileTransfer(10,"",snippetNarrow,copy.wstring());
+        std::ifstream copyFile(copy,std::ios::binary);std::string copyText((std::istreambuf_iterator<char>(copyFile)),{});require(copyText==snippetBytes,"explicit protected snippet export mismatch");
+        auto multibyte=std::wstring(11000,L'\u65e5');auto multiId=left.fileTransfer(7,b,"",multibyte);std::string multiNarrow(multiId.begin(),multiId.end());
+        wait([&]{return right.fileTransfer(0).find(multiId)!=std::wstring::npos;},"multibyte snippet offer missing");right.fileTransfer(2,"",multiNarrow,destination.wstring());
+        wait([&]{try{return left.fileTransfer(9,"",multiNarrow,L"")==multibyte;}catch(...){return false;}},"multibyte protected snippet did not complete");
+        require(left.fileTransfer(8,"",multiNarrow,L"")==std::wstring(10922,L'\u65e5'),"preview broke UTF-8 at 32 KiB boundary");
+        bool missingDenied=false;try{left.fileTransfer(8,"",Storage::newMessageId(),L"");}catch(...){missingDenied=true;}require(missingDenied,"missing protected source did not fail closed");pump();require(readyLeft&&readyRight,"local preview failure retired the peer session");
+        left.stop();right.stop();
+        left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        require(left.fileTransfer(0).find(snippetId)!=std::wstring::npos&&right.fileTransfer(0).find(snippetId)!=std::wstring::npos,"completed snippet lost after reopen");
+        require(right.fileTransfer(0).find(snippetPath.filename().wstring())!=std::wstring::npos,"completed local path lost after reopen");
+        require(left.fileTransfer(9,"",snippetNarrow,L"")==snippet,"protected snippet could not reopen after profile restart");
         left.stop();right.stop();
         std::cout<<"Native file session: unverified rejection / mutual peer TLS / opaque relay / Unicode binary / profile close-reopen resume / reconnect resume / final hash / message ACK coexistence PASS\n";
     }catch(const std::exception& error){left.stop();right.stop();std::cerr<<error.what()<<"\n";return 1;}

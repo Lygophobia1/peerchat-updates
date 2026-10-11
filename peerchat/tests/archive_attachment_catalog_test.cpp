@@ -88,8 +88,10 @@ int main(){try{
         auto receiving=std::make_unique<archive::AttachmentTransfers>(b,reader,reading,receiver,open,sink,completed,lease);
         auto id=receiving->download(readerScope,file.id,Blob{'d','i','r'});
         check(receiving->download(readerScope,file.id,Blob{'o','t','h','e','r'})==id);
+        check(receiving->originalAttachment(id)&&receiving->originalAttachment(id)->id==file.id&&receiving->originalAttachment(id)->sender==file.sender);
         // Pending request survives a controller/process recreation before Offer.
         receiving.reset();receiving=std::make_unique<archive::AttachmentTransfers>(b,reader,reading,receiver,open,sink,completed,lease);
+        check(receiving->originalAttachment(id)&&receiving->originalAttachment(id)->id==file.id);
         auto fetch=receiving->request(readerScope,1);archive::validateAttachmentControl(fetch);check(receiving->request(readerScope,1).empty());
         auto wrongScope=sourceScope;wrongScope.archive.readerGrantId[0]=wrongScope.archive.readerGrantId[0]=='a'?'b':'a';rejects([&]{sending.control(wrongScope,fetch,1);});
         sending.control(sourceScope,fetch,1);sending.control(sourceScope,fetch,1);

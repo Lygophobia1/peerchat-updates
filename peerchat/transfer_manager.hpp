@@ -44,11 +44,11 @@ struct Metadata {
     Digest digest{};
     bool operator==(const Metadata& b)const{return id==b.id&&name==b.name&&size==b.size&&digest==b.digest;}
 };
-struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0; };
+struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0,created=0; };
 // Persistence adapter only: no sockets, retry loop or independent transfer owner.
 struct DurableState:Snapshot {
     Blob location;
-    std::uint64_t highWaterSent=0,created=0,updated=0,expires=0;
+    std::uint64_t highWaterSent=0,updated=0,expires=0;
     bool digestReady=false;
 };
 class StateStore {
@@ -80,7 +80,7 @@ class TransferManager {
         bool ready=false,finishSent=false;
         std::optional<Blob> reply;
         Blob location;
-        std::uint64_t created=0,updated=0,expires=0;
+        std::uint64_t updated=0,expires=0;
         bool digestReady=false;
     };
     std::map<std::string,Entry> entries_;

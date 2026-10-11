@@ -62,6 +62,9 @@ public class GroupModel : ObservableModel {
     public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","UnreadLabel","MemberCount","PendingInviteCount"})Changed(name);}
 }
 public class MessageModel : ObservableModel {
+    public CoreAdapter.FileTransferData Attachment {get;private set;}
+    public Visibility TextVisibility {get{return Attachment==null?Visibility.Visible:Visibility.Collapsed;}}
+    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");}
     public MessageData Data;
     public bool Outgoing;
     public long GroupSenderAccountId;
@@ -70,13 +73,13 @@ public class MessageModel : ObservableModel {
     public void SetGroupSenderName(string name){if(groupSenderName==name)return;groupSenderName=name;Changed("Text");Changed("Preview");}
     double bubbleWidth=400;
     public double BubbleWidth {get{return bubbleWidth;}set{bubbleWidth=value;Changed("BubbleWidth");}}
-    public string Text {get{return IsGroupMessage?groupSenderName+"\n"+Data.text:Data.text;}}
+    public string Text {get{return Attachment!=null?Attachment.name:IsGroupMessage?groupSenderName+"\n"+Data.text:Data.text;}}
     public string Preview {get{string value=Text??"";if(value.Length<=160)return value;int length=160;if(Char.IsHighSurrogate(value[length-1])&&Char.IsLowSurrogate(value[length]))length--;return value.Substring(0,length)+"…";}}
     public HorizontalAlignment Alignment {get{return Outgoing?HorizontalAlignment.Right:HorizontalAlignment.Left;}}
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
-    public string Stamp {get{return LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":"  ◷ Queued"):"");}}
+    public string Stamp {get{return Attachment!=null?"File attachment":LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":"  ◷ Queued"):"");}}
     public void Delivered(){Data.delivery=2;Changed("Stamp");}
     public void ProjectNativeDelivery(int value){Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}}
     public void GroupStatus(string status){Data.status=status;Changed("Stamp");}
@@ -135,7 +138,7 @@ public class ChatViewModel {
         ConversationModel peerConversation=null;if(!String.IsNullOrEmpty(currentPeer))conversationsByPeer.TryGetValue(currentPeer,out peerConversation);
         if(!reused&&peerConversation!=null){conversation=peerConversation;Conversations.Remove(conversation.ConversationId);reused=true;}
         if(!reused){conversation=new ConversationModel{Contact=new ContactData{peer=currentPeer,name=username,host=""}};}
-        if(peerConversation!=null&&peerConversation!=conversation){foreach(var message in peerConversation.Messages)if(!conversation.Messages.Any(existing=>existing.Data.id==message.Data.id))conversation.Messages.Add(message);foreach(var peer in peerConversation.KnownPeerIds){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}if(String.IsNullOrEmpty(conversation.Draft))conversation.Draft=peerConversation.Draft;conversation.Unread+=peerConversation.Unread;Conversations.Remove(peerConversation.ConversationId);}
+        if(peerConversation!=null&&peerConversation!=conversation){foreach(var message in peerConversation.Messages)if(!conversation.Messages.Any(existing=>(existing.Attachment==null)==(message.Attachment==null)&&existing.Data.id==message.Data.id))conversation.Messages.Add(message);foreach(var peer in peerConversation.KnownPeerIds){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}if(String.IsNullOrEmpty(conversation.Draft))conversation.Draft=peerConversation.Draft;conversation.Unread+=peerConversation.Unread;Conversations.Remove(peerConversation.ConversationId);}
         conversation.ConversationId=key;conversation.AccountId=accountId;conversation.AccountName=username??"";conversation.IsFriend=true;Conversations[key]=conversation;
         if(knownPeers!=null)foreach(var peer in knownPeers)if(!String.IsNullOrEmpty(peer)){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}
         if(conversation.Contact==null)conversation.Contact=new ContactData{peer=currentPeer,name=username,host=""};
@@ -154,11 +157,14 @@ public class ChatViewModel {
     }
     public void RemoveConversation(ConversationModel conversation){if(conversation==null)return;Conversations.Remove(conversation.ConversationId);foreach(var peer in conversation.KnownPeerIds.ToArray())if(conversationsByPeer.ContainsKey(peer)&&conversationsByPeer[peer]==conversation)conversationsByPeer.Remove(peer);}
     static void OrderMessages(ObservableCollection<MessageModel> messages){
-        var ordered=messages.OrderBy(m=>m.Data.logical).ThenBy(m=>m.Data.sender,StringComparer.Ordinal).ThenBy(m=>m.Data.id,StringComparer.Ordinal).ToList();
+        var ordered=messages.Where(m=>m.Attachment==null).OrderBy(m=>m.Data.logical).ThenBy(m=>m.Data.sender,StringComparer.Ordinal).ThenBy(m=>m.Data.id,StringComparer.Ordinal).ToList();
+        foreach(var file in messages.Where(m=>m.Attachment!=null).OrderBy(m=>m.Data.time).ThenBy(m=>m.Data.id,StringComparer.Ordinal)){
+            int position=ordered.FindIndex(item=>item.Data.time>file.Data.time);if(position<0)ordered.Add(file);else ordered.Insert(position,file);
+        }
         for(int index=0;index<ordered.Count;index++){int current=messages.IndexOf(ordered[index]);if(current!=index)messages.Move(current,index);}
     }
     public void Apply(CoreEvent e){
-        if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery);}
+        if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery);}
         // Media-device failures do not change the authenticated text session.
         if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){Status=e.text;return;}
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}
@@ -167,9 +173,9 @@ public class ChatViewModel {
         if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(item.SessionRevision==0&&(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId)){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
         if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];if(!item.Online){item.ConnectionState="Awaiting peer verification";item.Refresh();}}}
         if(e.kind==9)Status=e.text;
-        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}foreach(var message in e.messages){if(item.Messages.Any(m=>m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
+        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
-        if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Data.id==receipt.id);if(match!=null)match.Delivered();}
+        if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==receipt.id);if(match!=null)match.Delivered();}
         if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online&&item.SessionRevision==0){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
         if(e.kind==9&&e.groups!=null){
             var visible=new HashSet<string>(e.groups.Select(group=>group.id));
