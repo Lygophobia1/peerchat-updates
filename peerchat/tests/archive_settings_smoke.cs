@@ -61,6 +61,18 @@ static class ArchiveSettingsSmoke {
                 File.WriteAllBytes(policy,new byte[]{1,2,3});Check(!(bool)loadPolicy.Invoke(desktop,null)); // Corruption fails closed.
                 savePolicy.Invoke(desktop,new object[]{false});
                 dialog=new Window{Owner=window,Width=700,Height=650,ShowInTaskbar=false,ShowActivated=false,Left=-20000,WindowStartupLocation=WindowStartupLocation.Manual};
+                // Real startup regression: a previous authenticated refresh has
+                // cached devices, but a new Settings panel starts at account 0.
+                var deviceType=typeof(DesktopApplication).Assembly.GetType("PeerChatDesktop.ArchiveEnrollmentExecution+Device");
+                var cached=Activator.CreateInstance(deviceType);deviceType.GetField("PeerId").SetValue(cached,new string('a',64));
+                var cachedRows=Array.CreateInstance(deviceType,1);cachedRows.SetValue(cached,0);
+                typeof(DesktopApplication).GetField("historyDevices",flags).SetValue(desktop,cachedRows);
+                typeof(DesktopApplication).GetField("historyAccount",flags).SetValue(desktop,8L);
+                typeof(DesktopApplication).GetField("historyGeneration",flags).SetValue(desktop,1UL);
+                for(int cycle=0;cycle<32;cycle++){
+                    var startup=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",flags).Invoke(desktop,new object[]{dialog});
+                    Check(startup.Children.OfType<Expander>().Any());
+                }
                 var panel=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,new object[]{dialog});
                 panel.Children.Add(toggle);
                 dialog.Content=new ScrollViewer{Content=panel};dialog.Show();dialog.UpdateLayout();
@@ -82,10 +94,25 @@ static class ArchiveSettingsSmoke {
                 Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));
                 Check(panel.IsEnabled);
                 var names=new HistoryDeviceNames(args[0]);string first=new string('a',64),second=new string('b',64);
+                Check(names.Get(8,first,"Unnamed device")=="Unnamed device");
+                Check(names.Get(0,first,"This PC")=="This PC");
+                Check(names.Get(8,"unsupported scope","Unnamed device")=="Unnamed device");
+                Check(names.Get(8,null,"Unnamed device")=="Unnamed device");
                 names.Set(8,first,"Work VM");names.Set(8,second,"Work VM");names.Set(9,first,"Other account");
                 for(int cycle=0;cycle<32;cycle++){var reopen=new HistoryDeviceNames(args[0]);Check(reopen.Get(8,first,"")=="Work VM"&&reopen.Get(8,second,"")=="Work VM"&&reopen.Get(9,first,"")=="Other account");}
                 names.Set(8,first,"Main PC");Check(names.Get(8,first,"")=="Main PC"&&names.Get(8,second,"")=="Work VM");
                 bool bad=false;try{names.Set(8,"Work VM","Replacement identity");}catch{bad=true;}Check(bad);
+                bad=false;try{names.Set(0,first,"Invalid account");}catch(InvalidDataException){bad=true;}Check(bad);
+                var metadataPath=Path.Combine(args[0],"history-device-names.dat");var protectedNames=File.ReadAllBytes(metadataPath);
+                var malformed=System.Text.Encoding.UTF8.GetBytes("{\"8:"+first+"\":\"bad\\nname\"}");
+                File.WriteAllBytes(metadataPath,System.Security.Cryptography.ProtectedData.Protect(malformed,System.Text.Encoding.UTF8.GetBytes("PeerChat/HistoryNames/v1"),System.Security.Cryptography.DataProtectionScope.CurrentUser));
+                Check(names.Get(8,first,"Unnamed device")=="Unnamed device");
+                File.WriteAllBytes(metadataPath,new byte[]{1,2,3});
+                Check(names.Get(8,first,"Unnamed device")=="Unnamed device"&&(bool)typeof(HistoryDeviceNames).GetProperty("DetailsUnavailable").GetValue(names,null));
+                bad=false;try{names.Set(8,first,"Do not overwrite corruption");}catch(InvalidDataException){bad=true;}Check(bad);
+                Check(File.ReadAllBytes(metadataPath).SequenceEqual(new byte[]{1,2,3}));
+                typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",flags).Invoke(desktop,new object[]{dialog});
+                File.WriteAllBytes(metadataPath,protectedNames);Check(names.Get(8,first,"")=="Main PC"&&!(bool)typeof(HistoryDeviceNames).GetProperty("DetailsUnavailable").GetValue(names,null));
                 var assembly=typeof(DesktopApplication).Assembly;var progressType=assembly.GetType("PeerChatDesktop.ArchiveEnrollmentExecution+SyncProgress");
                 Func<string,bool,bool,long,long?,HistoryProgressView> project=(state,running,complete,count,total)=>{var p=Activator.CreateInstance(progressType);progressType.GetField("State").SetValue(p,state);progressType.GetField("Running").SetValue(p,running);progressType.GetField("Complete").SetValue(p,complete);progressType.GetField("Processed").SetValue(p,count);progressType.GetField("Conversations").SetValue(p,4L);return (HistoryProgressView)typeof(HistoryProgressView).GetMethod("Create",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,new object[]{p,"Work VM",new string[0],total});};
                 foreach(var pair in new[]{new[]{"Connecting to archive","Connecting"},new[]{"Synchronizing history","Downloading history"},new[]{"Archive route unavailable","Waiting for device"},new[]{"Archive authorization unavailable","Authorization required"},new[]{"Paused","Paused"},new[]{"History synchronization is off","Permission disabled"},new[]{"Archive data rejected","Failed"}})Check(project(pair[0],true,false,842,null).State==pair[1]);
