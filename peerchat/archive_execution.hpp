@@ -52,6 +52,18 @@ public:
     bool needsInitialSync()const{return savedIntent_.empty()&&!reader_&&!running_&&policy_.historySyncEnabled();}
     bool needsAutomaticSync(std::uint64_t now)const{return policy_.historySyncEnabled()&&(needsInitialSync()||(completedIntent_&&!running_&&now>=nextAutomaticAt_));}
     const std::string& lastAutomaticSource()const{return intentSource_;}
+    // Only an explicitly active restart intent may change authorization scope.
+    // Never reinterpret a legacy paused intent, or mutate trust/grants/cursors.
+    std::string blockedRestoreSource()const{
+        if(!restore_||!policy_.historySyncEnabled())return {};
+        try{(void)sessionAuthorization(policy_,intentIssuer_,intentSource_,local_.peerId);return {};}catch(const std::exception&){return intentSource_;}
+    }
+    void resumeAuthorized(const std::string& issuer,const std::string& source){
+        require(restore_&&source==intentSource_&&!running_);
+        // start validates the complete new scope and opens its own durable
+        // cursor. The previous issuer's cursor remains untouched; imports dedupe.
+        start(issuer,source,false);
+    }
     void startAutomatic(const std::string& issuer,const std::string& source,std::uint64_t now){
         require(needsAutomaticSync(now)&&now<=UINT64_MAX-60000);start(issuer,source,true);nextAutomaticAt_=now+60000;
     }

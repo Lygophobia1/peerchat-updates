@@ -178,6 +178,36 @@ int main(){try{
     check(re.policy().permits(sa.peerId,sa.peerId,ar::ServeHistory)&&re.policy().permits(sb.peerId,sb.peerId,ar::ReadHistory));
     check(re.authorizationDiagnostics(19,1).find("incompatible_authorizers")!=std::string::npos);rejects([&]{re.sourceIssuer(sa.peerId);});
     auto splitBefore=splitB.archiveAuthorizationState();for(int i=0;i<10;++i)check(re.authorizationDiagnostics(19,1).size()<49152);check(splitBefore==splitB.archiveAuthorizationState());
+    // A running legacy intent must not remain pinned to an obsolete authority
+    // when a complete, independently trusted current grant pair already exists.
+    delivery::DeliveryManager splitDelivery(splitB,sb.peerId);
+    session::SessionTransportManager splitSessions("archive-restored",sb.peerId,{1});
+    protocol::Writer intentKey(ar::LocalFormat);intentKey.string("PeerChat/ArchiveIntentContext/v1");intentKey.number(19);intentKey.string(sb.peerId);
+    std::string intentContext;static const char digits[]="0123456789abcdef";
+    for(auto byte:digestDevicePayload(intentKey.data)){intentContext+=digits[byte>>4];intentContext+=digits[byte&15];}
+    auto writeIntent=[&](unsigned active){protocol::Writer w(ar::LocalFormat);w.string("PeerChat/ArchiveIntent/v1");w.number(19);w.string(sb.peerId);w.string(sa.peerId);w.string(sa.peerId);w.number(active);splitB.saveArchiveSyncState(intentContext,splitB.archiveSyncState(intentContext),w.data);};
+    writeIntent(1);
+    {ar::Execution pending(splitB,sb,re.policy(),splitDelivery,splitSessions);ar::reconcileInitialSync(re,pending);check(!pending.running());}
+    auto alternate=re.authorizeDevice(sa.peerId,ar::ServeHistory,3,true);
+    sm.revision=3;sm.grants.push_back({ar::encodeGrant(alternate),true});re.refresh(sm);re.disableIssuer(sa.peerId,true);
+    sm.device=sa.peerId;se.refresh(sm);se.approveIssuer(sb.peerId,true);sm.device=sb.peerId;
+    splitA.rememberAuthenticatedDeviceAccount(pc.peerId,9);splitB.rememberAuthenticatedDeviceAccount(pc.peerId,9);
+    StoredMessage recovered{Storage::newMessageId(),pc.peerId,sa.peerId,L"restored under existing trusted grant",200,Delivery::Delivered,0,1};check(splitA.append(pc.peerId,recovered));
+    auto policyBefore=splitB.archiveAuthorizationState();
+    {ar::Execution restored(splitB,sb,re.policy(),splitDelivery,splitSessions);ar::reconcileInitialSync(re,restored);check(restored.running()&&restored.scope()->archive.issuer==sb.peerId&&restored.scope()->archive.source==sa.peerId);
+        auto providerScope=ar::sessionAuthorization(se.policy(),sb.peerId,sa.peerId,sb.peerId);unsigned steps=0;
+        while(!restored.snapshot().complete){auto request=restored.request(*restored.scope(),100);check(!request.empty());auto response=ar::serveSyncControl(splitA,sa,se.policy(),providerScope,request,[&](const std::string& peer){return splitA.historicalDeviceAccount(peer);},201);restored.control(*restored.scope(),response,201,100);check(++steps<100);}
+        restored.tick(101,1);check(splitB.message(recovered.id)&&splitB.message(recovered.id)->text==recovered.text&&splitB.history(pc.peerId).size()==1);
+    }
+    {ar::Execution reopened(splitB,sb,re.policy(),splitDelivery,splitSessions);check(reopened.needsAutomaticSync(0)&&reopened.lastAutomaticSource()==sa.peerId);}
+    check(splitB.archiveAuthorizationState()==policyBefore&&!re.policy().trustsAuthority(sa.publicKey));
+    // A paused legacy intent is not an implicit request to resume, even though
+    // the same alternate authorization is valid.
+    writeIntent(0);{ar::Execution paused(splitB,sb,re.policy(),splitDelivery,splitSessions);ar::reconcileInitialSync(re,paused);check(!paused.running());}
+    // Expired metadata cannot authorize rebinding; no authorization expiry is
+    // relaxed by the earlier application refresh cadence.
+    writeIntent(1);now+=30000;
+    {ar::Execution stale(splitB,sb,re.policy(),splitDelivery,splitSessions);ar::reconcileInitialSync(re,stale);check(!stale.running());}
     std::cout<<"PASS: explicit source/reader consent, bounded read-only admission reasons, incompatible authorizers, authenticated metadata binding/freshness, no same-account grant, durable exact descriptor and grant retries, generation-ordered revoke/re-enroll, removal and fail-closed tamper/reconnect\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

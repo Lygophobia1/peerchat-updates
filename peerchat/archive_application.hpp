@@ -8,6 +8,12 @@ inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
 }
 inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution,std::uint64_t now=0){
+    auto restoredSource=execution.blockedRestoreSource();
+    if(!restoredSource.empty()){
+        std::string issuer;
+        try{issuer=enrollment.sourceIssuer(restoredSource);}catch(const std::exception&){return;}
+        execution.resumeAuthorized(issuer,restoredSource);return;
+    }
     if(!execution.needsAutomaticSync(now))return;
     auto devices=enrollment.devices();
     // Fair bounded reconciliation across sources; every source retains its own

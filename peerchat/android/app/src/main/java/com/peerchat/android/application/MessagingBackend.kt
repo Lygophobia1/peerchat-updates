@@ -455,7 +455,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val execution=archiveExecution(owner,checkNotNull(profile))
             try{if(initialArchive||now>=archiveMetadataAt){
                     if(initialArchive)execution.publishPending(active.accountId,generation,local) else execution.refreshCurrent(active.accountId,generation,local)
-                    archiveMetadataAt=now+if(mutable.value.archiveProgress.running)10000 else 60000
+                    // Stay below the native 30-second authorization expiry.
+                    archiveMetadataAt=now+if(mutable.value.archiveProgress.running)10000 else 20000
                 }
                 mutable.value=mutable.value.copy(archiveProgress=execution.progress(active.accountId,generation))
                 if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,now+10000)

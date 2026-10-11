@@ -108,7 +108,8 @@ public partial class DesktopApplication {
         bool initial=archiveLoadedOwner!=owner||archiveLoadedGeneration!=generation;
         if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc&&DateTime.UtcNow<archiveMetadataUtc)return;
         archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;
-        if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(archiveProgress!=null&&archiveProgress.Running?10:60);
+        // Authorization metadata expires after 30 seconds in the native owner.
+        if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(archiveProgress!=null&&archiveProgress.Running?10:20);
         string admission="History Sync snapshot unavailable.";
         archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
             try{if(initial)execution.PublishPending(account,(long)generation,local);else if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};}
