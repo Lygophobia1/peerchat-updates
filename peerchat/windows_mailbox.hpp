@@ -58,7 +58,8 @@ public:
             std::vector<StoredMessage> pending;std::set<std::string> seen;
             for(auto& message:storage.pendingMailboxUploads())if(friends.accountFor(message.recipient)>0){seen.insert(message.id);pending.push_back(std::move(message));}
             for(const auto& known:storage.contacts())if(known.verified&&friends.accountFor(known.peerId)>0){
-                auto route=sessions.snapshot(known.peerId);if(route&&route->connected)continue;
+                auto route=sessions.snapshot(known.peerId);
+                if(delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)!=delivery::MailboxRoutePolicy::Unavailable)continue;
                 for(auto& message:deliveries.pendingMessages(known.peerId,1000)){if(pending.size()==64)break;if(message.delivery!=Delivery::Stored&&seen.insert(message.id).second)pending.push_back(std::move(message));}
                 if(pending.size()==64)break;
             }
@@ -70,7 +71,8 @@ public:
             require(mailbox::id(id,32));auto binding=parseBinding(input);auto verified=contact(storage,friends,binding.device,binding.accountId);
             auto message=storage.message(id);require(message.has_value());auto canonical=contact(storage,friends,message->recipient,binding.accountId);
             auto route=sessions.snapshot(binding.device);
-            return deliveries.prepareMailbox(id,friends.localAccount(),binding.accountId,binding,verified,identity_,*hpke_,now(),allowed,route&&route->connected,&canonical);
+            const bool waitForLive=delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)!=delivery::MailboxRoutePolicy::Unavailable;
+            return deliveries.prepareMailbox(id,friends.localAccount(),binding.accountId,binding,verified,identity_,*hpke_,now(),allowed,waitForLive,&canonical);
         }
         if(operation==4){auto envelope=parse(input);require(envelope.header.senderAccount==friends.localAccount());
             contact(storage,friends,envelope.header.recipientDevice,envelope.header.recipientAccount);
@@ -91,7 +93,7 @@ public:
             require(allowed&&mailbox::id(id,32));auto message=storage.message(id);require(message.has_value());
             const auto accountId=friends.accountFor(message->recipient);auto canonical=contact(storage,friends,message->recipient,accountId);
             auto primaryRoute=sessions.snapshot(canonical.peerId);std::vector<RecipientBinding> prepared;
-            if(!primaryRoute||!primaryRoute->connected)for(const auto& binding:parseBindingBatch(input)){
+            if(delivery::mailboxRoutePolicy(allowed,primaryRoute?&*primaryRoute:nullptr)==delivery::MailboxRoutePolicy::Unavailable)for(const auto& binding:parseBindingBatch(input)){
                 require(binding.accountId==accountId);
                 // Server authorization never substitutes for an existing native
                 // identity pin. An unverified device is not silently trusted.

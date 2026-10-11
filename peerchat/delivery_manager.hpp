@@ -16,6 +16,20 @@
 
 namespace peerchat::delivery {
 
+enum class MailboxRoutePolicy { Forbidden, LiveReady, FirstAttemptPending, Unavailable };
+// Presence is deliberately not an input. Only the session owner's authenticated
+// winner and bounded attempt/failure snapshot determine live-route usability.
+inline MailboxRoutePolicy mailboxRoutePolicy(bool allowed,const session::SessionSnapshot* route) {
+    if(!allowed)return MailboxRoutePolicy::Forbidden;
+    if(route&&route->connected)return MailboxRoutePolicy::LiveReady;
+    if(route&&!route->latestFailedTransport.value&&!route->retryDelayMilliseconds&&
+       !route->retrySuspended&&(route->pending||route->retryScheduled))
+        return MailboxRoutePolicy::FirstAttemptPending;
+    // A failed first attempt permits upload even while the owner retries. No
+    // additional backoff cycle, presence refresh, timer or retry owner is needed.
+    return MailboxRoutePolicy::Unavailable;
+}
+
 // Profile-scoped durable delivery ownership. Storage remains the durable source of truth;
 // transport instances only prove which authenticated destination was actually sent an ID.
 // No packet type, ciphertext, message ID, ordering rule, or group-ledger rule lives here.

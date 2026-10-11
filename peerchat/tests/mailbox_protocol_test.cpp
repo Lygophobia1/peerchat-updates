@@ -4,6 +4,8 @@
 #include "../platform/protected_key_registry.hpp"
 #include "../delivery_manager.hpp"
 #include "../reliable_peer_protocol.hpp"
+#include "../session_transport_manager.hpp"
+#include "../windows_mailbox.hpp"
 #include <filesystem>
 #include <chrono>
 #include <fstream>
@@ -33,10 +35,37 @@ struct RegistryFixture : DeviceKeyRegistry {
     void replace(const std::vector<DeviceKeyMetadata>& in)override{entries=in;}
 };
 int main(int argc,char** argv){try{
+    using Policy=delivery::MailboxRoutePolicy;
+    session::SessionSnapshot route;
+    check(delivery::mailboxRoutePolicy(false,nullptr)==Policy::Forbidden);
+    check(delivery::mailboxRoutePolicy(true,nullptr)==Policy::Unavailable);
+    route.pending=true;check(delivery::mailboxRoutePolicy(true,&route)==Policy::FirstAttemptPending);
+    route.pending=false;route.retryScheduled=true;
+    check(delivery::mailboxRoutePolicy(true,&route)==Policy::FirstAttemptPending);
+    route.latestFailedTransport={1};route.retryDelayMilliseconds=1000;
+    check(delivery::mailboxRoutePolicy(true,&route)==Policy::Unavailable);
+    route.pending=true;check(delivery::mailboxRoutePolicy(true,&route)==Policy::Unavailable);
+    route.connected=true;check(delivery::mailboxRoutePolicy(true,&route)==Policy::LiveReady);
+    check(delivery::mailboxRoutePolicy(false,&route)==Policy::Forbidden);
     check(argc==2);std::filesystem::path root(argv[1]);std::filesystem::create_directories(root);
     Storage senderStore((root/L"sender").wstring()),recipientStore((root/L"recipient").wstring()),outsiderStore((root/L"outsider").wstring());
     Signing sender(senderStore.profile()),recipient(recipientStore.profile()),outsider(outsiderStore.profile());
     auto senderId=sender.profile.peerId,recipientId=recipient.profile.peerId;
+    session::SessionTransportManager sessions(senderId,senderId,{1});
+    sessions.setDemandDriven(true);
+    check(sessions.replaceCandidates({1},recipientId,{},true,1,100));
+    sessions.demandLiveRoute(recipientId,45100,100);
+    auto first=sessions.snapshot(recipientId);
+    check(first&&delivery::mailboxRoutePolicy(true,&*first)==Policy::FirstAttemptPending);
+    check(sessions.takeDueRelayAttempts(100).size()==1);
+    session::RouteObservation observation{{1},"relay:fixture","server","relay",false,1,session::TransportKind::Relay,session::RouteClass::ServerRelay};
+    check(sessions.registerAttempt({1},{1},recipientId,observation,100));
+    first=sessions.snapshot(recipientId);check(first&&delivery::mailboxRoutePolicy(true,&*first)==Policy::FirstAttemptPending);
+    check(sessions.closeTransport({1},{1},"first bounded attempt failed",true).accepted);
+    check(sessions.scheduleRelayRetry(recipientId,20100,1).scheduled);
+    auto failed=sessions.snapshot(recipientId);
+    check(failed&&delivery::mailboxRoutePolicy(true,&*failed)==Policy::Unavailable);
+    check(delivery::mailboxRoutePolicy(false,&*failed)==Policy::Forbidden);
     RecipientFixture fixture;auto hpke=platform::createShippingHpke();
     mailbox::Verify verify=verifyDevicePayload;mailbox::Fingerprint fingerprint=Storage::publicKeyId;
     mailbox::RecipientBinding binding;binding.accountId=8;binding.device=recipientId;binding.keyId=std::string(32,'a');binding.generation=1;
@@ -113,6 +142,19 @@ int main(int argc,char** argv){try{
     auto message=reliable::queueText(senderStore,sender.profile,&destination,queuedRecipient,Storage::newMessageId(),L"Durable mailbox text \u2603",now,&account);
     check(message.delivery==Delivery::Queued);
     delivery::DeliveryManager outgoing(senderStore,senderId),incoming(recipientStore,recipientId);
+    {
+        mailbox::WindowsMailbox adapter((root/L"native-adapter").wstring(),sender.profile);
+        auto count=[&](bool allowed,session::SessionTransportManager& owner){
+            auto bytes=adapter.execute(2,{},"",allowed,senderStore,outgoing,account,owner);
+            protocol::Reader result(bytes);check(result.type()==protocol::Accepted);return result.number();
+        };
+        session::SessionTransportManager pendingOwner(senderId,senderId,{1});
+        check(pendingOwner.replaceCandidates({1},recipientId,{},true,1,100));
+        check(count(true,pendingOwner)==0); // First eligible attempt: no upload.
+        check(count(false,sessions)==0); // Explicit OFF after failure: no upload.
+        check(count(true,sessions)==1); // Failed first attempt: actual native work list.
+        check(senderStore.message(message.id)->delivery==Delivery::Queued);
+    }
     check(outgoing.prepareMailbox(message.id,7,8,binding,destination,sender,*hpke,now,false,false).empty());
     check(outgoing.prepareMailbox(message.id,7,8,binding,destination,sender,*hpke,now,true,true).empty());
     auto unverified=destination;unverified.verified=false;

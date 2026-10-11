@@ -15,10 +15,12 @@ internal sealed class MailboxExecution {
     internal static bool CanStart(long account,long publishedAccount,bool stopping){
         return !stopping&&account>0&&account==publishedAccount;
     }
+    internal static bool RouteNeedsReevaluation(CoreEvent value){return value.kind==17&&!value.connected;}
     byte[] Native(uint operation,byte[] input=null,string id="",bool allowed=false){
         lifetime.Token.ThrowIfCancellationRequested();
         return invoke(operation,input,id,allowed);
     }
+    internal byte[] PendingUploads(bool allowed){return Native(2,null,"",allowed);}
     string receiptCursor="";
     bool registered;
     public bool NeedsContinuation {get;private set;}
@@ -38,8 +40,10 @@ internal sealed class MailboxExecution {
         public void End(){Require(stream.Position==stream.Length);}
         public void Dispose(){input.Dispose();}
     }
-    public void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged){
+    public void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged,Action<string> diagnostic=null){
         NeedsContinuation=false;
+        Action<string> trace=diagnostic??(_=>{});
+        trace("mailbox policy="+(allowed?"allowed":"forbidden"));
         var identity=Native(7);
         Func<string,Dictionary<string,object>,Dictionary<string,object>> request=(operation,body)=>{
             lifetime.Token.ThrowIfCancellationRequested();
@@ -69,9 +73,10 @@ internal sealed class MailboxExecution {
         if(receipts.Length<64)receiptCursor="";
         if(!allowed)return;
         var pending=new List<Tuple<string,string,long>>();
-        using(var record=new Record(Native(2),4)){long count=record.Number();Require(count<=64);for(long i=0;i<count;i++)pending.Add(Tuple.Create(record.Text(),record.Text(),record.Number()));record.End();}
+        using(var record=new Record(PendingUploads(allowed),4)){long count=record.Number();Require(count<=64);for(long i=0;i<count;i++)pending.Add(Tuple.Create(record.Text(),record.Text(),record.Number()));record.End();}
         NeedsContinuation|=pending.Count>4;
         foreach(var message in pending.Take(4)){
+            trace("mailbox message="+message.Item1+" fallback=no usable winner after bounded attempt or no eligible route");
             var reply=request("mailbox_keys",new Dictionary<string,object>{{"recipientAccountId",message.Item3.ToString(System.Globalization.CultureInfo.InvariantCulture)}});Require(Text(reply,"state")=="ready");
             var keys=Rows(reply,"keys").ToArray();Require(keys.Length<=32);
             byte[] batch;
@@ -87,7 +92,11 @@ internal sealed class MailboxExecution {
             foreach(var binding in prepared.Take(4)){
                 var wire=Native(3,binding,message.Item1,true);if(wire.Length==0)continue;
                 var body=signing();body["envelope"]=Convert.ToBase64String(wire);
-                if(Text(request("mailbox_store",body),"state")=="stored")Require(Native(4,wire).SequenceEqual(new byte[]{1}));
+                trace("mailbox message="+message.Item1+" submission=started");
+                if(Text(request("mailbox_store",body),"state")=="stored"){
+                    Require(Native(4,wire).SequenceEqual(new byte[]{1}));
+                    trace("mailbox message="+message.Item1+" submission=accepted state=Stored; opaque wake is server-owned, receipt not yet confirmed");
+                }else trace("mailbox message="+message.Item1+" submission=not accepted");
             }
         }
     }

@@ -47,13 +47,21 @@ static class ArchiveSettingsSmoke {
                     Check(navigation!=null&&navigation.Length==0); // Navigation only, no registration/login/identity mutation.
                 }
                 for(int cycle=0;cycle<32;cycle++)Check(!(bool)loadPolicy.Invoke(desktop,null));
+                var toggle=(CheckBox)typeof(DesktopApplication).GetMethod("VoiceProcessingSwitch",flags).Invoke(desktop,new object[]{"Offline encrypted mailbox storage",(bool)loadPolicy.Invoke(desktop,null)});
+                Check(toggle.IsChecked==false&&toggle.Template!=null);
+                toggle.IsChecked=true;savePolicy.Invoke(desktop,new object[]{toggle.IsChecked==true});Check((bool)loadPolicy.Invoke(desktop,null));
+                toggle.IsChecked=false;savePolicy.Invoke(desktop,new object[]{toggle.IsChecked==true});Check(!(bool)loadPolicy.Invoke(desktop,null));
                 savePolicy.Invoke(desktop,new object[]{true});Check((bool)loadPolicy.Invoke(desktop,null));
                 string policy=(string)typeof(DesktopApplication).GetProperty("MailboxPolicyPath",flags).GetValue(desktop,null);
                 File.WriteAllBytes(policy,new byte[]{1,2,3});Check(!(bool)loadPolicy.Invoke(desktop,null)); // Corruption fails closed.
                 savePolicy.Invoke(desktop,new object[]{false});
                 dialog=new Window{Owner=window,Width=700,Height=650,ShowInTaskbar=false,ShowActivated=false,Left=-20000,WindowStartupLocation=WindowStartupLocation.Manual};
                 var panel=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(desktop,new object[]{dialog});
+                panel.Children.Add(toggle);
                 dialog.Content=new ScrollViewer{Content=panel};dialog.Show();dialog.UpdateLayout();
+                var switchState=(TextBlock)toggle.Template.FindName("SwitchState",toggle);
+                Check(switchState.Text=="OFF");toggle.IsChecked=true;dialog.UpdateLayout();Check(switchState.Text=="ON");
+                toggle.IsChecked=false;dialog.UpdateLayout();Check(switchState.Text=="OFF");
                 Check(Find(dialog,"Archive device selector") is ComboBox);
                 Check(Find(dialog,"Historical attachment selector") is ComboBox);
                 foreach(var label in new[]{"Refresh attachments","Next attachment page","Download selected attachment…"})Check(Find(dialog,label) is Button);
@@ -63,7 +71,7 @@ static class ArchiveSettingsSmoke {
                 ((Button)Find(dialog,"Refresh archive devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));
                 Check(selector.Items.Count==0&&panel.IsEnabled);
-                Console.WriteLine("PASS: packaged WPF archive Settings controls render; no automatic enrollment, no unsigned-in RPC/consent, no archive state owned by WPF. Host smoke only.");
+                Console.WriteLine("PASS: explicit mailbox OFF protected persistence, corruption fails closed, rendered ON/OFF slider states; archive Settings render without automatic enrollment or unsigned-in consent. Host smoke only.");
             }catch(Exception error){Console.Error.WriteLine(error);result=1;}
             finally{if(dialog!=null)dialog.Close();window.Close();}
         };

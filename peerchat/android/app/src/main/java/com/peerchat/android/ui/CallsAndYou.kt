@@ -67,12 +67,12 @@ import com.peerchat.android.platform.NotificationPreview
         Text("Settings", style = MaterialTheme.typography.titleLarge)
         if(!state.demo){
             ArchiveDevicesSection(state,dispatch)
-            Text("Offline encrypted delivery",style=MaterialTheme.typography.titleMedium)
+            Text("Offline encrypted mailbox storage",style=MaterialTheme.typography.titleMedium)
             Row(verticalAlignment=Alignment.CenterVertically){
                 Switch(state.mailboxStorageAllowed,{dispatch(UiAction.MailboxStorage(it))})
-                Text("Allow temporary encrypted server storage")
+                Text(if(state.mailboxStorageAllowed) "ON" else "OFF")
             }
-            Text("Off keeps outgoing messages queued locally. Stored is not Delivered; only recipient acknowledgement confirms delivery.",style=MaterialTheme.typography.bodySmall)
+            Text("On allows temporary encrypted server storage when a live connection is unavailable. Off keeps messages on the sender until a live route is available. Stored is not Delivered; only recipient acknowledgement confirms delivery.",style=MaterialTheme.typography.bodySmall)
             Text("Message notifications",style=MaterialTheme.typography.titleMedium)
             Row(verticalAlignment=Alignment.CenterVertically){
                 Switch(state.notificationsEnabled,{dispatch(UiAction.NotificationSettings(it,state.notificationPreview))})

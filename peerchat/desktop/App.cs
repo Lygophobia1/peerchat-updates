@@ -128,7 +128,8 @@ public class DesktopApplication {
         mailboxTask=Task.Run(()=>execution.Service(service,peer,allowed,(sender,inserted)=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=service)return;
             var conversation=model.FindByPeer(sender);if(conversation!=null){core.History(sender,Int64.MaxValue);}
-        })))).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
+        })),stage=>window.Dispatcher.BeginInvoke((Action)(()=>{if(!closing&&discovery==service)TraceUi(stage);}))))
+        .ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=service)return;
             mailboxNextUtc=task.IsFaulted?DateTime.UtcNow.AddSeconds(30):execution.NeedsContinuation?DateTime.UtcNow.AddSeconds(1):mailboxNextUtc;
             if(task.IsFaulted)TraceUi("mailbox servicing failed: "+task.Exception.GetBaseException().GetType().Name);
@@ -585,7 +586,7 @@ public class DesktopApplication {
                 if(e.kind==0){localTlsCertificateDiagnostics=String.IsNullOrWhiteSpace(e.detail)?"Unavailable":e.detail;if(profileManager!=null)TraceStartup(profileManager.InstallRoot,"native-ready profile="+localProfile.Id+" relay-only="+(e.port==0)+"; "+localTlsCertificateDiagnostics);RestoreDiscoverySession();}
                 if(e.kind==14){var attempting=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(attempting!=null&&!attempting.Online&&attempting.SessionRevision==0){attempting.ConnectionState="Connecting";attempting.Refresh();}connectionAttempts.Update(e,attempting,"Connecting","Not yet presented",null);RecordConnection("connect",attempting,"attempt started",e);UpdateDiagnosticOperation("Connection",e.attempt.ToString(),"connecting · "+(e.source??"route"),e.sessionRevision,diagnosticsService.Capture());}
                 if(e.kind==15){var scheduled=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);if(scheduled!=null&&!scheduled.Online&&scheduled.SessionRevision==0){scheduled.ConnectionState="Retrying with backoff";scheduled.Refresh();}connectionAttempts.Update(e,scheduled,"Waiting to retry",null,null);RecordConnection("retry",scheduled,"scheduled in "+e.retryMs+" ms",e);UpdateDiagnosticOperation("Connection",e.attempt.ToString(),"retry scheduled",e.sessionRevision,diagnosticsService.Capture());}
-                if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);}
+                if(e.kind==17){var sessionConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);connectionAttempts.Update(e,sessionConversation,e.text,e.connected?"Verified":null,null);if(MailboxExecution.RouteNeedsReevaluation(e))RequestMailbox("session owner has no usable winner; native first-attempt policy reevaluated");}
                 if(e.kind==18)StartRelay(e);
                 if(e.kind==2){
                     var identityConversation=model.FindByPeer(e.expected)??model.FindByPeer(e.peer);
@@ -2370,6 +2371,9 @@ public class DesktopApplication {
 		on.Setters.Add(new Setter(TextBlock.TextProperty, "ON", "SwitchState"));
 		on.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left, "SwitchState"));
 		template.Triggers.Add(on);
+        var unknown = new Trigger { Property = CheckBox.IsCheckedProperty, Value = null };
+        unknown.Setters.Add(new Setter(TextBlock.TextProperty, "—", "SwitchState"));
+        template.Triggers.Add(unknown);
 		var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
 		disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.45, "SwitchRow"));template.Triggers.Add(disabled);
 		control.Template = template;
@@ -2848,7 +2852,8 @@ public class DesktopApplication {
 
     StackPanel ArchiveSettingsPanel(Window dialog){
         var panel=new StackPanel();
-        var sync=new CheckBox{Content="History synchronization",IsThreeState=true,IsChecked=null,IsEnabled=false,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,14,0,6)};
+        var sync=VoiceProcessingSwitch("History synchronization",false);
+        sync.IsThreeState=true;sync.IsChecked=null;sync.IsEnabled=false;sync.Foreground=Brush("#EDF1F5");sync.Margin=new Thickness(0,14,0,6);
         panel.Children.Add(sync);
         panel.Children.Add(new TextBlock{Text="On participates only after explicit archive authorization. Off pauses archive access without deleting history or revoking grants. Refresh after sign-in to load this account's saved choice.",TextWrapping=TextWrapping.Wrap,Foreground=Brush("#A1AEBB")});
         panel.Children.Add(new TextBlock{Text="Archive devices",FontSize=19,Foreground=Brush("#EDF1F5"),Margin=new Thickness(0,18,0,6)});
@@ -3246,7 +3251,8 @@ public class DesktopApplication {
 		};
 		settingsPages.Add("General", createInfoPage("General", "General client preferences will appear here as they are introduced. Local profile and account controls remain available from the profile bubble."));
 		settingsPages.Add("Privacy & Security", createInfoPage("Privacy & Security", "Local history is encrypted on this PC. Peer and account trust status remains available in the main Security & Status surface."));
-        var mailboxToggle=new CheckBox{Content="Allow temporary encrypted server storage for offline messages",IsChecked=mailboxStorageAllowed,IsEnabled=core.MailboxSupported,Margin=new Thickness(0,16,0,8),Foreground=Brush("#EDF1F5")};
+        var mailboxToggle=VoiceProcessingSwitch("Offline encrypted mailbox storage",mailboxStorageAllowed);
+        mailboxToggle.IsEnabled=core.MailboxSupported;mailboxToggle.Margin=new Thickness(0,16,0,8);mailboxToggle.Foreground=Brush("#EDF1F5");
         mailboxToggle.Click+=(s,e)=>{try{SaveMailboxPolicy(mailboxToggle.IsChecked==true);mailboxNextUtc=DateTime.MinValue;mailboxExecution=null;mailboxService=null;}catch{mailboxToggle.IsChecked=mailboxStorageAllowed;Notify("Mailbox privacy preference could not be saved.",dialog);}};
         settingsPages["Privacy & Security"].Children.Add(mailboxToggle);
         settingsPages["Privacy & Security"].Children.Add(ArchiveSettingsPanel(dialog));
@@ -3287,7 +3293,7 @@ public class DesktopApplication {
 		levelsPanel.Children.Add(inputLevelLabel);levelsPanel.Children.Add(inputLevel);levelsPanel.Children.Add(outputLevelLabel);levelsPanel.Children.Add(outputLevel);
 		voiceSettings.Children.Add(SettingsCard("Levels", "These controls apply real software gain in the native capture and playback path. Mute and Deafen remain immediate call controls.", levelsPanel));
 		StackPanel processingPanel = new StackPanel();
-		CheckBox processingEnabled = new CheckBox { Content = "Enable Audio Processing", IsChecked = voicePreferences.AudioProcessingEnabled, Margin = new Thickness(0,0,0,8) };
+		CheckBox processingEnabled = VoiceProcessingSwitch("Enable Audio Processing",voicePreferences.AudioProcessingEnabled);
 		CheckBox noiseSuppression = VoiceProcessingSwitch("Noise Suppression", voicePreferences.NoiseSuppressionEnabled);
 		CheckBox automaticGain = VoiceProcessingSwitch("Automatic Gain Control", voicePreferences.AutomaticGainEnabled);
 		var noiseStrength=VoicePresetSelector(VoiceProcessingPresets.NoiseSuppressionNames,voicePreferences.NoiseSuppressionStrength);

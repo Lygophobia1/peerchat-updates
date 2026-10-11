@@ -13,6 +13,13 @@ internal static class MailboxLifecycleTest {
         Check(!MailboxExecution.CanStart(0,0,false));
         Check(!MailboxExecution.CanStart(8,8,true));
         Check(MailboxExecution.CanStart(8,8,false));
+        Check(MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=17,connected=false}));
+        Check(!MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=17,connected=true}));
+        Check(!MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=14,connected=false}));
+        foreach(bool policy in new[]{false,true}){
+            var execution=new MailboxExecution((op,bytes,id,allowed)=>{Check(op==2&&allowed==policy);return new byte[]{1};});
+            Check(execution.PendingUploads(policy).SequenceEqual(new byte[]{1}));
+        }
         for(int cycle=0;cycle<100;cycle++){
             var entered=new ManualResetEventSlim();var release=new ManualResetEventSlim();
             int calls=0;
