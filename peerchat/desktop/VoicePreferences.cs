@@ -50,7 +50,7 @@ public sealed class ScreenSharePreferenceData {
     public int FramesPerSecond=30;
     public int BitrateBitsPerSecond=8000000;
     public bool CaptureCursor=true;
-    public string Backend="Native Windows";
+    public string Backend="WebRTC Compatibility";
 }
 public sealed class ScreenSharePreferenceStore {
     readonly string path;

@@ -16,6 +16,16 @@ static class VoicePreferencesTest {
         string profileA=Path.Combine(root,"A"),profileB=Path.Combine(root,"B");
         Func<byte[],byte[]> identity=data=>(byte[])data.Clone();
         try {
+            var screen=new ScreenSharePreferenceStore(profileA);
+            Require(screen.Load().Backend=="WebRTC Compatibility","Missing screen preference did not default to Compatibility");
+            Directory.CreateDirectory(profileA);
+            string screenPath=Path.Combine(profileA,"screen-share-preferences.json");
+            File.WriteAllText(screenPath,"{\"Version\":1,\"FramesPerSecond\":60,\"BitrateBitsPerSecond\":16000000,\"CaptureCursor\":false}");
+            var missing=screen.Load();Require(missing.Backend=="WebRTC Compatibility"&&missing.FramesPerSecond==60&&missing.BitrateBitsPerSecond==16000000&&!missing.CaptureCursor,"Missing backend default changed saved quality");
+            foreach(string backend in new[]{"Native Windows","WebRTC Compatibility"}){
+                missing.Backend=backend;screen.Save(missing);
+                for(int i=0;i<16;i++)Require(new ScreenSharePreferenceStore(profileA).Load().Backend==backend,"Explicit backend selection did not survive reopen");
+            }
             var storeA=new VoicePreferenceStore(profileA,identity,identity);
             var defaults=storeA.Load();
             Require(defaults.EchoCancellationEnabled,"Fresh profile AEC must default ON");
