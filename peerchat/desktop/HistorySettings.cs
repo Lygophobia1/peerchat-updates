@@ -126,6 +126,19 @@ public partial class DesktopApplication {
                 bool changed=setup||receive.IsChecked!=device.GrantedRead||provide.IsChecked!=device.GrantedServe;
                 focus.IsEnabled=false;bool ok=await run(changed?5u:0u,device,caps,autoSwitch.IsChecked==true);focus.IsEnabled=true;if(ok)focus.Close();else message.Text=status.Text;
             }));
+            // Aggregate ON switches may describe a different issuer's grant.
+            // A separate explicit action can establish the requested local-issuer
+            // grant even when the displayed permissions have not changed. Never
+            // issue it on open, refresh, ordinary Save or automatic reconciliation.
+            bool localAuthorizer=historyDevices.Any(d=>d.Local&&d.ApprovedIssuer);
+            body.Children.Add(HistoryText("ON permissions may have been granted by another authorizer. Saving unchanged switches does not create a grant signed by this device."));
+            if(localAuthorizer)controls.Children.Add(HistoryButton("Authorize selected permissions from this device",async()=>{
+                if(!same()){message.Text="Account/device context changed; reopen Manage.";return;}
+                long caps=(receive.IsChecked==true?1:0)|(provide.IsChecked==true?2:0);
+                if(caps==0){message.Text="At least one history permission is required.";return;}
+                focus.IsEnabled=false;bool ok=await run(5,device,caps,null);focus.IsEnabled=true;if(ok)focus.Close();else message.Text=status.Text;
+            }));
+            else body.Children.Add(HistoryText("This device is not an enabled trusted authorizer. No grant will be issued and disabled trust will not be restored automatically."));
             if(!device.Local)controls.Children.Add(HistoryButton("Sync now",async()=>{if(same()&&await run(12,device,0,null))focus.Close();}));
             if(!setup)body.Children.Add(HistoryButton("Revoke device",revoke));focus.ShowDialog();
         };

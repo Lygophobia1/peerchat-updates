@@ -93,6 +93,26 @@ static class ArchiveSettingsSmoke {
                 ((Button)Find(dialog,"Refresh history devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));
                 Check(panel.IsEnabled);
+                // Aggregate permissions can already be ON under another issuer.
+                // The new action is explicit, not an automatic Save side effect.
+                var own=Activator.CreateInstance(deviceType);deviceType.GetField("PeerId").SetValue(own,new string('b',64));deviceType.GetField("Local").SetValue(own,true);
+                deviceType.GetField("GrantedRead").SetValue(cached,true);deviceType.GetField("GrantedServe").SetValue(cached,true);
+                var consentRows=Array.CreateInstance(deviceType,2);consentRows.SetValue(own,0);consentRows.SetValue(cached,1);
+                typeof(DesktopApplication).GetField("historyDevices",flags).SetValue(desktop,consentRows);
+                foreach(bool enabledAuthorizer in new[]{true,false}){
+                    deviceType.GetField("ApprovedIssuer").SetValue(own,enabledAuthorizer);
+                    Exception modalFailure=null;
+                    window.Dispatcher.BeginInvoke((Action)(()=>{
+                        Window focus=null;try{
+                            focus=dialog.OwnedWindows.Cast<Window>().Single(w=>w.Title=="New history device");focus.UpdateLayout();
+                            var explicitGrant=Find(focus,"Authorize selected permissions from this device") as Button;
+                            Check((explicitGrant!=null)==enabledAuthorizer);
+                            if(explicitGrant!=null){explicitGrant.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(focus.IsVisible&&focus.IsEnabled&&panel.IsEnabled);}
+                        }catch(Exception error){modalFailure=error;}finally{if(focus!=null)focus.Close();}
+                    }));
+                    ((Button)Find(dialog,"+ Authorize a device")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    if(modalFailure!=null)throw modalFailure;
+                }
                 var names=new HistoryDeviceNames(args[0]);string first=new string('a',64),second=new string('b',64);
                 Check(names.Get(8,first,"Unnamed device")=="Unnamed device");
                 Check(names.Get(0,first,"This PC")=="This PC");
