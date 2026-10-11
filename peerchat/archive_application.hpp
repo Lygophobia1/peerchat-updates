@@ -26,9 +26,11 @@ inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution,std
 }
 inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,unsigned operation,const Blob& bytes,
     std::uint64_t now,std::uint64_t network){
-    require(((operation>=12&&operation<=15)||(operation>=19&&operation<=21))&&bytes.size()<=MaxApplicationBytes);
+    require(((operation>=12&&operation<=15)||(operation>=19&&operation<=22))&&bytes.size()<=MaxApplicationBytes);
     protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
-    auto account=r.number(),generation=r.number();require(enrollment.matches(account,generation));
+    auto account=r.number(),generation=r.number();
+    if(operation==22){r.end();auto result=applicationHeader(operation);result.string(enrollment.authorizationDiagnostics(account,generation));return result.data;}
+    require(enrollment.matches(account,generation));
     auto result=applicationHeader(operation);
     if(operation==19){auto peer=r.string();auto write=r.number();require(write<=1);if(write){auto enabled=r.number();require(enabled<=1);r.end();enrollment.automaticSync(peer,enabled!=0);}else r.end();result.number(enrollment.automaticSync(peer));return result.data;}
     if(operation==20){r.end();auto peers=execution.providingDevices(now);result.number(peers.size());for(const auto& peer:peers)result.string(peer);return result.data;}

@@ -80,6 +80,7 @@ static class ArchiveApplicationBoundaryTest {
         using(var w=new Wire(5)){w.Text(pb);w.Number(1);w.Number(1);read=Request(a,5,w);}
         PairMetadata(a,pa,descriptors,new[]{serve,read},2);PairMetadata(b,pb,descriptors,new[]{serve,read},2);
         var source=Client(a);var reader=Client(b);Check(reader.Progress(8,1).Running); // Actual native automatic authorized initial sync.
+        var admission=reader.AuthorizationDiagnostics(8,1);Check(admission.Length<=49152&&admission.Contains("local_device="+pb)&&admission.Contains("source_provide=allowed reader_receive=allowed"));
         ulong ra=0,rb=0;ArchiveRelayScope scope;var until=DateTime.UtcNow.AddSeconds(10);
         while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb!=0)source.IncomingArchive(8,1,scope);else Thread.Sleep(10);}
         while(ra==0&&DateTime.UtcNow<until){ra=Relay(a,out scope);if(ra==0)Thread.Sleep(10);}
@@ -182,6 +183,9 @@ static class ArchiveApplicationBoundaryTest {
                 return reply;
             });
             execution.Refresh(8,4,peer);Views(handle,peer,true,true);Check(publications==0);
+            var safeAdmission=execution.AuthorizationDiagnostics(8,4);Check(safeAdmission.Contains("account=8")&&safeAdmission.Contains("local_generation=1")&&safeAdmission.Contains("server_generation=1"));
+            var service=new PeerChatDesktop.DiagnosticsService(new PeerChatDesktop.DiagnosticsSources{HistorySync=()=>safeAdmission});
+            Check(PeerChatDesktop.DiagnosticsService.FormatFull(service.Capture()).Contains("local_device="+peer));
             Check(execution.HistorySync(8,4));
             Check(!execution.HistorySync(8,4,false));Views(handle,peer,true,false);
             bool stalePolicy=false;try{execution.HistorySync(8,3,true);}catch(Exception){stalePolicy=true;}Check(stalePolicy);

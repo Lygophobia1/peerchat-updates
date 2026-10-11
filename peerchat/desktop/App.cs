@@ -99,6 +99,7 @@ public partial class DesktopApplication {
     bool mailboxRequested=true;
     Task archiveTask=Task.FromResult(0);DateTime archiveNextUtc=DateTime.MinValue,archiveMetadataUtc=DateTime.MinValue,archiveServingUntilUtc=DateTime.MinValue;
     ArchiveEnrollmentExecution.SyncProgress archiveProgress;
+    string archiveAuthorizationDiagnostic="No authenticated History Sync snapshot yet.";
     long archiveProjectedCount=-1;
     DiscoveryClient archiveLoadedOwner;ulong archiveLoadedGeneration;
     void PumpArchive(){
@@ -108,10 +109,13 @@ public partial class DesktopApplication {
         if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc&&DateTime.UtcNow<archiveMetadataUtc)return;
         archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;
         if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(archiveProgress!=null&&archiveProgress.Running?10:60);
+        string admission="History Sync snapshot unavailable.";
         archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
-            if(initial)execution.PublishPending(account,(long)generation,local);else if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};
+            try{if(initial)execution.PublishPending(account,(long)generation,local);else if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};}
+            finally{try{admission=execution.AuthorizationDiagnostics(account,(long)generation);}catch(Exception error){admission="Admission snapshot unavailable: "+error.GetType().Name;}}
         }).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
+            archiveAuthorizationDiagnostic=admission;
             if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];archiveNextUtc=DateTime.UtcNow.AddSeconds(60);TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
             archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
             archiveProgress=task.Result.Progress;historyDevices=task.Result.Devices;historyProviding=task.Result.Providing;historyAccount=account;historyGeneration=generation;
@@ -340,7 +344,7 @@ public partial class DesktopApplication {
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
-        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
+        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{HistorySync=()=>archiveAuthorizationDiagnostic,Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
         // Profile selection and any legacy migration finish before the native owner exists.

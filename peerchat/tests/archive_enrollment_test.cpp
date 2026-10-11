@@ -25,6 +25,9 @@ int main(){try{
         m.device=device.peerId;m.serverEpoch="test-server-epoch";m.descriptors={da,db};m.grants=std::move(grants);return m;
     };
     source.refresh(metadata(pa,1,{}));reader.refresh(metadata(pb,1,{}));
+    auto admission=reader.authorizationDiagnostics(8,1);
+    check(admission.find("metadata_fresh=1")!=std::string::npos&&admission.find("required_grant_or_trust_missing")!=std::string::npos);
+    rejects([&]{reader.authorizationDiagnostics(9,1);});rejects([&]{reader.authorizationDiagnostics(8,2);});
     check(reader.automaticSync(pa.peerId));reader.automaticSync(pa.peerId,false);check(!reader.automaticSync(pa.peerId));
     {ar::Enrollment reopened(b,pb,8,clock);reopened.authenticated(1);reopened.refresh(metadata(pb,1,{}));check(!reopened.automaticSync(pa.peerId));}
     check(reader.pendingPublications().empty()&&!reader.policy().trustsAuthority(pa.publicKey));
@@ -47,8 +50,17 @@ int main(){try{
     check(source.pendingPublications().size()==2&&!source.policy().permits(pa.peerId,pa.peerId,ar::ServeHistory));
     std::vector<ar::RegisteredGrant> registered{{ar::encodeGrant(serving),true},{ar::encodeGrant(reading),true}};
     source.refresh(metadata(pa,2,registered));reader.refresh(metadata(pb,2,registered));
+    check(reader.authorizationDiagnostics(8,1).find("authorizer_not_trusted")!=std::string::npos);
     check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
+    admission=reader.authorizationDiagnostics(8,1);
+    check(admission.find("source_provide=allowed reader_receive=allowed")!=std::string::npos);
+    check(admission.find("local_generation=1")!=std::string::npos&&admission.find("server_generation=1")!=std::string::npos);
+    auto diagnosticCommand=ar::applicationHeader(22);diagnosticCommand.number(8);diagnosticCommand.number(1);
+    auto diagnosticBefore=b.archiveAuthorizationState();reader.invalidate();
+    auto diagnosticReply=ar::executeSyncOperation(reader,execution,22,diagnosticCommand.data,now,1);
+    check(!diagnosticReply.empty()&&reader.authorizationDiagnostics(8,1).find("metadata_stale")!=std::string::npos&&b.archiveAuthorizationState()==diagnosticBefore);
+    reader.refresh(metadata(pb,3,registered));
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.policy().setHistorySyncEnabled(false);
     ar::reconcileInitialSync(reader,execution);check(!execution.running());
@@ -93,13 +105,13 @@ int main(){try{
     {ar::Authorization reopened(b,pb,8,[](auto,const auto&){return true;},[](auto,const auto&,const auto&)->std::optional<ar::CurrentGrant>{return {};});check(!reopened.historySyncEnabled());}
     reader.policy().setHistorySyncEnabled(true);
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory)); // Same grant, not re-enrollment.
-    auto bad=metadata(pb,3,registered);bad.grants.back().proof.back()^=1;
+    auto bad=metadata(pb,4,registered);bad.grants.back().proof.back()^=1;
     rejects([&]{reader.refresh(bad);});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
-    reader.refresh(metadata(pb,3,registered));
+    reader.refresh(metadata(pb,4,registered));
     rejects([&]{reader.refresh(metadata(pb,2,registered));});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
-    reader.refresh(metadata(pb,4,registered));now+=30000;
+    reader.refresh(metadata(pb,5,registered));now+=30000;
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));rejects([&]{reader.devices();});
-    reader.refresh(metadata(pb,5,registered));reader.authenticated(2);
+    reader.refresh(metadata(pb,6,registered));reader.authenticated(2);
     rejects([&]{reader.refresh(metadata(pb,6,registered));});
     reader.refresh(metadata(pb,1,registered,2));check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     source.refresh(metadata(pa,3,registered));auto revoked=source.revokeDevice(pb.peerId,30,true);
@@ -130,6 +142,7 @@ int main(){try{
     auto removed=metadata(pb,4,registered,2);removed.descriptors={db};removed.grants[0].eligible=false;removed.grants[1].eligible=false;
     reader.refresh(removed);check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.refresh(metadata(pb,5,registered,2));reader.disableIssuer(pa.peerId,true);
+    check(reader.authorizationDiagnostics(8,2).find("authorizer_disabled")!=std::string::npos);
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,true);}); // No accidental resurrection.
     auto wrong=metadata(pb,6,registered,2);wrong.account=9;rejects([&]{reader.refresh(wrong);});
@@ -154,6 +167,17 @@ int main(){try{
     {ar::Enrollment reopened(permissionStore,identity,18,clock);reopened.authenticated(1);reopened.refresh(view);check(reopened.devices()[0].grantedRead&&!reopened.devices()[0].grantedServe);}
     auto gone=permissions.revokeDevice(identity.peerId,105,true);view.revision++;view.grants={{ar::encodeGrant(gone),false}};permissions.refresh(view);check(permissions.devices()[0].revoked&&!permissions.devices()[0].authorized);
     auto context=permissions.automaticContext(identity.peerId);permissions.automaticSync(identity.peerId,false);auto saved=permissionStore.archiveSyncState(context);auto damaged=saved;damaged.back()^=2;permissionStore.saveArchiveSyncState(context,saved,damaged);rejects([&]{permissions.automaticSync(identity.peerId);});check(permissionStore.profile().peerId==identity.peerId);
-    std::cout<<"PASS: explicit source/reader consent, authenticated metadata binding/freshness, no same-account grant, durable exact descriptor and grant retries, generation-ordered revoke/re-enroll, removal and fail-closed tamper/reconnect\n";
+    // Two individually permitted devices under different issuers must NOT be
+    // combined into one archive authorization. Mirrors the physical ambiguity.
+    Storage splitA((root/L"split-source").wstring()),splitB((root/L"split-reader").wstring());auto sa=splitA.profile(),sb=splitB.profile();
+    ar::Enrollment se(splitA,sa,19,clock),re(splitB,sb,19,clock);se.authenticated(1);re.authenticated(1);
+    ar::EnrollmentMetadata sm;sm.account=19;sm.authenticationGeneration=1;sm.revision=1;sm.device=sa.peerId;sm.serverEpoch="split";sm.descriptors={se.registration(1),re.registration(1)};
+    se.refresh(sm);sm.device=sb.peerId;re.refresh(sm);se.approveIssuer(sa.peerId,true);re.approveIssuer(sb.peerId,true);
+    auto sg=se.authorizeDevice(sa.peerId,ar::ServeHistory,2,true),rg=re.authorizeDevice(sb.peerId,ar::ReadHistory,2,true);
+    sm.revision=2;sm.grants={{ar::encodeGrant(sg),true},{ar::encodeGrant(rg),true}};re.refresh(sm);re.approveIssuer(sa.peerId,true);
+    check(re.policy().permits(sa.peerId,sa.peerId,ar::ServeHistory)&&re.policy().permits(sb.peerId,sb.peerId,ar::ReadHistory));
+    check(re.authorizationDiagnostics(19,1).find("incompatible_authorizers")!=std::string::npos);rejects([&]{re.sourceIssuer(sa.peerId);});
+    auto splitBefore=splitB.archiveAuthorizationState();for(int i=0;i<10;++i)check(re.authorizationDiagnostics(19,1).size()<49152);check(splitBefore==splitB.archiveAuthorizationState());
+    std::cout<<"PASS: explicit source/reader consent, bounded read-only admission reasons, incompatible authorizers, authenticated metadata binding/freshness, no same-account grant, durable exact descriptor and grant retries, generation-ordered revoke/re-enroll, removal and fail-closed tamper/reconnect\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

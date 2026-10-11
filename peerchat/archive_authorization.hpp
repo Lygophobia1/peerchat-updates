@@ -183,14 +183,33 @@ public:
         try{accept(g);}catch(...){pending_.pop_back();throw;}
         return g;
     }
-    bool permits(const std::string& issuer,const std::string& device,std::uint64_t capability)const{
+    const char* admissionReason(const std::string& issuer,const std::string& device,std::uint64_t capability)const{
         usable();auto a=authorities_.find(issuer);auto g=grants_.find({issuer,device});
         const auto current=currentGrant_(account_,issuer,device);
-        return historySyncEnabled()&&capability>0&&capability<=AllCapabilities&&a!=authorities_.end()&&a->second.enabled&&
-            g!=grants_.end()&&!g->second.revoked&&(g->second.capabilities&capability)==capability&&
-            current&&!current->revoked&&current->generation==g->second.generation&&
-            current->capabilities==g->second.capabilities&&current->issuanceId==g->second.issuanceId&&
-            currentDevice_(account_,issuer)&&currentDevice_(account_,device);
+        if(!historySyncEnabled())return "history_sync_off";
+        if(!capability||capability>AllCapabilities)return "invalid_capability";
+        if(a==authorities_.end())return "authorizer_not_trusted";
+        if(!a->second.enabled)return "authorizer_disabled";
+        if(g==grants_.end())return "local_grant_missing";
+        if(g->second.revoked)return "local_grant_revoked";
+        if((g->second.capabilities&capability)!=capability)return "local_permission_missing";
+        if(!current)return "current_verified_grant_unavailable";
+        if(current->revoked)return "server_grant_revoked_or_ineligible";
+        if(current->generation!=g->second.generation)return "grant_generation_mismatch";
+        if(current->capabilities!=g->second.capabilities)return "grant_capability_mismatch";
+        if(current->issuanceId!=g->second.issuanceId)return "grant_id_mismatch";
+        if(!currentDevice_(account_,issuer))return "authorizer_device_mapping_unavailable";
+        if(!currentDevice_(account_,device))return "subject_device_mapping_unavailable";
+        return "allowed";
+    }
+    bool permits(const std::string& issuer,const std::string& device,std::uint64_t capability)const{
+        return std::string(admissionReason(issuer,device,capability))=="allowed";
+    }
+    std::vector<std::string> authorityReferences()const{
+        usable();std::vector<std::string> result;for(const auto& row:authorities_)result.push_back(row.first);return result;
+    }
+    std::vector<Grant> grantReferences()const{
+        usable();std::vector<Grant> result;for(const auto& row:grants_)result.push_back(row.second);return result;
     }
     Grant grant(const std::string& issuer,const std::string& device)const{usable();auto g=grants_.find({issuer,device});require(g!=grants_.end());return g->second;}
     std::vector<Grant> pendingPublications()const{usable();return pending_;}

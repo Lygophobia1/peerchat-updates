@@ -107,6 +107,7 @@ public sealed class ActiveDiagnosticOperation {
 }
 
 public sealed class DiagnosticsSources {
+    public Func<string> HistorySync {get;set;}
     public Func<string> Connection {get;set;}
     public Func<string> ConnectionEvents {get;set;}
     public Func<string> Security {get;set;}
@@ -132,6 +133,7 @@ public sealed class DiagnosticsService {
     public DiagnosticsService(DiagnosticsSources value){if(value==null)throw new ArgumentNullException("value");sources=value;}
     public DiagnosticsSnapshot Capture(){
         var sections=new List<DiagnosticsSection>();
+        Add(sections,"History Sync authorization",Read(sources.HistorySync));
         Add(sections,"Connection",Read(sources.Connection));Add(sections,"Connection events",Read(sources.ConnectionEvents));
         Add(sections,"Security",Read(sources.Security));
         var voice=ReadVoice();Add(sections,"Voice",String.IsNullOrWhiteSpace(voice)?Read(sources.Voice):voice);
@@ -192,6 +194,7 @@ public sealed class DiagnosticsService {
     public static DiagnosticsSnapshot ProjectConnection(DiagnosticsSnapshot value,DiagnosticsConnectionScope scope,string component){
         if(value==null||scope==null)return Clone(value);
         var selected=new List<DiagnosticsSection>();
+        Add(selected,"History Sync authorization",Section(value,"History Sync authorization"));
         bool overview=String.Equals(component,"Overview",StringComparison.OrdinalIgnoreCase);
         if(overview||String.Equals(component,"Reliable Connection",StringComparison.OrdinalIgnoreCase)){
             string connection=Section(value,"Connection");

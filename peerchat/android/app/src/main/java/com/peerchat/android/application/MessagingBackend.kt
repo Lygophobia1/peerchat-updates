@@ -452,7 +452,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val initialArchive=archiveLoadedGeneration!=generation
         if(livePeerWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
             val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId
-            try{val execution=archiveExecution(owner,checkNotNull(profile));if(initialArchive||now>=archiveMetadataAt){
+            val execution=archiveExecution(owner,checkNotNull(profile))
+            try{if(initialArchive||now>=archiveMetadataAt){
                     if(initialArchive)execution.publishPending(active.accountId,generation,local) else execution.refreshCurrent(active.accountId,generation,local)
                     archiveMetadataAt=now+if(mutable.value.archiveProgress.running)10000 else 60000
                 }
@@ -461,6 +462,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 archiveLoadedGeneration=generation
                 archiveRetryAt=0L
             }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive authorization or source unavailable"));archiveRetryAt=now+60000}
+            finally{val admission=try{execution.authorizationDiagnostics(active.accountId,generation)}catch(error:Exception){"Admission snapshot unavailable: ${error.javaClass.simpleName}"};mutable.value=mutable.value.copy(archiveAuthorizationDiagnostics=admission)}
         }
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.

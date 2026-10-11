@@ -1,5 +1,6 @@
 #pragma once
 #include "archive_authorization.hpp"
+#include <sstream>
 
 namespace peerchat::archive {
 // Platform adapters provide this bounded public-metadata projection ONLY from
@@ -56,6 +57,46 @@ public:
         require(bool(clock_)&&account>0);
     }
     Authorization& policy(){return policy_;}
+    // Public identity references only. No proof, key, signature or history bytes.
+    std::string authorizationDiagnostics(std::uint64_t account,std::uint64_t generation)const{
+        require(account==account_&&generation==generation_);
+        std::ostringstream out;
+        out<<"scope=archive_history account="<<account_<<" local_device="<<local_.peerId
+           <<"\nauthentication_generation="<<generation_<<" metadata_revision="<<revision_
+           <<" metadata_fresh="<<fresh()<<" refreshed_ms="<<refreshed_<<" observed_ms="<<clock_()<<"\n";
+        std::map<std::string,bool> issuers;
+        for(const auto& id:policy_.authorityReferences())issuers[id]=true;
+        for(const auto& row:current_)issuers[row.first.first]=true;
+        std::map<std::pair<std::string,std::string>,bool> rows;
+        for(const auto& g:policy_.grantReferences())rows[{g.issuer,g.device}]=true;
+        for(const auto& row:current_)rows[row.first]=true;
+        for(const auto& issuer:issuers){
+            auto key=policy_.authorityKey(issuer.first);
+            out<<"authorizer="<<issuer.first<<" trust="<<(!key?"unknown":policy_.trustsAuthority(*key)?"trusted":"disabled")
+               <<" device_mapping="<<descriptors_.count(issuer.first)<<"\n";
+        }
+        for(const auto& row:rows){
+            auto local=policy_.cachedGrant(row.first.first,row.first.second);auto server=current_.find(row.first);
+            out<<"grant authorizer="<<row.first.first<<" device="<<row.first.second<<" device_mapping="<<descriptors_.count(row.first.second);
+            if(local)out<<" local_id="<<local->issuanceId<<" local_generation="<<local->generation<<" local_permissions="<<local->capabilities<<" local_revoked="<<local->revoked;
+            else out<<" local=missing";
+            if(server!=current_.end()){const auto& s=server->second;out<<" server_id="<<s.grant.issuanceId<<" server_generation="<<s.grant.generation<<" server_permissions="<<s.grant.capabilities<<" server_revoked="<<s.grant.revoked<<" signature_verified="<<s.verified<<" server_eligible="<<s.eligible;}
+            else out<<" server=missing";
+            out<<" receive="<<policy_.admissionReason(row.first.first,row.first.second,ReadHistory)<<" provide="<<policy_.admissionReason(row.first.first,row.first.second,ServeHistory)<<"\n";
+        }
+        for(const auto& device:descriptors_)if(device.first!=local_.peerId){
+            bool admitted=false,sourceAny=false,readerAny=false;
+            for(const auto& issuer:issuers){
+                bool source=policy_.permits(issuer.first,device.first,ServeHistory),reader=policy_.permits(issuer.first,local_.peerId,ReadHistory);
+                sourceAny|=source;readerAny|=reader;admitted|=source&&reader;
+                out<<"source="<<device.first<<" reader="<<local_.peerId<<" authorizer="<<issuer.first
+                   <<" source_provide="<<policy_.admissionReason(issuer.first,device.first,ServeHistory)
+                   <<" reader_receive="<<policy_.admissionReason(issuer.first,local_.peerId,ReadHistory)<<"\n";
+            }
+            out<<"source_eligibility="<<device.first<<" result="<<(!fresh()?"metadata_stale":admitted?"allowed":sourceAny&&readerAny?"incompatible_authorizers":"required_grant_or_trust_missing")<<"\n";
+        }
+        auto result=out.str();if(result.size()>49152)result=result.substr(0,49100)+"\n[bounded report truncated]\n";return result;
+    }
     std::string automaticContext(const std::string& peer)const{
         protocol::Writer w(LocalFormat);w.string("PeerChat/HistoryAutomatic/v1");w.number(account_);w.string(local_.peerId);w.string(peer);
         std::string context;static const char hex[]="0123456789abcdef";for(auto byte:digestDevicePayload(w.data)){context+=hex[byte>>4];context+=hex[byte&15];}return context;
@@ -77,7 +118,13 @@ public:
         require(fresh()&&protocol::id(source)&&source!=local_.peerId);
         for(const auto& entry:current_)if(entry.first.second==source&&
             policy_.permits(entry.first.first,source,ServeHistory)&&policy_.permits(entry.first.first,local_.peerId,ReadHistory))return entry.first.first;
-        throw std::runtime_error("This archive source or reader is not authorized by a current trusted grant");
+        std::string reason="History Sync admission denied";
+        for(const auto& issuer:policy_.authorityReferences()){
+            reason+="; "+issuer.substr(0,12)+": source="+policy_.admissionReason(issuer,source,ServeHistory)
+                +", reader="+policy_.admissionReason(issuer,local_.peerId,ReadHistory);
+        }
+        if(policy_.authorityReferences().empty())reason+="; no trusted authorizer recorded";
+        throw std::runtime_error(reason);
     }
     bool matches(std::uint64_t account,std::uint64_t generation)const{return fresh()&&account==account_&&generation==generation_;}
     void authenticated(std::uint64_t generation){

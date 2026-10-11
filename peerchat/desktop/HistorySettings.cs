@@ -76,7 +76,7 @@ public partial class DesktopApplication {
         var raw=HistoryText("");advancedPanel.Children.Add(raw);
         long account=0;ulong generation=0;bool updating=false,operating=false;bool? desiredSync=null;ArchiveEnrollmentExecution.Device[] renderedRows=null;
         var automatic=new Dictionary<string,bool>();Action render=null;Func<uint,ArchiveEnrollmentExecution.Device,long,bool?,Task<bool>> run=null;
-        Action progress=()=>{var view=CurrentHistoryView();status.Text=view.Direction;counters.Text=view.Counters;bar.Visibility=view.Active?Visibility.Visible:Visibility.Collapsed;bar.IsIndeterminate=view.Indeterminate;bar.Value=view.Percent;raw.Text=(archiveProgress==null?"No validated snapshot.":archiveProgress.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation;};
+        Action progress=()=>{var view=CurrentHistoryView();status.Text=view.Direction;counters.Text=view.Counters;bar.Visibility=view.Active?Visibility.Visible:Visibility.Collapsed;bar.IsIndeterminate=view.Indeterminate;bar.Value=view.Percent;raw.Text=(archiveProgress==null?"No validated snapshot.":archiveProgress.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation+"\n"+archiveAuthorizationDiagnostic;};
         run=async(action,target,capabilities,auto)=>{
             var owner=discovery;long current=owner==null?0:owner.AccountId;ulong revision=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
             if(operating)return false;
@@ -91,7 +91,8 @@ public partial class DesktopApplication {
                     if(action>=4&&action<=7)execution.Consent(current,(long)revision,action,target.PeerId,capabilities,true);
                     if(auto.HasValue){if(!auto.Value&&archiveProgress!=null&&archiveProgress.Running&&(target.Local||archiveProgress.Source==target.PeerId))execution.PauseSync(current,(long)revision);execution.AutomaticSync(current,(long)revision,target.PeerId,auto);}
                     bool enabled=execution.HistorySync(current,(long)revision,action==11?desiredSync:null);execution.PublishPending(current,(long)revision,local);
-                    if(action==12)execution.StartSync(current,(long)revision,target.PeerId,true);if(action==14)execution.PauseSync(current,(long)revision);
+                    try{if(action==12)execution.StartSync(current,(long)revision,target.PeerId,true);if(action==14)execution.PauseSync(current,(long)revision);}
+                    finally{var admission=execution.AuthorizationDiagnostics(current,(long)revision);dialog.Dispatcher.BeginInvoke((Action)(()=>{if(discovery==owner&&authenticatedFriendSnapshotGeneration==revision)archiveAuthorizationDiagnostic=admission;}));}
                     var rows=execution.SnapshotDevices(current,(long)revision);var preferences=rows.ToDictionary(d=>d.PeerId,d=>execution.AutomaticSync(current,(long)revision,d.PeerId));
                     return new {Rows=rows,Preferences=preferences,Enabled=enabled,Progress=execution.Progress(current,(long)revision),Providing=execution.Providing(current,(long)revision)};
                 });

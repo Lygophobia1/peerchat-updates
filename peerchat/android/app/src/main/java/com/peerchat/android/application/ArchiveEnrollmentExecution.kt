@@ -12,6 +12,11 @@ internal class ArchiveEnrollmentExecution(
     private fun command(operation:Int,fields:(NativeRecordWriter)->Unit = {}):ByteArray =
         NativeRecordWriter(31).also {it.text("PeerChat/ArchiveApplication/v1");it.number(1);it.number(operation.toLong());fields(it)}.bytes()
     private fun invalidate(){native(9,command(9))}
+    fun authorizationDiagnostics(account:Long,generation:Long):String {
+        val r=NativeRecord(native(22,command(22){it.number(account);it.number(generation)}),31)
+        require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==22L)
+        val text=r.text();require(text.length<=49152);r.end();return text
+    }
     fun refreshCurrent(account:Long,generation:Long,device:String):ByteArray {
         try{refreshState(account,generation,device);return native(3,command(3))}catch(error:Exception){invalidate();throw error}
     }

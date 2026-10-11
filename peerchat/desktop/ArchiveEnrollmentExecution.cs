@@ -68,6 +68,12 @@ internal sealed class ArchiveEnrollmentExecution {
         object version;Check(result.TryGetValue("archiveVersion",out version)&&Convert.ToInt64(version)==1);return result;
     }
     void Invalidate(){native(9,Command(9));}
+    public string AuthorizationDiagnostics(long account,long generation){
+        var bytes=native(22,Command(22,w=>{w.Write(account);w.Write(generation);}));var header=Command(22);
+        Check(bytes.Length>=header.Length+8&&bytes.Take(header.Length).SequenceEqual(header));
+        long length=BitConverter.ToInt64(bytes,header.Length);Check(length>=0&&length<=49152&&bytes.Length==header.Length+8+length);
+        return new UTF8Encoding(false,true).GetString(bytes,header.Length+8,(int)length);
+    }
     public void StartSync(long account,long generation,string source,bool newScan){native(12,Command(12,w=>{w.Write(account);w.Write(generation);WriteText(w,source);w.Write(newScan?1L:0L);}));}
     public void PauseSync(long account,long generation){native(14,Command(14,w=>{w.Write(account);w.Write(generation);}));}
     public bool AutomaticSync(long account,long generation,string peer,bool? enabled=null){
