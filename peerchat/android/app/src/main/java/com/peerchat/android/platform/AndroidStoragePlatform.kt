@@ -9,6 +9,28 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 
+/** Fixed native schema statements only, never SQL containing user values.
+ * Current native triggers contain one body statement followed by END. Preserve
+ * that internal semicolon; reject unfinished/unsupported bodies before executing.
+ */
+internal fun nativeSqlStatements(sql:String):List<String> {
+    require(sql.length<=32768&&!sql.contains('\u0000')&&!sql.contains('"')&&!sql.contains('\'')&&!sql.contains("--")&&!sql.contains("/*"))
+    val result=mutableListOf<String>()
+    var trigger:String?=null
+    for(part in sql.split(';').map{it.trim()}.filter{it.isNotEmpty()}) {
+        val pending=trigger
+        if(pending!=null){
+            require(part.equals("END",ignoreCase=true)){"Unsupported native trigger body"}
+            result.add("$pending; END;");trigger=null
+        }else if(part.startsWith("CREATE TRIGGER ",ignoreCase=true)){
+            require(Regex("\\bBEGIN\\b",RegexOption.IGNORE_CASE).containsMatchIn(part)){"Invalid native trigger"}
+            trigger=part
+        }else result.add(part)
+    }
+    require(trigger==null){"Incomplete native trigger"}
+    return result
+}
+
 // Platform execution/crypto only. Native Storage retains ALL schema, record,
 // history/outbox, ordering, dedupe and transaction policy.
 class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false) : AutoCloseable {
@@ -89,8 +111,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         // Native execute uses fixed schema/PRAGMA/transaction statements only;
         // all values use bound statements. Reject quoted literals/comments here
         // rather than ambiguously splitting arbitrary SQL at semicolons.
-        invalid(!sql.contains('\u0000') && !sql.contains('"') && !sql.contains('\'') && !sql.contains("--") && !sql.contains("/*"))
-        sql.split(';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { statement ->
+        nativeSqlStatements(sql).forEach { statement ->
             // Android rejects result-producing PRAGMAs in execSQL (including
             // journal_mode=WAL and secure_delete). Execute/drain the same native
             // statement via a cursor; do not change durability/schema policy.
