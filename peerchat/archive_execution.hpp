@@ -15,6 +15,7 @@ class Execution {
     std::string intentContext_,intentIssuer_,intentSource_;Blob savedIntent_;bool restore_=false;
     std::uint64_t pendingAt_=0,nextAutomaticAt_=0;
     bool completedIntent_=false;
+    std::string lastIncoming_="none";
     DeviceAccounts directory()const{return [this](const std::string& device){return storage_.historicalDeviceAccount(device);};}
     void intent(const std::string& issuer,const std::string& source,unsigned disposition){
         require(disposition<=2); // 0 explicit pause/failure, 1 running, 2 completed.
@@ -68,6 +69,24 @@ public:
         require(needsAutomaticSync(now)&&now<=UINT64_MAX-60000);start(issuer,source,true);nextAutomaticAt_=now+60000;
     }
     const std::string& state()const{return state_;}
+    std::string diagnostics()const{
+        std::ostringstream out;
+        out<<"\n=== History Sync execution ===\nstate="<<state_<<" running="<<running_<<" restore_pending="<<restore_<<" completed_intent="<<completedIntent_
+           <<"\nintent_issuer="<<intentIssuer_<<" intent_source="<<intentSource_;
+        auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<progress.complete<<" page_pending="<<progress.pending;
+        if(scope_){const auto& a=scope_->archive;
+            out<<"\nactive_scope_issuer="<<a.issuer<<" source="<<a.source<<" reader="<<a.reader<<" source_generation="<<a.sourceGeneration<<" reader_generation="<<a.readerGeneration
+               <<" source_grant_id="<<a.sourceGrantId<<" reader_grant_id="<<a.readerGrantId<<" scope_current="<<currentSessionAuthorization(policy_,*scope_);
+            auto route=sessions_.snapshot(scope_->continuityKey());
+            if(route){auto reason=route->latestFailureUtf8.substr(0,256);for(auto& c:reason)if(static_cast<unsigned char>(c)<32)c=' ';
+                out<<"\narchive_route connected="<<route->connected<<" pending="<<route->pending<<" winner="<<route->activeTransport.value
+                   <<" latest_failed_attempt="<<route->latestFailedTransport.value<<" retry_scheduled="<<route->retryScheduled<<" retry_suspended="<<route->retrySuspended
+                   <<" retry_delay_ms="<<route->retryDelayMilliseconds<<" network_generation="<<route->networkRevision<<" last_failure="<<reason;
+            }else out<<"\narchive_route=not_requested";
+        }else out<<"\nactive_scope=none";
+        out<<"\nlast_incoming_archive="<<lastIncoming_<<"\n";
+        return out.str();
+    }
     // A corrupt checkpoint/page stops only archive work, never the profile's
     // ordinary messaging worker. The protected record is not overwritten.
     void failed(){restore_=false;running_=false;if(reader_)reader_->cancel();state_="Archive synchronization failed closed";}
@@ -87,6 +106,10 @@ public:
         state_=running_?"Connecting to archive":"History synchronized";
     }
     void incoming(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t network){
+        const auto& a=scope.archive;
+        std::ostringstream detail;detail<<"issuer="<<a.issuer<<" source="<<a.source<<" reader="<<a.reader<<" source_generation="<<a.sourceGeneration<<" reader_generation="<<a.readerGeneration;
+        if(a.account==policy_.account())detail<<" source_provide="<<policy_.admissionReason(a.issuer,a.source,ServeHistory)<<" reader_receive="<<policy_.admissionReason(a.issuer,a.reader,ReadHistory);
+        detail<<" exact_scope_current="<<currentSessionAuthorization(policy_,scope);lastIncoming_=detail.str();
         require(scope.archive.source==local_.peerId&&currentSessionAuthorization(policy_,scope));
         hold(scope,now,network);
     }

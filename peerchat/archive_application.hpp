@@ -35,7 +35,7 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     require(((operation>=12&&operation<=15)||(operation>=19&&operation<=22))&&bytes.size()<=MaxApplicationBytes);
     protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==operation);
     auto account=r.number(),generation=r.number();
-    if(operation==22){r.end();auto result=applicationHeader(operation);result.string(enrollment.authorizationDiagnostics(account,generation));return result.data;}
+    if(operation==22){r.end();auto result=applicationHeader(operation);auto details=execution.diagnostics()+enrollment.authorizationDiagnostics(account,generation);if(details.size()>49152)details.resize(49152);result.string(details);return result.data;}
     require(enrollment.matches(account,generation));
     auto result=applicationHeader(operation);
     if(operation==19){auto peer=r.string();auto write=r.number();require(write<=1);if(write){auto enabled=r.number();require(enabled<=1);r.end();enrollment.automaticSync(peer,enabled!=0);}else r.end();result.number(enrollment.automaticSync(peer));return result.data;}

@@ -60,6 +60,7 @@ int main(){try{
     auto diagnosticBefore=b.archiveAuthorizationState();reader.invalidate();
     auto diagnosticReply=ar::executeSyncOperation(reader,execution,22,diagnosticCommand.data,now,1);
     check(!diagnosticReply.empty()&&reader.authorizationDiagnostics(8,1).find("metadata_stale")!=std::string::npos&&b.archiveAuthorizationState()==diagnosticBefore);
+    check(execution.diagnostics().find("active_scope=none")!=std::string::npos);
     reader.refresh(metadata(pb,3,registered));
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.policy().setHistorySyncEnabled(false);
@@ -142,6 +143,9 @@ int main(){try{
     auto removed=metadata(pb,4,registered,2);removed.descriptors={db};removed.grants[0].eligible=false;removed.grants[1].eligible=false;
     reader.refresh(removed);check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     reader.refresh(metadata(pb,5,registered,2));reader.disableIssuer(pa.peerId,true);
+    auto deniedIncoming=ar::decodeSessionBinding(ar::sessionBinding(ar::sessionAuthorization(source.policy(),pa.peerId,pa.peerId,pb.peerId)).data,pb.peerId);
+    rejects([&]{execution.incoming(deniedIncoming,now,1);});
+    check(execution.diagnostics().find("authorizer_disabled")!=std::string::npos&&execution.diagnostics().find("exact_scope_current=0")!=std::string::npos);
     check(reader.authorizationDiagnostics(8,2).find("authorizer_disabled")!=std::string::npos);
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,true);}); // No accidental resurrection.
