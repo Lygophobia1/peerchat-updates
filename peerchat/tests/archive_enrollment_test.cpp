@@ -59,8 +59,34 @@ int main(){try{
     reader.automaticSync(pb.peerId,true);
     ar::reconcileInitialSync(reader,execution);check(execution.running()&&execution.scope()->archive.source==pa.peerId);
     check(source.pendingPublications().empty()&&reader.pendingPublications().empty()); // Starting cannot create a grant.
+    auto drain=[&]{unsigned steps=0;while(!execution.snapshot().complete){
+        auto request=execution.request(*execution.scope(),1000);check(!request.empty());
+        auto sourceScope=ar::sessionAuthorization(source.policy(),pa.peerId,pa.peerId,pb.peerId);
+        auto response=ar::serveSyncControl(a,pa,source.policy(),sourceScope,request,
+            [&](const std::string& peer){return a.historicalDeviceAccount(peer);},100);
+        execution.control(*execution.scope(),response,100,1000);check(++steps<100);
+    }execution.tick(1001,1);check(!execution.running());};
+    drain();check(execution.snapshot().complete);
+    ar::reconcileInitialSync(reader,execution,59999);check(!execution.running());
+    Storage contact((root/L"contact").wstring());auto pc=contact.profile();
+    a.rememberAuthenticatedDeviceAccount(pc.peerId,9);b.rememberAuthenticatedDeviceAccount(pc.peerId,9);
+    StoredMessage sent{Storage::newMessageId(),pa.peerId,pc.peerId,L"sent multiline \u4e00\nsecond line",100,Delivery::Delivered,0,1};
+    StoredMessage received{Storage::newMessageId(),pc.peerId,pa.peerId,L"received",101,Delivery::Delivered,0,2};
+    check(a.append(pc.peerId,sent)&&a.append(pc.peerId,received));
+    ar::reconcileInitialSync(reader,execution,60000);check(execution.running());drain();
+    auto copies=b.history(pc.peerId);check(copies.size()==2&&b.message(sent.id)->sender==pa.peerId&&b.message(received.id)->sender==pc.peerId&&b.message(sent.id)->text==sent.text);
+    check(b.pending(pc.peerId).empty()&&b.pendingMailboxUploads().empty());
+    // Completion survives reopen and remains eligible; explicit Pause does not.
+    {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);check(reopened.needsAutomaticSync(0));}
     execution.stop();ar::reconcileInitialSync(reader,execution);check(!execution.running());
     {ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);ar::reconcileInitialSync(reader,reopened);check(!reopened.running());}
+    // A legacy inactive bit is indistinguishable from explicit Pause. Preserve
+    // it; guessing completion would silently override the old user's intent.
+    {protocol::Writer key(ar::LocalFormat);key.string("PeerChat/ArchiveIntentContext/v1");key.number(8);key.string(pb.peerId);
+        std::string context;static const char hex[]="0123456789abcdef";for(auto byte:digestDevicePayload(key.data)){context+=hex[byte>>4];context+=hex[byte&15];}
+        auto saved=b.archiveSyncState(context);protocol::Writer legacy(ar::LocalFormat);legacy.string("PeerChat/ArchiveIntent/v1");legacy.number(8);legacy.string(pb.peerId);legacy.string(pa.peerId);legacy.string(pa.peerId);legacy.number(0);
+        b.saveArchiveSyncState(context,saved,legacy.data);ar::Execution reopened(b,pb,reader.policy(),deliveries,sessions);check(!reopened.needsAutomaticSync(120000));
+    }
     check(reader.policy().historySyncEnabled());
     reader.policy().setHistorySyncEnabled(false);
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));

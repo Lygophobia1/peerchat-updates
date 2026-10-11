@@ -13,11 +13,13 @@ class Execution {
     std::map<std::string,std::pair<session::ReliableAuthorization,std::uint64_t>> serving_;
     bool running_=false;std::string state_="Not started";
     std::string intentContext_,intentIssuer_,intentSource_;Blob savedIntent_;bool restore_=false;
-    std::uint64_t pendingAt_=0;
+    std::uint64_t pendingAt_=0,nextAutomaticAt_=0;
+    bool completedIntent_=false;
     DeviceAccounts directory()const{return [this](const std::string& device){return storage_.historicalDeviceAccount(device);};}
-    void intent(const std::string& issuer,const std::string& source,bool active){
-        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveIntent/v1");w.number(policy_.account());w.string(local_.peerId);w.string(issuer);w.string(source);w.number(active);
-        storage_.saveArchiveSyncState(intentContext_,savedIntent_,w.data);savedIntent_=std::move(w.data);intentIssuer_=issuer;intentSource_=source;restore_=false;
+    void intent(const std::string& issuer,const std::string& source,unsigned disposition){
+        require(disposition<=2); // 0 explicit pause/failure, 1 running, 2 completed.
+        protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveIntent/v2");w.number(policy_.account());w.string(local_.peerId);w.string(issuer);w.string(source);w.number(disposition);
+        storage_.saveArchiveSyncState(intentContext_,savedIntent_,w.data);savedIntent_=std::move(w.data);intentIssuer_=issuer;intentSource_=source;restore_=false;completedIntent_=disposition==2;
     }
 public:
     Execution(Storage& storage,const Profile& local,Authorization& policy,delivery::DeliveryManager& deliveries,
@@ -26,10 +28,12 @@ public:
         static const char hex[]="0123456789abcdef";for(auto b:digestDevicePayload(key.data)){intentContext_+=hex[b>>4];intentContext_+=hex[b&15];}
         savedIntent_=storage_.archiveSyncState(intentContext_);
         if(!savedIntent_.empty()){
-            protocol::Reader r(savedIntent_);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveIntent/v1"&&r.number()==policy_.account()&&r.string()==local_.peerId);
+            protocol::Reader r(savedIntent_);require(r.type()==LocalFormat);auto version=r.string();require((version=="PeerChat/ArchiveIntent/v1"||version=="PeerChat/ArchiveIntent/v2")&&r.number()==policy_.account()&&r.string()==local_.peerId);
             intentIssuer_=r.string();intentSource_=r.string();auto active=r.number();r.end();
-            require(protocol::id(intentIssuer_)&&protocol::id(intentSource_)&&intentSource_!=local_.peerId&&active<=1);restore_=active!=0;
-            state_=restore_?"Waiting for archive authorization":"Paused or previously completed";
+            require(protocol::id(intentIssuer_)&&protocol::id(intentSource_)&&intentSource_!=local_.peerId&&active<=(version=="PeerChat/ArchiveIntent/v1"?1u:2u));restore_=active==1;completedIntent_=active==2;
+            // Old false intents cannot distinguish Pause from completion. Never
+            // silently undo an explicit legacy pause; Sync now upgrades safely.
+            state_=restore_?"Waiting for archive authorization":completedIntent_?"History synchronized":"Paused or legacy completed; Sync now resumes";
         }
     }
     const std::optional<session::ReliableAuthorization>& scope()const{return scope_;}
@@ -46,6 +50,11 @@ public:
     // Initial participation only. A durable pause/completion is never silently
     // replaced, and this predicate cannot enroll a device or issue a grant.
     bool needsInitialSync()const{return savedIntent_.empty()&&!reader_&&!running_&&policy_.historySyncEnabled();}
+    bool needsAutomaticSync(std::uint64_t now)const{return policy_.historySyncEnabled()&&(needsInitialSync()||(completedIntent_&&!running_&&now>=nextAutomaticAt_));}
+    const std::string& lastAutomaticSource()const{return intentSource_;}
+    void startAutomatic(const std::string& issuer,const std::string& source,std::uint64_t now){
+        require(needsAutomaticSync(now)&&now<=UINT64_MAX-60000);start(issuer,source,true);nextAutomaticAt_=now+60000;
+    }
     const std::string& state()const{return state_;}
     // A corrupt checkpoint/page stops only archive work, never the profile's
     // ordinary messaging worker. The protected record is not overwritten.
@@ -61,7 +70,7 @@ public:
         auto scope=sessionAuthorization(policy_,issuer,source,local_.peerId);
         auto reader=std::make_unique<SyncReader>(storage_,local_,policy_,deliveries_,scope,directory());
         if(newScan&&reader->snapshot().complete)reader->rescan();
-        intent(issuer,source,!reader->snapshot().complete);
+        intent(issuer,source,reader->snapshot().complete?2:1);
         scope_=std::move(scope);reader_=std::move(reader);running_=!reader_->snapshot().complete;
         state_=running_?"Connecting to archive":"History synchronized";
     }
@@ -101,7 +110,7 @@ public:
             reader_->disconnected();state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
             retire(*scope_);return close;
         }
-        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;state_="History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
+        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_="History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(reader_->snapshot().pending&&now>=pendingAt_&&now-pendingAt_>=15000){
             auto route=sessions_.snapshot(scope_->continuityKey());
             if(route&&route->activeTransport.value){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);

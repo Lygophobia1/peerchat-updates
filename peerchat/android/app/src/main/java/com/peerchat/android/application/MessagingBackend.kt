@@ -31,6 +31,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var generation=0L
     private var network=0L
     private var archiveMetadataAt=0L
+    private var archiveRetryAt=0L
     private var archiveServingUntil=0L
     private var archiveLoadedGeneration=-1L
     private var refreshAt=0L
@@ -335,7 +336,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             try {clearAuthorization()}finally {
                 executions.values.forEach{it.close()};executions.clear()
                 friends=friends.map{it.copy(online=false)}
-                refreshAt=0L;archiveMetadataAt=0L;archiveServingUntil=0L;archiveLoadedGeneration=-1L
+                refreshAt=0L;archiveMetadataAt=0L;archiveRetryAt=0L;archiveServingUntil=0L;archiveLoadedGeneration=-1L
                 contactsDirty=false;loggedTickFailure=null
                 mutable.value=localOfflineSnapshot(mutable.value,"Network session reset; sign in to reconnect")
             }
@@ -449,12 +450,17 @@ class MessagingBackend(context: Context,private val profileName: String="default
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
         if(!livePeerWorkAllowed&&mailboxAllowed()){publish();return}
         val initialArchive=archiveLoadedGeneration!=generation
-        if(livePeerWorkAllowed&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil)){
-            archiveLoadedGeneration=generation
+        if(livePeerWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
             val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId
-            try{val execution=archiveExecution(owner,checkNotNull(profile));if(initialArchive||now>=archiveMetadataAt){execution.refreshCurrent(active.accountId,generation,local);archiveMetadataAt=now+10000}
+            try{val execution=archiveExecution(owner,checkNotNull(profile));if(initialArchive||now>=archiveMetadataAt){
+                    if(initialArchive)execution.publishPending(active.accountId,generation,local) else execution.refreshCurrent(active.accountId,generation,local)
+                    archiveMetadataAt=now+if(mutable.value.archiveProgress.running)10000 else 60000
+                }
                 mutable.value=mutable.value.copy(archiveProgress=execution.progress(active.accountId,generation))
-            }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive authorization or source unavailable"));archiveMetadataAt=now+10000}
+                if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,now+10000)
+                archiveLoadedGeneration=generation
+                archiveRetryAt=0L
+            }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive authorization or source unavailable"));archiveRetryAt=now+60000}
         }
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.

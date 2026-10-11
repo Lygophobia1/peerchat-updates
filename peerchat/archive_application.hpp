@@ -7,16 +7,21 @@ constexpr size_t MaxApplicationBytes=262144;
 inline protocol::Writer applicationHeader(unsigned operation){
     protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveApplication/v1");w.number(1);w.number(operation);return w;
 }
-inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution){
-    if(!execution.needsInitialSync())return;
-    for(const auto& device:enrollment.devices()){
+inline void reconcileInitialSync(Enrollment& enrollment,Execution& execution,std::uint64_t now=0){
+    if(!execution.needsAutomaticSync(now))return;
+    auto devices=enrollment.devices();
+    // Fair bounded reconciliation across sources; every source retains its own
+    // durable conversation cursors. Missing availability is never called Online.
+    auto last=std::find_if(devices.begin(),devices.end(),[&](const auto& d){return d.peerId==execution.lastAutomaticSource();});
+    if(last!=devices.end())std::rotate(devices.begin(),std::next(last),devices.end());
+    for(const auto& device:devices){
         if(device.local||!device.mayServe||!enrollment.automaticSync(device.peerId)||!enrollment.automaticSync(enrollment.policy().localDevice()))continue;
         std::string issuer;
         // Capability bits alone are insufficient: source and reader must have
         // current verified grants from the SAME explicitly trusted authority.
         try{issuer=enrollment.sourceIssuer(device.peerId);}catch(const std::exception&){continue;}
         // Do not swallow a corrupt durable cursor as an unavailable source.
-        execution.start(issuer,device.peerId,false);return;
+        execution.startAutomatic(issuer,device.peerId,now);return;
     }
 }
 inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,unsigned operation,const Blob& bytes,
@@ -32,7 +37,7 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     if(operation==14){r.end();execution.stop();}
     if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();
         auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
-    if(operation==13){r.end();reconcileInitialSync(enrollment,execution);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
+    if(operation==13){r.end();reconcileInitialSync(enrollment,execution,now);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
         result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
         result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);}
     return result.data;

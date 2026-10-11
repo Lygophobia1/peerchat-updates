@@ -60,8 +60,8 @@ int main(){try{
     };
     ar::Authorization source(a,pa,8,member,grants),reader(b,pb,8,member,grants);
     source.approveAuthority(pa.publicKey,true);reader.approveAuthority(pa.publicKey,true);
-    auto serve=source.issue(pa.publicKey,ar::ServeHistory,false,100,true);
-    auto read=source.issue(pb.publicKey,ar::ReadHistory,false,100,true);
+    auto serve=source.issue(pa.publicKey,ar::AllCapabilities,false,100,true);
+    auto read=source.issue(pb.publicKey,ar::AllCapabilities,false,100,true);
     for(auto g:{serve,read}){published[g.device]={g.generation,g.capabilities,g.issuanceId,g.revoked};reader.accept(g);}
     auto scope=ar::sessionAuthorization(reader,pa.peerId,pa.peerId,pb.peerId);
     ar::ProvenanceVerifier attest(source,a,pa,8,directory);
@@ -210,6 +210,20 @@ int main(){try{
     whole->rescan();auto outgoing=whole->nextRequest();
     reader.setHistorySyncEnabled(false);rejects([&]{whole->accept(ar::serveSyncControl(a,pa,source,sourceScope,outgoing,directory,400));});
     reader.setHistorySyncEnabled(true);whole->disconnected();whole->cancel();rejects([&]{whole->nextRequest();});
+    // Reverse direction through the same production storage/provenance/import
+    // path. These are Windows host identities, not Android physical acceptance.
+    StoredMessage siblingSent{Storage::newMessageId(),pb.peerId,pc.peerId,L"sibling sent \u4e00\nline two",400,Delivery::Delivered,0,100};
+    check(b.append(pc.peerId,siblingSent));
+    delivery::DeliveryManager reverseDeliveries(a,pa.peerId);
+    auto reverseScope=ar::sessionAuthorization(source,pa.peerId,pb.peerId,pa.peerId);
+    auto reverseServing=ar::sessionAuthorization(reader,pa.peerId,pb.peerId,pa.peerId);
+    ar::HistoryReader reverse(a,pa,source,reverseDeliveries,reverseScope,pc.peerId,directory);
+    unsigned reverseSteps=0;while(!reverse.snapshot().complete){
+        auto requestBack=reverse.nextRequest();auto responseBack=ar::serveHistoryPage(b,pb,reader,reverseServing,requestBack,directory,500);
+        reverse.acceptPage(responseBack);check(++reverseSteps<100);
+    }
+    check(a.message(siblingSent.id)&&a.message(siblingSent.id)->sender==pb.peerId&&a.message(siblingSent.id)->text==siblingSent.text);
+    check(a.pending(pc.peerId).empty()&&a.pendingMailboxUploads().empty());
     a.eraseHistory(pc.peerId);check(a.archiveHistoryWatermark()>watermark);
     newer.id=Storage::newMessageId();check(a.append(pc.peerId,newer));
     check(a.archiveHistoryWatermark()>watermark+1); // Deleted positions cannot be reused.

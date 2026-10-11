@@ -105,15 +105,17 @@ public partial class DesktopApplication {
         var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
         if(closing||busy||owner==null||account<=0||mailboxContextAccount!=account||generation==0||!archiveTask.IsCompleted||DateTime.UtcNow<archiveNextUtc)return;
         bool initial=archiveLoadedOwner!=owner||archiveLoadedGeneration!=generation;
-        if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc)return;
-        archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
-        archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
+        if(!initial&&!historySettingsOpen&&(archiveProgress==null||!archiveProgress.Running)&&DateTime.UtcNow>=archiveServingUntilUtc&&DateTime.UtcNow<archiveMetadataUtc)return;
+        archiveNextUtc=DateTime.UtcNow.AddSeconds(1);bool refresh=initial||DateTime.UtcNow>=archiveMetadataUtc;
+        if(refresh)archiveMetadataUtc=DateTime.UtcNow.AddSeconds(archiveProgress!=null&&archiveProgress.Running?10:60);
         archiveTask=Task.Run(()=>{var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));
-            if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};
+            if(initial)execution.PublishPending(account,(long)generation,local);else if(refresh)execution.RefreshCurrent(account,(long)generation,local);return new {Progress=execution.Progress(account,(long)generation),Devices=execution.SnapshotDevices(account,(long)generation),Providing=execution.Providing(account,(long)generation)};
         }).ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=owner||authenticatedFriendSnapshotGeneration!=generation)return;
-            if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            if(task.IsFaulted){archiveProgress=null;historyDevices=new ArchiveEnrollmentExecution.Device[0];historyProviding=new string[0];archiveNextUtc=DateTime.UtcNow.AddSeconds(60);TraceUi("archive metadata/progress unavailable: "+task.Exception.GetBaseException().GetType().Name);return;}
+            archiveLoadedOwner=owner;archiveLoadedGeneration=generation;
             archiveProgress=task.Result.Progress;historyDevices=task.Result.Devices;historyProviding=task.Result.Providing;historyAccount=account;historyGeneration=generation;
+            if(archiveProgress.Running&&archiveMetadataUtc>DateTime.UtcNow.AddSeconds(10))archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
             if(archiveProgress.Processed!=archiveProjectedCount){
                 archiveProjectedCount=archiveProgress.Processed;
                 if(model.Selected!=null&&!model.Groups){
