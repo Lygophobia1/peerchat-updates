@@ -62,12 +62,17 @@ enum class Provenance { ArchiveAttested,LocallyOriginated,OriginalSigned };
 class ProvenanceVerifier {
     Authorization& authorization_;Storage& storage_;const Profile& local_;std::uint64_t account_;
     std::function<std::optional<std::uint64_t>(const std::string&)> deviceAccount_;
+    mutable const char* stage_="provenance_not_started";
     void validateContext(const OriginalRecord& record)const{
+        stage_="record_device_mapping_lookup";
         const auto sender=deviceAccount_(record.message.sender),recipient=deviceAccount_(record.message.recipient);
-        require(sender&&recipient&&*sender==record.senderAccount&&*recipient==record.recipientAccount&&
+        stage_="record_device_mapping_missing";require(sender&&recipient);
+        stage_="record_account_binding";
+        require(*sender==record.senderAccount&&*recipient==record.recipientAccount&&
             (*sender==account_||*recipient==account_));
     }
 public:
+    const char* stage()const{return stage_;}
     // Accepted account/device identity directory, including retained historical
     // bindings. Never resolve account context from message-supplied metadata.
     ProvenanceVerifier(Authorization& authorization,Storage& storage,const Profile& local,std::uint64_t account,
@@ -85,12 +90,15 @@ public:
     }
     Provenance verify(const Assertion& a)const{
         validateContext(a.original);
+        stage_="record_current_permissions";
         require(a.account==account_&&authorization_.permits(a.issuer,local_.peerId,ReadHistory)&&authorization_.permits(a.issuer,a.archiveDevice,ServeHistory));
+        stage_="record_generation_digest_signature";
         auto g=authorization_.grant(a.issuer,a.archiveDevice);require(g.generation==a.grantGeneration&&a.digest==digestDevicePayload(recordPayload(a.original))&&
             verifyDevicePayload(assertionPayload(a),a.signature,g.publicKey));
         // No original-sender signature exists for legacy DMs. A source-controlled
         // label can NEVER upgrade this result to OriginalSigned.
         auto existing=storage_.message(a.original.message.id);
+        stage_="record_provenance_accepted";
         if(a.original.message.sender==local_.peerId&&existing&&recordPayload(OriginalRecord{*existing,a.original.senderAccount,a.original.recipientAccount})==recordPayload(a.original))
             return Provenance::LocallyOriginated;
         return Provenance::ArchiveAttested;

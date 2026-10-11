@@ -14,6 +14,7 @@ class SyncReader {
     std::unique_ptr<AttachmentReader> attachments_;
     std::uint64_t processed_=0,conversations_=0;
     bool complete_=false,pending_=false,cancelled_=false;
+    const char* acceptStage_="not_started";
     Blob state()const{
         auto w=historyHeader(8);manifestFields(w,position_);w.number(processed_);w.number(conversations_);w.number(complete_);return w.data;
     }
@@ -57,23 +58,25 @@ public:
         pending_=true;return request;
     }
     size_t accept(const Blob& bytes){
-        current();if(complete_){attachments_->accept(bytes);return 0;}require(pending_);
+        acceptStage_="sync_current_authorization";current();if(complete_){acceptStage_="attachment_page_accept";attachments_->accept(bytes);return 0;}require(pending_);
         if(history_){
             auto before=history_->snapshot().processed;auto inserted=history_->acceptPage(bytes);auto snapshot=history_->snapshot();
             require(snapshot.processed>=before&&processed_<=UINT64_MAX-(snapshot.processed-before));processed_+=snapshot.processed-before;
             pending_=false;if(snapshot.complete)advance();else persist();return inserted;
         }
-        auto page=decodeManifestPage(bytes);const auto& q=page.request;
+        acceptStage_="manifest_page_decode";auto page=decodeManifestPage(bytes);const auto& q=page.request;
+        acceptStage_="manifest_request_binding";
         require(q.id==position_.id&&q.after==position_.after&&(position_.store.empty()||q.store==position_.store)&&
             (!position_.through||q.through==position_.through));
         // No ownership is inferred from a conversation name or a remote claim.
         // Message account/device provenance is validated again by HistoryReader.
-        current();position_=q;pending_=false;
+        acceptStage_="manifest_cursor_commit";current();position_=q;pending_=false;
         if(page.conversations.empty()){require(page.complete);position_.after=page.next;complete_=true;persist();}
         else{page_=std::move(page);index_=0;persist();}
         return 0;
     }
     void disconnected(){pending_=false;if(history_)history_->disconnected();attachments_->disconnected();}
+    const char* acceptStage()const{return history_?history_->acceptStage():acceptStage_;}
     void cancel(){cancelled_=true;pending_=false;if(history_)history_->cancel();attachments_->cancel();}
     Snapshot snapshot()const{auto media=attachments_->snapshot();return {processed_,conversations_,complete_&&media.complete,complete_?media.pending:pending_,cancelled_,media.processed};}
 };

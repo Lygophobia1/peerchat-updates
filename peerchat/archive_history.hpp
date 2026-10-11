@@ -170,6 +170,7 @@ class HistoryReader {
     session::ReliableAuthorization scope_;DeviceAccounts directory_;
     HistoryRequest position_;std::string context_;Blob saved_;
     std::uint64_t processed_=0;bool complete_=false,pending_=false,cancelled_=false;
+    const char* acceptStage_="not_started";
     Blob state()const{
         auto w=historyHeader(6);historyRequestFields(w,position_);w.number(processed_);w.number(complete_?1:0);return w.data;
     }
@@ -203,25 +204,29 @@ public:
         position_.id=Storage::newMessageId();persist();pending_=true;return encodeHistoryRequest(position_);
     }
     size_t acceptPage(const Blob& bytes){
-        current();require(pending_);auto page=decodeHistoryPage(bytes);const auto& q=page.request;
+        acceptStage_="history_current_authorization";current();require(pending_);acceptStage_="history_page_decode";auto page=decodeHistoryPage(bytes);const auto& q=page.request;
+        acceptStage_="history_request_binding";
         require(q.id==position_.id&&q.conversation==position_.conversation&&q.after==position_.after&&
             (position_.store.empty()||q.store==position_.store)&&(!position_.through||q.through==position_.through));
         ProvenanceVerifier verifier(authorization_,storage_,local_,scope_.archive.account,directory_);
         for(const auto& item:page.records){
+            acceptStage_="history_record_scope";
             const auto& a=item.assertion;const auto& m=a.original.message;
             require(a.archiveDevice==scope_.archive.source&&a.issuer==scope_.archive.issuer&&
                 (a.original.senderAccount==scope_.archive.account?m.recipient:m.sender)==q.conversation);
-            verifier.verify(a);
+            acceptStage_="history_record_provenance";try{verifier.verify(a);}catch(...){acceptStage_=verifier.stage();throw;}
         }
         require(processed_<=std::numeric_limits<std::uint64_t>::max()-page.records.size());
         size_t inserted=0;
         for(const auto& item:page.records){
+            acceptStage_="history_durable_import";
             current();if(deliveries_.acceptArchiveHistory(local_,authorization_,scope_,item.assertion,directory_))++inserted;
         }
-        current();position_=q;position_.after=page.next;complete_=page.complete;processed_+=page.records.size();persist();pending_=false;
+        acceptStage_="history_cursor_commit";current();position_=q;position_.after=page.next;complete_=page.complete;processed_+=page.records.size();persist();pending_=false;acceptStage_="history_page_accepted";
         return inserted;
     }
     void disconnected(){pending_=false;}
+    const char* acceptStage()const{return acceptStage_;}
     void cancel(){cancelled_=true;pending_=false;}
     Snapshot snapshot()const{return {position_.after,position_.through,processed_,complete_,pending_,cancelled_};}
 };

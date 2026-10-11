@@ -81,6 +81,14 @@ int main(){try{
     auto first=a.archiveHistoryPage(pc.peerId,0,watermark,8);
     check(first.messages.size()==8&&first.messages.front().id==originals.front().id&&!first.complete);
     auto checkpoint=first.nextCursor;
+    // A missing historical identity mapping must remain fail-closed, but its
+    // diagnostic stage must not be confused with transport or signature failure.
+    {auto missing=[&](const std::string& peer)->std::optional<std::uint64_t>{if(peer==pc.peerId)return {};return directory(peer);};
+        ar::HistoryReader refused(b,pb,reader,deliveries,scope,pc.peerId,missing);
+        auto request=refused.nextRequest();auto provider=ar::sessionAuthorization(source,pa.peerId,pa.peerId,pb.peerId);auto response=ar::serveHistoryPage(a,pa,source,provider,request,directory,200);
+        rejects([&]{refused.acceptPage(response);});check(std::string(refused.acceptStage())=="record_device_mapping_missing"&&refused.snapshot().processed==0&&b.history(pc.peerId).empty());
+        refused.cancel();
+    }
     // A later live message cannot enter a sealed historical window.
     auto newer=originals.back();newer.id=Storage::newMessageId();newer.logicalOrder++;
     check(a.append(pc.peerId,newer));

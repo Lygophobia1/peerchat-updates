@@ -16,6 +16,7 @@ class Execution {
     std::uint64_t pendingAt_=0,nextAutomaticAt_=0;
     bool completedIntent_=false;
     std::string lastIncoming_="none";
+    std::string rejectedStage_="none";
     DeviceAccounts directory()const{return [this](const std::string& device){return storage_.historicalDeviceAccount(device);};}
     void intent(const std::string& issuer,const std::string& source,unsigned disposition){
         require(disposition<=2); // 0 explicit pause/failure, 1 running, 2 completed.
@@ -84,7 +85,7 @@ public:
                    <<" retry_delay_ms="<<route->retryDelayMilliseconds<<" network_generation="<<route->networkRevision<<" last_failure="<<reason;
             }else out<<"\narchive_route=not_requested";
         }else out<<"\nactive_scope=none";
-        out<<"\nlast_incoming_archive="<<lastIncoming_<<"\n";
+        out<<"\nlast_incoming_archive="<<lastIncoming_<<"\ndata_rejection_stage="<<rejectedStage_<<"\n";
         return out.str();
     }
     // A corrupt checkpoint/page stops only archive work, never the profile's
@@ -174,7 +175,7 @@ public:
         }
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{reader_->accept(bytes);return {};}
-        catch(...){intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
+        catch(...){rejectedStage_=reader_->acceptStage();intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
     }
     void disconnected(const session::ReliableAuthorization& scope){
         if(scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data&&reader_)reader_->disconnected();
