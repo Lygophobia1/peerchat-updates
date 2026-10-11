@@ -14,6 +14,18 @@ class MediaDiagnosticsTest {
         Check(screen.Contains("230 ms")&&screen.Contains("80000 µs")&&screen.Contains("true"));
         Check(MediaPerformanceSummary.Screen(null).Contains("Unavailable"));
         Check(MediaPerformanceSummary.ProcessSnapshot().Contains("process_cpu_total_ms="));
+        var group=new GroupDiagnosticsData{GroupId="group-a",Name="Test group",Members=new System.Collections.Generic.List<GroupDiagnosticsMember>(),RoomVoiceState="received_packets=2",RoomScreenState="presented_frames=1"};
+        var frozen=new DiagnosticsSnapshot{SnapshotId="frozen",TimestampUtc="old",Sections=new System.Collections.Generic.List<DiagnosticsSection>{new DiagnosticsSection{Name="Voice",Details="DM voice unchanged"}},Groups=new System.Collections.Generic.List<GroupDiagnosticsData>{group}};
+        frozen=DiagnosticsService.RefreshGroupView(frozen,new[]{group},DateTime.UtcNow);frozen.SnapshotId="frozen";frozen.TimestampUtc="old";
+        var live=DiagnosticsService.RefreshGroupView(frozen,new[]{group},DateTime.UtcNow);
+        group.RoomVoiceState="received_packets=20";group.RoomScreenState="presented_frames=30";
+        var next=DiagnosticsService.RefreshGroupView(live,new[]{group},DateTime.UtcNow);
+        Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(live,"group-a","Voice")).Contains("received_packets=2"));
+        Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(next,"group-a","Voice")).Contains("received_packets=20"));
+        Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(next,"group-a","Screen Share")).Contains("presented_frames=30"));
+        Check(next.Sections[0].Details=="DM voice unchanged"&&frozen.SnapshotId=="frozen"&&frozen.TimestampUtc=="old"&&frozen.Groups[0].RoomVoiceState=="received_packets=2");
+        next.Groups[0].RoomVoiceState="changed";Check(live.Groups[0].RoomVoiceState=="received_packets=2");
+        Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(DiagnosticsService.RefreshGroupView(next,null,DateTime.UtcNow),"group-a","Voice")).Contains("unavailable"));
         int result=0;var app=new Application();var desktop=new DesktopApplication(args[0],0);
         var flags=BindingFlags.Instance|BindingFlags.NonPublic;
         var window=(Window)typeof(DesktopApplication).GetField("window",flags).GetValue(desktop);
@@ -30,7 +42,18 @@ class MediaDiagnosticsTest {
             for(int i=0;i<3;i++){show.Invoke(desktop,null);await Task.Delay(200);Check(panel.Children.OfType<TextBlock>().Count(t=>Object.Equals(t.Tag,"media performance"))==1);Check(panel.Children.OfType<TextBlock>().Single(t=>Object.Equals(t.Tag,"media performance")).Text.Contains("NetEq"));show.Invoke(desktop,null);}
             var screenPanel=(StackPanel)typeof(DesktopApplication).GetField("screenConnectionPanel",flags).GetValue(desktop);
             Check(screenPanel.Children.OfType<TextBlock>().Count(t=>Object.Equals(t.Tag,"media performance"))==1);
-            Console.WriteLine("PASS: bounded media summaries, unavailable telemetry honest, CPU/GC snapshot; packaged WPF repeated details open/close, one summary per owner.");
+            // Presentation fixture only, not a real group media acceptance claim.
+            var displayed=new GroupModel{Data=new GroupData{id=new string('a',32),name="Before",members=new GroupMemberData[0],invites=new GroupMemberData[0]}};
+            model.GroupChats[displayed.Id]=displayed;model.Groups=true;model.SelectedGroup=displayed;
+            typeof(DesktopApplication).GetMethod("ShowDiagnosticsWindow",flags).Invoke(desktop,new object[]{null});
+            var diagnostics=app.Windows.Cast<Window>().Single(w=>w.Title=="Connection & Diagnostics");
+            Func<System.Windows.DependencyObject,System.Collections.Generic.IEnumerable<System.Windows.DependencyObject>> walk=null;
+            walk=o=>Enumerable.Range(0,System.Windows.Media.VisualTreeHelper.GetChildrenCount(o)).SelectMany(i=>{var child=System.Windows.Media.VisualTreeHelper.GetChild(o,i);return new[]{child}.Concat(walk(child));});
+            await Task.Delay(100);var details=walk(diagnostics).OfType<TextBox>().Single();Check(details.Text.Contains("Before"));
+            displayed.Data.name="After live refresh";await Task.Delay(1300);Check(details.Text.Contains("After live refresh"));
+            typeof(DesktopApplication).GetField("authenticatedFriendSnapshotGeneration",flags).SetValue(desktop,(ulong)2);
+            await Task.Delay(1300);Check(details.Text.Contains("unavailable"));diagnostics.Close();await Task.Delay(100);
+            Console.WriteLine("PASS: bounded media summaries, honest unavailable telemetry; copied live group counters, immutable failure snapshots; packaged WPF live group refresh/context invalidation and repeated details open/close.");
         }catch(Exception error){Console.Error.WriteLine(error);result=1;}finally{window.Close();}};
         app.Run(window);return result;
     }

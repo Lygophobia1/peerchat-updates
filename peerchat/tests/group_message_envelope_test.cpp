@@ -143,6 +143,14 @@ int main(int argc,char** argv){
             group_keys::GroupKeyManager sameKeys(reopened,2,sameDevice.peerId);sameKeys.apply(roster);
             MessageLayer sameReceiver(reopened,sameKeys,sameDevice,2);expect(sameReceiver.receive(local,state,original.wire),Result::DuplicateMessage);
         }
+        // Archive authorization for an account must not imply group membership
+        // for a different device belonging to that account.
+        MessageLayer otherDeviceForMember(memberStore,memberKeys,owner,2);
+        expect(otherDeviceForMember.receive(local,state,original.wire),Result::LocalNotMember);
+        auto multiDeviceRoster=roster;auto extraDevice=multiDeviceRoster.devices.back();
+        extraDevice.peerId=std::string(64,'f');multiDeviceRoster.devices.push_back(extraDevice);
+        bool duplicateAccountRejected=false;try{ownerKeys.apply(multiDeviceRoster);}catch(...){duplicateAccountRejected=true;}
+        require(duplicateAccountRejected,"Current one-device group roster accepted another device for the same account");
         // Current roster but missing/wrong key, with a matching persistent identity.
         Storage missing((root/L"missing").wstring());missing.saveProfile(member);
         group_keys::GroupKeyManager missingKeys(missing,2,member.peerId);missingKeys.apply(roster);MessageLayer missingReceiver(missing,missingKeys,member,2);

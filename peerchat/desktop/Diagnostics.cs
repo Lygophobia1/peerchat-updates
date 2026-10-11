@@ -213,6 +213,12 @@ public sealed class DiagnosticsService {
         if(selected.Count==0)Add(selected,"Overview","No current subsystem state is available for this logical connection.");
         return new DiagnosticsSnapshot{SnapshotId=value.SnapshotId,TimestampUtc=value.TimestampUtc,Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=selected};
     }
+    // Presentation only: consume the existing session owners' copied snapshots.
+    // Never mutate retained failure evidence or invoke media/network servicing.
+    public static DiagnosticsSnapshot RefreshGroupView(DiagnosticsSnapshot value,IEnumerable<GroupDiagnosticsData> groups,DateTime utc){
+        if(value==null)return null;
+        return new DiagnosticsSnapshot{SnapshotId=Guid.NewGuid().ToString("N"),TimestampUtc=utc.ToUniversalTime().ToString("O"),Build=value.Build,Profile=value.Profile,Status=value.Status,Sections=(value.Sections??new List<DiagnosticsSection>()).Select(s=>new DiagnosticsSection{Name=s.Name,Details=s.Details}).ToList(),Groups=CloneGroups(groups)};
+    }
     public static IList<GroupDiagnosticsData> GroupScopes(DiagnosticsSnapshot value){return CloneGroups(value==null?null:value.Groups).OrderBy(g=>g.Name??"",StringComparer.OrdinalIgnoreCase).ThenBy(g=>g.GroupId??"",StringComparer.Ordinal).ToList();}
     public static DiagnosticsSnapshot ProjectGroup(DiagnosticsSnapshot value,string groupId,string component){
         if(value==null)return null;
