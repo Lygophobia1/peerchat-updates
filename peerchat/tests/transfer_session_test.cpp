@@ -89,7 +89,7 @@ int main(){
         auto snippetId=left.fileTransfer(7,b,"",snippet);std::string snippetNarrow(snippetId.begin(),snippetId.end());
         wait([&]{return right.fileTransfer(0).find(snippetId)!=std::wstring::npos;},"snippet offer missing");
         right.fileTransfer(2,"",snippetNarrow,destination.wstring());
-        auto snippetPath=destination/(snippetId+L"-message.txt");
+        auto snippetPath=destination/(snippetId+L"-message.peerchat-text");
         wait([&]{return std::filesystem::exists(snippetPath);},"snippet not completed");
         std::ifstream snippetFile(snippetPath,std::ios::binary);std::string snippetBytes((std::istreambuf_iterator<char>(snippetFile)),{});
         require(snippetBytes==unicode::encode(snippet),"snippet content normalized or truncated");

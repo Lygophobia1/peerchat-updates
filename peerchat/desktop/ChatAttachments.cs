@@ -15,6 +15,10 @@ using System.Windows.Threading;
 namespace PeerChatDesktop {
 // Presentation only: no persisted UI transfer state, sockets, ACK or retry owner.
 public static class ChatAttachmentProjection {
+    // Presentation marker in the existing authenticated attachment name field;
+    // never an authorization or executable-type discriminator.
+    public const string LongMessageName="message.peerchat-text";
+    public static bool IsLongMessage(CoreAdapter.FileTransferData row){return row!=null&&(row.protectedSource||row.name==LongMessageName);}
     public const int InlineCharacters=4096,SnippetCharacters=1024*1024;
     public const int SnippetUtf8Bytes=512*1024;
     public static bool RequiresSnippet(string text){return text!=null&&text.Length>InlineCharacters;}
@@ -99,6 +103,23 @@ public static class SafeAttachmentPreview {
         }catch{result.Error="Preview unavailable — use Save As or containing folder";return result;}
     }
 }
+// Shared read-only text surface for files, protected snippets and ordinary long
+// chat messages. Height is bounded independently of exact text/line count.
+public sealed class BoundedTextView:StackPanel {
+    public readonly TextBox Viewer;
+    public readonly Button Expand,Copy,OpenFull;
+    public static bool CodeLike(string text){return System.Text.RegularExpressions.Regex.Matches(text??"",@"(?m)^\s*(?:public |private |class |def |function |#include|import |using |.*[;{}]\s*$)").Count>=3;}
+    public static TextBox ReadOnly(string text,bool code){return new TextBox{Text=text??"",IsReadOnly=true,AcceptsReturn=true,FontSize=16,FontFamily=new FontFamily(code?"Consolas":"Segoe UI"),Background=new SolidColorBrush(Color.FromRgb(11,21,30)),Foreground=Brushes.White,TextWrapping=code?TextWrapping.NoWrap:TextWrapping.Wrap,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Padding=new Thickness(6),BorderThickness=new Thickness(0)};}
+    public static void ShowFull(string text,bool code,string title){var owner=Application.Current==null?null:Application.Current.MainWindow;var dialog=new Window{Title=title+" — read-only",Width=760,Height=520,Background=new SolidColorBrush(Color.FromRgb(11,21,30)),Foreground=Brushes.White,Content=ReadOnly(text,code)};if(owner!=null&&owner.IsVisible)dialog.Owner=owner;dialog.Show();}
+    public BoundedTextView(string text,bool code,string title,Action copy=null,Action open=null){
+        code=code||CodeLike(text);Children.Add(new TextBlock{Text=title,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,6)});
+        Viewer=ReadOnly(text,code);Viewer.MaxHeight=160;Children.Add(Viewer);
+        var actions=new WrapPanel{Margin=new Thickness(0,4,0,0)};Children.Add(actions);
+        Expand=new Button{Content="Expand",Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,0,6,0)};Expand.Click+=(s,e)=>{bool expanded=Viewer.MaxHeight>160;Viewer.MaxHeight=expanded?160:320;Expand.Content=expanded?"Expand":"Show less";};actions.Children.Add(Expand);
+        Copy=new Button{Content="Copy",Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,0,6,0)};Copy.Click+=(s,e)=>{if(copy!=null)copy();else try{Clipboard.SetText(text);}catch{}};actions.Children.Add(Copy);
+        OpenFull=new Button{Content="Open full",Padding=new Thickness(8,4,8,4)};OpenFull.Click+=(s,e)=>{if(open!=null)open();else ShowFull(text,code,title);};actions.Children.Add(OpenFull);
+    }
+}
 public sealed class AttachmentActionEventArgs:RoutedEventArgs {
     public readonly CoreAdapter.FileTransferData Transfer;public readonly string Action;
     public AttachmentActionEventArgs(RoutedEvent routed,CoreAdapter.FileTransferData transfer,string action):base(routed){Transfer=transfer;Action=action;}
@@ -107,14 +128,17 @@ public sealed class AttachmentCard:StackPanel {
     public static readonly RoutedEvent ActionEvent=EventManager.RegisterRoutedEvent("Action",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(AttachmentCard));
     public static readonly DependencyProperty TransferProperty=DependencyProperty.Register("Transfer",typeof(CoreAdapter.FileTransferData),typeof(AttachmentCard),new PropertyMetadata(null,(sender,args)=>((AttachmentCard)sender).Render()));
     public CoreAdapter.FileTransferData Transfer{get{return (CoreAdapter.FileTransferData)GetValue(TransferProperty);}set{SetValue(TransferProperty,value);}}
-    string previewPath="";AttachmentPreview preview;bool autoPreviewAttempted;
+    string previewPath="",previewId="";AttachmentPreview preview;bool autoPreviewAttempted;
     static readonly Queue<WeakReference> residentCards=new Queue<WeakReference>();
     public AttachmentCard(){MaxWidth=360;Loaded+=(s,e)=>Render();}
     Button ActionButton(string label,Action action){var button=new Button{Content=label,Margin=new Thickness(0,4,6,0),Padding=new Thickness(8,4,8,4)};button.Click+=(s,e)=>action();return button;}
     void Signal(CoreAdapter.FileTransferData row,string action){RaiseEvent(new AttachmentActionEventArgs(ActionEvent,row,action));}
     void Render(){
         var row=Transfer;Visibility=row==null?Visibility.Collapsed:Visibility.Visible;Children.Clear();if(row==null)return;
-        Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
+        if(previewId!=row.id||previewPath!=row.path){preview=null;previewId=row.id;previewPath=row.path;autoPreviewAttempted=false;}
+        bool longMessage=ChatAttachmentProjection.IsLongMessage(row);
+        if(!longMessage)Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
+        else if(preview==null)Children.Add(new TextBlock{Text="Long message",FontWeight=FontWeights.SemiBold});
         Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
@@ -123,26 +147,25 @@ public sealed class AttachmentCard:StackPanel {
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
         if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.state!=4||(!row.protectedSource&&String.IsNullOrEmpty(row.path)))return;
-        actions.Children.Add(ActionButton("Save As…",()=>Signal(row,"save")));
-        if(!row.protectedSource)actions.Children.Add(ActionButton("Folder",()=>Signal(row,"folder")));
-        if(previewPath!=row.path){preview=null;previewPath=row.path;autoPreviewAttempted=false;}
+        if(!longMessage)actions.Children.Add(ActionButton("Save As…",()=>Signal(row,"save")));
+        if(!longMessage&&!row.protectedSource)actions.Children.Add(ActionButton("Folder",()=>Signal(row,"folder")));
         if(preview==null){actions.Children.Add(ActionButton("Preview",()=>LoadPreview(row)));if(IsLoaded&&IsVisible&&!autoPreviewAttempted){autoPreviewAttempted=true;LoadPreview(row);}return;}
         if(preview.Image!=null){var image=new Image{Source=preview.Image,MaxWidth=320,MaxHeight=240,HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,0),Cursor=Cursors.Hand,ToolTip="Open read-only image viewer"};image.MouseLeftButtonUp+=(s,e)=>ShowPreview(row,preview);Children.Add(image);}
-        else if(preview.Error.Length==0){Children.Add(new TextBox{Text=preview.Text,IsReadOnly=true,FontFamily=new FontFamily("Consolas"),Background=new SolidColorBrush(Color.FromRgb(11,21,30)),Foreground=Brushes.White,MaxHeight=150,TextWrapping=TextWrapping.NoWrap,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Margin=new Thickness(0,8,0,0)});if(preview.Truncated)Children.Add(new TextBlock{Text="Preview limited to 32 KiB / 200 lines",Foreground=Brushes.LightGray});actions.Children.Add(ActionButton("Copy preview",()=>{try{Clipboard.SetText(preview.Text);}catch{}}));actions.Children.Add(ActionButton("Expand",()=>ShowPreview(row,preview)));actions.Children.Add(ActionButton("Open full text",()=>OpenFull(row)));}
+        else if(preview.Error.Length==0){Children.Add(new BoundedTextView(preview.Text,!longMessage,longMessage?"Long message":"Text preview",null,()=>OpenFull(row)));if(preview.Truncated)Children.Add(new TextBlock{Text="Preview limited to 32 KiB / 200 lines — Open full to read more",Foreground=Brushes.LightGray});}
         else{Children.Add(new TextBlock{Text=preview.Error,Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});actions.Children.Add(ActionButton("Retry preview",()=>{preview=null;LoadPreview(row);}));}
     }
     bool loading;
-    public void ProtectedPreview(string id,string text,string error){loading=false;if(Transfer==null||Transfer.id!=id)return;while(residentCards.Count>=24){var old=residentCards.Dequeue().Target as AttachmentCard;if(old!=null&&old!=this){old.preview=null;old.autoPreviewAttempted=true;old.Render();}}residentCards.Enqueue(new WeakReference(this));preview=String.IsNullOrEmpty(error)?SafeAttachmentPreview.FromText(text,Transfer.size):new AttachmentPreview{Error=error};previewPath=Transfer.path;Render();}
+    public void ProtectedPreview(string id,string text,string error){loading=false;if(Transfer==null||Transfer.id!=id)return;while(residentCards.Count>=24){var old=residentCards.Dequeue().Target as AttachmentCard;if(old!=null&&old!=this){old.preview=null;old.autoPreviewAttempted=true;old.Render();}}residentCards.Enqueue(new WeakReference(this));preview=String.IsNullOrEmpty(error)?(ChatAttachmentProjection.IsLongMessage(Transfer)?new AttachmentPreview{Text=text}:SafeAttachmentPreview.FromText(text,Transfer.size)):new AttachmentPreview{Error=error};previewPath=Transfer.path;Render();}
     public static void DisplayText(CoreAdapter.FileTransferData row,string text){ShowPreview(row,new AttachmentPreview{Text=text});}
-    async void LoadPreview(CoreAdapter.FileTransferData row){if(loading)return;loading=true;if(row.protectedSource){Signal(row,"preview-snippet");return;}try{var value=await SafeAttachmentPreview.ReadAsync(row.path,row.size);if(Transfer!=null&&Transfer.id==row.id&&Transfer.path==row.path){
+    async void LoadPreview(CoreAdapter.FileTransferData row){if(loading)return;loading=true;if(row.protectedSource){Signal(row,"preview-snippet");return;}try{var value=ChatAttachmentProjection.IsLongMessage(row)?new AttachmentPreview{Text=await SafeAttachmentPreview.FullTextAsync(row.path,row.size)}:await SafeAttachmentPreview.ReadAsync(row.path,row.size);if(Transfer!=null&&Transfer.id==row.id&&Transfer.path==row.path){
         while(residentCards.Count>=24){var old=residentCards.Dequeue().Target as AttachmentCard;if(old!=null&&old!=this){old.preview=null;old.autoPreviewAttempted=true;old.Render();}}
         residentCards.Enqueue(new WeakReference(this));preview=value;previewPath=row.path;Render();
-    }}finally{loading=false;}}
+    }}catch{if(Transfer!=null&&Transfer.id==row.id){preview=new AttachmentPreview{Error="Text unavailable or changed"};Render();}}finally{loading=false;}}
     async void OpenFull(CoreAdapter.FileTransferData row){if(row.protectedSource){Signal(row,"full-snippet");return;}try{string text=await SafeAttachmentPreview.FullTextAsync(row.path,row.size);ShowPreview(row,new AttachmentPreview{Text=text});}catch(Exception error){MessageBox.Show(error.Message,"Read-only text viewer");}}
     static void ShowPreview(CoreAdapter.FileTransferData row,AttachmentPreview value){
         // No shell-open for scripts/HTML/executables. Images and text stay read-only.
-        object content=value.Image!=null?(object)new Image{Source=value.Image,Stretch=Stretch.Uniform}:
-            new TextBox{Text=value.Text,IsReadOnly=true,FontFamily=new FontFamily("Consolas"),Background=new SolidColorBrush(Color.FromRgb(11,21,30)),Foreground=Brushes.White,TextWrapping=TextWrapping.NoWrap,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+        if(value.Image==null){BoundedTextView.ShowFull(value.Text,!ChatAttachmentProjection.IsLongMessage(row)||BoundedTextView.CodeLike(value.Text),ChatAttachmentProjection.IsLongMessage(row)?"Long message":row.name);return;}
+        object content=new Image{Source=value.Image,Stretch=Stretch.Uniform};
         new Window{Title=row.name+" — read-only bounded preview",Owner=Application.Current==null?null:Application.Current.MainWindow,Width=760,Height=520,Background=new SolidColorBrush(Color.FromRgb(11,21,30)),Foreground=Brushes.White,Content=content}.Show();
     }
 }
@@ -160,7 +183,7 @@ public partial class DesktopApplication {
             if(action.Action=="preview-snippet"||action.Action=="full-snippet"){
                 var card=action.OriginalSource as AttachmentCard;bool full=action.Action=="full-snippet";
                 if(!SafeAttachmentPreview.TryNativeRead()){if(card!=null&&!full)card.ProtectedPreview(row.id,"","Preview busy — try again");return;}
-                try{var text=await Task.Run(()=>core.FileTransfer(full?9u:8u,"",row.id,""));if(closing)return;if(full)AttachmentCard.DisplayText(row,text);else if(card!=null)card.ProtectedPreview(row.id,text,"");}
+                try{var text=await Task.Run(()=>core.FileTransfer(full||ChatAttachmentProjection.IsLongMessage(row)?9u:8u,"",row.id,""));if(closing)return;if(full)AttachmentCard.DisplayText(row,text);else if(card!=null)card.ProtectedPreview(row.id,text,"");}
                 catch{if(!closing&&card!=null&&!full)card.ProtectedPreview(row.id,"","Protected source unavailable or changed");else if(!closing)Notify("Protected source unavailable or changed; no insecure fallback was used.");}
                 finally{SafeAttachmentPreview.EndNativeRead();}return;
             }

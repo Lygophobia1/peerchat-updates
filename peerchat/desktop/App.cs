@@ -31,20 +31,25 @@ using PeerChat.Updater;
 
 namespace PeerChatDesktop {
 // Links are built as text/Hyperlink objects. Peer text is never parsed as XAML.
-public class ChatText : TextBlock {
+public class ChatText : ContentControl {
     public const int InlinePreviewCharacters=1024;
-    public static string DisplayMessage(string message){string value=message??"";if(value.Length<=InlinePreviewCharacters)return value;int length=InlinePreviewCharacters;if(Char.IsHighSurrogate(value[length-1])&&Char.IsLowSurrogate(value[length]))length--;return value.Substring(0,length)+"\n… Large message ("+value.Length+" characters). Use Copy message to copy its full contents.";}
+    // This is display-only: the persisted message and clipboard source stay exact.
+    public static string DisplayMessage(string message){return message??"";}
+    public static readonly DependencyProperty TextWrappingProperty=DependencyProperty.Register("TextWrapping",typeof(TextWrapping),typeof(ChatText),new PropertyMetadata(TextWrapping.Wrap));
+    public TextWrapping TextWrapping {get{return (TextWrapping)GetValue(TextWrappingProperty);}set{SetValue(TextWrappingProperty,value);}}
     public static readonly DependencyProperty MessageProperty=DependencyProperty.Register("Message",typeof(string),typeof(ChatText),new PropertyMetadata("",Update));
     public string Message {get{return (string)GetValue(MessageProperty);}set{SetValue(MessageProperty,value);}}
     static void Update(DependencyObject source,DependencyPropertyChangedEventArgs e){
-        var view=(ChatText)source;string text=e.NewValue as string??"";string visible=DisplayMessage(text);view.Inlines.Clear();int start=0;
-        foreach(Match match in Regex.Matches(visible,@"https?://[^\s<>""\u0000-\u001f]+",RegexOptions.IgnoreCase)){
-            view.Inlines.Add(new Run(visible.Substring(start,match.Index-start)));Uri uri;
+        var view=(ChatText)source;string text=e.NewValue as string??"";view.ContextMenu=null;
+        if(text.Length>InlinePreviewCharacters){view.Content=new BoundedTextView(text,false,"Long message");return;}
+        var block=new TextBlock{TextWrapping=TextWrapping.Wrap};int start=0;
+        foreach(Match match in Regex.Matches(text,@"https?://[^\s<>""\u0000-\u001f]+",RegexOptions.IgnoreCase)){
+            block.Inlines.Add(new Run(text.Substring(start,match.Index-start)));Uri uri;
             if(Uri.TryCreate(match.Value,UriKind.Absolute,out uri)&&(uri.Scheme=="http"||uri.Scheme=="https")){
                 var link=new Hyperlink(new Run(match.Value)){NavigateUri=uri,Foreground=new SolidColorBrush(Color.FromRgb(131,204,252))};
-                link.RequestNavigate+=(sender,args)=>{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(args.Uri.AbsoluteUri){UseShellExecute=true});}catch{}args.Handled=true;};view.Inlines.Add(link);
-            }else view.Inlines.Add(new Run(match.Value));start=match.Index+match.Length;
-        }view.Inlines.Add(new Run(visible.Substring(start)));
+                link.RequestNavigate+=(sender,args)=>{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(args.Uri.AbsoluteUri){UseShellExecute=true});}catch{}args.Handled=true;};block.Inlines.Add(link);
+            }else block.Inlines.Add(new Run(match.Value));start=match.Index+match.Length;
+        }block.Inlines.Add(new Run(text.Substring(start)));view.Content=block;
         var menu=new ContextMenu();var copy=new MenuItem{Header="Copy message"};copy.Click+=(s,a)=>{try{Clipboard.SetText(text);}catch{}};menu.Items.Add(copy);view.ContextMenu=menu;
     }
 }

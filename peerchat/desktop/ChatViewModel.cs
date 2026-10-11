@@ -64,7 +64,7 @@ public class GroupModel : ObservableModel {
 public class MessageModel : ObservableModel {
     public CoreAdapter.FileTransferData Attachment {get;private set;}
     public Visibility TextVisibility {get{return Attachment==null?Visibility.Visible:Visibility.Collapsed;}}
-    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");}
+    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");}
     public MessageData Data;
     public bool Outgoing;
     public long GroupSenderAccountId;
@@ -73,13 +73,13 @@ public class MessageModel : ObservableModel {
     public void SetGroupSenderName(string name){if(groupSenderName==name)return;groupSenderName=name;Changed("Text");Changed("Preview");}
     double bubbleWidth=400;
     public double BubbleWidth {get{return bubbleWidth;}set{bubbleWidth=value;Changed("BubbleWidth");}}
-    public string Text {get{return Attachment!=null?Attachment.name:IsGroupMessage?groupSenderName+"\n"+Data.text:Data.text;}}
+    public string Text {get{return Attachment!=null?(ChatAttachmentProjection.IsLongMessage(Attachment)?"Long message":Attachment.name):IsGroupMessage?groupSenderName+"\n"+Data.text:Data.text;}}
     public string Preview {get{string value=Text??"";if(value.Length<=160)return value;int length=160;if(Char.IsHighSurrogate(value[length-1])&&Char.IsLowSurrogate(value[length]))length--;return value.Substring(0,length)+"…";}}
     public HorizontalAlignment Alignment {get{return Outgoing?HorizontalAlignment.Right:HorizontalAlignment.Left;}}
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
-    public string Stamp {get{return Attachment!=null?"File attachment":LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":"  ◷ Queued"):"");}}
+    public string Stamp {get{return Attachment!=null?(ChatAttachmentProjection.IsLongMessage(Attachment)?LocalTime.ToString("MMM d · h:mm tt"):"File attachment"):LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":"  ◷ Queued"):"");}}
     public void Delivered(){Data.delivery=2;Changed("Stamp");}
     public void ProjectNativeDelivery(int value){Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}}
     public void GroupStatus(string status){Data.status=status;Changed("Stamp");}

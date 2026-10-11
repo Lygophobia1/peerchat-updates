@@ -121,20 +121,22 @@ public:
 // Generated chat text is not a user-owned plaintext input file. Keep its one
 // resumable source DPAPI-protected; decrypt only inside the existing Source.
 class ProtectedSnippetSource final:public Source {
-    std::unique_ptr<FileSource> record_;Blob plain_,token_;
+    std::unique_ptr<FileSource> record_;Blob plain_,token_;std::string name_;
 public:
     static constexpr const char* Domain="PeerChat/ProtectedSnippetSource/v1";
     static constexpr size_t MaxBytes=512*1024;
-    explicit ProtectedSnippetSource(const std::wstring& path){
+    static constexpr const char* MessageName="message.peerchat-text";
+    explicit ProtectedSnippetSource(const std::wstring& path,std::string name="message.txt"):name_(std::move(name)){
+        require(name_=="message.txt"||name_==MessageName);
         auto id=std::filesystem::path(path).stem().string();require(protocol::id(id,32));
         record_=std::make_unique<FileSource>(path);require(record_->size()<=1024*1024);
         Blob sealed;for(std::uint64_t offset=0;offset<record_->size();offset+=ChunkBytes){auto part=record_->read(offset,std::min<std::uint64_t>(ChunkBytes,record_->size()-offset));sealed.insert(sealed.end(),part.begin(),part.end());}
         platform::WindowsRecordProtector protector;plain_=protector.unprotect(sealed,std::string(Domain)+"/"+id);require(plain_.size()<=MaxBytes);
-        protocol::Writer token(protocol::FileTransfer);token.data=record_->resumeToken();token.string(Domain);token.string("message.txt");token_=std::move(token.data);
+        protocol::Writer token(protocol::FileTransfer);token.data=record_->resumeToken();token.string(Domain);token.string(name_);token_=std::move(token.data);
     }
     ~ProtectedSnippetSource(){if(!plain_.empty())SecureZeroMemory(plain_.data(),plain_.size());}
     std::uint64_t size()const override{return plain_.size();}
-    std::string name()const override{return "message.txt";}
+    std::string name()const override{return name_;}
     Blob read(std::uint64_t offset,size_t count)override{require(offset<=plain_.size()&&count<=ChunkBytes&&count<=plain_.size()-offset);return Blob(plain_.begin()+offset,plain_.begin()+offset+count);}
     Blob resumeToken()const override{return token_;}
     static std::unique_ptr<Source> create(const std::wstring& path,const Blob& bytes){
@@ -143,14 +145,14 @@ public:
         HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);require(file!=INVALID_HANDLE_VALUE);DWORD written=0;
         bool ok=WriteFile(file,sealed.data(),static_cast<DWORD>(sealed.size()),&written,nullptr)&&written==sealed.size()&&FlushFileBuffers(file);CloseHandle(file);
         if(!ok){DeleteFileW(path.c_str());throw std::runtime_error("Could not persist protected snippet");}
-        try{return std::make_unique<ProtectedSnippetSource>(path);}catch(...){DeleteFileW(path.c_str());throw;}
+        try{return std::make_unique<ProtectedSnippetSource>(path,MessageName);}catch(...){DeleteFileW(path.c_str());throw;}
     }
     static std::unique_ptr<Source> reopen(const DurableState& state){
-        protocol::Reader r(state.location);require(r.type()==protocol::FileTransfer);auto source=std::make_unique<ProtectedSnippetSource>(r.text());require(source->resumeToken()==state.location);return source;
+        protocol::Reader r(state.location);require(r.type()==protocol::FileTransfer);auto path=r.text();for(int n=0;n<5;n++)r.number();require(r.string()==Domain);auto name=r.string();r.end();auto source=std::make_unique<ProtectedSnippetSource>(path,name);require(source->resumeToken()==state.location);return source;
     }
 };
 inline bool protectedSnippetToken(const Blob& token){
-    try{protocol::Reader r(token);require(r.type()==protocol::FileTransfer);r.text();for(int n=0;n<5;n++)r.number();if(!r.remaining())return false;auto domain=r.string();if(domain!=ProtectedSnippetSource::Domain)return false;require(r.string()=="message.txt");r.end();return true;}catch(...){return false;}
+    try{protocol::Reader r(token);require(r.type()==protocol::FileTransfer);r.text();for(int n=0;n<5;n++)r.number();if(!r.remaining())return false;auto domain=r.string();if(domain!=ProtectedSnippetSource::Domain)return false;auto name=r.string();require(name=="message.txt"||name==ProtectedSnippetSource::MessageName);r.end();return true;}catch(...){return false;}
 }
 inline std::unique_ptr<Source> reopenSource(const DurableState& state){return protectedSnippetToken(state.location)?ProtectedSnippetSource::reopen(state):FileSource::reopen(state);}
 class FileSink final:public Sink {

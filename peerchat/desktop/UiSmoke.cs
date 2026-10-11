@@ -25,14 +25,12 @@ class UiSmoke {
  window.ShowInTaskbar=false;window.ShowActivated=false;window.WindowStartupLocation=WindowStartupLocation.Manual;window.Left=-20000;
  window.Loaded+=async(s,e)=>{try{
   string legacyLarge=new string('X',16384);string preview=ChatText.DisplayMessage(legacyLarge);
-  Require(preview.Length<1200&&preview.Contains("Large message")&&legacyLarge.Length==16384,
-   "Legacy oversized history is not displayed through a bounded preview");
+  Require(preview==legacyLarge,"Legacy oversized history content changed");
   var previewModel=new MessageModel{Data=new MessageData{id="legacy",text=legacyLarge}};
   Require(previewModel.Preview.Length<=161&&previewModel.Text.Length==16384,
    "Conversation preview changed or expanded the stored message");
   string surrogateBoundary=new string('X',ChatText.InlinePreviewCharacters-1)+"\U0001F600"+new string('Y',16384);
-  Require(!Char.IsHighSurrogate(ChatText.DisplayMessage(surrogateBoundary)[ChatText.InlinePreviewCharacters-2]),
-   "Bounded history preview split a UTF-16 surrogate pair");
+  Require(ChatText.DisplayMessage(surrogateBoundary)==surrogateBoundary,"History viewer changed Unicode");
   var legacyPage=new StackPanel{Width=420};for(int index=0;index<100;index++)
    legacyPage.Children.Add(new ChatText{Message=legacyLarge,TextWrapping=TextWrapping.Wrap,MaxWidth=400});
   legacyPage.Measure(new Size(420,double.PositiveInfinity));
