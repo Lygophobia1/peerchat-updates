@@ -85,14 +85,26 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val local=mutable.value.localPeerId
         require(snapshot.accountId==session.accountId&&snapshot.authenticationGeneration==generation&&snapshot.localPeerId==local&&snapshot.devices.any{it.peerId==device})
         val execution=archiveExecution(owner,native)
-        execution.refresh(session.accountId,generation,local)
-        val operation=when(action){ArchiveDeviceAction.TrustAuthorizer->4;ArchiveDeviceAction.Authorize->5;ArchiveDeviceAction.Revoke->6;ArchiveDeviceAction.DisableAuthorizer->7}
+        val currentRows=execution.devices(session.accountId,generation,execution.refresh(session.accountId,generation,local))
         val capabilities=(if(read)1L else 0L) or (if(serve)2L else 0L)
         require(action!=ArchiveDeviceAction.Authorize||capabilities!=0L)
-        execution.consent(session.accountId,generation,operation,device,capabilities,true)
+        when(action){
+            ArchiveDeviceAction.SetUp->{require(device==local);execution.prepareFirstDevice(session.accountId,generation,local,true)}
+            ArchiveDeviceAction.ApproveIssuer->execution.confirmExistingIssuer(session.accountId,generation,device,true)
+            else->{
+                if(action==ArchiveDeviceAction.Authorize)check(currentRows.single{it.peerId==device}.mayAuthorize){"Approve from an enabled trusted history device."}
+                val operation=when(action){ArchiveDeviceAction.TrustAuthorizer->4;ArchiveDeviceAction.Authorize->5;ArchiveDeviceAction.Revoke->6;ArchiveDeviceAction.DisableAuthorizer->7;else->error("Unsupported history action")}
+                execution.consent(session.accountId,generation,operation,device,capabilities,true)
+            }
+        }
         execution.publishPending(session.accountId,generation,local)
+        val verified=execution.devices(session.accountId,generation,execution.refresh(session.accountId,generation,local))
+        if(action==ArchiveDeviceAction.Authorize||action==ArchiveDeviceAction.SetUp){
+            val row=verified.single{it.peerId==device};val wanted=if(action==ArchiveDeviceAction.SetUp)3L else capabilities
+            check(row.approvalKnown&&row.localGrantPresent&&row.localGrantRead==((wanted and 1L)!=0L)&&row.localGrantServe==((wanted and 2L)!=0L)){"Requested permissions were not verified by the server; no approval is claimed."}
+        }
         mutable.value=mutable.value.copy(archiveProgress=execution.progress(session.accountId,generation))
-        ArchiveEnrollmentSnapshot(session.accountId,generation,local,execution.devices(session.accountId,generation,execution.refresh(session.accountId,generation,local)),execution.historySync(session.accountId,generation))
+        ArchiveEnrollmentSnapshot(session.accountId,generation,local,verified,execution.historySync(session.accountId,generation))
     }}
     override suspend fun setHistorySync(snapshot:ArchiveEnrollmentSnapshot,enabled:Boolean):ArchiveEnrollmentSnapshot=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled&&mutable.value.serverPresenceLive)

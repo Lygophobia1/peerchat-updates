@@ -24,6 +24,12 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
         Text("Keep approved devices up to date automatically.")
     }
     Text("Existing custom permissions and automatic-sync preferences are preserved. Offline Messages is a separate setting.",style=MaterialTheme.typography.bodySmall)
+    val thisDevice=enrollment?.devices?.singleOrNull{it.local}
+    if(thisDevice?.primaryAction==ArchiveDeviceAction.SetUp){
+        Text("Set up History Sync",style=MaterialTheme.typography.titleMedium)
+        Text("Enroll this first trusted device, then explicitly authorize your other devices.")
+        Button({pending=PendingArchiveConsent(checkNotNull(enrollment),ArchiveDeviceAction.SetUp,thisDevice.peerId,true,true)},enabled=!state.archiveBusy){Text("Set up History Sync")}
+    }
     Text("Sync Status",style=MaterialTheme.typography.titleMedium)
     val progress=state.archiveProgress
     Text("Phase: "+progress.displayState+" · Source: "+if(progress.source.isEmpty())"No source selected" else "Device "+progress.source.take(12)+"…")
@@ -44,12 +50,20 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
             OutlinedCard(Modifier.fillMaxWidth()){
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
                     Text(if(device.local)"This device" else "Device "+device.peerId.take(12)+"…",style=MaterialTheme.typography.titleSmall)
-                    Text(if(device.mayRead||device.mayServe)"Verified history access" else if(device.authorized)"Registered grant · review trust and permissions" else if(device.revoked)"Access revoked" else "Approval required",style=MaterialTheme.typography.bodySmall)
+                    Text(if(device.approved)"Approved" else if(device.mayRead||device.mayServe)"Verified history access" else if(device.authorized)"Registered grant · review trust and permissions" else if(device.revoked)"Access revoked" else "Approval required",style=MaterialTheme.typography.bodySmall)
                     Text(if(!device.local&&device.peerId==progress.source&&progress.running&&progress.displayState=="Syncing")"Available · transferring verified history" else "Availability unknown",style=MaterialTheme.typography.bodySmall)
                     Row{
-                        TextButton({managed=device.peerId},enabled=!state.archiveBusy){Text(if(device.authorized)"Manage" else "Approve device")}
+                        device.primaryAction?.let{action->
+                            Button({when(action){
+                                ArchiveDeviceAction.SetUp->pending=PendingArchiveConsent(checkNotNull(enrollment),action,device.peerId,true,true)
+                                ArchiveDeviceAction.ApproveIssuer->pending=PendingArchiveConsent(checkNotNull(enrollment),action,device.approvalIssuer)
+                                else->managed=device.peerId
+                            }},enabled=!state.archiveBusy,contentPadding=PaddingValues(horizontal=12.dp,vertical=4.dp)){Text(when(action){ArchiveDeviceAction.SetUp->"Set up";ArchiveDeviceAction.ApproveIssuer->"Approve";else->"Authorize"})}
+                        }
+                        TextButton({managed=device.peerId},enabled=!state.archiveBusy){Text("Manage")}
                         if(!device.local&&device.mayServe)TextButton({dispatch(UiAction.ArchiveSynchronize(checkNotNull(enrollment),device.peerId))},enabled=!state.archiveBusy&&enrollment?.historySyncEnabled==true&&!progress.running){Text("Sync now")}
                     }
+                    if(device.approvalKnown&&!device.approved&&device.primaryAction==null)Text("Approve from an enabled trusted history device. Signing in alone never grants history access.",style=MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -69,6 +83,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
         AlertDialog(onDismissRequest={managed=null},title={Text(if(selected.authorized)"Manage history device" else "New history device")},text={Column(verticalArrangement=Arrangement.spacedBy(6.dp)){
             Text(if(selected.local)"This device" else "Device "+selected.peerId.take(12)+"…")
             Text(selected.authorizationState)
+            Text("Receive and Provide let this device exchange eligible encrypted history. Existing custom permissions are preserved.",style=MaterialTheme.typography.bodySmall)
             TextButton({custom=!custom}){Text("Advanced")}
             if(custom){
                 Text("Peer ID: "+selected.peerId,style=MaterialTheme.typography.bodySmall)
@@ -80,7 +95,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
                 TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.DisableAuthorizer,selected.peerId)},enabled=!state.archiveBusy){Text("Disable authorizer")}
                 TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.Revoke,selected.peerId)},enabled=!state.archiveBusy){Text("Revoke device")}
             }
-        }},confirmButton={TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.Authorize,selected.peerId,read,serve)},enabled=!state.archiveBusy&&(read||serve)&&(!selected.authorized||read!=selected.grantedRead||serve!=selected.grantedServe)){Text(if(selected.authorized)"Save custom permissions" else "Authorize device")}},dismissButton={TextButton({managed=null}){Text("Close")}})
+        }},confirmButton={TextButton({pending=PendingArchiveConsent(enrollment,ArchiveDeviceAction.Authorize,selected.peerId,read,serve)},enabled=!state.archiveBusy&&selected.approvalKnown&&selected.mayAuthorize&&(read||serve)&&(!selected.localGrantPresent||read!=selected.localGrantRead||serve!=selected.localGrantServe)){Text(if(selected.authorized)"Confirm permissions" else "Authorize device")}},dismissButton={TextButton({managed=null}){Text("Close")}})
     }
     pending?.let {p->
         AlertDialog(onDismissRequest={pending=null},title={Text("Confirm history authorization")},text={
@@ -89,6 +104,8 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
                 ArchiveDeviceAction.Authorize->"Authorize selected permissions: receive="+p.read+", provide="+p.serve+"?"
                 ArchiveDeviceAction.Revoke->"Revoke this device's access granted by the local authorizer?"
                 ArchiveDeviceAction.DisableAuthorizer->"Disable this history authorizer locally?"
+                ArchiveDeviceAction.SetUp->"Enroll this first trusted history device with Receive history ON and Provide history ON? This does not authorize any other device."
+                ArchiveDeviceAction.ApproveIssuer->"Trust this exact registered authorizer to use its existing verified grants? No new grant will be issued."
             }+"\n\nSigning identities are unchanged. Already received history is not erased.")
         },confirmButton={TextButton({dispatch(UiAction.ArchiveConsent(p.context,p.action,p.device,p.read,p.serve));pending=null;managed=null}){Text("Confirm")}},dismissButton={TextButton({pending=null}){Text("Cancel")}})
     }

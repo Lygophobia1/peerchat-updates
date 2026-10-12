@@ -9,7 +9,7 @@ class ArchiveStatusTest {
         val native:(Int,ByteArray)->ByteArray={op,_->NativeRecordWriter(31).also{w->
             w.text("PeerChat/ArchiveApplication/v1");w.number(1);w.number(op.toLong())
             if(op==23){w.text("Synchronizing history");w.number(500);w.number(4);w.number(0);w.number(1);w.text(source);w.number(0);w.number(8);w.number(20);w.number(1791740000000);w.number(2);w.number(0)}
-            else {assertEquals(21,op);w.number(1);w.text(source);w.number(1);w.number(0)}
+            else {assertEquals(21,op);w.number(1);w.text(source);w.number(1);w.number(0);w.text("PeerChat/ArchiveDeviceApproval/v2");w.number(1);w.text(source);repeat(6){w.number(0)};w.text("")}
         }.bytes()}
         val execution=ArchiveEnrollmentExecution(native){_,_->throw AssertionError("No network calls for presentation")}
         val progress=execution.progress(8,3);assertEquals(8L,progress.received);assertEquals(500L,progress.processed);assertEquals(3L,progress.authenticationGeneration);assertFalse(progress.enabled)

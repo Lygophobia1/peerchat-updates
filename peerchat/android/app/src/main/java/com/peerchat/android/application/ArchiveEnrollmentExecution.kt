@@ -33,11 +33,37 @@ internal class ArchiveEnrollmentExecution(
     }
     fun devices(account:Long,generation:Long,base:ByteArray):List<ArchiveDeviceSnapshot>{
         val rows=archiveDeviceSnapshots(base)
-        val r=NativeRecord(native(21,command(21){it.number(account);it.number(generation)}),31)
+        val r=NativeRecord(native(21,command(21){it.number(account);it.number(generation);it.number(2)}),31)
         require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==21L&&r.number()==rows.size.toLong())
         val grants=mutableMapOf<String,Pair<Boolean,Boolean>>()
         repeat(rows.size){val peer=r.text();val read=r.number();val serve=r.number();require(read<=1&&serve<=1&&rows.any{it.peerId==peer}&&!grants.containsKey(peer));grants[peer]=(read==1L) to (serve==1L)}
-        r.end();return rows.map{it.copy(grantedRead=grants.getValue(it.peerId).first,grantedServe=grants.getValue(it.peerId).second)}
+        require(r.text()=="PeerChat/ArchiveDeviceApproval/v2"&&r.number()==rows.size.toLong())
+        fun flag()=r.number().also{require(it<=1)}==1L
+        val approval=mutableMapOf<String,ArchiveDeviceSnapshot>()
+        repeat(rows.size){
+            val peer=r.text();val row=rows.single{it.peerId==peer};require(!approval.containsKey(peer))
+            val value=row.copy(grantedRead=grants.getValue(peer).first,grantedServe=grants.getValue(peer).second,
+                approvalKnown=true,mayAuthorize=flag(),pairAuthorized=flag(),localGrantPresent=flag(),localGrantRead=flag(),localGrantServe=flag(),maySetUp=flag(),approvalIssuer=r.text())
+            require(value.localGrantPresent==(value.localGrantRead||value.localGrantServe))
+            require(!value.maySetUp||value.local&&!value.mayAuthorize&&!value.localGrantPresent)
+            require(value.approvalIssuer.isEmpty()||rows.any{it.peerId==value.approvalIssuer})
+            approval[peer]=value
+        }
+        r.end();return rows.map{approval.getValue(it.peerId)}
+    }
+    // Same scoped native operations as Windows. Refresh/render never calls these.
+    fun prepareFirstDevice(account:Long,generation:Long,local:String,confirmed:Boolean){
+        if(!confirmed)return
+        val row=devices(account,generation,native(3,command(3))).single{it.local&&it.peerId==local}
+        check(row.approvalKnown&&row.maySetUp){"First-device setup is not eligible; retained history authorization is unchanged."}
+        consent(account,generation,4,local,0,true)
+        consent(account,generation,5,local,3,true)
+    }
+    fun confirmExistingIssuer(account:Long,generation:Long,issuer:String,confirmed:Boolean){
+        if(!confirmed)return
+        val row=devices(account,generation,native(3,command(3))).single{it.local}
+        check(row.approvalKnown&&row.approvalIssuer==issuer){"This registered authorizer is not currently eligible for approval."}
+        consent(account,generation,4,issuer,0,true)
     }
     private fun proof(value:String,max:Int):ByteArray {
         require(value.length<=((max+2)/3)*4)

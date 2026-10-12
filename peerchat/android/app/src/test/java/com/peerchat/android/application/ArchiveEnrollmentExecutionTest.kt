@@ -94,4 +94,47 @@ class ArchiveEnrollmentExecutionTest {
         try{execution.refresh(8,3,f.device);fail()}catch(_:IllegalArgumentException){}
         assertFalse(f.live);assertFalse(f.operations.contains(2))
     }
+    private class ApprovalFixture {
+        val local="a".repeat(64);val issuer="b".repeat(64)
+        var setup=true;var offeredIssuer="";var malformed=false
+        val consent=mutableListOf<Int>()
+        fun reply(op:Int,fields:(NativeRecordWriter)->Unit)=NativeRecordWriter(31).also{it.text("PeerChat/ArchiveApplication/v1");it.number(1);it.number(op.toLong());fields(it)}.bytes()
+        fun base()=reply(3){w->w.number(2);for(peer in listOf(local,issuer)){w.text(peer);w.number(if(peer==local)1 else 0);repeat(3){w.number(0)}}}
+        fun native(op:Int,input:ByteArray):ByteArray {
+            val r=NativeRecord(input,31);require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==op.toLong())
+            if(op==3){r.end();return base()}
+            require(r.number()==8L&&r.number()==3L)
+            if(op==21){
+                require(r.number()==2L);r.end()
+                return reply(21){w->
+                    w.number(2);for(peer in listOf(local,issuer)){w.text(peer);w.number(0);w.number(0)}
+                    w.text("PeerChat/ArchiveDeviceApproval/v2");w.number(2)
+                    for(peer in listOf(local,issuer)){w.text(peer);repeat(5){w.number(0)};w.number(if(setup&&peer==local)1 else 0);w.text(if(peer==local)if(malformed)"c".repeat(64) else offeredIssuer else "")}
+                }
+            }
+            require(op==10);val action=r.number().toInt();val device=r.text();if(action==5)require(r.number()==3L)
+            require(r.number()==1L);r.end();require(device==local||device==issuer);consent+=action
+            return reply(10){}
+        }
+        fun execution()=ArchiveEnrollmentExecution(::native){_,_->error("No RPC during explicit consent adapter test")}
+    }
+    @Test fun firstUseUsesExistingScopedConsentOnlyAfterConfirmation(){
+        val f=ApprovalFixture();val execution=f.execution()
+        execution.prepareFirstDevice(8,3,f.local,false);assertTrue(f.consent.isEmpty())
+        val row=execution.devices(8,3,f.base()).single{it.local}
+        assertEquals(ArchiveDeviceAction.SetUp,row.primaryAction)
+        execution.prepareFirstDevice(8,3,f.local,true);assertEquals(listOf(4,5),f.consent)
+        f.setup=false;f.consent.clear()
+        try{execution.prepareFirstDevice(8,3,f.local,true);fail()}catch(_:IllegalStateException){}
+        assertTrue(f.consent.isEmpty())
+    }
+    @Test fun receivedIssuerRequiresExactKnownIdentityAndNeverIssuesGrant(){
+        val f=ApprovalFixture();f.setup=false;f.offeredIssuer=f.issuer
+        val execution=f.execution()
+        execution.confirmExistingIssuer(8,3,f.issuer,false);assertTrue(f.consent.isEmpty())
+        try{execution.confirmExistingIssuer(8,3,f.local,true);fail()}catch(_:IllegalStateException){}
+        execution.confirmExistingIssuer(8,3,f.issuer,true);assertEquals(listOf(4),f.consent)
+        f.malformed=true
+        try{execution.devices(8,3,f.base());fail()}catch(_:IllegalArgumentException){}
+    }
 }

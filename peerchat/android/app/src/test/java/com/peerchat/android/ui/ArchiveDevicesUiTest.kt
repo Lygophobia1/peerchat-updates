@@ -27,7 +27,7 @@ class ArchiveDevicesUiTest {
         compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state,actions::add)}}}
         compose.runOnIdle{assertTrue(actions.isEmpty())}
         compose.onNodeWithText("Trust history authorizer").assertDoesNotExist()
-        compose.onNodeWithText("Approve device").performScrollTo().performClick()
+        compose.onNodeWithText("Manage").performScrollTo().performClick()
         compose.onNodeWithText("Advanced",substring=false).performClick()
         compose.onNodeWithText("Trust history authorizer").performClick()
         compose.onNodeWithText("Confirm history authorization").assertExists()
@@ -40,6 +40,40 @@ class ArchiveDevicesUiTest {
             assertEquals(1,actions.size)
             assertEquals(UiAction.ArchiveConsent(context,ArchiveDeviceAction.TrustAuthorizer,id),actions.single())
         }
+    }
+    @Test fun firstUseSetupRequiresConfirmationAndUpdatesToAuthorize(){
+        val local="a".repeat(64);val remote="b".repeat(64)
+        val first=ArchiveDeviceSnapshot(local,true,false,false,false,approvalKnown=true,maySetUp=true)
+        val other=ArchiveDeviceSnapshot(remote,false,false,false,false,approvalKnown=true)
+        val context=ArchiveEnrollmentSnapshot(8,3,local,listOf(first,other))
+        val state=mutableStateOf(PeerChatUiState(demo=false,account=AccountUi("8","Test"),archiveEnrollment=context))
+        val actions=mutableListOf<UiAction>()
+        compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state.value,actions::add)}}}
+        compose.onAllNodesWithText("Set up History Sync",useUnmergedTree=true).assertCountEquals(2)
+        compose.onNodeWithText("Set up",substring=false).performScrollTo().performClick()
+        compose.onNodeWithText("Confirm history authorization").assertExists()
+        compose.runOnIdle{assertTrue(actions.isEmpty())}
+        compose.onNodeWithText("Cancel").performClick()
+        compose.runOnIdle{assertTrue(actions.isEmpty())}
+        compose.onNodeWithText("Set up",substring=false).performScrollTo().performClick()
+        compose.onNodeWithText("Confirm",substring=false).performClick()
+        compose.runOnIdle{
+            assertEquals(UiAction.ArchiveConsent(context,ArchiveDeviceAction.SetUp,local,true,true),actions.single())
+            state.value=state.value.copy(archiveEnrollment=context.copy(devices=listOf(first.copy(maySetUp=false,approvedIssuer=true,authorized=true,grantedRead=true,grantedServe=true,mayAuthorize=true,localGrantPresent=true,localGrantRead=true,localGrantServe=true),other.copy(mayAuthorize=true))))
+        }
+        compose.onNodeWithText("Set up",substring=false).assertDoesNotExist()
+        compose.onNodeWithText("Authorize",substring=false).performScrollTo().performClick()
+        compose.onNodeWithText("Authorize device").performClick()
+        compose.onNodeWithText("Confirm",substring=false).performClick()
+        compose.runOnIdle{val command=actions.last() as UiAction.ArchiveConsent;assertEquals(remote,command.device);assertTrue(command.read&&command.serve);assertEquals(ArchiveDeviceAction.Authorize,command.action)}
+    }
+    @Test fun unverifiedAndDisabledDevicesNeverOfferFirstUseOrAuthorize(){
+        val id="c".repeat(64)
+        val state=PeerChatUiState(demo=false,account=AccountUi("8","Test"),archiveEnrollment=ArchiveEnrollmentSnapshot(8,3,id,listOf(ArchiveDeviceSnapshot(id,true,false,false,false,approvalKnown=true))))
+        compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state){}}}}
+        compose.onNodeWithText("Set up",substring=false).assertDoesNotExist()
+        compose.onNodeWithText("Authorize",substring=false).assertDoesNotExist()
+        compose.onNodeWithText("Approve from an enabled trusted history device.",substring=true).assertExists()
     }
     @Test fun committedBatchProgressUpdatesWithoutReopeningAndDoesNotCountScansAsReceipts(){
         val id="b".repeat(64)
