@@ -1,1 +1,1 @@
-namespace PeerChat { public static class VersionInfo { public const string Display="4.0.2-dev.108"; public const string ReleaseFolder="v4.0.2-dev.108"; } }
+namespace PeerChat { public static class VersionInfo { public const string Display="4.0.2-dev.109"; public const string ReleaseFolder="v4.0.2-dev.109"; } }

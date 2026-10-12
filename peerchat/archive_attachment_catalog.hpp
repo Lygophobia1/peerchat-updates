@@ -47,6 +47,24 @@ class AttachmentCatalog {
 public:
     explicit AttachmentCatalog(Storage& storage):storage_(storage){}
     std::optional<Attachment> find(const std::string& id){auto bytes=storage_.attachmentMetadata(id);if(bytes.empty())return {};auto a=decodeLocalAttachment(bytes);require(a.id==id);return a;}
+    // Bounded local presentation window, independent of the expiring transfer
+    // journal. No network admission, remote paths or new history cursor owner.
+    std::vector<Attachment> recent(size_t limit=64){
+        require(limit>0&&limit<=64);auto through=storage_.attachmentMetadataWatermark();
+        auto after=std::max<std::int64_t>(0,through-static_cast<std::int64_t>(limit));
+        std::vector<Attachment> result;
+        while(after<through){auto page=storage_.attachmentMetadataPage(after,through);
+            for(const auto& record:page.records){auto a=decodeLocalAttachment(record.record);require(a.id==record.id);result.push_back(std::move(a));}
+            require(page.next>after);after=page.next;if(page.complete)break;
+        }
+        require(result.size()<=limit);return result;
+    }
+    static transfer::DurableState localCopy(const Attachment& a,const std::string& local,const AttachmentAccounts& directory){
+        auto account=directory(local);require(account.has_value());attachmentAccounts(a,directory,*account);
+        require(!a.location.empty());transfer::DurableState row;row.metadata={a.id,a.name,a.size,a.digest};row.peer=a.conversation;
+        row.state=transfer::State::Complete;row.sending=a.senderAccount==*account;row.done=a.size;row.created=a.utc;
+        row.digestReady=true;row.location=a.location;return row;
+    }
     bool retain(const Attachment& incoming){
         validateAttachment(incoming);auto previous=storage_.attachmentMetadata(incoming.id);auto next=incoming;
         if(!previous.empty()){

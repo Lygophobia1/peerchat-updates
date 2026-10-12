@@ -49,6 +49,9 @@ struct Instance {
     std::unique_ptr<peerchat::archive::Execution> archiveExecution;
     std::unique_ptr<peerchat::archive::AttachmentTransfers> archiveTransfers;
     std::set<std::string> cataloguedTransfers;
+    std::vector<peerchat::archive::Attachment> catalogProjection;
+    std::int64_t catalogProjectionWatermark=-1;
+    std::uint64_t catalogProjectionAt=0;
     void prepareAttachments(std::uint64_t now){
         using namespace peerchat;
         protocol::check(bool(storage));
@@ -556,11 +559,26 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             else instance->transfers->cancel(id);
         }else if(operation==4){
             r.end();auto rows=instance->transfers->snapshots();rows.erase(std::remove_if(rows.begin(),rows.end(),[&](const auto& row){return instance->archiveTransfers&&instance->archiveTransfers->wasArchiveTransfer(row.metadata.id);}),rows.end());
+            std::map<std::string,transfer::DurableState> retained;
+            for(auto row:instance->transfers->completedRecords())try{if(!row.sending)row.location=transfer::posix::FileSink::reopen(instance->attachmentCache,row)->sourceToken();retained.emplace(row.metadata.id,std::move(row));}catch(const std::exception&){/* Retain message metadata, never invent a missing copy. */}
+            archive::AttachmentCatalog catalog(*instance->storage);
+            auto watermark=instance->storage->attachmentMetadataWatermark();
+            if(watermark!=instance->catalogProjectionWatermark||now>=instance->catalogProjectionAt){
+                auto fresh=catalog.recent();instance->catalogProjection=std::move(fresh);instance->catalogProjectionWatermark=watermark;instance->catalogProjectionAt=now+2000;
+            }
+            for(const auto& a:instance->catalogProjection){
+                if(std::any_of(rows.begin(),rows.end(),[&](const auto& row){return row.metadata.id==a.id;}))continue;
+                try{auto row=archive::AttachmentCatalog::localCopy(a,instance->profile.peerId,[&](const auto& peer){return instance->storage->historicalDeviceAccount(peer);});
+                    retained.emplace(a.id,row);rows.push_back(row);
+                }catch(const std::exception&){/* No account mapping or possessed copy: no fabricated completed transfer. */}
+            }
+            std::stable_sort(rows.begin(),rows.end(),[](const auto& a,const auto& b){auto active=[](const auto& row){return row.state!=transfer::State::Complete&&row.state!=transfer::State::Failed&&row.state!=transfer::State::Cancelled;};if(active(a)!=active(b))return active(a);return a.created>b.created;});
+            if(rows.size()>64)rows.resize(64);
             w.number(rows.size());
             for(const auto& row:rows){w.string(row.metadata.id);w.string(row.peer);w.string(row.metadata.name);w.number(row.metadata.size);w.number(static_cast<unsigned>(row.state));w.number(row.sending);w.number(row.done);w.number(row.created);w.string(row.error);
                 std::string path;
-                if(row.state==transfer::State::Complete)for(auto d:instance->transfers->completedRecords())if(d.metadata.id==row.metadata.id){
-                    try{if(!d.sending)d.location=transfer::posix::FileSink::reopen(instance->attachmentCache,d)->sourceToken();
+                if(row.state==transfer::State::Complete&&retained.count(row.metadata.id)){auto d=retained.at(row.metadata.id);
+                    try{
                         auto source=transfer::posix::FileSource::reopen(instance->attachmentCache,d);path=directory()+"/"+source->cacheName();
                     }catch(const std::exception&){/* Missing copy is never presented as viewable. */}
                 }
@@ -610,6 +628,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;std::lock_guard<std::mutex> lock(instance->gate);instance->prepareAttachments(runtimeNow());
         std::optional<transfer::DurableState> found;
         for(auto row:instance->transfers->retainedRecords())if(row.metadata.id==id&&(row.state==transfer::State::Complete||(row.sending&&transfer::ProtectedTextSource::token(row.location)))){if(!row.sending)row.location=transfer::posix::FileSink::reopen(instance->attachmentCache,row)->sourceToken();found=std::move(row);}
+        if(!found){archive::AttachmentCatalog catalog(*instance->storage);auto a=catalog.find(id);if(a)found=archive::AttachmentCatalog::localCopy(*a,instance->profile.peerId,[&](const auto& peer){return instance->storage->historicalDeviceAccount(peer);});}
         protocol::check(found&&found->metadata.size<=transfer::ProtectedTextSource::MaxBytes);
         auto source=instance->openAttachment(*found);Blob plain;
         for(std::uint64_t offset=0;offset<source->size();offset+=transfer::ChunkBytes){auto part=source->read(offset,std::min<std::uint64_t>(transfer::ChunkBytes,source->size()-offset));plain.insert(plain.end(),part.begin(),part.end());}

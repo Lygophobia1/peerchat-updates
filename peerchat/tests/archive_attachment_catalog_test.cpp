@@ -59,6 +59,14 @@ int main(){try{
     auto second=a.attachmentMetadataPage(first.next,first.through);check(second.records.size()==3&&second.complete&&second.next==first.through);
     check(a.attachmentMetadataPage(0,watermark).records.size()==1);
     {
+        auto recent=sourceCatalog.recent(8);check(recent.size()==8&&recent.back().id==second.records.back().id);
+        auto copy=archive::AttachmentCatalog::localCopy(attachment,source.peerId,directoryA);
+        check(copy.state==transfer::State::Complete&&!copy.sending&&copy.location==attachment.location&&copy.metadata.name==attachment.name&&copy.done==attachment.size);
+        rejects([&]{archive::AttachmentCatalog::localCopy(attachment,reader.peerId,[](const auto&)->std::optional<std::uint64_t>{return 10;});});
+        rejects([&]{archive::AttachmentCatalog::localCopy(verified,source.peerId,directoryA);});
+        rejects([&]{sourceCatalog.recent(0);});rejects([&]{sourceCatalog.recent(65);});
+    }
+    {
         auto sync=std::make_unique<archive::AttachmentReader>(b,reading,readerScope,directoryB);unsigned pages=0;
         while(!sync->snapshot().complete){auto request=sync->nextRequest();rejects([&]{sync->nextRequest();});
             auto response=archive::serveAttachmentPage(a,source,serving,sourceScope,request,directoryA);
@@ -70,6 +78,20 @@ int main(){try{
         request=sync->nextRequest();sync->accept(archive::serveAttachmentPage(a,source,serving,sourceScope,request,directoryA));check(sync->snapshot().complete&&sync->snapshot().processed==11);
     }
     rejects([&]{a.attachmentMetadataPage(-1,watermark);});rejects([&]{a.attachmentMetadataPage(0,watermark,9);});
+    // Completed presentation survives reopening without any transfer journal.
+    // Larger catalogs are bounded; other-account copies cannot become readable.
+    {
+        std::string local,last;
+        {Storage retained((root/"retained").wstring());local=retained.profile().peerId;
+            retained.rememberAuthenticatedDeviceAccount(local,8);retained.rememberAuthenticatedDeviceAccount(contact.peerId,9);
+            archive::AttachmentCatalog catalog(retained);
+            for(unsigned n=0;n<70;++n){auto copy=attachment;copy.id=Storage::newMessageId();copy.recipient=local;copy.utc=100+n;catalog.retain(copy);last=copy.id;}
+        }
+        Storage reopened((root/"retained").wstring());check(reopened.profile().peerId==local);
+        archive::AttachmentCatalog catalog(reopened);auto recent=catalog.recent();check(recent.size()==64&&recent.back().id==last);
+        auto copy=archive::AttachmentCatalog::localCopy(recent.back(),local,[&](const auto& device){return reopened.historicalDeviceAccount(device);});
+        check(copy.metadata.id==last&&copy.location==attachment.location&&copy.done==attachment.size);
+    }
     // The archive adapter borrows exactly the same transfer mechanics as live
     // file sharing. No socket, peer trust promotion, chunk engine or fake ACK.
     {
