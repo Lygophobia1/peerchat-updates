@@ -100,7 +100,7 @@ bool verifyGroupEventSignature(const GroupEvent& event,const Blob& publicKey){
 }
 
 Blob encodeGroupEvent(const GroupEvent& event){protocol::Writer writer(protocol::GroupEvent);writer.string(event.eventId);writeUnsigned(writer,event);writer.bytes(event.signature);return writer.data;}
-GroupEvent decodeGroupEvent(const Blob& packet,bool enforceChatLimit,bool* oversizedMessage){protocol::Reader reader(packet);protocol::check(reader.type()==protocol::GroupEvent);GroupEvent event;event.eventId=reader.string();event.groupId=reader.string();auto kind=reader.number();protocol::check(kind>=1&&kind<=9);event.kind=static_cast<GroupEventKind>(kind);event.logicalOrder=reader.number();event.createdMilliseconds=reader.number();event.actorAccountId=reader.number();event.actorPeerId=reader.string();event.subjectAccountId=reader.number();event.subjectPeerId=reader.string();event.subjectName=reader.text();event.subjectPublicKey=reader.bytes();event.value=reader.text();if(enforceChatLimit&&event.kind==GroupEventKind::Message){auto message=reader.chatText();if(oversizedMessage)*oversizedMessage=!message.has_value();if(message)event.message=std::move(*message);}else event.message=reader.text();event.signature=reader.bytes();reader.end();return event;}
+GroupEvent decodeGroupEvent(const Blob& packet,bool enforceChatLimit,bool* oversizedMessage){protocol::Reader reader(packet);protocol::check(reader.type()==protocol::GroupEvent);GroupEvent event;event.eventId=reader.string();event.groupId=reader.string();auto kind=reader.number();protocol::check(kind>=1&&kind<=11);event.kind=static_cast<GroupEventKind>(kind);event.logicalOrder=reader.number();event.createdMilliseconds=reader.number();event.actorAccountId=reader.number();event.actorPeerId=reader.string();event.subjectAccountId=reader.number();event.subjectPeerId=reader.string();event.subjectName=reader.text();event.subjectPublicKey=reader.bytes();event.value=reader.text();if(enforceChatLimit&&event.kind==GroupEventKind::Message){auto message=reader.chatText();if(oversizedMessage)*oversizedMessage=!message.has_value();if(message)event.message=std::move(*message);}else event.message=reader.text();event.signature=reader.bytes();reader.end();return event;}
 
 bool GroupLedger::contains(const std::string& eventId)const{return std::any_of(events_.begin(),events_.end(),[&](const GroupEvent& event){return event.eventId==eventId;});}
 
@@ -122,7 +122,8 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
             if(allowed){next.created=true;next.groupId=event.groupId;next.name=event.value;next.ownerAccountId=event.actorAccountId;next.members[event.actorAccountId]={event.actorAccountId,event.subjectName,event.actorPeerId,event.subjectPublicKey,GroupRole::Owner};}
         }else if(next.created&&event.groupId==next.groupId){
             auto actor=next.members.find(event.actorAccountId);auto invitation=next.invitations.find(event.actorAccountId);
-            bool actorMember=actor!=next.members.end()&&signedBy(event,actor->second);bool invitedActor=invitation!=next.invitations.end()&&signedBy(event,invitation->second);
+            const auto* actorDevice=next.device(event.actorAccountId,event.actorPeerId);
+            bool actorMember=actorDevice&&signedBy(event,*actorDevice);bool invitedActor=invitation!=next.invitations.end()&&signedBy(event,invitation->second);
             if(event.kind==GroupEventKind::Rename){allowed=actorMember&&actor->second.role>=GroupRole::Admin&&validName(event.value);if(allowed)next.name=event.value;}
             else if(event.kind==GroupEventKind::Invite){allowed=actorMember&&actor->second.role>=GroupRole::Admin&&event.subjectAccountId>0&&event.subjectAccountId!=event.actorAccountId&&next.members.count(event.subjectAccountId)==0&&next.invitations.count(event.subjectAccountId)==0&&validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&!event.subjectName.empty();if(allowed)next.invitations[event.subjectAccountId]={event.subjectAccountId,event.subjectName,event.subjectPeerId,event.subjectPublicKey,GroupRole::Member};}
             else if(event.kind==GroupEventKind::Accept){allowed=invitedActor&&event.subjectAccountId==event.actorAccountId&&event.subjectPeerId==event.actorPeerId;if(allowed){next.members[event.actorAccountId]=invitation->second;next.invitations.erase(invitation);}}
@@ -130,9 +131,37 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
             else if(event.kind==GroupEventKind::Leave){allowed=actorMember&&actor->second.role!=GroupRole::Owner;if(allowed)next.members.erase(actor);}
             else if(event.kind==GroupEventKind::Remove){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(actor->second.role==GroupRole::Owner||(actor->second.role==GroupRole::Admin&&subject->second.role==GroupRole::Member));if(allowed)next.members.erase(subject);}
             else if(event.kind==GroupEventKind::SetRole){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&actor->second.role==GroupRole::Owner&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(event.value==L"admin"||event.value==L"member");if(allowed)subject->second.role=event.value==L"admin"?GroupRole::Admin:GroupRole::Member;}
+            else if(event.kind==GroupEventKind::AuthorizeDevice){
+                std::size_t count=1;for(const auto& item:next.authorizedDevices)if(item.second.accountId==event.actorAccountId)++count;
+                bool occupied=next.authorizedDevices.count(event.subjectPeerId)!=0;
+                for(const auto& item:next.members)if(item.second.peerId==event.subjectPeerId)occupied=true;
+                for(const auto& item:next.invitations)if(item.second.peerId==event.subjectPeerId)occupied=true;
+                allowed=deviceEnrollmentEnabled_&&actorMember&&event.subjectAccountId==event.actorAccountId&&count<8&&!occupied&&
+                    validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&
+                    Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&
+                    event.value==L"PeerChat/group-device-authorization/v1"&&event.message.empty();
+                if(allowed)next.authorizedDevices[event.subjectPeerId]={event.subjectAccountId,actor->second.name,event.subjectPeerId,event.subjectPublicKey,actor->second.role};
+            }
+            else if(event.kind==GroupEventKind::RevokeDevice){
+                const auto* subject=next.device(event.subjectAccountId,event.subjectPeerId);
+                allowed=deviceEnrollmentEnabled_&&actorMember&&subject&&event.subjectAccountId==event.actorAccountId&&
+                    event.value==L"PeerChat/group-device-revocation/v1"&&event.message.empty()&&event.subjectPublicKey.empty();
+                if(allowed&&actor->second.peerId==event.subjectPeerId){
+                    auto replacement=std::find_if(next.authorizedDevices.begin(),next.authorizedDevices.end(),[&](const auto& item){return item.second.accountId==event.actorAccountId;});
+                    allowed=replacement!=next.authorizedDevices.end();
+                    if(allowed){actor->second=replacement->second;next.authorizedDevices.erase(replacement);}
+                }else if(allowed)next.authorizedDevices.erase(event.subjectPeerId);
+            }
             else if(event.kind==GroupEventKind::Message){allowed=actorMember&&!event.message.empty()&&unicode::utf16Units(event.message)<=16384;if(allowed)next.messages.push_back(event);}
         }
-        if(allowed){next.maxLogicalOrder=std::max(next.maxLogicalOrder,event.logicalOrder);accepted.insert(event.eventId);}
+        if(allowed){
+            for(auto it=next.authorizedDevices.begin();it!=next.authorizedDevices.end();){
+                auto account=next.members.find(it->second.accountId);
+                if(account==next.members.end())it=next.authorizedDevices.erase(it);
+                else{it->second.role=account->second.role;++it;}
+            }
+            next.maxLogicalOrder=std::max(next.maxLogicalOrder,event.logicalOrder);accepted.insert(event.eventId);
+        }
     }
     state_=std::move(next);accepted_=std::move(accepted);return requiredEventId.empty()||accepted_.count(requiredEventId)!=0;
 }

@@ -84,7 +84,7 @@ public:
         }
         // A partial server roster cannot authorize a key for a larger signed
         // group. Finish signed-roster reconciliation before distributing material.
-        return currentMembers==ledger.members.size();
+        return currentMembers==ledger.members.size()+ledger.authorizedDevices.size();
     }
     // A restart reconciles any gap between committing the local key and queuing
     // each recipient. Durable receipts prevent repeated handoffs after ACK.

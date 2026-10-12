@@ -25,7 +25,7 @@ Windows package: build/development/4.0.2-dev.96/DevelopmentUpdater/PeerChat-4.0.
 - Historical group membership/key generations are not currently published as a sufficient provenance proof. Current membership or History Sync approval cannot authorize old group records for a newly joined account.
 - Android compiles shared signed group ledger/storage but does not yet expose the Windows group envelope/key/session owner through JNI/application state. Group AEAD/key generation still directly use Windows CNG; a narrow platform crypto adapter is an independent portability prerequisite, not a new Kotlin encryption engine.
 
-Additional-device authority policy requires an explicit choice: Owner/Admin only, or an existing member device permitted to approve another device of its own account. This dependent policy decision must not be inferred from account login. Independent Android work may continue while it is pending.
+Approved additional-device policy: an existing authorized group device may explicitly approve another device of its own account. Account login remains insufficient. The dev.99 signed-ledger prerequisite is documented in GROUP_DEVICE_ENROLLMENT_DEV99.md; server proof/epoch and application integration remain follow-up work, not completed enrollment.
 
 ## Remaining sequence
 

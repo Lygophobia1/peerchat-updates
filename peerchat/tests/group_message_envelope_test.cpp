@@ -48,6 +48,76 @@ static GroupState ledger(const std::string& local,const Profile& owner,const Pro
     }
     return result.state();
 }
+static void deviceEnrollment(const std::filesystem::path& root){
+    Storage firstStore((root/L"first").wstring()),secondStore((root/L"second").wstring()),thirdStore((root/L"third").wstring());
+    auto first=firstStore.profile(),second=secondStore.profile(),third=thirdStore.profile();
+    GroupLedger ledger(true);GroupEvent create;create.groupId=newGroupId();create.logicalOrder=1;create.kind=GroupEventKind::Create;
+    create.actorAccountId=create.subjectAccountId=8;create.actorPeerId=create.subjectPeerId=first.peerId;
+    create.subjectPublicKey=first.publicKey;create.subjectName=L"Account owner";create.value=L"Device enrollment";
+    signGroupEvent(create,first);require(ledger.append(create),"Device fixture create");
+    auto approve=[&](const Profile& actor,const Profile& target,std::uint64_t account){
+        GroupEvent event;event.groupId=create.groupId;event.logicalOrder=ledger.state().maxLogicalOrder+1;
+        event.kind=GroupEventKind::AuthorizeDevice;event.actorAccountId=8;event.actorPeerId=actor.peerId;
+        event.subjectAccountId=account;event.subjectPeerId=target.peerId;event.subjectPublicKey=target.publicKey;
+        event.value=L"PeerChat/group-device-authorization/v1";signGroupEvent(event,actor);return event;
+    };
+    require(!ledger.state().device(8,second.peerId),"Same-account device admitted without consent");
+    auto rejected=[&](const GroupEvent& event){auto isolated=ledger;return !isolated.append(event);};
+    require(rejected(approve(first,second,9)),"Cross-account approval accepted");
+    require(rejected(approve(second,third,8)),"Unenrolled device issued approval");
+    auto grant=approve(first,second,8);auto tampered=grant;tampered.subjectPeerId=third.peerId;
+    require(rejected(tampered),"Substituted device approval accepted");
+    auto wrongPurpose=grant;wrongPurpose.value=L"PeerChat/history";signGroupEvent(wrongPurpose,first);
+    require(rejected(wrongPurpose),"Wrong-purpose device approval accepted");
+    grant=decodeGroupEvent(encodeGroupEvent(grant));require(ledger.append(grant),"Explicit same-account approval rejected");
+    GroupLedger productionDefault;require(productionDefault.append(create)&&!productionDefault.append(grant),
+        "Production enabled enrollment before server proof/epoch integration");
+    require(ledger.state().members.size()==1&&ledger.state().device(8,second.peerId),"Device enrollment changed logical membership");
+    group_keys::RosterSnapshot oldRoster{create.groupId,newGroupId(),first.peerId,1,{{8,first.peerId,GroupRole::Owner,false}}};
+    require(!group_keys::GroupKeyManager::matchesSignedLedger(oldRoster,ledger.state()),"Incomplete server roster authorized enrolled ledger");
+    // A separately authorized device can approve its own account's next device.
+    auto next=approve(second,third,8);require(ledger.append(next),"Authorized sibling could not approve own-account device");
+    GroupEvent chat;chat.groupId=create.groupId;chat.logicalOrder=ledger.state().maxLogicalOrder+1;
+    chat.kind=GroupEventKind::Message;chat.actorAccountId=8;chat.actorPeerId=second.peerId;chat.message=L"Signed sibling message";
+    signGroupEvent(chat,second);require(ledger.append(chat),"Approved sibling could not sign group text");
+    GroupEvent revoke;revoke.groupId=create.groupId;revoke.logicalOrder=ledger.state().maxLogicalOrder+1;
+    revoke.kind=GroupEventKind::RevokeDevice;revoke.actorAccountId=revoke.subjectAccountId=8;
+    revoke.actorPeerId=first.peerId;revoke.subjectPeerId=second.peerId;revoke.value=L"PeerChat/group-device-revocation/v1";
+    signGroupEvent(revoke,first);require(ledger.append(revoke),"Device-specific revocation failed");
+    require(!ledger.state().device(8,second.peerId)&&ledger.state().device(8,third.peerId),"Revocation changed sibling membership");
+    auto stale=approve(second,second,8);require(!ledger.append(stale),"Revoked device issued fresh approval");
+    chat.logicalOrder=ledger.state().maxLogicalOrder+1;chat.message=L"Revoked message";signGroupEvent(chat,second);
+    require(rejected(chat),"Revoked device signed a new accepted group message");
+    // Revoking the original device preserves the account role and an authorized sibling.
+    auto primaryRevocation=ledger;revoke.logicalOrder=ledger.state().maxLogicalOrder+1;
+    revoke.actorPeerId=third.peerId;revoke.subjectPeerId=first.peerId;signGroupEvent(revoke,third);
+    require(primaryRevocation.append(revoke)&&!primaryRevocation.state().device(8,first.peerId)&&
+        primaryRevocation.state().device(8,third.peerId)&&primaryRevocation.state().members.at(8).role==GroupRole::Owner,
+        "Original-device revocation lost account ownership");
+    revoke.logicalOrder=primaryRevocation.state().maxLogicalOrder+1;revoke.subjectPeerId=third.peerId;signGroupEvent(revoke,third);
+    require(!primaryRevocation.append(revoke),"Last authorized device was silently revoked");
+    // Ordinary members, not just Owners/Admins, may approve their own account.
+    GroupLedger ordinary(true);require(ordinary.append(create),"Ordinary-member fixture create");
+    GroupEvent invite;invite.groupId=create.groupId;invite.logicalOrder=2;invite.kind=GroupEventKind::Invite;
+    invite.actorAccountId=8;invite.actorPeerId=first.peerId;invite.subjectAccountId=9;
+    invite.subjectPeerId=third.peerId;invite.subjectPublicKey=third.publicKey;invite.subjectName=L"Member";
+    signGroupEvent(invite,first);require(ordinary.append(invite),"Ordinary-member invite");
+    GroupEvent accept;accept.groupId=create.groupId;accept.logicalOrder=3;accept.kind=GroupEventKind::Accept;
+    accept.actorAccountId=accept.subjectAccountId=9;accept.actorPeerId=accept.subjectPeerId=third.peerId;
+    signGroupEvent(accept,third);require(ordinary.append(accept),"Ordinary-member accept");
+    auto memberGrant=grant;memberGrant.logicalOrder=4;memberGrant.actorAccountId=memberGrant.subjectAccountId=9;
+    memberGrant.actorPeerId=third.peerId;signGroupEvent(memberGrant,third);
+    require(ordinary.append(memberGrant)&&ordinary.state().device(9,second.peerId)->role==GroupRole::Member,
+        "Ordinary member approval required admin or elevated sibling role");
+    // Reverse delivery and encrypted storage reopen preserve the signed device state.
+    GroupLedger reverse(true);for(auto it=ledger.events().rbegin();it!=ledger.events().rend();++it)reverse.append(*it);
+    require(reverse.state().device(8,third.peerId)&&!reverse.state().device(8,second.peerId),"Device ledger did not converge");
+    const auto path=(root/L"reopen").wstring();{Storage store(path);for(const auto& event:ledger.events())store.appendGroupEvent(event);}
+    GroupLedger reopened(true);{Storage store(path);for(const auto& event:store.groupEvents(create.groupId))reopened.append(event);}
+    require(reopened.state().device(8,third.peerId)&&!reopened.state().device(8,second.peerId),"Signed device approval did not persist");
+    require(firstStore.contacts().empty()&&firstStore.groupKey(create.groupId,1).empty(),"Enrollment silently granted trust or history keys");
+    std::cout<<"PASS: explicit same-account signed device approval; substitution/domain rejection; device revocation; primary replacement; last-device protection; convergence and encrypted reopen\n";
+}
 static void memberFanout(const std::filesystem::path& root,unsigned count){
     require(count==3||count==4,"Fanout fixture bound");
     std::vector<std::unique_ptr<Storage>> stores;std::vector<Profile> devices;
@@ -69,6 +139,7 @@ static void memberFanout(const std::filesystem::path& root,unsigned count){
 int main(int argc,char** argv){
     try{
         require(argc==2,"Unique temporary profile directory required");auto root=std::filesystem::path(argv[1]);
+        deviceEnrollment(root/L"device-enrollment");
         memberFanout(root/L"three-members",3);memberFanout(root/L"four-members",4);
         Storage ownerStore((root/L"owner").wstring()),memberStore((root/L"member").wstring()),outsiderStore((root/L"outsider").wstring());
         auto owner=ownerStore.profile(),member=memberStore.profile(),outsider=outsiderStore.profile();
