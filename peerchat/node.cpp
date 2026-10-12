@@ -938,8 +938,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 protocol::check(c.peerId==roster->distributorPeerId||event.actorPeerId==c.peerId);
                 auto found=groups.find(event.groupId);
                 if(found==groups.end()){
-                    protocol::check(event.kind==GroupEventKind::Create&&c.peerId==roster->distributorPeerId&&
-                        std::any_of(roster->devices.begin(),roster->devices.end(),[&](const auto& member){return member.accountId==event.actorAccountId&&member.peerId==event.actorPeerId&&member.role==GroupRole::Owner&&!member.invited;}));
+                    protocol::check(event.kind==GroupEventKind::Create&&c.peerId==roster->distributorPeerId);
+                    if(!roster->creationProof.empty())protocol::check(encodeGroupEvent(event)==roster->creationProof);
+                    else protocol::check(std::any_of(roster->devices.begin(),roster->devices.end(),[&](const auto& member){return member.accountId==event.actorAccountId&&member.peerId==event.actorPeerId&&member.role==GroupRole::Owner&&!member.invited;}));
                     found=groups.emplace(event.groupId,GroupLedger{}).first;
                 }
                 auto& ledger=found->second;

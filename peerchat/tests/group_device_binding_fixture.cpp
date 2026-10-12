@@ -61,6 +61,15 @@ int main(int argc,char** argv){try{
     auto targetProof=group_devices::identityProof(1,target);
     auto validWire=group_devices::approvalProof(server,1,valid,target.publicKey,targetProof,owner);
     group_keys::RosterSnapshot previous{create.groupId,server,owner.peerId,1,{{1,owner.peerId,GroupRole::Owner,false}}};
+    auto rooted=previous;rooted.creationProof=encodeGroupEvent(create);
+    group_keys::GroupKeyManager roots(ownerStore,1,owner.peerId);roots.apply(rooted);
+    auto rejectRoot=[&](group_keys::RosterSnapshot candidate){bool rejected=false;try{roots.apply(candidate);}catch(const std::exception&){rejected=true;}
+        if(!rejected||roots.roster(server)->creationProof!=rooted.creationProof)throw std::runtime_error("Unverified root changed authoritative roster");};
+    auto badRoot=rooted;badRoot.creationProof.back()^=1;rejectRoot(badRoot);
+    badRoot=rooted;badRoot.creationProof.clear();rejectRoot(badRoot);
+    badRoot=rooted;badRoot.creationProof=encodeGroupEvent(otherCreation);rejectRoot(badRoot);
+    badRoot=rooted;badRoot.generation=2;badRoot.creationProof.back()^=1;rejectRoot(badRoot);
+    if(group_keys::verifiedCreation(server,create.groupId,rooted.creationProof).eventId!=create.eventId)throw std::runtime_error("Verified root changed creation event");
     auto current=previous;current.generation=2;current.devices.push_back({1,target.peerId,GroupRole::Owner,false});
     GroupLedger signedLedger(true);if(!signedLedger.append(create))throw std::runtime_error("Reconciliation create failed");
     auto checkRejection=[&](const group_keys::RosterSnapshot& snapshot,group_devices::Reconciliation reason){

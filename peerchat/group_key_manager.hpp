@@ -2,6 +2,7 @@
 #include "group_key_handoff.hpp"
 #include "group.hpp"
 #include "platform/group_crypto.hpp"
+#include "group_roster_evidence.hpp"
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -17,6 +18,7 @@ struct RosterSnapshot {
     std::string legacyGroupId,serverGroupId,distributorPeerId;
     std::uint64_t generation=0;
     std::vector<RosterDevice> devices;
+    Blob creationProof{};
 };
 
 // Profile-scoped group-key owner. The server roster is an authenticated control
@@ -29,6 +31,7 @@ public:
         if(!localAccountId_||!protocol::id(localPeerId_))throw std::invalid_argument("Group-key profile binding is invalid");
     }
     void apply(RosterSnapshot snapshot){
+        if(!snapshot.creationProof.empty())verifiedCreation(snapshot.serverGroupId,snapshot.legacyGroupId,snapshot.creationProof);
         if(!protocol::id(snapshot.legacyGroupId,32)||!protocol::id(snapshot.serverGroupId,32)||
            !protocol::id(snapshot.distributorPeerId)||snapshot.generation==0||
            snapshot.generation>INT64_MAX||snapshot.devices.empty())throw std::runtime_error("Invalid authenticated group roster");
@@ -46,6 +49,8 @@ public:
         if(!local||!distributor)throw std::runtime_error("Local profile or key distributor is not in the authenticated group roster");
         auto old=rosters_.find(snapshot.serverGroupId);
         if(old!=rosters_.end()){
+            if(!old->second.creationProof.empty()&&old->second.creationProof!=snapshot.creationProof)
+                throw std::runtime_error("Authenticated group creation evidence changed or disappeared");
             if(old->second.legacyGroupId!=snapshot.legacyGroupId||snapshot.generation<old->second.generation)
                 throw std::runtime_error("Stale or conflicting group roster");
             if(snapshot.generation==old->second.generation){

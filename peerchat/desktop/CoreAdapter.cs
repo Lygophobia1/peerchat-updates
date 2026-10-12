@@ -77,6 +77,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_erase_history(IntPtr handle,string peer);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_account(IntPtr handle,ulong account,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster_evidence(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members,[In] byte[] proof,uint proofSize);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_clear_authenticated_group_rosters(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_begin_group_control(IntPtr handle,string group,ulong targetAccount,string targetPeer,ulong discoveryGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
@@ -165,7 +166,8 @@ public sealed class CoreAdapter : IDisposable {
     public bool SetAuthenticatedGroupRoster(long localAccount,ulong discoveryGeneration,ServerGroupRoster roster){
         if(localAccount<=0||discoveryGeneration==0||roster==null)return false;
         var rows=new List<string>();foreach(var member in roster.Members){if(member.AccountId<=0||String.IsNullOrEmpty(member.PeerId)||String.IsNullOrEmpty(member.Role)||String.IsNullOrEmpty(member.State)||member.PeerId.IndexOfAny(new[]{'|','\r','\n'})>=0)return false;rows.Add(member.AccountId+"|"+member.PeerId+"|"+member.Role+"|"+member.State);}
-        return ui_authenticated_group_roster(handle,(ulong)localAccount,discoveryGeneration,roster.GroupId,roster.LegacyGroupId,(ulong)roster.RosterGeneration,roster.DistributorPeerId,String.Join("\n",rows))!=0;
+        byte[] proof=new byte[0];if(!String.IsNullOrEmpty(roster.CreationProof)){if(roster.CreationProof.Length>4096)return false;try{proof=Convert.FromBase64String(roster.CreationProof);}catch(FormatException){return false;}if(proof.Length==0||proof.Length>2048)return false;}
+        return ui_authenticated_group_roster_evidence(handle,(ulong)localAccount,discoveryGeneration,roster.GroupId,roster.LegacyGroupId,(ulong)roster.RosterGeneration,roster.DistributorPeerId,String.Join("\n",rows),proof,(uint)proof.Length)!=0;
     }
     public void ClearAuthenticatedGroupRosters(){ui_clear_authenticated_group_rosters(handle);}
     public bool BeginGroupControl(string serverGroupId,long targetAccount,string targetPeer,ulong discoveryGeneration){return targetAccount>0&&ui_begin_group_control(handle,serverGroupId,(ulong)targetAccount,targetPeer,discoveryGeneration)!=0;}
