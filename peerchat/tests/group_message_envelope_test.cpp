@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <set>
+#include <bcrypt.h> // Independent Windows fixture even with portable production crypto.
 
 using namespace peerchat;
 using namespace peerchat::group_messages;
@@ -15,14 +16,14 @@ static void expect(const Reception& value,Result expected){
 static void resign(Envelope& envelope,const Profile& profile){envelope.signature=signDevicePayload(signingPayload(envelope),profile);}
 // Independent CNG fixture: manufacture a fully authenticated conflicting ID,
 // rather than weakening production creation to accept caller-selected IDs/nonces.
-static void sealFixture(Envelope& e,const Blob& plaintext,const Blob& keyBytes,const Profile& device){
+static void sealFixture(Envelope& e,const Blob& plaintext,const Blob& keyBytes,const Profile& device,bool preserveNonce=false){
     BCRYPT_ALG_HANDLE algorithm{};BCRYPT_KEY_HANDLE key{};
     auto ok=[](NTSTATUS status){require(status>=0,"CNG envelope fixture failed");};
     try{
         ok(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_AES_ALGORITHM,nullptr,0));
         ok(BCryptSetProperty(algorithm,BCRYPT_CHAINING_MODE,reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_GCM)),sizeof(BCRYPT_CHAIN_MODE_GCM),0));
         ok(BCryptGenerateSymmetricKey(algorithm,&key,nullptr,0,const_cast<PUCHAR>(keyBytes.data()),32,0));
-        e.nonce.resize(12);ok(BCryptGenRandom(nullptr,e.nonce.data(),12,BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+        e.nonce.resize(12);if(!preserveNonce)ok(BCryptGenRandom(nullptr,e.nonce.data(),12,BCRYPT_USE_SYSTEM_PREFERRED_RNG));
         e.ciphertext.resize(plaintext.size());e.tag.resize(16);auto aad=associatedData(e);
         BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;BCRYPT_INIT_AUTH_MODE_INFO(info);
         info.pbNonce=e.nonce.data();info.cbNonce=12;info.pbAuthData=aad.data();info.cbAuthData=static_cast<ULONG>(aad.size());info.pbTag=e.tag.data();info.cbTag=16;
@@ -47,9 +48,28 @@ static GroupState ledger(const std::string& local,const Profile& owner,const Pro
     }
     return result.state();
 }
+static void memberFanout(const std::filesystem::path& root,unsigned count){
+    require(count==3||count==4,"Fanout fixture bound");
+    std::vector<std::unique_ptr<Storage>> stores;std::vector<Profile> devices;
+    for(unsigned i=0;i<count;++i){stores.push_back(std::make_unique<Storage>((root/std::to_wstring(i)).wstring()));devices.push_back(stores.back()->profile());}
+    GroupLedger signedLedger;auto local=newGroupId(),server=newGroupId();GroupEvent event;
+    event.groupId=local;event.logicalOrder=1;event.kind=GroupEventKind::Create;event.actorAccountId=event.subjectAccountId=1;event.actorPeerId=event.subjectPeerId=devices[0].peerId;event.subjectPublicKey=devices[0].publicKey;event.subjectName=L"Owner";event.value=L"Bounded fanout";signGroupEvent(event,devices[0]);require(signedLedger.append(event),"Fanout create");
+    for(unsigned i=1;i<count;++i){event={};event.groupId=local;event.logicalOrder=2*i;event.kind=GroupEventKind::Invite;event.actorAccountId=1;event.actorPeerId=devices[0].peerId;event.subjectAccountId=i+1;event.subjectPeerId=devices[i].peerId;event.subjectPublicKey=devices[i].publicKey;event.subjectName=L"Member";signGroupEvent(event,devices[0]);require(signedLedger.append(event),"Fanout invite");event={};event.groupId=local;event.logicalOrder=2*i+1;event.kind=GroupEventKind::Accept;event.actorAccountId=event.subjectAccountId=i+1;event.actorPeerId=event.subjectPeerId=devices[i].peerId;signGroupEvent(event,devices[i]);require(signedLedger.append(event),"Fanout accept");}
+    group_keys::RosterSnapshot roster;roster.legacyGroupId=local;roster.serverGroupId=server;roster.distributorPeerId=devices[0].peerId;roster.generation=2*count-1;
+    for(unsigned i=0;i<count;++i)roster.devices.push_back({i+1,devices[i].peerId,i?GroupRole::Member:GroupRole::Owner,false});
+    std::vector<std::unique_ptr<group_keys::GroupKeyManager>> owners;std::vector<std::unique_ptr<MessageLayer>> layers;
+    for(unsigned i=0;i<count;++i){owners.push_back(std::make_unique<group_keys::GroupKeyManager>(*stores[i],i+1,devices[i].peerId));owners.back()->apply(roster);}
+    require(owners[0]->ensureCurrentKey(server,signedLedger.state()),"Fanout key generation");
+    for(unsigned i=1;i<count;++i){auto offers=stores[0]->pendingGroupKeyHandoffs(devices[i].peerId);require(offers.size()==1&&owners[i]->accept(offers[0],devices[0].peerId,signedLedger.state()),"Fanout exact-device key handoff");}
+    for(unsigned i=0;i<count;++i)layers.push_back(std::make_unique<MessageLayer>(*stores[i],*owners[i],devices[i],i+1));
+    for(unsigned sender=0;sender<count;++sender){auto plain=body("bounded-fanout-"+std::to_string(sender));auto sent=layers[sender]->create(local,signedLedger.state(),plain);require(sent.result==Result::Accepted,"Fanout sender");for(unsigned reader=0;reader<count;++reader)if(reader!=sender){auto received=layers[reader]->receive(local,signedLedger.state(),sent.wire);expect(received,Result::Accepted);require(received.plaintext==plain&&received.envelope.senderAccount==sender+1&&received.envelope.senderDevice==devices[sender].peerId,"Fanout provenance/content");expect(layers[reader]->receive(local,signedLedger.state(),sent.wire),Result::DuplicateMessage);}}
+    for(unsigned i=0;i<count;++i)require(stores[i]->authenticatedGroupHistory(local,100).size()==count,"Fanout protected history count/dedupe");
+    std::cout<<"PASS: "<<count<<" signed members, per-device key handoff, every sender/reader, original provenance and protected history dedupe\n";
+}
 int main(int argc,char** argv){
     try{
         require(argc==2,"Unique temporary profile directory required");auto root=std::filesystem::path(argv[1]);
+        memberFanout(root/L"three-members",3);memberFanout(root/L"four-members",4);
         Storage ownerStore((root/L"owner").wstring()),memberStore((root/L"member").wstring()),outsiderStore((root/L"outsider").wstring());
         auto owner=ownerStore.profile(),member=memberStore.profile(),outsider=outsiderStore.profile();
         auto local=newGroupId(),server=newGroupId();auto state=ledger(local,owner,member);
@@ -67,6 +87,7 @@ int main(int argc,char** argv){
         for(auto size:{std::size_t(0),std::size_t(1),std::size_t(128),MaxPlaintextBytes}){
             Blob plain(size);for(std::size_t i=0;i<size;++i)plain[i]=static_cast<unsigned char>(i%251);
             auto sent=sender.create(local,state,plain);require(sent.result==Result::Accepted,"Envelope creation failed");
+            if(size){auto cng=sent.envelope;sealFixture(cng,plain,ownerStore.groupKey(local,2),owner,true);require(cng.ciphertext==sent.envelope.ciphertext&&cng.tag==sent.envelope.tag,"Independent CNG/production encryption mismatch");}
             require(nonces.insert(sent.envelope.nonce).second,"Repeated nonce");
             Envelope parsed;require(parse(sent.wire,parsed)==Result::Accepted&&serialize(parsed)==sent.wire,"Canonical parse/serialize roundtrip failed");
             auto received=receiver.receive(local,state,sent.wire);expect(received,Result::Accepted);require(received.plaintext==plain,"Roundtrip mismatch");

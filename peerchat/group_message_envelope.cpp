@@ -5,11 +5,8 @@
 
 namespace peerchat::group_messages {
 namespace {
-struct Algorithm { BCRYPT_ALG_HANDLE handle{};~Algorithm(){if(handle)BCryptCloseAlgorithmProvider(handle,0);} };
-struct Key { BCRYPT_KEY_HANDLE handle{};~Key(){if(handle)BCryptDestroyKey(handle);} };
-struct Secret { Blob bytes;~Secret(){SecureZeroMemory(bytes.data(),bytes.size());} };
+struct Secret { Blob bytes;~Secret(){platform::group_crypto::wipe(bytes.data(),bytes.size());} };
 void check(bool value){if(!value)throw std::runtime_error("Invalid group envelope");}
-void nt(NTSTATUS value){if(value<0)throw std::runtime_error("Group envelope crypto operation failed");}
 void number(Blob& out,std::uint64_t value,std::size_t bytes){for(std::size_t i=bytes;i>0;--i)out.push_back(static_cast<unsigned char>(value>>(8*(i-1))));}
 void fixed(Blob& out,const std::string& value,std::size_t bytes){check(protocol::id(value,bytes));out.insert(out.end(),value.begin(),value.end());}
 void append(Blob& out,const Blob& value){out.insert(out.end(),value.begin(),value.end());}
@@ -24,23 +21,10 @@ struct Reader {
     Blob bytes(std::size_t size){check(size<=wire.size()-offset);Blob value(wire.begin()+offset,wire.begin()+offset+size);offset+=size;return value;}
     std::string text(std::size_t size){auto value=bytes(size);return {value.begin(),value.end()};}
 };
-// Windows CNG AES-256-GCM. Caller owns/wipes key and decrypted scratch memory.
+// Same AES-256-GCM envelope on both platforms; caller wipes scratch memory.
 bool gcm(bool encrypt,const Blob& keyBytes,const Blob& aad,const Blob& nonce,const Blob& input,Blob& output,Blob& tag){
     check(keyBytes.size()==32&&nonce.size()==12&&tag.size()==16&&input.size()<=MaxPlaintextBytes);
-    Algorithm algorithm;Key key;
-    nt(BCryptOpenAlgorithmProvider(&algorithm.handle,BCRYPT_AES_ALGORITHM,nullptr,0));
-    nt(BCryptSetProperty(algorithm.handle,BCRYPT_CHAINING_MODE,reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_GCM)),sizeof(BCRYPT_CHAIN_MODE_GCM),0));
-    nt(BCryptGenerateSymmetricKey(algorithm.handle,&key.handle,nullptr,0,const_cast<PUCHAR>(keyBytes.data()),32,0));
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;BCRYPT_INIT_AUTH_MODE_INFO(info);
-    info.pbNonce=const_cast<PUCHAR>(nonce.data());info.cbNonce=12;
-    info.pbAuthData=const_cast<PUCHAR>(aad.data());info.cbAuthData=static_cast<ULONG>(aad.size());
-    info.pbTag=tag.data();info.cbTag=16;
-    output.resize(input.size());ULONG written=0;unsigned char empty=0;
-    auto operation=encrypt?BCryptEncrypt:BCryptDecrypt;
-    NTSTATUS status=operation(key.handle,input.empty()?&empty:const_cast<PUCHAR>(input.data()),static_cast<ULONG>(input.size()),
-        &info,nullptr,0,output.empty()?&empty:output.data(),static_cast<ULONG>(output.size()),&written,0);
-    if(status<0){SecureZeroMemory(output.data(),output.size());output.clear();return false;}
-    check(written==input.size());return true;
+    return platform::group_crypto::gcm(encrypt,keyBytes,aad,nonce,input,output,tag);
 }
 }
 
@@ -116,7 +100,7 @@ Creation MessageLayer::create(const std::string& local,const GroupState& ledger,
         e.messageId=Storage::newMessageId();e.senderAccount=account_;e.senderDevice=device_.peerId;e.nonce.resize(12);
         bool reserved=false;
         for(int attempt=0;attempt<32&&!reserved;++attempt){
-            nt(BCryptGenRandom(nullptr,e.nonce.data(),12,BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+            e.nonce=platform::group_crypto::random(12);
             reserved=store_.reserveGroupNonce(Storage::publicKeyId(key.bytes),e.nonce);
         }
         if(!reserved){result.result=Result::CryptoFailed;return result;}

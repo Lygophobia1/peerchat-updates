@@ -1,7 +1,7 @@
 #pragma once
 #include "group_key_handoff.hpp"
 #include "group.hpp"
-#include <bcrypt.h>
+#include "platform/group_crypto.hpp"
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -95,9 +95,7 @@ public:
            !matchesSignedLedger(*snapshot,signedLedger))return false;
         Blob key=store_.groupKey(snapshot->legacyGroupId,snapshot->generation);
         if(key.empty()){
-            key.resize(32);
-            if(BCryptGenRandom(nullptr,key.data(),static_cast<ULONG>(key.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)
-                throw std::runtime_error("Cannot generate group content key");
+            key=platform::group_crypto::random(32);
             store_.saveGroupKey(snapshot->legacyGroupId,snapshot->generation,key);
         }
         try{
@@ -109,10 +107,10 @@ public:
                 offer.serverGroupId=snapshot->serverGroupId;offer.distributorPeerId=localPeerId_;
                 offer.recipientPeerId=member.peerId;offer.rosterGeneration=offer.keyGeneration=snapshot->generation;
                 offer.contentKey=key;store_.queueGroupKeyHandoff(offer);
-                SecureZeroMemory(offer.contentKey.data(),offer.contentKey.size());
+                platform::group_crypto::wipe(offer.contentKey.data(),offer.contentKey.size());
             }
-        }catch(...){SecureZeroMemory(key.data(),key.size());throw;}
-        SecureZeroMemory(key.data(),key.size());return true;
+        }catch(...){platform::group_crypto::wipe(key.data(),key.size());throw;}
+        platform::group_crypto::wipe(key.data(),key.size());return true;
     }
     bool accept(const GroupKeyHandoff& offer,const std::string& authenticatedTlsPeer,const GroupState& signedLedger){
         const auto* snapshot=roster(offer.serverGroupId);
