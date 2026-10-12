@@ -75,6 +75,7 @@ namespace PeerChat.Server {
         public long OwnerAccountId { get; private set; }
         public string ServerGroupId { get; private set; }
         public string CreateEventId { get; private set; }
+        public string Encoded { get; private set; }
 
         internal static ulong Number(byte[] data,ref int offset){
             if(data.Length-offset<8)throw new InvalidOperationException("Invalid group creation proof.");
@@ -119,7 +120,7 @@ namespace PeerChat.Server {
 #endif
                 }catch(CryptographicException){throw new InvalidOperationException("Invalid group creation proof.");}
                 string serverId=Hex(sha.ComputeHash(Encoding.ASCII.GetBytes("PeerChat group roster v1|"+legacyId+"|"+actorIdentity))).Substring(0,32);
-                return new GroupRosterProof{LegacyGroupId=legacyId,OwnerIdentity=actorIdentity,OwnerAccountId=(long)actor,ServerGroupId=serverId,CreateEventId=eventId};
+                return new GroupRosterProof{LegacyGroupId=legacyId,OwnerIdentity=actorIdentity,OwnerAccountId=(long)actor,ServerGroupId=serverId,CreateEventId=eventId,Encoded=Convert.ToBase64String(wire)};
             }
         }
     }

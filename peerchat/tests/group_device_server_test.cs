@@ -26,6 +26,9 @@ internal static class GroupDeviceServerTest {
         string path=Path.Combine(root,"server.sqlite");using(var db=new AccountDatabase(path)){
             Accounts(db,creation,member,sibling);
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)==null,"Unregistered target was admitted");
+            Require(Convert.ToString(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["creationProof"])==creation.Encoded,"Verified root was not retained exactly");
+            Require(db.GroupRoster(creation.ServerGroupId,2,member)==null,"Unenrolled account could read group root");
+            Require(db.RegisterGroup(1,creation.OwnerIdentity,creation)!=null&&Convert.ToInt64(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["rosterGeneration"])==1,"Registration retry mutated generation");
             Require(db.AddDevice(1,approve.Target),"Recipient registration");
             Require(db.ApplyGroupDeviceProof(2,member,approve)==null,"Wrong account session approved device");
             Require(db.ApplyGroupDeviceProof(1,member,approve)==null,"Wrong device session approved device");
@@ -60,8 +63,11 @@ internal static class GroupDeviceServerTest {
             Require(db.ApplyGroupDeviceProof(1,replacement.Actor,replacement)!=null,"Authorized sibling could not retire original device");
             Require(!db.GroupRosterMember(approve.GroupId,1,approve.Actor)&&db.GroupRosterMember(approve.GroupId,1,approve.Target),"Primary revoke changed wrong device");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)==null,"Removed approver retained proof authority");
+            Require(Convert.ToString(db.GroupRoster(approve.GroupId,1,approve.Target)["creationProof"])==creation.Encoded,"Revoking original creator erased immutable root evidence");
+            Require(db.GroupRoster(approve.GroupId,1,approve.Actor)==null,"Revoked creator could read current roster/root");
         }
         using(var db=new AccountDatabase(path)){
+            Require(Convert.ToString(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["creationProof"])==creation.Encoded,"Root evidence lost across restart");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)!=null,"Exact receipt did not survive restart");
             Require(db.AddDevice(1,sibling)==false,"Device could move accounts");
             Require(db.AddDevice(1,Read(root,"stale.bin").Target),"Stale fixture same-account registration");
@@ -81,6 +87,29 @@ internal static class GroupDeviceServerTest {
             Require(!db.GroupRosterMember(creation.ServerGroupId,2,sibling)&&db.ApplyGroupDeviceProof(2,member,memberProof)==null,"Rejoin restored old device authorization");
             Require(db.ApplyGroupDeviceProof(2,member,Read(root,"member-rejoin.bin"))!=null,"Fresh post-rejoin approval failed");
             Require(db.GroupRemove(creation.ServerGroupId,1,creation.OwnerIdentity,2,member,8)!=null&&!db.GroupRosterMember(creation.ServerGroupId,2,sibling),"Account removal retained sibling authorization");
+        }
+        string legacy=Path.Combine(root,"legacy-root.sqlite");
+        using(var db=new AccountDatabase(legacy)){
+            // Isolated fixture models the pre-column schema, with no production data.
+            db.Execute("DROP TABLE group_device_proofs; DROP TABLE group_invites; DROP TABLE group_roster_devices; DROP TABLE group_rosters;");
+            db.Execute("CREATE TABLE group_rosters(group_id TEXT PRIMARY KEY,legacy_group_id TEXT NOT NULL,owner_account_id INTEGER NOT NULL,owner_identity TEXT NOT NULL,distributor_identity TEXT NOT NULL,roster_generation INTEGER NOT NULL,creation_event_id TEXT NOT NULL DEFAULT '',created_utc INTEGER NOT NULL);");
+        }
+        using(var db=new AccountDatabase(legacy)){
+            Accounts(db,creation,member,sibling);
+            db.Execute("UPDATE group_rosters SET creation_proof='';");
+            Require(Convert.ToString(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["creationProof"])=="","Missing historical root was fabricated");
+            Require(db.RegisterGroup(2,member,creation)==null,"Wrong account backfilled root");
+            Require(db.RegisterGroup(1,creation.OwnerIdentity,creation)!=null&&Convert.ToString(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["creationProof"])==creation.Encoded,"Exact verified registration retry failed to backfill");
+            Require(Convert.ToInt64(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["rosterGeneration"])==1,"Backfill altered roster epoch");
+            db.Execute("UPDATE group_rosters SET creation_proof='AAAA';");
+            bool rejected=false;try{db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity);}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Corrupt persisted root did not fail closed");
+            rejected=false;try{db.RegisterGroup(1,creation.OwnerIdentity,creation);}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Registration silently overwrote corrupt root");
+            var substituted=GroupRosterProof.Parse(Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"other-create.bin"))));
+            db.Execute("UPDATE group_rosters SET creation_proof='"+substituted.Encoded+"';");
+            rejected=false;try{db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity);}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Valid signature from another group was accepted as the stored root");
         }
         Console.WriteLine("PASS: actual native double-signature proofs; authoritative account/device/group checks; exact epochs; durable idempotency; revocation; ordinary-member approval; leave/rejoin and account removal");return 0;
     }catch(Exception error){Console.Error.WriteLine("FAIL: "+error.GetType().Name+": "+error.Message);return 1;}}

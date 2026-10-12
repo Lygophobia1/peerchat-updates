@@ -59,7 +59,7 @@ namespace PeerChat.Server {
                 "CREATE INDEX IF NOT EXISTS friend_requests_recipient_state ON friend_requests(recipient_id,state,updated_utc);" +
                 "CREATE TABLE IF NOT EXISTS friendships(account_low INTEGER NOT NULL REFERENCES accounts(id), account_high INTEGER NOT NULL REFERENCES accounts(id), created_utc INTEGER NOT NULL, PRIMARY KEY(account_low,account_high));" +
                 "CREATE TABLE IF NOT EXISTS account_blocks(blocker_id INTEGER NOT NULL REFERENCES accounts(id), blocked_id INTEGER NOT NULL REFERENCES accounts(id), created_utc INTEGER NOT NULL, PRIMARY KEY(blocker_id,blocked_id));" +
-                "CREATE TABLE IF NOT EXISTS group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, distributor_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);" +
+                "CREATE TABLE IF NOT EXISTS group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, distributor_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', creation_proof TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_roster_devices(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, public_identity TEXT NOT NULL, role TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(group_id,account_id,public_identity));" +
                 "CREATE INDEX IF NOT EXISTS group_roster_members_by_device ON group_roster_devices(public_identity,state,group_id);" +
                 "CREATE TABLE IF NOT EXISTS group_device_proofs(proof_id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, actor_identity TEXT NOT NULL, target_identity TEXT NOT NULL, applied_generation INTEGER NOT NULL, revoked INTEGER NOT NULL, signed_proof TEXT NOT NULL);" +
@@ -77,6 +77,7 @@ namespace PeerChat.Server {
             try { Execute("ALTER TABLE presence ADD COLUMN public_candidate_source TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
             try { Execute("ALTER TABLE presence ADD COLUMN observed_classification TEXT;"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
             try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_event_id TEXT NOT NULL DEFAULT '';"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
+            try { Execute("ALTER TABLE group_rosters ADD COLUMN creation_proof TEXT NOT NULL DEFAULT '';"); } catch(InvalidOperationException error){if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw;}
             // Early group-roster databases predate the distributor field. CREATE TABLE IF NOT
             // EXISTS does not upgrade them; registration would otherwise fail on its first INSERT.
             try { Execute("ALTER TABLE group_rosters ADD COLUMN distributor_identity TEXT NOT NULL DEFAULT '';"); }
@@ -176,9 +177,12 @@ namespace PeerChat.Server {
         public Dictionary<string,object> RegisterGroup(long account,string device,GroupRosterProof proof){lock(gate){
             if(proof==null||proof.OwnerAccountId!=account||proof.OwnerIdentity!=device||!OwnsDevice(account,device))return null;
             string group=proof.ServerGroupId;long existing=ScalarLong(database,"SELECT owner_account_id FROM group_rosters WHERE group_id="+Quote(group));
-            if(existing!=0){if(existing!=account||ScalarText(database,"SELECT owner_identity FROM group_rosters WHERE group_id="+Quote(group))!=device||ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.LegacyGroupId||ScalarText(database,"SELECT creation_event_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.CreateEventId)return null;return GroupRoster(group,account,device);}
+            if(existing!=0){if(existing!=account||ScalarText(database,"SELECT owner_identity FROM group_rosters WHERE group_id="+Quote(group))!=device||ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.LegacyGroupId||ScalarText(database,"SELECT creation_event_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.CreateEventId)return null;// Backfill only an exact verified registration retry; never invent a root for legacy history.
+                string stored=GroupCreationProof(group);
+                if(String.IsNullOrEmpty(stored))Execute("UPDATE group_rosters SET creation_proof="+Quote(proof.Encoded)+" WHERE group_id="+Quote(group)+" AND creation_proof='';");
+                return GroupRoster(group,account,device);}
             Execute("BEGIN IMMEDIATE;");try{
-                Execute("INSERT INTO group_rosters(group_id,legacy_group_id,owner_account_id,owner_identity,distributor_identity,roster_generation,creation_event_id,created_utc) VALUES("+Quote(group)+","+Quote(proof.LegacyGroupId)+","+account+","+Quote(device)+","+Quote(device)+",1,"+Quote(proof.CreateEventId)+","+UnixNow()+");");
+                Execute("INSERT INTO group_rosters(group_id,legacy_group_id,owner_account_id,owner_identity,distributor_identity,roster_generation,creation_event_id,creation_proof,created_utc) VALUES("+Quote(group)+","+Quote(proof.LegacyGroupId)+","+account+","+Quote(device)+","+Quote(device)+",1,"+Quote(proof.CreateEventId)+","+Quote(proof.Encoded)+","+UnixNow()+");");
                 Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(group)+","+account+","+Quote(device)+",'owner','member');");
                 Execute("COMMIT;");return GroupRoster(group,account,device);
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
@@ -207,6 +211,18 @@ namespace PeerChat.Server {
                 Execute("COMMIT;");return GroupRoster(proof.GroupId,account,device);
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
+        // Public, content-free root evidence; never grants current membership or historical keys.
+        // The original creator may have been revoked, so compare immutable registration fields.
+        string GroupCreationProof(string group){
+            string encoded=ScalarText(database,"SELECT creation_proof FROM group_rosters WHERE group_id="+Quote(group));
+            if(String.IsNullOrEmpty(encoded))return "";
+            var proof=GroupRosterProof.Parse(encoded);
+            if(proof.ServerGroupId!=group||proof.LegacyGroupId!=ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))||
+               proof.CreateEventId!=ScalarText(database,"SELECT creation_event_id FROM group_rosters WHERE group_id="+Quote(group))||
+               proof.OwnerAccountId!=ScalarLong(database,"SELECT owner_account_id FROM group_rosters WHERE group_id="+Quote(group)))
+                throw new InvalidOperationException("Stored group creation evidence is invalid.");
+            return proof.Encoded;
+        }
         public Dictionary<string,object> GroupRoster(string group,long account,string device){lock(gate){
             if(!GroupId(group)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null&&GroupRole(group,account,device,"invited")==null)return null;
             long generation=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group));
@@ -214,7 +230,7 @@ namespace PeerChat.Server {
             try{if(SqliteNative.prepare(database,"SELECT r.account_id,r.public_identity,r.role,r.state,a.username FROM group_roster_devices r JOIN accounts a ON a.id=r.account_id WHERE r.group_id="+Quote(group)+" ORDER BY r.account_id,r.public_identity",out statement)!=0)throw new InvalidOperationException("Cannot read group roster.");
                 while(SqliteNative.step(statement)==100)members.Add(new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(statement,0)},{"publicIdentity",SqliteNative.columnText(statement,1)},{"role",SqliteNative.columnText(statement,2)},{"state",SqliteNative.columnText(statement,3)},{"username",SqliteNative.columnText(statement,4)}});
             }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
-            return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members}};
+            return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members},{"creationProof",GroupCreationProof(group)}};
         }}
         public List<Dictionary<string,object>> GroupRostersForDevice(long account,string device){lock(gate){
             var result=new List<Dictionary<string,object>>();if(!OwnsDevice(account,device))return result;

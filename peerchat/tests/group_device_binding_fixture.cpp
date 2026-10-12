@@ -15,6 +15,8 @@ int main(int argc,char** argv){try{
     create.actorAccountId=create.subjectAccountId=1;create.actorPeerId=create.subjectPeerId=owner.peerId;
     create.subjectPublicKey=owner.publicKey;create.subjectName=L"Owner";create.value=L"Device proof fixtures";signGroupEvent(create,owner);
     write(root/L"create.bin",encodeGroupEvent(create));
+    auto otherCreation=create;otherCreation.groupId=newGroupId();signGroupEvent(otherCreation,owner);
+    write(root/L"other-create.bin",encodeGroupEvent(otherCreation));
     auto text=std::string("PeerChat group roster v1|")+create.groupId+"|"+owner.peerId;
     auto server=hex(digestDevicePayload(Blob(text.begin(),text.end()))).substr(0,32);
     std::map<std::string,Blob> evidence;
