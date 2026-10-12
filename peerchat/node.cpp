@@ -1433,7 +1433,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(!groupAccount.accountId||command.accountId!=groupAccount.accountId||!command.generation||command.generation<groupRosterDiscoveryGeneration)
                     throw std::runtime_error("Authenticated group roster belongs to a stale account session");
                 if(!groupKeys)groupKeys=std::make_unique<group_keys::GroupKeyManager>(*store,groupAccount.accountId,profile.peerId);
-                groupKeys->apply(std::move(command.roster));groupRosterDiscoveryGeneration=command.generation;
+                auto applicationLedger=groups.find(command.roster.legacyGroupId);
+                group_devices::Replica::applyAuthenticated(*store,*groupKeys,std::move(command.roster),applicationLedger==groups.end()?nullptr:&applicationLedger->second);
+                groupRosterDiscoveryGeneration=command.generation;
                 const auto* current=groupKeys->roster(command.group);
                 if(current){
                     auto retired=sessionTransports->invalidateGroupControl(sessionEpoch,command.group,current->generation);

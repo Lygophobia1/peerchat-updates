@@ -37,6 +37,53 @@ class Replica {
         if(result==Reconciliation::Accepted){ledger=std::move(candidate);}return result;
     }
 public:
+    // Existing application roster owner supplies the authenticated snapshot and
+    // local ledger. No second session/retry owner and no implicit activation.
+    static void applyAuthenticated(Storage& store,group_keys::GroupKeyManager& keys,
+                                   group_keys::RosterSnapshot incoming,GroupLedger* ledger,bool enabled=false){
+        const std::string server=incoming.serverGroupId;
+        auto old=keys.roster(server);group_keys::RosterSnapshot before;if(old)before=*old;
+        try{
+            incoming=keys.checked(std::move(incoming));
+            auto exactRoot=[&](const GroupLedger& verified){
+                if(incoming.creationProof.empty())return;
+                auto creation=std::find_if(verified.events().begin(),verified.events().end(),[&](const auto& event){return event.kind==GroupEventKind::Create&&verified.accepted(event.eventId);});
+                protocol::check(creation!=verified.events().end()&&encodeGroupEvent(*creation)==incoming.creationProof);
+            };
+            if(ledger&&ledger->state().created)exactRoot(*ledger);
+            auto memberships=[](const group_keys::RosterSnapshot& snapshot){
+                std::map<std::uint64_t,std::set<std::string>> result;
+                for(const auto& d:snapshot.devices)if(!d.invited)result[d.accountId].insert(d.peerId);
+                return result;
+            };
+            auto afterMembers=memberships(incoming);bool deviceChange=false;
+            if(old){
+                auto previous=memberships(before);
+                for(const auto& account:afterMembers){auto found=previous.find(account.first);
+                    if(found!=previous.end()?found->second!=account.second:account.second.size()>1)deviceChange=true;
+                }
+            }
+            if(deviceChange){
+                protocol::check(enabled&&ledger&&incoming.generation==before.generation+1);
+                auto proof=std::find_if(incoming.deviceApprovals.begin(),incoming.deviceApprovals.end(),[&](const auto& row){return row.appliedGeneration==incoming.generation;});
+                protocol::check(proof!=incoming.deviceApprovals.end());
+                Replica replica(store,server,incoming.legacyGroupId,true);
+                protocol::check(replica.accept(before,incoming,proof->proof,*ledger)==Reconciliation::Accepted);
+            }else if(!old&&std::any_of(afterMembers.begin(),afterMembers.end(),[](const auto& account){return account.second.size()>1;})){
+                // Reopening may use verified protected receipts, never a naked
+                // current roster or a truncated public proof window as a ledger.
+                protocol::check(enabled&&ledger);
+                auto restored=restoreStored(store,incoming.legacyGroupId);
+                exactRoot(restored);
+                protocol::check(group_keys::GroupKeyManager::matchesSignedLedger(incoming,restored.state()));
+                *ledger=std::move(restored);
+            }
+            keys.apply(std::move(incoming));
+        }catch(...){
+            // A failed current snapshot cannot leave old key authority usable.
+            keys.revoke(server);throw;
+        }
+    }
     // Existing groups keep their accepted-event replay behavior. Device events
     // require individually protected receipts; recovery does not enable live
     // enrollment or release a key without a fresh authenticated roster.

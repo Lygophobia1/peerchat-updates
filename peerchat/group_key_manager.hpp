@@ -31,7 +31,8 @@ public:
         :store_(storage),localAccountId_(localAccountId),localPeerId_(std::move(localPeerId)),deviceEnrollmentEnabled_(deviceEnrollmentEnabled){
         if(!localAccountId_||!protocol::id(localPeerId_))throw std::invalid_argument("Group-key profile binding is invalid");
     }
-    void apply(RosterSnapshot snapshot){
+    // Pure admission/preflight: no key, handoff or persistence mutation.
+    RosterSnapshot checked(RosterSnapshot snapshot)const{
         if(!snapshot.creationProof.empty())verifiedCreation(snapshot.serverGroupId,snapshot.legacyGroupId,snapshot.creationProof);
         protocol::check(snapshot.deviceApprovals.empty()||!snapshot.creationProof.empty());
         verifyDeviceApprovals(snapshot.serverGroupId,snapshot.legacyGroupId,snapshot.generation,snapshot.deviceApprovals);
@@ -64,6 +65,13 @@ public:
                     throw std::runtime_error("Conflicting group roster generation");
                 for(size_t i=0;i<snapshot.devices.size();++i){const auto& a=old->second.devices[i];const auto& b=snapshot.devices[i];if(a.accountId!=b.accountId||a.peerId!=b.peerId||a.role!=b.role||a.invited!=b.invited)throw std::runtime_error("Conflicting group roster generation");}
             }
+        }
+        return snapshot;
+    }
+    void apply(RosterSnapshot snapshot){
+        snapshot=checked(std::move(snapshot));
+        auto old=rosters_.find(snapshot.serverGroupId);
+        if(old!=rosters_.end()){
             for(const auto& previous:old->second.devices){
                 if(previous.invited)continue;
                 if(!currentMember(snapshot,previous.accountId,previous.peerId))

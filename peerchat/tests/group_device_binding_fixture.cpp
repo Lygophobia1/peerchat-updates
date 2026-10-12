@@ -95,6 +95,64 @@ int main(int argc,char** argv){try{
     if(group_devices::reconcileApproval(current,retired,evidence.at("revoke.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||signedLedger.state().device(1,target.peerId))
         throw std::runtime_error("Exact device revocation did not reconcile");
     auto restored=current;restored.generation=4;
+    {
+        Storage appStore((root/L"application-replica").wstring());appStore.appendGroupEvent(create);
+        GroupLedger appLedger;appLedger.append(create);
+        group_keys::GroupKeyManager appKeys(appStore,1,owner.peerId,true);appKeys.apply(rooted);
+        auto next=current;next.creationProof=rooted.creationProof;next.deviceApprovals={{2,validWire}};
+        auto preflight=appKeys.checked(next);
+        if(preflight.generation!=2||appKeys.roster(server)->generation!=1||appStore.groupEvents(create.groupId).size()!=1)
+            throw std::runtime_error("Pure roster preflight mutated application state");
+        group_devices::Replica::applyAuthenticated(appStore,appKeys,next,&appLedger,true);
+        if(appKeys.roster(server)->generation!=2||!appLedger.state().device(1,target.peerId)||appStore.groupReplicaReceipt(create.groupId,valid.eventId).empty())
+            throw std::runtime_error("Application roster did not commit an individually verified replica receipt");
+        group_devices::Replica::applyAuthenticated(appStore,appKeys,next,&appLedger,true);
+        if(appStore.groupEvents(create.groupId).size()!=2)throw std::runtime_error("Repeated application snapshot duplicated a ledger event");
+        auto revoked=retired;revoked.creationProof=rooted.creationProof;revoked.deviceApprovals={{3,evidence.at("revoke.bin")}};
+        group_devices::Replica::applyAuthenticated(appStore,appKeys,revoked,&appLedger,true);
+        if(appLedger.state().device(1,target.peerId)||appKeys.roster(server)->generation!=3)throw std::runtime_error("Application device revoke did not remove authority");
+        auto enrolled=restored;enrolled.creationProof=rooted.creationProof;enrolled.deviceApprovals={{4,evidence.at("reenroll.bin")}};
+        group_devices::Replica::applyAuthenticated(appStore,appKeys,enrolled,&appLedger,true);
+        for(int i=0;i<16;++i){Storage reopened((root/L"application-replica").wstring());
+            group_keys::GroupKeyManager loaded(reopened,1,owner.peerId,true);GroupLedger live;
+            group_devices::Replica::applyAuthenticated(reopened,loaded,enrolled,&live,true);
+            if(!live.state().device(1,target.peerId)||live.events().size()!=4||loaded.roster(server)->generation!=4)
+                throw std::runtime_error("Application reopen lost individually verified replica admission");}
+        auto rejectApplication=[&](const std::wstring& name,group_keys::RosterSnapshot candidate,bool enabled,bool ledgerPresent){
+            Storage isolated((root/name).wstring());isolated.appendGroupEvent(create);GroupLedger unchanged;unchanged.append(create);
+            group_keys::GroupKeyManager isolatedKeys(isolated,1,owner.peerId,true);isolatedKeys.apply(rooted);bool failed=false;
+            try{group_devices::Replica::applyAuthenticated(isolated,isolatedKeys,candidate,ledgerPresent?&unchanged:nullptr,enabled);}catch(...){failed=true;}
+            if(!failed||isolatedKeys.roster(server)||unchanged.state().device(1,target.peerId)||isolated.groupEvents(create.groupId).size()!=1||!isolated.groupReplicaReceipt(create.groupId,valid.eventId).empty())
+                throw std::runtime_error("Rejected application admission retained authority or mutated durable ledger");
+        };
+        rejectApplication(L"app-disabled",next,false,true);rejectApplication(L"app-no-ledger",next,true,false);
+        auto missing=next;missing.deviceApprovals.clear();rejectApplication(L"app-missing-proof",missing,true,true);
+        auto gap=next;gap.generation=3;rejectApplication(L"app-epoch-gap",gap,true,true);
+        auto wrongRole=next;wrongRole.devices.back().role=GroupRole::Admin;rejectApplication(L"app-wrong-role",wrongRole,true,true);
+        {
+            Storage failedStore((root/L"app-conflicting-receipt").wstring());failedStore.appendGroupEvent(create);failedStore.commitGroupReplicaReceipt(valid,Blob{0});
+            group_keys::GroupKeyManager failedKeys(failedStore,1,owner.peerId,true);failedKeys.apply(rooted);GroupLedger unchanged;unchanged.append(create);bool failed=false;
+            try{group_devices::Replica::applyAuthenticated(failedStore,failedKeys,next,&unchanged,true);}catch(...){failed=true;}
+            if(!failed||failedKeys.roster(server)||unchanged.state().device(1,target.peerId)||failedStore.groupReplicaReceipt(create.groupId,valid.eventId)!=Blob{0}||failedStore.groupEvents(create.groupId).size()!=2)
+                throw std::runtime_error("Failed application persistence changed authority or discarded existing evidence");
+        }
+        {
+            // Same signed identity/group namespace is insufficient: exact accepted
+            // creation evidence must agree between server and local ledger.
+            auto changedCreation=create;changedCreation.value=L"Different signed creation";signGroupEvent(changedCreation,owner);
+            Storage conflictingRoot((root/L"app-conflicting-root").wstring());conflictingRoot.appendGroupEvent(changedCreation);
+            GroupLedger conflictingLedger;conflictingLedger.append(changedCreation);
+            group_keys::GroupKeyManager conflictingKeys(conflictingRoot,1,owner.peerId,true);conflictingKeys.apply(rooted);bool failed=false;
+            try{group_devices::Replica::applyAuthenticated(conflictingRoot,conflictingKeys,next,&conflictingLedger,true);}catch(...){failed=true;}
+            if(!failed||conflictingKeys.roster(server)||conflictingLedger.state().device(1,target.peerId)||conflictingRoot.groupEvents(create.groupId).size()!=1)
+                throw std::runtime_error("Different signed creation root admitted an application transition");
+        }
+        // A server snapshot alone cannot bootstrap an unverified multi-device ledger.
+        Storage naked((root/L"app-naked-bootstrap").wstring());naked.appendGroupEvent(create);
+        group_keys::GroupKeyManager nakedKeys(naked,1,owner.peerId,true);GroupLedger unverified;bool rejected=false;
+        try{group_devices::Replica::applyAuthenticated(naked,nakedKeys,next,&unverified,true);}catch(...){rejected=true;}
+        if(!rejected||nakedKeys.roster(server)||naked.groupEvents(create.groupId).size()!=1)throw std::runtime_error("Current roster substituted for durable enrollment receipts");
+    }
     group_keys::verifyDeviceApprovals(server,create.groupId,3,{{2,validWire},{3,evidence.at("revoke.bin")}});
     {
         protocol::Writer w(protocol::GroupEvent);w.string("PeerChat/group-roster-evidence/v1");w.bytes(encodeGroupEvent(create));w.number(2);
