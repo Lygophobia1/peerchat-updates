@@ -23,6 +23,7 @@
 #include "../archive_attachment_transfer.hpp"
 #include "transfer_storage.hpp"
 #include "attachment_file_io.hpp"
+#include "../protected_text_source.hpp"
 #endif
 
 namespace {
@@ -38,6 +39,12 @@ struct Instance {
     std::shared_ptr<peerchat::transfer::posix::Cache> attachmentCache;
     std::unique_ptr<peerchat::transfer::ProtectedStorageJournal> transferJournal;
     std::unique_ptr<peerchat::transfer::TransferManager> transfers;
+    std::shared_ptr<peerchat::platform::RecordProtector> attachmentRecords;
+    std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
+        using namespace peerchat;auto open=[&](const transfer::DurableState& row){return transfer::posix::FileSource::reopen(attachmentCache,row);};
+        if(transfer::ProtectedTextSource::token(d.location))return transfer::ProtectedTextSource::reopen(d,attachmentRecords,open);
+        return open(d);
+    }
     std::unique_ptr<peerchat::archive::Enrollment> archiveApplication;
     std::unique_ptr<peerchat::archive::Execution> archiveExecution;
     std::unique_ptr<peerchat::archive::AttachmentTransfers> archiveTransfers;
@@ -49,14 +56,15 @@ struct Instance {
             auto identity=std::dynamic_pointer_cast<platform::android::Identity>(profile.identity);protocol::check(bool(identity));
             auto path=identity->context->bytes("attachmentDirectory","()[B");attachmentCache=std::make_shared<transfer::posix::Cache>(std::string(path.begin(),path.end()));
             auto cache=attachmentCache;
+            attachmentRecords=std::make_shared<platform::android::Records>(identity->context);
             transferJournal=std::make_unique<transfer::ProtectedStorageJournal>(*storage,profile.peerId,
-                [cache](const transfer::DurableState& d){return transfer::posix::FileSource::reopen(cache,d);},
+                [this](const transfer::DurableState& d){return openAttachment(d);},
                 [cache](const transfer::DurableState& d){return transfer::posix::FileSink::reopen(cache,d);});
             auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get());manager->restore(now);transfers=std::move(manager);
         }
         if(!archiveTransfers&&archiveApplication&&archiveExecution){auto cache=attachmentCache;
             archiveTransfers=std::make_unique<archive::AttachmentTransfers>(*storage,profile,archiveApplication->policy(),*transfers,
-                [cache](const archive::Attachment& a){transfer::DurableState d;d.metadata={a.id,a.name,a.size,a.digest};d.location=a.location;return transfer::posix::FileSource::reopen(cache,d);},
+                [this](const archive::Attachment& a){transfer::DurableState d;d.metadata={a.id,a.name,a.size,a.digest};d.location=a.location;return openAttachment(d);},
                 [cache](const transfer::Metadata& m,const Blob&){cache->reserve(m.size);return std::make_unique<transfer::posix::FileSink>(cache,m);},
                 [cache](const transfer::DurableState& d){auto file=transfer::posix::FileSink::reopen(cache,d);return file->sourceToken();},
                 [this](const session::ReliableAuthorization& scope,std::uint64_t time){archiveExecution->hold(scope,time,relayRequests->network());});
@@ -580,6 +588,32 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         const auto now=runtimeNow();instance->sessions.demandLiveRoute(peer,now+45000,now);
         if(requested!=peer)instance->sessions.demandLiveRoute(requested,now+45000,now);
         return peerchat::platform::android::Context::input(env,peerchat::Blob(id.begin(),id.end()));
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge_offerText(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jbyteArray input){
+    try{
+        using namespace peerchat;protocol::check(input&&env->GetArrayLength(input)>0&&static_cast<size_t>(env->GetArrayLength(input))<=transfer::ProtectedTextSource::MaxBytes);
+        auto peer=peerArgument(env,destination);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);protocol::check(instance->friends.contains(peer));instance->prepareAttachments(runtimeNow());
+        auto plain=platform::android::Context::output(env,input);auto id=Storage::newMessageId();
+        auto sealed=transfer::ProtectedTextSource::seal(plain,id,*instance->attachmentRecords);
+        auto record=transfer::posix::FileSource::create(instance->attachmentCache,id+"-"+transfer::ProtectedTextSource::Name,transfer::ProtectedTextSource::Name,sealed);
+        auto source=std::make_unique<transfer::ProtectedTextSource>(std::move(record),id,instance->attachmentRecords);
+        instance->transfers->offer(peer,id,std::move(source),runtimeNow());instance->sessions.demandLiveRoute(peer,runtimeNow()+2000,runtimeNow());
+        return platform::android::Context::input(env,id);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge_readText(JNIEnv* env,jobject,jlong handle,jbyteArray input){
+    try{
+        using namespace peerchat;protocol::check(input&&env->GetArrayLength(input)==32);
+        auto bytes=platform::android::Context::output(env,input);std::string id(bytes.begin(),bytes.end());protocol::check(protocol::id(id,32));
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;std::lock_guard<std::mutex> lock(instance->gate);instance->prepareAttachments(runtimeNow());
+        std::optional<transfer::DurableState> found;
+        for(auto row:instance->transfers->retainedRecords())if(row.metadata.id==id&&(row.state==transfer::State::Complete||(row.sending&&transfer::ProtectedTextSource::token(row.location)))){if(!row.sending)row.location=transfer::posix::FileSink::reopen(instance->attachmentCache,row)->sourceToken();found=std::move(row);}
+        protocol::check(found&&found->metadata.size<=transfer::ProtectedTextSource::MaxBytes);
+        auto source=instance->openAttachment(*found);Blob plain;
+        for(std::uint64_t offset=0;offset<source->size();offset+=transfer::ChunkBytes){auto part=source->read(offset,std::min<std::uint64_t>(transfer::ChunkBytes,source->size()-offset));plain.insert(plain.end(),part.begin(),part.end());}
+        unicode::decode(std::string(plain.begin(),plain.end()));return platform::android::Context::input(env,plain);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_history(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jlong before){

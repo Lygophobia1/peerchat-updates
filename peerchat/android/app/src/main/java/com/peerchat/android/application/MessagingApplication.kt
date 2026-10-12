@@ -24,6 +24,7 @@ interface MessagingApplication:AutoCloseable {
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
     suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String = error("File sharing unavailable")
     suspend fun attachmentAction(id:String,accept:Boolean) { error("File sharing unavailable") }
+    suspend fun attachmentText(id:String):String = error("Text preview unavailable")
     suspend fun requestFriend(username:String)
     suspend fun respondFriend(accountId:Long,accept:Boolean)
     suspend fun signOut()

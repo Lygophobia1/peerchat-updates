@@ -24,7 +24,7 @@ foreach($variant in @('debug','release')){
             if($name -eq 'peerchat_messaging'){
                 foreach($method in @('bind','publicKey','sign')){if($symbols -notmatch "Java_com_peerchat_android_ProfileBridge_$method\b"){throw "Missing ProfileBridge $method"}}
                 foreach($method in @('open','exchange','close')){if($symbols -notmatch "Java_com_peerchat_android_PeerTlsBridge_$method\b"){throw "Missing PeerTlsBridge $method"}}
-                if($symbols -notmatch "Java_com_peerchat_android_TransferBridge_request\b"){throw "Missing production TransferBridge request"}
+                foreach($method in @('request','offerText','readText')){if($symbols -notmatch "Java_com_peerchat_android_TransferBridge_$method\b"){throw "Missing production TransferBridge $method"}}
                 foreach($method in @('friends','presence','requests','open','exchange','close','send','queueLocal','history','state')){if($symbols -notmatch "Java_com_peerchat_android_ReliableBridge_$method\b"){throw "Missing ReliableBridge $method"}}
                 foreach($hook in @('storageTest','attachmentTest')){
                     $testHook=$symbols -match "Java_com_peerchat_android_ProfileBridge_$hook\b"

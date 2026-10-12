@@ -84,6 +84,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var automaticResumeSuppressed=false
     private var uiGeneration=0L
     private val retainedDiagnostics=ArrayDeque<String>()
+    private val previewLoading=mutableSetOf<String>()
+    private val largeDrafts=mutableMapOf<String,String>()
     private fun retainDiagnostic(category:String,reason:String) {
         if(retainedDiagnostics.size>=16)retainedDiagnostics.removeFirst()
         retainedDiagnostics.addLast("generation=$uiGeneration category=$category $reason")
@@ -176,14 +178,14 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val row=qolState.conversations[key] ?: ConversationPreference()
                 c.copy(unread=incoming.count{it.sequence>row.readSequence})
             }
-            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
+            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (largeDrafts[c.id] ?: qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
         }
     }
     init {
     // Collect during authentication, rather than only after restore completes.
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(recovering)return@collect
-        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear()}
+        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap())}
         current=snapshot
         if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
         mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress)
@@ -299,7 +301,9 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         when(action) {
             is UiAction.Draft -> {
                 val c=current.conversations.find{"account:${it.friend.accountId}"==action.conversationId} ?: return
-                if(action.text.length>4096)return
+                if(action.text.toByteArray().size>512*1024)return
+                if(action.text.length>4096){largeDrafts[action.conversationId]=action.text;mutable.value=reduceUi(mutable.value,action);return}
+                largeDrafts.remove(action.conversationId)
                 val accountKey=preferenceAccountKey() ?: return
                 val key=conversationPreferenceKey(accountKey,c.friend.accountId)
                 mutable.value=reduceUi(mutable.value,action)
@@ -348,6 +352,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 try {backend.respondFriend(action.accountId,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Friend response failed; authorization unchanged.")}
             }
+            is UiAction.AttachmentPreview -> {
+                if(action.id in mutable.value.attachmentPreviews||!previewLoading.add(action.id))return
+                val account=current.accountId;val requestGeneration=uiGeneration
+                if(current.conversations.none{c->c.attachments.any{it.id==action.id}}){previewLoading.remove(action.id);return}
+                viewModelScope.launch{try{
+                    val text=backend.attachmentText(action.id)
+                    if(account==current.accountId&&requestGeneration==uiGeneration){
+                        val cache=mutable.value.attachmentPreviews.toMutableMap();if(cache.size>=4)cache.remove(cache.keys.first());cache[action.id]=text
+                        mutable.value=mutable.value.copy(attachmentPreviews=cache)
+                    }
+                }catch(_:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="Text preview unavailable. The original attachment is retained.")}
+                finally{previewLoading.remove(action.id)}}
+            }
             is UiAction.SendAttachment -> {
                 val c=current.conversations.find{"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri)}
@@ -358,11 +375,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.PreviewMessage -> {
                 if(mutable.value.sendBusy)return
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
-                if(action.text.isBlank()||action.text.length>4096)return
+                if(action.text.isBlank()||action.text.toByteArray().size>512*1024)return
                 mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false)
                 viewModelScope.launch {
                     var accepted=false
                     try {backend.send(c.friend.peerId,action.text);accepted=true
+                        largeDrafts.remove("account:${c.friend.accountId}")
                         val accountKey=preferenceAccountKey();if(accountKey!=null)savePreference(conversationPreferenceKey(accountKey,c.friend.accountId)){it.copy(draft="")}
                         mutable.value=mutable.value.copy(drafts=mutable.value.drafts+("account:${c.friend.accountId}" to ""))
                     } catch(_:Exception) {

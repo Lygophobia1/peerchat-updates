@@ -1,5 +1,6 @@
 #define NOMINMAX
 #include "../windows_transfer_io.hpp"
+#include "../protected_text_source.hpp"
 #include <iostream>
 #include <deque>
 #include <fstream>
@@ -16,6 +17,10 @@ struct MemorySource:Source {
     Blob read(std::uint64_t off,size_t limit)override{return Blob(bytes.begin()+off,bytes.begin()+off+std::min<std::uint64_t>(limit,bytes.size()-off));}
 };
 struct Result {Blob bytes;bool committed=false,destroyed=false;bool diskFailure=false;};
+struct MemoryRecord:MemorySource {
+    explicit MemoryRecord(Blob bytes):MemorySource(std::move(bytes),ProtectedTextSource::Name){}
+    Blob resumeToken()const override{return Blob{1,2,3};}
+};
 struct MemorySink:Sink {
     Result& result;explicit MemorySink(Result& r):result(r){}
     ~MemorySink(){result.destroyed=true;}
@@ -52,6 +57,24 @@ struct Harness {
 Blob data(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*17);return b;}
 int main(){
     try{
+        {
+            auto protector=std::make_shared<platform::WindowsRecordProtector>();auto id=std::string(32,'e');
+            std::string text;for(unsigned n=0;n<3000;++n)text+=u8"Exact multiline 日本語 😀\r\n";
+            Blob plain(text.begin(),text.end());auto sealed=ProtectedTextSource::seal(plain,id,*protector);
+            check(sealed!=plain&&std::search(sealed.begin(),sealed.end(),plain.begin(),plain.end())==sealed.end());
+            ProtectedTextSource source(std::make_unique<MemoryRecord>(sealed),id,protector);
+            DurableState record;record.metadata={id,ProtectedTextSource::Name,plain.size(),{}};record.location=source.resumeToken();
+            for(unsigned n=0;n<32;++n){
+                auto reopened=ProtectedTextSource::reopen(record,protector,[&](const DurableState& row){
+                    check(row.metadata.size==sealed.size()&&row.location==Blob({1,2,3}));return std::make_unique<MemoryRecord>(sealed);});
+                Blob restored;for(size_t off=0;off<plain.size();off+=ChunkBytes){auto part=reopened->read(off,std::min(ChunkBytes,plain.size()-off));restored.insert(restored.end(),part.begin(),part.end());}
+                check(restored==plain);rejected([&]{reopened->read(0,ChunkBytes+1);});
+            }
+            auto bad=sealed;bad.back()^=1;rejected([&]{ProtectedTextSource wrong(std::make_unique<MemoryRecord>(bad),id,protector);});
+            rejected([&]{ProtectedTextSource wrong(std::make_unique<MemoryRecord>(sealed),std::string(32,'f'),protector);});
+            rejected([&]{ProtectedTextSource::seal(Blob(ProtectedTextSource::MaxBytes+1,'x'),id,*protector);});
+            rejected([&]{ProtectedTextSource::seal(Blob{0xff},id,*protector);});
+        }
         {
             TransferManager manager{[]{return std::make_unique<windows::Sha256>();}};
             auto peer=std::string(64,'a'),live=std::string(32,'1'),archive=std::string(32,'2');

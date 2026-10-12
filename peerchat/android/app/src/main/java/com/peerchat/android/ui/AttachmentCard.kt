@@ -33,11 +33,14 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
     LaunchedEffect(path,edge){result.value=withContext(Dispatchers.IO){attachmentPicture(path,edge)}}
     return result
 }
-@Composable internal fun AttachmentCard(row:AttachmentSnapshot,dispatch:(UiAction)->Unit) {
+@Composable internal fun AttachmentCard(row:AttachmentSnapshot,dispatch:(UiAction)->Unit,preview:String?=null) {
     val context=LocalContext.current;val scope=rememberCoroutineScope()
     var expanded by remember(row.id){mutableStateOf(false)}
     var saveError by remember(row.id){mutableStateOf(false)}
     val bitmap by rememberAttachmentPicture(row.localPath,512)
+    val longMessage=row.name=="message.peerchat-text"
+    val textFile=longMessage||row.name.substringAfterLast('.',"").lowercase() in setOf("txt","c","h","cpp","hpp","java","kt","cs","py","json","md","xml","yaml","yml","log")
+    LaunchedEffect(row.id,row.complete){if(longMessage&&(row.complete||row.outgoing))dispatch(UiAction.AttachmentPreview(row.id))}
     val save=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")){uri->
         if(uri!=null)scope.launch{saveError=try{withContext(Dispatchers.IO){File(row.localPath).inputStream().use{input->context.contentResolver.openOutputStream(uri,"w").use{output->input.copyTo(checkNotNull(output),32768)}}};false}catch(_:Exception){true}}
     }
@@ -46,12 +49,14 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
             modifier=Modifier.widthIn(max=330.dp).fillMaxWidth(.9f).testTag("attachment-${row.id}")){
             Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
                 bitmap?.let{Image(it.asImageBitmap(),row.name,Modifier.fillMaxWidth().heightIn(max=200.dp).clickable{expanded=true},contentScale=ContentScale.Fit)}
-                Text(row.name,style=MaterialTheme.typography.bodyMedium)
+                Text(if(longMessage)"Long message" else row.name,style=MaterialTheme.typography.bodyMedium)
+                if(preview!=null)BoundedTextViewer(preview,!longMessage||codeLike(preview),if(longMessage)"Long message" else row.name)
                 Text("${row.size} bytes · "+when(row.state){0->"Preparing";1->"Waiting for recipient";2->"File offered";3->"Transferring";4->"Transfer complete";5->"Cancelled";6->"Failed";7->"Recovering";else->"Suspended"},
                     style=MaterialTheme.typography.labelSmall)
                 if(row.state==3&&row.size>0)LinearProgressIndicator(progress={row.done.toFloat()/row.size.toFloat()},modifier=Modifier.fillMaxWidth())
                 if(row.error.isNotEmpty())Text(row.error,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
                 Row{
+                    if(textFile&&preview==null&&(row.complete||longMessage&&row.outgoing))TextButton({dispatch(UiAction.AttachmentPreview(row.id))}){Text("Read text")}
                     if(row.awaitingAcceptance)TextButton({dispatch(UiAction.AttachmentAction(row.id,true))},Modifier.testTag("accept-file")){Text("Accept")}
                     if(row.active)TextButton({dispatch(UiAction.AttachmentAction(row.id,false))}){Text(if(row.awaitingAcceptance)"Decline" else "Cancel")}
                     if(row.complete&&row.localPath.isNotEmpty()){

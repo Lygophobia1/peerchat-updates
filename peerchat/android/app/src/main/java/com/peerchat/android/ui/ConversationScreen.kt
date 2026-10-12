@@ -79,7 +79,7 @@ import kotlinx.coroutines.delay
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                 ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo&&c.kind==ChatKind.Direct)picker.launch(arrayOf("*/*")) })
-                OutlinedTextField(draft, { if (it.length <= 4096){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                OutlinedTextField(draft, { if (it.toByteArray().size <= 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
                 IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
@@ -119,7 +119,7 @@ import kotlinx.coroutines.delay
                     item(key = message.id) { MessageBubble(message, c.kind == ChatKind.Group &&
                         (index == 0 || c.messages[index - 1].senderId != message.senderId), dispatch) }
                 }
-                c.attachments.forEach{attachment->item(key="attachment-${attachment.id}"){AttachmentCard(attachment,dispatch)}}
+                c.attachments.forEach{attachment->item(key="attachment-${attachment.id}"){AttachmentCard(attachment,dispatch,state.attachmentPreviews[attachment.id])}}
             }
         }
     }

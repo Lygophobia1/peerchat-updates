@@ -150,14 +150,17 @@ public:
     std::vector<Snapshot> snapshots()const{std::vector<Snapshot> result;for(auto& p:entries_)result.push_back(p.second);return result;}
     bool hasPendingControl(const std::string& id)const{auto found=entries_.find(id);return found!=entries_.end()&&found->second.reply.has_value();}
     // Local adapter readout only; tokens never travel in a transfer packet.
-    std::vector<DurableState> completedRecords()const{
+    std::vector<DurableState> retainedRecords()const{
         std::vector<DurableState> result;
-        for(const auto& p:entries_)if(p.second.state==State::Complete){
+        for(const auto& p:entries_){
             const auto& e=p.second;DurableState d;static_cast<Snapshot&>(d)=e;
             d.location=e.location;d.created=e.created;d.updated=e.updated;d.expires=e.expires;
             d.highWaterSent=e.highWaterSent;d.digestReady=e.digestReady;result.push_back(std::move(d));
         }
         return result;
+    }
+    std::vector<DurableState> completedRecords()const{
+        auto rows=retainedRecords();rows.erase(std::remove_if(rows.begin(),rows.end(),[](const auto& row){return row.state!=State::Complete;}),rows.end());return rows;
     }
     std::vector<std::string> demandedPeers()const{
         std::vector<std::string> result;for(auto& p:entries_)if(!terminal(p.second.state)||p.second.reply)result.push_back(p.second.peer);return result;

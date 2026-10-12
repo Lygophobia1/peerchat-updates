@@ -50,6 +50,12 @@ public:
     }
     std::uint64_t size()const override{return size_;}std::string name()const override{return name_;}Blob resumeToken()const override{return token_;}
     const std::string& cacheName()const{return path_;}
+    static std::unique_ptr<FileSource> create(std::shared_ptr<Cache> cache,const std::string& path,const std::string& name,const Blob& bytes){
+        check(bytes.size()<=1024*1024&&path.size()>33&&path.size()<=253&&protocol::id(path.substr(0,32),32)&&path[32]=='-'&&safeName(path.substr(33)));cache->reserve(bytes.size());
+        File file(openat(cache->fd(),path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600));size_t done=0;
+        while(done<bytes.size()){auto n=write(file.fd,bytes.data()+done,std::min<size_t>(ChunkBytes,bytes.size()-done));if(n<0&&errno==EINTR)continue;check(n>0);done+=n;}
+        check(fsync(file.fd)==0&&fsync(cache->fd())==0);return std::make_unique<FileSource>(std::move(cache),path,name);
+    }
     Blob read(std::uint64_t offset,size_t count)override{check(offset<=size_&&count<=size_-offset);return posix::read(file_->fd,offset,count);}
     static std::unique_ptr<FileSource> reopen(std::shared_ptr<Cache> cache,const DurableState& d){protocol::Reader r(d.location);check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSource/v1");auto path=r.string(),name=r.string();auto result=std::make_unique<FileSource>(std::move(cache),path,name);verifyIdentity(r,result->file_->fd,true);r.end();check(result->size()==d.metadata.size&&result->name()==d.metadata.name);return result;}
 };

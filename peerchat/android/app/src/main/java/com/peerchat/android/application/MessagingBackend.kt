@@ -296,7 +296,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
     override suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
         synchronized(gate) {
             check(!stopped&&friends.any {it.peerId==peerId}&&(accounts?.session!=null||mutable.value.localHistoryReady))
-            val result=checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),text.toByteArray(Charsets.UTF_8)))
+            val utf8=text.toByteArray(Charsets.UTF_8);require(utf8.size<=512*1024&&!text.contains('\u0000'))
+            val result=if(text.length>4096){check(authorizationSnapshotInstalled);checkNotNull(com.peerchat.android.TransferBridge.offerText(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
+                else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))
             val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
             mailboxAt=0L
             publish()
@@ -329,6 +331,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }}
     override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled);transfer(if(accept)2 else 3){it.text(id)};publish();Unit
+    }}
+    override suspend fun attachmentText(id:String):String=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped);val bytes=checkNotNull(com.peerchat.android.TransferBridge.readText(checkNotNull(profile).handle,id.toByteArray(Charsets.US_ASCII)))
+        Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString()
     }}
     override suspend fun requestFriend(username:String) = withContext(Dispatchers.IO) {synchronized(gate){
         require(username.isNotBlank()&&username.length<=64)
