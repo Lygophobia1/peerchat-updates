@@ -189,6 +189,26 @@ namespace PeerChat.Server {
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
         // Gated application prerequisite, not an RPC or membership operation.
+        // Issuing work must be tied to the currently authenticated device lease,
+        // not merely an account token or a previously captured presence object.
+        bool CurrentGroupDeviceSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,out long account){
+            account=0;if(leaseEpoch!=Live.Epoch||!GroupRosterProof.Id(tokenHash,64)||!GroupRosterProof.Id(device,64)||leaseGeneration<=0)return false;
+            account=Authenticate(tokenHash);var lease=Live.Get(device);
+            return account>0&&OwnsDevice(account,device)&&SessionAllowsDevice(tokenHash,device)&&lease!=null&&
+                lease.Account==account&&lease.Identity==device&&lease.Session==tokenHash&&lease.Generation==leaseGeneration;
+        }
+        internal bool PublishGroupDeviceIdentityForSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,GroupDeviceIdentityProof proof){lock(gate){
+            long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account))return false;
+            return PublishGroupDeviceIdentity(account,device,proof);
+        }}
+        internal string ReadGroupDeviceIdentityForSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,string target){lock(gate){
+            long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account))return null;
+            return ReadGroupDeviceIdentity(account,device,target);
+        }}
+        internal Dictionary<string,object> ApplyGroupDeviceProofForSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,GroupDeviceProof proof){lock(gate){
+            long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account))return null;
+            return ApplyGroupDeviceProof(account,device,proof);
+        }}
         public bool PublishGroupDeviceIdentity(long account,string device,GroupDeviceIdentityProof proof){lock(gate){
             if(proof==null||proof.Account!=account||proof.Device!=device||!OwnsDevice(account,device))return false;
             Execute("INSERT INTO group_device_identity_proofs(public_identity,account_id,signed_proof) VALUES("+Quote(device)+","+account+","+Quote(proof.Encoded)+") ON CONFLICT(public_identity) DO NOTHING;");

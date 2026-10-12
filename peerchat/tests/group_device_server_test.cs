@@ -26,6 +26,49 @@ internal static class GroupDeviceServerTest {
             bool rejected=false;try{GroupDeviceIdentityProof.Parse(Convert.ToBase64String(wire));}catch(InvalidOperationException){rejected=true;}
             Require(rejected,"Invalid device possession evidence accepted: "+corruption);
         }
+        string sessionPath=Path.Combine(root,"session-admission.sqlite"),oldEpoch="";
+        using(var db=new AccountDatabase(sessionPath)){
+            oldEpoch=db.Live.Epoch;
+            Accounts(db,creation,member,sibling);Require(db.AddDevice(1,approve.Target),"Session target registration");
+            string actorToken=new string('a',64),targetToken=new string('b',64),replacementToken=new string('c',64),foreignToken=new string('d',64);
+            long expires=DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds();
+            db.CreateSession(actorToken,1,expires);db.CreateSession(targetToken,1,expires);db.CreateSession(replacementToken,1,expires);db.CreateSession(foreignToken,2,expires);
+            Require(db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,db.Live.Epoch,1,approve)==null,"Account session without live device lease approved enrollment");
+            var actorLease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-old",true,actorToken);
+            var targetLease=db.TouchPresence(1,approve.Target,"",0,"",0,"test","test","target",true,targetToken);
+            Require(!db.PublishGroupDeviceIdentityForSession(actorToken,approve.Target,db.Live.Epoch,targetLease.Generation,identity),"Other device session published target possession");
+            Require(db.PublishGroupDeviceIdentityForSession(targetToken,approve.Target,db.Live.Epoch,targetLease.Generation,identity),"Live target could not publish possession");
+            Require(db.ReadGroupDeviceIdentityForSession(actorToken,approve.Actor,db.Live.Epoch,actorLease.Generation,approve.Target)==identity.Encoded,"Live approver could not read target evidence");
+            Require(db.ReadGroupDeviceIdentityForSession(foreignToken,approve.Actor,db.Live.Epoch,actorLease.Generation,approve.Target)==null,"Foreign session read same-account evidence");
+            Require(db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,db.Live.Epoch,actorLease.Generation+1,approve)==null,"Invented lease generation approved device");
+            Require(db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,new string('0',32),actorLease.Generation,approve)==null,"Wrong server epoch approved device");
+            Require(db.ApplyGroupDeviceProofForSession(foreignToken,approve.Actor,db.Live.Epoch,actorLease.Generation,approve)==null,"Foreign account session approved device");
+            string boundToken=new string('e',64),credentialHash=new string('f',64);
+            db.RememberDevice(1,approve.Target,credentialHash);db.CreateDeviceSession(boundToken,1,approve.Target,expires,credentialHash);
+            var boundLease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","wrong-bound-device",true,boundToken);
+            Require(db.ApplyGroupDeviceProofForSession(boundToken,approve.Actor,db.Live.Epoch,boundLease.Generation,approve)==null,"Remembered target session substituted approver device");
+            actorLease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-restored",true,actorToken);
+            var fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-new",true,replacementToken);
+            Require(fresh.Generation!=actorLease.Generation&&db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,db.Live.Epoch,actorLease.Generation,approve)==null,"Superseded lease approved device");
+            Require(db.ApplyGroupDeviceProofForSession(replacementToken,approve.Actor,db.Live.Epoch,actorLease.Generation,approve)==null,"Fresh session reused old generation");
+            Require(db.ApplyGroupDeviceProofForSession(replacementToken,approve.Actor,db.Live.Epoch,fresh.Generation,approve)!=null,"Exact live session failed signed approval");
+            db.RevokeSession(replacementToken);
+            Require(db.ApplyGroupDeviceProofForSession(replacementToken,approve.Actor,db.Live.Epoch,fresh.Generation,revoke)==null,"Revoked authenticated session retained group authority");
+            db.CreateSession(replacementToken,1,expires);db.ClearPresence(1,approve.Actor,"actor-new");
+            Require(db.ApplyGroupDeviceProofForSession(replacementToken,approve.Actor,db.Live.Epoch,fresh.Generation,revoke)==null,"Disconnected device retained captured authority");
+            fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-final",true,replacementToken);
+            Require(db.ApplyGroupDeviceProofForSession(replacementToken,approve.Actor,db.Live.Epoch,fresh.Generation,revoke)!=null,"Fresh reconnect could not revoke enrolled device");
+            db.RevokeSession(actorToken);db.CreateSession(actorToken,1,DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds());
+            fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-expired",true,actorToken);
+            Require(db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,db.Live.Epoch,fresh.Generation,reenroll)==null,"Expired session approved device");
+            Require(Convert.ToInt64(db.GroupRoster(approve.GroupId,1,approve.Actor)["rosterGeneration"])==3,"Rejected session attempts mutated roster");
+        }
+        using(var db=new AccountDatabase(sessionPath)){
+            string token=new string('1',64);db.CreateSession(token,1,DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds());
+            var fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","after-server-restart",true,token);
+            Require(db.Live.Epoch!=oldEpoch&&db.ApplyGroupDeviceProofForSession(token,approve.Actor,oldEpoch,fresh.Generation,reenroll)==null,"Server restart reused old issuing context");
+            Require(db.ApplyGroupDeviceProofForSession(token,approve.Actor,db.Live.Epoch,fresh.Generation,reenroll)!=null,"Fresh server epoch could not explicitly reenroll");
+        }
         string identityPath=Path.Combine(root,"device-identity.sqlite");
         using(var db=new AccountDatabase(identityPath)){
             Accounts(db,creation,member,sibling);
