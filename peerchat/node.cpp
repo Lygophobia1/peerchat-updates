@@ -9,6 +9,7 @@
 #include <bcrypt.h>
 #include "node.hpp"
 #include "group_message_envelope.hpp"
+#include "group_device_replica.hpp"
 #include "group_text.hpp"
 #include "delivery_manager.hpp"
 #include "archive_application.hpp"
@@ -1567,7 +1568,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
             liveOutboxPeers.clear();for(const auto& c:contacts)if(!store->pending(c.first,1).empty())liveOutboxPeers.insert(c.first);
-            groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){GroupLedger ledger;for(const auto& event:store->groupEvents(groupId))ledger.append(event);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
+            groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){auto ledger=group_devices::Replica::restoreStored(*store,groupId);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
             startupDirectListener=startDirectListener;
             if(startupDirectListener)ensureDirectListener("explicit-direct-only",listeningPortOverride);

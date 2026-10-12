@@ -617,6 +617,29 @@ std::vector<GroupEvent> Storage::groupEvents(const std::string& groupId) {
     require(identifier(groupId,32),"Invalid Group ID");Statement statement(impl_->sql,"SELECT event_id,b FROM group_events WHERE group_id=? ORDER BY logical_order,event_id");statement.text(1,groupId);std::vector<GroupEvent> events;
     while(statement.row()){std::string eventId=statement.text(0);Secret plain{impl_->protect(statement.bytes(1),"PeerChat.v1/group-event/"+eventId+"/"+groupId,false)};auto event=decodeGroupEvent(plain.data);require(event.eventId==eventId&&event.groupId==groupId,"Stored group event identity mismatch");events.push_back(std::move(event));}return events;
 }
+Blob Storage::groupReplicaReceipt(const std::string& group,const std::string& id){
+    require(identifier(group,32)&&identifier(id),"Invalid group replica receipt identity");
+    return impl_->get("group-replica/"+group+"/"+id);
+}
+void Storage::commitGroupReplicaReceipt(const GroupEvent& event,const Blob& receipt){
+    require(identifier(event.groupId,32)&&identifier(event.eventId)&&event.logicalOrder>0&&event.logicalOrder<=INT64_MAX&&
+        (event.kind==GroupEventKind::AuthorizeDevice||event.kind==GroupEventKind::RevokeDevice)&&
+        !receipt.empty()&&receipt.size()<=65536,"Invalid group replica receipt");
+    Transaction transaction(impl_->sql);auto key="group-replica/"+event.groupId+"/"+event.eventId;
+    Secret old{impl_->get(key)};require(old.data.empty()||old.data==receipt,"Conflicting group replica receipt");
+    auto plain=encodeGroupEvent(event);Statement existing(impl_->sql,"SELECT group_id,b FROM group_events WHERE event_id=?");existing.text(1,event.eventId);
+    if(existing.row()){
+        require(existing.text(0)==event.groupId,"Group replica event identity conflict");
+        Secret saved{impl_->protect(existing.bytes(1),"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,false)};
+        require(saved.data==plain,"Conflicting group replica event");
+    }else{
+        auto encrypted=impl_->protect(plain,"PeerChat.v1/group-event/"+event.eventId+"/"+event.groupId,true);
+        Statement insert(impl_->sql,"INSERT INTO group_events(event_id,group_id,logical_order,b) VALUES(?,?,?,?)");
+        insert.text(1,event.eventId);insert.text(2,event.groupId);insert.number(3,event.logicalOrder);insert.blob(4,encrypted);insert.row();
+    }
+    if(old.data.empty())impl_->put(key,receipt);
+    transaction.commit();
+}
 std::vector<std::string> Storage::groupIds() {
     Statement statement(impl_->sql,"SELECT DISTINCT group_id FROM group_events ORDER BY group_id");std::vector<std::string> groups;while(statement.row()){auto id=statement.text(0);require(identifier(id,32),"Invalid stored Group ID");groups.push_back(std::move(id));}return groups;
 }

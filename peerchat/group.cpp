@@ -136,7 +136,7 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
                 bool occupied=next.authorizedDevices.count(event.subjectPeerId)!=0;
                 for(const auto& item:next.members)if(item.second.peerId==event.subjectPeerId)occupied=true;
                 for(const auto& item:next.invitations)if(item.second.peerId==event.subjectPeerId)occupied=true;
-                allowed=deviceEnrollmentEnabled_&&actorMember&&event.subjectAccountId==event.actorAccountId&&count<8&&!occupied&&
+                allowed=(deviceEnrollmentEnabled_||admittedDeviceEvents_.count(event.eventId))&&actorMember&&event.subjectAccountId==event.actorAccountId&&count<8&&!occupied&&
                     validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&
                     Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&
                     event.value==L"PeerChat/group-device-authorization/v1"&&event.message.empty();
@@ -144,7 +144,7 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
             }
             else if(event.kind==GroupEventKind::RevokeDevice){
                 const auto* subject=next.device(event.subjectAccountId,event.subjectPeerId);
-                allowed=deviceEnrollmentEnabled_&&actorMember&&subject&&event.subjectAccountId==event.actorAccountId&&
+                allowed=(deviceEnrollmentEnabled_||admittedDeviceEvents_.count(event.eventId))&&actorMember&&subject&&event.subjectAccountId==event.actorAccountId&&
                     event.value==L"PeerChat/group-device-revocation/v1"&&event.message.empty()&&event.subjectPublicKey.empty();
                 if(allowed&&actor->second.peerId==event.subjectPeerId){
                     auto replacement=std::find_if(next.authorizedDevices.begin(),next.authorizedDevices.end(),[&](const auto& item){return item.second.accountId==event.actorAccountId;});

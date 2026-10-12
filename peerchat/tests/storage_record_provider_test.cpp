@@ -5,9 +5,10 @@
 namespace {
 struct ObservedRecords final : peerchat::platform::RecordProtector {
     peerchat::platform::WindowsRecordProtector dpapi;
-    int encrypted=0,decrypted=0;bool unavailable=false;
+    int encrypted=0,decrypted=0;bool unavailable=false,failReplicaReceipt=false;
     peerchat::Blob protect(const peerchat::Blob& value,const std::string& context) override{
         if(unavailable)throw std::runtime_error("Test record key missing");
+        if(failReplicaReceipt&&context.rfind("PeerChat.v1/group-replica/",0)==0)throw std::runtime_error("Test receipt protection failure");
         ++encrypted;return dpapi.protect(value,context);
     }
     peerchat::Blob unprotect(const peerchat::Blob& value,const std::string& context) override{
@@ -28,6 +29,18 @@ int main(){using namespace peerchat;using namespace storage_detail;try{
     for(int i=0;i<32;++i){auto db=std::make_shared<WindowsSqlDatabase>(root.wstring());Storage store(db,records);
         require(store.profile().peerId==profile.peerId&&store.history(remote).size()==1&&store.pending(remote).size()==1,"Provider restart lost records");}
     require(records->decrypted>=96,"Reads bypassed record provider");
+    GroupEvent replicaEvent;replicaEvent.groupId=Storage::newMessageId();replicaEvent.logicalOrder=2;
+    replicaEvent.kind=GroupEventKind::AuthorizeDevice;replicaEvent.actorAccountId=replicaEvent.subjectAccountId=1;
+    replicaEvent.actorPeerId=profile.peerId;replicaEvent.subjectPeerId=remote;replicaEvent.value=L"PeerChat/group-device-authorization/v1";
+    signGroupEvent(replicaEvent,profile);
+    {auto db=std::make_shared<WindowsSqlDatabase>(root.wstring());Storage store(db,records);
+        records->failReplicaReceipt=true;rejectedRecord([&]{store.commitGroupReplicaReceipt(replicaEvent,Blob{1});});records->failReplicaReceipt=false;
+        require(store.groupEvents(replicaEvent.groupId).empty()&&store.groupReplicaReceipt(replicaEvent.groupId,replicaEvent.eventId).empty(),"Receipt failure left partial replica state");}
+    {auto db=std::make_shared<WindowsSqlDatabase>(root.wstring());Storage store(db,records);
+        require(store.groupEvents(replicaEvent.groupId).empty(),"Partial replica event survived restart");
+        store.commitGroupReplicaReceipt(replicaEvent,Blob{1});store.commitGroupReplicaReceipt(replicaEvent,Blob{1});
+        rejectedRecord([&]{store.commitGroupReplicaReceipt(replicaEvent,Blob{2});});
+        require(store.groupEvents(replicaEvent.groupId).size()==1&&store.groupReplicaReceipt(replicaEvent.groupId,replicaEvent.eventId)==Blob{1},"Replica duplicate changed durable evidence");}
     {auto db=std::make_shared<WindowsSqlDatabase>(root.wstring());Storage store(db,records);records->unavailable=true;
         rejectedRecord([&]{store.profile();});rejectedRecord([&]{store.history(remote);});rejectedRecord([&]{store.append(remote,message);});records->unavailable=false;
         require(store.profile().peerId==profile.peerId&&store.pending(remote).size()==1,"Provider failure changed identity/outbox");}

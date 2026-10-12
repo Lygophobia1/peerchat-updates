@@ -1,5 +1,6 @@
 #include "../group_device_binding.hpp"
 #include "../group_device_reconciliation.hpp"
+#include "../group_device_replica.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -84,6 +85,41 @@ int main(int argc,char** argv){try{
     if(group_devices::reconcileApproval(current,retired,evidence.at("revoke.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||signedLedger.state().device(1,target.peerId))
         throw std::runtime_error("Exact device revocation did not reconcile");
     auto restored=current;restored.generation=4;
+    Storage replicaStore((root/L"replica").wstring());replicaStore.appendGroupEvent(create);
+    GroupLedger replicaLedger;replicaLedger.append(create);
+    group_devices::Replica disabled(replicaStore,server,create.groupId);
+    if(disabled.accept(previous,current,validWire,replicaLedger)!=group_devices::Reconciliation::LedgerRejected)
+        throw std::runtime_error("Replica activated enrollment by default");
+    group_devices::Replica replica(replicaStore,server,create.groupId,true);
+    wrong=current;wrong.generation=3;
+    if(replica.accept(previous,wrong,validWire,replicaLedger)!=group_devices::Reconciliation::StaleGeneration||!replicaStore.groupReplicaReceipt(create.groupId,valid.eventId).empty())
+        throw std::runtime_error("Stale replica admission mutated durable state");
+    if(replica.accept(previous,current,validWire,replicaLedger)!=group_devices::Reconciliation::Accepted||!replicaLedger.state().device(1,target.peerId))
+        throw std::runtime_error("Proof-specific replica admission failed");
+    if(replica.accept(previous,current,validWire,replicaLedger)==group_devices::Reconciliation::Accepted)
+        throw std::runtime_error("Replica replay accepted stale transition");
+    auto unauthorized=group_devices::readApproval(evidence.at("stale.bin")).event;
+    if(replicaLedger.append(unauthorized)||replicaLedger.state().device(1,extra.peerId))
+        throw std::runtime_error("One admitted proof globally enabled unapproved device events");
+    // Use a fresh reconstructed ledger so the intentionally invalid test event
+    // above is not part of the independently verified durable replica.
+    replicaLedger=replica.restore();
+    if(replica.accept(current,retired,evidence.at("revoke.bin"),replicaLedger)!=group_devices::Reconciliation::Accepted||replicaLedger.state().device(1,target.peerId))
+        throw std::runtime_error("Durable replica revocation failed");
+    if(replica.accept(retired,restored,evidence.at("reenroll.bin"),replicaLedger)!=group_devices::Reconciliation::Accepted)
+        throw std::runtime_error("Explicit replica re-enrollment failed");
+    for(int i=0;i<16;++i){Storage reopened((root/L"replica").wstring());group_devices::Replica loaded(reopened,server,create.groupId,true);
+        auto ledger=loaded.restore();auto applicationLedger=group_devices::Replica::restoreStored(reopened,create.groupId);
+        if(!applicationLedger.state().device(1,target.peerId)||applicationLedger.events().size()!=4)throw std::runtime_error("Application replica restore diverged");
+        if(!ledger.state().device(1,target.peerId)||ledger.events().size()!=4)
+            throw std::runtime_error("Protected replica reopen lost verified transitions");}
+    Storage missingStore((root/L"missing-receipt").wstring());missingStore.appendGroupEvent(create);missingStore.appendGroupEvent(valid);
+    bool missingRejected=false;try{group_devices::Replica(missingStore,server,create.groupId,true).restore();}catch(const std::exception&){missingRejected=true;}
+    if(!missingRejected)throw std::runtime_error("Naked stored device event bypassed receipt verification");
+    Storage conflictStore((root/L"conflict-receipt").wstring());conflictStore.appendGroupEvent(create);conflictStore.commitGroupReplicaReceipt(valid,Blob{0});
+    GroupLedger conflictLedger;conflictLedger.append(create);bool conflictRejected=false;
+    try{group_devices::Replica(conflictStore,server,create.groupId,true).accept(previous,current,validWire,conflictLedger);}catch(const std::exception&){conflictRejected=true;}
+    if(!conflictRejected||conflictLedger.state().device(1,target.peerId))throw std::runtime_error("Failed receipt persistence changed live replica");
     if(group_devices::reconcileApproval(retired,restored,evidence.at("reenroll.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||!signedLedger.state().device(1,target.peerId))
         throw std::runtime_error("Fresh explicit reenrollment did not reconcile");
     auto adversarial=[&](const char* name,const std::string& group,const Blob& identity,const Blob& signedEvent){

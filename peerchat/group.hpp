@@ -4,6 +4,7 @@
 #include <set>
 
 namespace peerchat {
+namespace group_devices { class Replica; }
 enum class GroupRole : unsigned char { Member=1, Admin=2, Owner=3 };
 enum class GroupEventKind : unsigned char { Create=1, Rename=2, Invite=3, Accept=4, Decline=5, Leave=6, Remove=7, SetRole=8, Message=9, AuthorizeDevice=10, RevokeDevice=11 };
 
@@ -59,6 +60,8 @@ public:
     bool contains(const std::string& eventId)const;
     bool accepted(const std::string& eventId)const{return accepted_.count(eventId)!=0;}
 private:
+    friend class group_devices::Replica;
+    std::set<std::string> admittedDeviceEvents_;
     bool deviceEnrollmentEnabled_=false;
     bool rebuild(const std::string& requiredEventId);
     std::vector<GroupEvent> events_;

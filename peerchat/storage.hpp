@@ -126,6 +126,8 @@ public:
     void eraseHistory(const std::string& conversation);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
     bool appendGroupEvent(const GroupEvent& event);
+    Blob groupReplicaReceipt(const std::string& groupId,const std::string& eventId);
+    void commitGroupReplicaReceipt(const GroupEvent& event,const Blob& receipt);
     std::vector<GroupEvent> groupEvents(const std::string& groupId);
     std::vector<std::string> groupIds();
     GroupAccount groupAccount();
