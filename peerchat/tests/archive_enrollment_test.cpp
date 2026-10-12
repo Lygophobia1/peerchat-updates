@@ -38,6 +38,7 @@ int main(){try{
     rejects([&]{ar::executeEnrollmentOperation(source,10,bound.data,20);});
     check(!source.policy().trustsAuthority(pa.publicKey)); // Stale consent cannot authorize a new context.
     check(source.devices().size()==2&&reader.devices().size()==2);
+    for(const auto& device:source.devices())check(device.maySetUp==device.local&&device.approvalIssuer.empty());
     for(const auto& device:reader.devices())check(!device.mayRead&&!device.mayServe&&!device.approvedIssuer);
     delivery::DeliveryManager deliveries(b,pb.peerId);
     session::SessionTransportManager sessions("archive-enrollment",pb.peerId,{1});
@@ -51,10 +52,13 @@ int main(){try{
     check(source.pendingPublications().size()==2&&!source.policy().permits(pa.peerId,pa.peerId,ar::ServeHistory));
     std::vector<ar::RegisteredGrant> registered{{ar::encodeGrant(serving),true},{ar::encodeGrant(reading),true}};
     source.refresh(metadata(pa,2,registered));reader.refresh(metadata(pb,2,registered));
+    for(const auto& device:source.devices())check(!device.maySetUp);
+    for(const auto& device:reader.devices())check(!device.maySetUp&&device.approvalIssuer==(device.local?pa.peerId:std::string{}));
     check(reader.authorizationDiagnostics(8,1).find("authorizer_not_trusted")!=std::string::npos);
     check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
     admission=reader.authorizationDiagnostics(8,1);
+    for(const auto& device:reader.devices())check(!device.maySetUp&&device.approvalIssuer.empty());
     for(const auto& d:reader.devices())check((d.local||d.pairAuthorized)&&!d.mayAuthorize&&!d.localGrantPresent);
     for(const auto& d:source.devices()){check((d.local||d.pairAuthorized)&&d.mayAuthorize&&d.localGrantPresent);check(d.localGrantRead==(d.peerId==pb.peerId)&&d.localGrantServe==(d.peerId==pa.peerId));}
     check(admission.find("source_provide=allowed reader_receive=allowed")!=std::string::npos);

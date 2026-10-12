@@ -47,6 +47,7 @@ public:
         std::string peerId;bool local=false,approvedIssuer=false;
         bool mayRead=false,mayServe=false,revoked=false,authorized=false,grantedRead=false,grantedServe=false;
         bool mayAuthorize=false,pairAuthorized=false,localGrantPresent=false,localGrantRead=false,localGrantServe=false;
+        bool maySetUp=false;std::string approvalIssuer{};
     };
     // This profile-worker component owns only archive authorization application
     // state. SessionTransportManager/DeliveryManager remain the media-free route
@@ -206,6 +207,14 @@ public:
                 return g.capabilities;
             };
             row.mayAuthorize=member(account_,local_.peerId)&&policy_.trustsAuthority(local_.publicKey);
+            // First-use is not recovery from disabled trust/revocation. Never
+            // offer bootstrap over any retained authority or server grant.
+            row.maySetUp=row.local&&member(account_,local_.peerId)&&current_.empty()&&policy_.authorityReferences().empty()&&policy_.grantReferences().empty()&&policy_.pendingPublications().empty();
+            if(row.local)for(const auto& item:current_){
+                const auto& g=item.second.grant;if(g.device!=local_.peerId||!item.second.verified||!item.second.eligible||g.revoked||!g.capabilities||policy_.authorityKey(g.issuer))continue;
+                auto self=current_.find({g.issuer,g.issuer});if(self==current_.end()||!self->second.verified||!self->second.eligible||self->second.grant.revoked)continue;
+                auto own=self->second.grant.capabilities;if(((own&ServeHistory)&&(g.capabilities&ReadHistory))||((own&ReadHistory)&&(g.capabilities&ServeHistory))){row.approvalIssuer=g.issuer;break;}
+            } // Explicit confirmation may trust this exact registered issuer; never automatic.
             auto own=valid(local_.peerId,d.device);row.localGrantPresent=own!=0;row.localGrantRead=(own&ReadHistory)!=0;row.localGrantServe=(own&ServeHistory)!=0;
             for(const auto& issuer:policy_.authorityReferences()){
                 auto remote=valid(issuer,d.device),local=valid(issuer,local_.peerId);

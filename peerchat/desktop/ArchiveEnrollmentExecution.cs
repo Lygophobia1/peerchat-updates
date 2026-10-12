@@ -176,18 +176,30 @@ internal sealed class ArchiveEnrollmentExecution {
     }
     public Device[] SnapshotDevices(long account,long generation){
         var rows=Devices(native(3,Command(3)));foreach(var d in rows)d.Automatic=AutomaticSync(account,generation,d.PeerId);
-        var bytes=native(21,Command(21,w=>{w.Write(account);w.Write(generation);w.Write(1L);}));var header=Command(21);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        var bytes=native(21,Command(21,w=>{w.Write(account);w.Write(generation);w.Write(2L);}));var header=Command(21);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
         using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,Encoding.UTF8)){stream.Position=header.Length;Check(r.ReadInt64()==rows.Length);var seen=new HashSet<string>();foreach(var item in rows){Check(r.ReadInt64()==64);var peer=Encoding.ASCII.GetString(r.ReadBytes(64));var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));long read=r.ReadInt64(),serve=r.ReadInt64();Check(read>=0&&read<=1&&serve>=0&&serve<=1);d.GrantedRead=read==1;d.GrantedServe=serve==1;}Check(ReadApproval(r,rows));Check(stream.Position==stream.Length);}return rows;
     }
     static bool ReadApproval(BinaryReader r,Device[] rows){
         Func<string> text=()=>{long n=r.ReadInt64();Check(n>=0&&n<=128&&n<=r.BaseStream.Length-r.BaseStream.Position);return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
         Func<bool> flag=()=>{long n=r.ReadInt64();Check(n==0||n==1);return n==1;};
-        Check(text()=="PeerChat/ArchiveDeviceApproval/v1"&&r.ReadInt64()==rows.Length);
-        var seen=new HashSet<string>();foreach(var item in rows){string peer=text();var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));d.MayAuthorize=flag();d.PairAuthorized=flag();d.LocalGrantPresent=flag();d.LocalGrantRead=flag();d.LocalGrantServe=flag();Check(d.LocalGrantPresent==(d.LocalGrantRead||d.LocalGrantServe));d.ApprovalKnown=true;}return true;
+        Check(text()=="PeerChat/ArchiveDeviceApproval/v2"&&r.ReadInt64()==rows.Length);
+        var seen=new HashSet<string>();foreach(var item in rows){string peer=text();var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));d.MayAuthorize=flag();d.PairAuthorized=flag();d.LocalGrantPresent=flag();d.LocalGrantRead=flag();d.LocalGrantServe=flag();d.MaySetUp=flag();d.ApprovalIssuer=text();Check(d.ApprovalIssuer.Length==0||rows.Any(row=>row.PeerId==d.ApprovalIssuer));Check(!d.MaySetUp||d.Local&&!d.MayAuthorize&&!d.LocalGrantPresent);Check(d.LocalGrantPresent==(d.LocalGrantRead||d.LocalGrantServe));d.ApprovalKnown=true;}return true;
+    }
+    // Explicit UI commands compose existing scoped consent operations. They do
+    // not enroll on open, login, refresh, or from the History Sync ON switch.
+    public void PrepareFirstDevice(long account,long generation,string local,long capabilities,bool confirmed){
+        if(!confirmed)return;Check(capabilities>0&&capabilities<=3);
+        var device=SnapshotDevices(account,generation).SingleOrDefault(d=>d.PeerId==local&&d.Local);Check(device!=null&&device.ApprovalKnown&&device.MaySetUp);
+        Consent(account,generation,4,local,0,true);Consent(account,generation,5,local,capabilities,true);
+    }
+    public void ConfirmExistingIssuer(long account,long generation,string issuer,bool confirmed){
+        if(!confirmed)return;var local=SnapshotDevices(account,generation).SingleOrDefault(d=>d.Local);Check(local!=null&&local.ApprovalKnown&&local.ApprovalIssuer==issuer);
+        Consent(account,generation,4,issuer,0,true); // Accept only existing verified grants; issue nothing.
     }
     public sealed class Device {
         public bool NeedsApproval {get{return ApprovalKnown&&!(Local?(GrantedRead||GrantedServe):PairAuthorized)&&!LocalGrantPresent;}}
         public bool ApprovalKnown,MayAuthorize,PairAuthorized,LocalGrantPresent,LocalGrantRead,LocalGrantServe;
+        public bool MaySetUp;public string ApprovalIssuer="";
         public bool Automatic=true,GrantedRead,GrantedServe;
         public string PeerId;public bool Local,ApprovedIssuer,MayRead,MayServe,Revoked,Authorized;
         public string AuthorizationState {get {return Authorized||MayRead||MayServe?"Authorized":Revoked?"Revoked":"Not authorized";}}
