@@ -238,6 +238,23 @@ namespace PeerChat.Server {
                 throw new InvalidOperationException("Stored group creation evidence is invalid.");
             return proof.Encoded;
         }
+        // Public signed evidence only. A receipt is not membership or a key grant;
+        // native consecutive-roster admission remains mandatory.
+        List<Dictionary<string,object>> GroupDeviceApprovals(string group,string legacy,long generation){
+            var result=new List<Dictionary<string,object>>();IntPtr statement=IntPtr.Zero;
+            try{
+                if(SqliteNative.prepare(database,"SELECT proof_id,account_id,actor_identity,target_identity,applied_generation,revoked,signed_proof FROM group_device_proofs WHERE group_id="+Quote(group)+" ORDER BY applied_generation DESC LIMIT 32",out statement)!=0)throw new InvalidOperationException("Cannot read group device evidence.");
+                while(SqliteNative.step(statement)==100){
+                    var proof=GroupDeviceProof.Parse(SqliteNative.columnText(statement,6));long applied=SqliteNative.columnLong(statement,4);
+                    if(proof.Id!=SqliteNative.columnText(statement,0)||proof.Account!=SqliteNative.columnLong(statement,1)||
+                       proof.Actor!=SqliteNative.columnText(statement,2)||proof.Target!=SqliteNative.columnText(statement,3)||
+                       proof.GroupId!=group||proof.LegacyGroupId!=legacy||proof.Generation+1!=applied||applied>generation||
+                       (proof.Revoke?1:0)!=SqliteNative.columnLong(statement,5))throw new InvalidOperationException("Stored group device evidence is invalid.");
+                    result.Add(new Dictionary<string,object>{{"appliedGeneration",applied},{"proof",proof.Encoded}});
+                }
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+            result.Reverse();return result;
+        }
         public Dictionary<string,object> GroupRoster(string group,long account,string device){lock(gate){
             if(!GroupId(group)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null&&GroupRole(group,account,device,"invited")==null)return null;
             long generation=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group));
@@ -245,7 +262,8 @@ namespace PeerChat.Server {
             try{if(SqliteNative.prepare(database,"SELECT r.account_id,r.public_identity,r.role,r.state,a.username FROM group_roster_devices r JOIN accounts a ON a.id=r.account_id WHERE r.group_id="+Quote(group)+" ORDER BY r.account_id,r.public_identity",out statement)!=0)throw new InvalidOperationException("Cannot read group roster.");
                 while(SqliteNative.step(statement)==100)members.Add(new Dictionary<string,object>{{"accountId",SqliteNative.columnLong(statement,0)},{"publicIdentity",SqliteNative.columnText(statement,1)},{"role",SqliteNative.columnText(statement,2)},{"state",SqliteNative.columnText(statement,3)},{"username",SqliteNative.columnText(statement,4)}});
             }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
-            return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members},{"creationProof",GroupCreationProof(group)}};
+            var legacy=ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group));
+            return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",legacy},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members},{"creationProof",GroupCreationProof(group)},{"deviceApprovals",GroupRole(group,account,device)==null?new List<Dictionary<string,object>>():GroupDeviceApprovals(group,legacy,generation)}};
         }}
         public List<Dictionary<string,object>> GroupRostersForDevice(long account,string device){lock(gate){
             var result=new List<Dictionary<string,object>>();if(!OwnsDevice(account,device))return result;

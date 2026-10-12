@@ -102,12 +102,16 @@ internal static class GroupDeviceServerTest {
         using(var db=new AccountDatabase(path)){
             Require(Convert.ToString(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["creationProof"])==creation.Encoded,"Root evidence lost across restart");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)!=null,"Exact receipt did not survive restart");
+            var evidence=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)db.GroupRoster(approve.GroupId,1,approve.Actor)["deviceApprovals"];
+            Require(evidence.Count==1&&Convert.ToInt64(evidence[0]["appliedGeneration"])==2&&Convert.ToString(evidence[0]["proof"])==approve.Encoded,"Verified approval projection lost durable proof");
             Require(db.AddDevice(1,sibling)==false,"Device could move accounts");
             Require(db.AddDevice(1,Read(root,"stale.bin").Target),"Stale fixture same-account registration");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,Read(root,"stale.bin"))==null,"Stale generation accepted");
             Require(db.ApplyGroupDeviceProof(1,revoke.Actor,revoke)!=null&&!db.GroupRosterMember(approve.GroupId,1,approve.Target),"Device revocation failed");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)==null,"Old approval resurrected revoked device");
             Require(db.ApplyGroupDeviceProof(1,reenroll.Actor,reenroll)!=null,"Fresh explicit reenrollment failed");
+            evidence=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)db.GroupRoster(approve.GroupId,1,approve.Actor)["deviceApprovals"];
+            Require(evidence.Count==3&&Convert.ToInt64(evidence[2]["appliedGeneration"])==4,"Approval/revocation projection order changed");
         }
         var memberProof=Read(root,"member.bin");using(var db=new AccountDatabase(Path.Combine(root,"ordinary.sqlite"))){
             Accounts(db,creation,member,sibling);

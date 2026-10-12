@@ -1,8 +1,20 @@
 #pragma once
 #include "group.hpp"
 #include "protocol.hpp"
+#include "group_device_binding.hpp"
 
 namespace peerchat::group_keys {
+struct PublicDeviceApproval {std::uint64_t appliedGeneration=0;Blob proof;};
+// Validates signed evidence in an authenticated snapshot only. This never
+// admits an event, trusts an authorizer, persists a receipt or releases a key.
+inline void verifyDeviceApprovals(const std::string& server,const std::string& legacy,std::uint64_t generation,const std::vector<PublicDeviceApproval>& rows){
+    protocol::check(protocol::id(server,32)&&protocol::id(legacy,32)&&generation>0&&generation<=INT64_MAX&&rows.size()<=32);
+    std::uint64_t previous=0;std::set<std::string> ids;
+    for(const auto& row:rows){auto proof=group_devices::readApproval(row.proof);
+        protocol::check(proof.serverGroup==server&&proof.event.groupId==legacy&&row.appliedGeneration==proof.generation+1&&
+            row.appliedGeneration<=generation&&row.appliedGeneration>previous&&ids.insert(proof.event.eventId).second);previous=row.appliedGeneration;
+    }
+}
 // Immutable signed creation evidence is not current membership, a history grant,
 // or permission to release keys. Current roster and full ledger checks remain.
 inline GroupEvent verifiedCreation(const std::string& server,const std::string& legacy,const Blob& wire){

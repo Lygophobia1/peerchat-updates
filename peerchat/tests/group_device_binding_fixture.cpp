@@ -94,6 +94,14 @@ int main(int argc,char** argv){try{
     if(group_devices::reconcileApproval(current,retired,evidence.at("revoke.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||signedLedger.state().device(1,target.peerId))
         throw std::runtime_error("Exact device revocation did not reconcile");
     auto restored=current;restored.generation=4;
+    group_keys::verifyDeviceApprovals(server,create.groupId,3,{{2,validWire},{3,evidence.at("revoke.bin")}});
+    auto rejectEvidence=[&](const std::vector<group_keys::PublicDeviceApproval>& rows,std::uint64_t generation=3){
+        bool failed=false;try{group_keys::verifyDeviceApprovals(server,create.groupId,generation,rows);}catch(...){failed=true;}
+        if(!failed)throw std::runtime_error("Invalid public device receipt admitted");
+    };
+    rejectEvidence({{2,validWire}},1);rejectEvidence({{3,validWire}});
+    rejectEvidence({{3,evidence.at("revoke.bin")},{2,validWire}});rejectEvidence({{2,validWire},{2,validWire}});
+    auto damagedEvidence=validWire;damagedEvidence.back()^=1;rejectEvidence({{2,damagedEvidence}});
     Storage replicaStore((root/L"replica").wstring());replicaStore.appendGroupEvent(create);
     GroupLedger replicaLedger;replicaLedger.append(create);
     group_devices::Replica disabled(replicaStore,server,create.groupId);
