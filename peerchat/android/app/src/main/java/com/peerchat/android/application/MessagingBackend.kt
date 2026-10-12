@@ -127,12 +127,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
     @Volatile private var operationDeadline=Long.MAX_VALUE
     @Volatile private var livePeerWorkAllowed=true
     @Volatile private var quiescent=java.util.concurrent.CountDownLatch(0)
-    internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE) {
+    internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE) {
         inUse=value
         operationDeadline=deadlineNanos
         // A finite wake lease services server mailbox only. It never starts a
         // friend reconnect cycle to obtain history or bootstrap sender trust.
-        livePeerWorkAllowed=deadlineNanos==Long.MAX_VALUE
+        livePeerWorkAllowed=allowPeerWork
         operations.configure(value&&!resetting,deadlineNanos)
         if(!value){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
             executor.execute {try{synchronized(gate){if(!inUse&&!stopped){
@@ -317,6 +317,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
     }
     private var transferDiagnosticsAt=0L
+    private val transferDiagnosticStates=mutableMapOf<String,Pair<String,Long>>()
     private fun transfer(operation:Int,write:(NativeRecordWriter)->Unit={}):ByteArray {
         val request=NativeRecordWriter(30).also(write).bytes()
         return checkNotNull(com.peerchat.android.TransferBridge.request(checkNotNull(profile).handle,operation,request)){"Native transfer operation rejected"}
@@ -566,10 +567,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(attachments.isNotEmpty()&&diagnosticNow>=transferDiagnosticsAt){
             transferDiagnosticsAt=diagnosticNow+1000
             val record=NativeRecord(transfer(5),30)
+            val currentIds=mutableSetOf<String>()
             repeat(record.number().toInt().coerceIn(0,64)){
-                android.util.Log.i("PeerChatTransfer",record.text()+" projection_observed_ms="+diagnosticNow)
+                val row=record.text();val id=row.substringBefore(' ');currentIds.add(id)
+                val signature=row.substringBefore(" elapsed_ms=");val previous=transferDiagnosticStates[id]
+                val active=!row.contains(" state=4 ")&&!row.contains(" state=5 ")&&!row.contains(" state=6 ")&&!row.contains(" state=8 ")
+                if(previous?.first!=signature||(active&&diagnosticNow-(previous?.second?:0L)>=10000)){
+                    android.util.Log.i("PeerChatTransfer",row+" projection_observed_ms="+diagnosticNow)
+                    transferDiagnosticStates[id]=signature to diagnosticNow
+                }
             }
             record.end()
+            transferDiagnosticStates.keys.retainAll(currentIds)
         }
         mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed())
     }

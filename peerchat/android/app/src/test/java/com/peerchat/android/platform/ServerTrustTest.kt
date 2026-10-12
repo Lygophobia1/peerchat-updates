@@ -81,6 +81,8 @@ class ServerTrustTest {
         assertFalse(round{port,_->assertEquals(pin,ServerChannel.inspectCertificate("localhost",port))})
         assertTrue(round(true){port,ready->ServerChannel("localhost",port,pin,false).use{
             assertTrue(ready.await(10,java.util.concurrent.TimeUnit.SECONDS))
+            val tcp=ServerChannel::class.java.getDeclaredField("tcp").also{it.isAccessible=true}.get(it) as java.net.Socket
+            assertTrue("Authenticated outer relay socket disables Nagle",tcp.tcpNoDelay)
         }})
         assertFalse(round{port,_->
             try{ServerChannel("localhost",port,"a".repeat(64),false).close();fail("Wrong pin accepted")}

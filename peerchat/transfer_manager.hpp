@@ -253,6 +253,12 @@ public:
                         auto digest=e.hash->finish();e.hash.reset();
                         if(e.digestReady&&digest!=e.metadata.digest){fail(e,"Source content changed after restart");continue;}
                         e.metadata.digest=digest;e.digestReady=true;e.state=State::Offered;
+                    }else if(e.done==e.metadata.size){
+                        // A retained full file can finish locally after exact
+                        // revalidation, even while its sender is unavailable.
+                        if(e.hash->finish()!=e.metadata.digest){fail(e,"File integrity verification failed after restart");continue;}
+                        {Timer timer(e.commitUs);e.sink->commit();}
+                        e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply.reset();
                     }else{e.state=State::Transferring;e.reply=offsetPacket(Kind::Resume,e);}
                     e.error.clear();touch(e);
                 }
@@ -302,7 +308,10 @@ public:
             if(i!=entries_.end()){
                 auto& e=i->second;protocol::check(e.peer==peer&&!e.sending&&e.metadata==m);
                 e.lastActivity=now;
-                if(e.state==State::Complete)e.reply=packet(Kind::Complete,id).data;
+                // A restarted sender must first learn the durable full offset,
+                // then send Finish before receiving Complete. Do not bypass
+                // its existing completion ordering with an unsolicited ACK.
+                if(e.state==State::Complete)e.reply=offsetPacket(Kind::Resume,e);
                 else if(e.state==State::Transferring)e.reply=offsetPacket(Kind::Resume,e);
                 else if(terminal(e.state))e.reply=packet(Kind::Cancel,id).data;
                 return;

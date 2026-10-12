@@ -145,6 +145,7 @@ public final class ServerChannel implements AutoCloseable {
         tcp=new Socket(); SSLSocket candidate=null;
         try {
             operations.attach(tcp);arm(10000);
+            tcp.setTcpNoDelay(true);
             tcp.connect(new InetSocketAddress(host,port),10000);tcp.setSoTimeout(10000);
             observe(timing,"server_tcp_connected",started);
             candidate=(SSLSocket)context.getSocketFactory().createSocket(tcp,host,port,true);

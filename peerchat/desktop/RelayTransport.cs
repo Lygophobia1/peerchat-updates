@@ -27,6 +27,7 @@ public sealed class RelayTransport : IDisposable {
         // creates a false disconnect/retry loop. TcpClient.Close still interrupts this
         // unbounded read during profile shutdown; writes retain their bounded timeout.
         tls=discovery.OpenAuthenticatedStream(out tcp,true);
+        tcp.NoDelay=true; // Small authenticated stop-and-wait controls must not wait for Nagle.
         var request=new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",discovery.SessionToken??""},{"publicIdentity",localPeer},{"targetAccountId",targetAccount.ToString()},{"targetPublicIdentity",targetPeer}};
         if(!String.IsNullOrEmpty(groupId)){if(rosterGeneration<=0)throw new InvalidOperationException("Group-control roster generation is unavailable.");request["purpose"]="group_key";request["groupId"]=groupId;request["rosterGeneration"]=rosterGeneration.ToString();}
         if(archive!=null){if(!String.IsNullOrEmpty(groupId)||archive.Account!=discovery.AccountId||targetAccount!=archive.Account||

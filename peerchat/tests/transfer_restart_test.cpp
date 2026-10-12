@@ -123,7 +123,20 @@ int main(int argc,char** argv){
             check(h.receiver->snapshots()[0].done==data.size());h.sender.reset();h.receiver.reset();
             auto d=h.jb->load()[0];
             {auto sink=windows::FileSink::reopen(d);sink->commit();} // Crash after atomic rename, before Complete journal.
-            h.ja.reset();h.jb.reset();h.open();h.finish();check(h.result()==data);
+            h.ja.reset();h.jb.reset();h.open();
+            for(int n=0;n<20&&h.receiver->snapshots()[0].state==State::Recovering;++n)
+                h.receiver->tick(h.now++,[](const std::string&)->std::uint64_t{return 0;},[](const std::string&,const Blob&){throw std::runtime_error("Offline receiver sent control");return false;});
+            check(h.receiver->snapshots()[0].state==State::Complete&&h.result()==data);
+            h.finish();check(h.result()==data);
+        }
+        {
+            Harness h(root/L"full-prefix-corrupt");auto data=bytes(100001);h.offer(data);
+            for(int n=0;n<1000&&(h.receiver->snapshots().empty()||h.receiver->snapshots()[0].done!=data.size());++n)h.pump();
+            check(h.receiver->snapshots()[0].done==data.size());h.sender.reset();h.receiver.reset();h.ja.reset();h.jb.reset();
+            data[0]^=1;write(h.destination/(h.id+".peerchat-part"),data);h.open();
+            for(int n=0;n<20&&h.receiver->snapshots()[0].state==State::Recovering;++n)
+                h.receiver->tick(h.now++,[](const std::string&)->std::uint64_t{return 0;},[](const std::string&,const Blob&){return false;});
+            check(h.receiver->snapshots()[0].state==State::Failed);
         }
         {
             Harness h(root/L"tamper");h.offer(bytes(100001));h.partial();h.sender.reset();h.receiver.reset();h.ja.reset();h.jb.reset();
