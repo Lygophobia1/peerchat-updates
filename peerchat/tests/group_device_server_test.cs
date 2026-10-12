@@ -15,6 +15,39 @@ internal static class GroupDeviceServerTest {
         string root=args[0];var creation=GroupRosterProof.Parse(Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"create.bin"))));
         GroupDeviceProof approve=Read(root,"approve.bin"),revoke=Read(root,"revoke.bin"),reenroll=Read(root,"reenroll.bin");
         string member=Peer(File.ReadAllBytes(Path.Combine(root,"member-public.bin"))),sibling=Peer(File.ReadAllBytes(Path.Combine(root,"sibling-public.bin")));
+        var identity=GroupDeviceIdentityProof.Parse(Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"identity.bin"))));
+        Require(identity.Account==1&&identity.Device==approve.Target,"Native identity proof mapping changed");
+        var wrongIdentity=GroupDeviceIdentityProof.Parse(Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"identity-wrong-account.bin"))));
+        foreach(string corruption in new[]{"signature","truncated","trailing","purpose"}){
+            byte[] wire=File.ReadAllBytes(Path.Combine(root,corruption=="purpose"?"approve.bin":"identity.bin"));
+            if(corruption=="signature")wire[wire.Length-1]^=1;
+            else if(corruption=="truncated")Array.Resize(ref wire,wire.Length-1);
+            else if(corruption=="trailing")Array.Resize(ref wire,wire.Length+1);
+            bool rejected=false;try{GroupDeviceIdentityProof.Parse(Convert.ToBase64String(wire));}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Invalid device possession evidence accepted: "+corruption);
+        }
+        string identityPath=Path.Combine(root,"device-identity.sqlite");
+        using(var db=new AccountDatabase(identityPath)){
+            Accounts(db,creation,member,sibling);
+            Require(!db.PublishGroupDeviceIdentity(1,identity.Device,identity),"Unregistered target published identity proof");
+            Require(db.AddDevice(1,identity.Device),"Identity target registration failed");
+            Require(!db.PublishGroupDeviceIdentity(2,member,identity)&&!db.PublishGroupDeviceIdentity(1,creation.OwnerIdentity,identity),"Account session substituted signing device");
+            Require(!db.PublishGroupDeviceIdentity(1,identity.Device,wrongIdentity),"Valid signature for wrong account accepted");
+            Require(db.PublishGroupDeviceIdentity(1,identity.Device,identity)&&db.PublishGroupDeviceIdentity(1,identity.Device,identity),"Identity publication/idempotent retry failed");
+            Require(db.ReadGroupDeviceIdentity(1,creation.OwnerIdentity,identity.Device)==identity.Encoded,"Own-account approver could not read exact target evidence");
+            Require(db.ReadGroupDeviceIdentity(2,member,identity.Device)==null&&db.ReadGroupDeviceIdentity(1,member,identity.Device)==null,"Cross-account or unowned requesting device read evidence");
+            Require(!db.GroupRosterMember(creation.ServerGroupId,1,identity.Device)&&Convert.ToInt64(db.GroupRoster(creation.ServerGroupId,1,creation.OwnerIdentity)["rosterGeneration"])==1,"Possession publication implicitly approved group membership");
+        }
+        using(var db=new AccountDatabase(identityPath)){
+            Require(db.ReadGroupDeviceIdentity(1,creation.OwnerIdentity,identity.Device)==identity.Encoded,"Identity evidence lost across restart");
+            db.Execute("UPDATE group_device_identity_proofs SET signed_proof='"+wrongIdentity.Encoded+"';");
+            bool rejected=false;try{db.ReadGroupDeviceIdentity(1,creation.OwnerIdentity,identity.Device);}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Corrupt persisted account mapping did not fail closed");
+            rejected=false;try{db.PublishGroupDeviceIdentity(1,identity.Device,identity);}catch(InvalidOperationException){rejected=true;}
+            Require(rejected,"Publication silently replaced mismatched stored evidence");
+            db.Execute("DELETE FROM devices WHERE public_identity='"+identity.Device+"';");
+            Require(db.ReadGroupDeviceIdentity(1,creation.OwnerIdentity,identity.Device)==null&&!db.PublishGroupDeviceIdentity(1,identity.Device,identity),"Removed account device retained proof eligibility");
+        }
         foreach(string corruption in new[]{"tampered","truncated"}){
             byte[] wire=File.ReadAllBytes(Path.Combine(root,"approve.bin"));if(corruption=="tampered")wire[wire.Length-1]^=1;else Array.Resize(ref wire,wire.Length-1);
             bool rejected=false;try{GroupDeviceProof.Parse(Convert.ToBase64String(wire));}catch(InvalidOperationException){rejected=true;}Require(rejected,"Corrupt proof accepted");

@@ -13,6 +13,28 @@ inline Blob identityInput(std::uint64_t account,const std::string& device,const 
 inline Blob identityProof(std::uint64_t account,const Profile& device){
     return signDevicePayload(identityInput(account,device.peerId,device.publicKey),device);
 }
+struct SignedIdentity {
+    std::uint64_t account=0;
+    std::string device;
+    Blob publicKey,signature;
+};
+// Public possession evidence only, never a group membership grant or credential.
+inline Blob identityRegistration(std::uint64_t account,const Profile& device){
+    auto input=identityInput(account,device.peerId,device.publicKey);
+    auto signature=signDevicePayload(input,device);
+    protocol::check(signature.size()==64&&verifyDevicePayload(input,signature,device.publicKey));
+    protocol::Writer writer(protocol::GroupEvent);writer.data=std::move(input);writer.bytes(signature);return writer.data;
+}
+inline SignedIdentity readIdentityRegistration(const Blob& wire){
+    protocol::check(wire.size()<=512);
+    protocol::Reader reader(wire);protocol::check(reader.type()==protocol::GroupEvent);
+    protocol::check(reader.string()=="PeerChat/group-device-identity/v1");
+    SignedIdentity result;result.account=reader.number();result.device=reader.string();result.publicKey=reader.bytes();
+    auto signedEnd=reader.cursor;result.signature=reader.bytes();reader.end();
+    auto input=identityInput(result.account,result.device,result.publicKey);
+    protocol::check(result.signature.size()==64&&input==Blob(wire.begin(),wire.begin()+signedEnd)&&
+        verifyDevicePayload(input,result.signature,result.publicKey));return result;
+}
 inline Blob approvalProof(const std::string& serverGroup,std::uint64_t generation,const GroupEvent& event,
                           const Blob& targetPublicKey,const Blob& targetIdentitySignature,const Profile& actor){
     if(!protocol::id(serverGroup,32)||!generation||generation>=INT64_MAX||

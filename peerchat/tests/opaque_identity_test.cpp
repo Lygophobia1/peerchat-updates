@@ -1,5 +1,6 @@
 #include "../storage.cpp"
 #include "../platform/identity_provider.hpp"
+#include "../group_device_binding.hpp"
 #include <iostream>
 
 namespace {
@@ -31,6 +32,8 @@ int main(){using namespace peerchat;try{
     validateProfile(legacy);
     auto provider=std::make_shared<TestIdentity>(legacy);
     Profile opaque=legacy;opaque.privateKey.clear();opaque.identity=provider;
+    auto evidence=group_devices::readIdentityRegistration(group_devices::identityRegistration(7,opaque));
+    require(evidence.account==7&&evidence.device==legacy.peerId&&evidence.publicKey==legacy.publicKey,"Opaque group identity proof changed signing identity");
     const Blob payload{0,1,2,0,255};
     for(int i=0;i<1000;++i){validateProfile(opaque);auto signature=signDevicePayload(payload,opaque);
         require(signature.size()==64&&verifyDevicePayload(payload,signature,legacy.publicKey),"Provider signature rejected");}
@@ -38,7 +41,7 @@ int main(){using namespace peerchat;try{
     rejects([&]{signDevicePayload(payload,invalid);});
     invalid=opaque;invalid.publicKey[12]^=1;rejects([&]{validateProfile(invalid);});
     rejects([&]{signDevicePayload(Blob(70001),opaque);});
-    provider->fail=true;rejects([&]{signDevicePayload(payload,opaque);});provider->fail=false;
+    provider->fail=true;rejects([&]{signDevicePayload(payload,opaque);});rejects([&]{group_devices::identityRegistration(7,opaque);});provider->fail=false;
     provider->wrongSignature=true;rejects([&]{validateProfile(opaque);});rejects([&]{signDevicePayload(payload,opaque);});
     provider->wrongSignature=false;
     GroupEvent event;event.actorPeerId=opaque.peerId;event.actorAccountId=1;

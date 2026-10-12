@@ -11,6 +11,14 @@ int main(int argc,char** argv){try{
     std::filesystem::path root(argv[1]);
     Storage ownerStore((root/L"owner").wstring()),targetStore((root/L"target").wstring()),memberStore((root/L"member").wstring()),siblingStore((root/L"sibling").wstring()),extraStore((root/L"extra").wstring());
     auto owner=ownerStore.profile(),target=targetStore.profile(),member=memberStore.profile(),sibling=siblingStore.profile(),extra=extraStore.profile();
+    auto registration=group_devices::identityRegistration(1,target);
+    auto identity=group_devices::readIdentityRegistration(registration);
+    if(identity.account!=1||identity.device!=target.peerId||identity.publicKey!=target.publicKey)throw std::runtime_error("Identity proof roundtrip failed");
+    write(root/L"identity.bin",registration);
+    write(root/L"identity-wrong-account.bin",group_devices::identityRegistration(2,target));
+    auto badRegistration=registration;badRegistration.back()^=1;bool invalid=false;
+    try{group_devices::readIdentityRegistration(badRegistration);}catch(const std::exception&){invalid=true;}
+    if(!invalid)throw std::runtime_error("Damaged identity registration accepted");
     GroupEvent create;create.groupId=newGroupId();create.logicalOrder=1;create.kind=GroupEventKind::Create;
     create.actorAccountId=create.subjectAccountId=1;create.actorPeerId=create.subjectPeerId=owner.peerId;
     create.subjectPublicKey=owner.publicKey;create.subjectName=L"Owner";create.value=L"Device proof fixtures";signGroupEvent(create,owner);

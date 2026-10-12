@@ -62,6 +62,7 @@ namespace PeerChat.Server {
                 "CREATE TABLE IF NOT EXISTS group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, distributor_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', creation_proof TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_roster_devices(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, public_identity TEXT NOT NULL, role TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(group_id,account_id,public_identity));" +
                 "CREATE INDEX IF NOT EXISTS group_roster_members_by_device ON group_roster_devices(public_identity,state,group_id);" +
+                "CREATE TABLE IF NOT EXISTS group_device_identity_proofs(public_identity TEXT PRIMARY KEY REFERENCES devices(public_identity) ON DELETE CASCADE,account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,signed_proof TEXT NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_device_proofs(proof_id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, actor_identity TEXT NOT NULL, target_identity TEXT NOT NULL, applied_generation INTEGER NOT NULL, revoked INTEGER NOT NULL, signed_proof TEXT NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_invites(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, recipient_account_id INTEGER NOT NULL REFERENCES accounts(id), invite_id TEXT NOT NULL UNIQUE, inviter_account_id INTEGER NOT NULL REFERENCES accounts(id), inviter_identity TEXT NOT NULL, state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(group_id,recipient_account_id));" +
                 "CREATE INDEX IF NOT EXISTS group_invites_recipient_state ON group_invites(recipient_account_id,state,updated_utc);");
@@ -186,6 +187,20 @@ namespace PeerChat.Server {
                 Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(group)+","+account+","+Quote(device)+",'owner','member');");
                 Execute("COMMIT;");return GroupRoster(group,account,device);
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
+        // Gated application prerequisite, not an RPC or membership operation.
+        public bool PublishGroupDeviceIdentity(long account,string device,GroupDeviceIdentityProof proof){lock(gate){
+            if(proof==null||proof.Account!=account||proof.Device!=device||!OwnsDevice(account,device))return false;
+            Execute("INSERT INTO group_device_identity_proofs(public_identity,account_id,signed_proof) VALUES("+Quote(device)+","+account+","+Quote(proof.Encoded)+") ON CONFLICT(public_identity) DO NOTHING;");
+            return ReadGroupDeviceIdentity(account,device,device)!=null;
+        }}
+        public string ReadGroupDeviceIdentity(long account,string requestingDevice,string targetDevice){lock(gate){
+            if(!OwnsDevice(account,requestingDevice)||!OwnsDevice(account,targetDevice))return null;
+            string encoded=ScalarText(database,"SELECT signed_proof FROM group_device_identity_proofs WHERE account_id="+account+" AND public_identity="+Quote(targetDevice));
+            if(encoded==null)return null;
+            var proof=GroupDeviceIdentityProof.Parse(encoded);
+            if(proof.Account!=account||proof.Device!=targetDevice)throw new InvalidOperationException("Stored group device identity evidence is invalid.");
+            return proof.Encoded;
         }}
         // Internal production boundary: RPC/UI activation waits for signed replica
         // reconciliation and current-key provisioning. Never admits account login alone.

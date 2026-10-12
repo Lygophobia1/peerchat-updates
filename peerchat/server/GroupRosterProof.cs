@@ -3,6 +3,28 @@ using System.Security.Cryptography;
 using System.Text;
 
 namespace PeerChat.Server {
+    // Possession of the existing signing identity, not group approval. Session
+    // account/device ownership and signed group approval are separate admissions.
+    internal sealed class GroupDeviceIdentityProof {
+        public long Account {get;private set;} public string Device {get;private set;}
+        public string Encoded {get;private set;}
+        private GroupDeviceIdentityProof(){}
+        static void Check(bool value){if(!value)throw new InvalidOperationException("Invalid group device identity evidence.");}
+        public static GroupDeviceIdentityProof Parse(string encoded){
+            Check(!String.IsNullOrEmpty(encoded)&&encoded.Length<=1024);
+            byte[] wire;try{wire=Convert.FromBase64String(encoded);}catch(FormatException){throw new InvalidOperationException("Invalid group device identity evidence.");}
+            Check(wire.Length>=4&&wire.Length<=512&&wire[0]=='P'&&wire[1]=='T'&&wire[2]==1&&wire[3]==5);
+            int p=4;Check(GroupRosterProof.Text(wire,ref p,64)=="PeerChat/group-device-identity/v1");
+            ulong account=GroupRosterProof.Number(wire,ref p);string device=GroupRosterProof.Text(wire,ref p,64);
+            byte[] key=GroupRosterProof.Bytes(wire,ref p,72);int signedEnd=p;
+            byte[] signature=GroupRosterProof.Bytes(wire,ref p,64);
+            Check(p==wire.Length&&account>0&&account<=long.MaxValue&&GroupRosterProof.Id(device,64)&&key.Length==72);
+            using(var sha=SHA256.Create())Check(GroupRosterProof.Hex(sha.ComputeHash(key))==device);
+            byte[] input=new byte[signedEnd];Buffer.BlockCopy(wire,0,input,0,signedEnd);
+            Check(GroupDeviceProof.Verify(input,signature,key));
+            return new GroupDeviceIdentityProof{Account=(long)account,Device=device,Encoded=Convert.ToBase64String(wire)};
+        }
+    }
     internal sealed class GroupDeviceProof {
         public string GroupId {get;private set;} public string LegacyGroupId {get;private set;}
         public string Actor {get;private set;} public string Target {get;private set;}
@@ -15,7 +37,7 @@ namespace PeerChat.Server {
         static void Number(System.IO.BinaryWriter writer,ulong value){writer.Write(value);}
         static void Bytes(System.IO.BinaryWriter writer,byte[] value){Number(writer,(ulong)value.Length);writer.Write(value);}
         static void Text(System.IO.BinaryWriter writer,string value){Bytes(writer,Encoding.UTF8.GetBytes(value));}
-        static bool Verify(byte[] input,byte[] signature,byte[] key){
+        internal static bool Verify(byte[] input,byte[] signature,byte[] key){
             if(signature.Length!=64||key.Length!=72)return false;
             try{using(var sha=SHA256.Create()){
 #if PEERCHAT_PORTABLE
