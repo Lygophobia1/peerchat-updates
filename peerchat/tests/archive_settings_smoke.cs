@@ -102,6 +102,7 @@ static class ArchiveSettingsSmoke {
                 var consentRows=Array.CreateInstance(deviceType,2);consentRows.SetValue(own,0);consentRows.SetValue(cached,1);
                 typeof(DesktopApplication).GetField("historyDevices",flags).SetValue(desktop,consentRows);
                 foreach(bool enabledAuthorizer in new[]{true,false}){
+                    deviceType.GetField("GrantedRead").SetValue(cached,!enabledAuthorizer);deviceType.GetField("GrantedServe").SetValue(cached,false);
                     deviceType.GetField("ApprovedIssuer").SetValue(own,enabledAuthorizer);
                     Exception modalFailure=null;
                     window.Dispatcher.BeginInvoke((Action)(()=>{
@@ -109,9 +110,11 @@ static class ArchiveSettingsSmoke {
                             focus=dialog.OwnedWindows.Cast<Window>().Single(w=>w.Title=="New history device");focus.UpdateLayout();
                             var focusBody=(StackPanel)((ScrollViewer)focus.Content).Content;Check(!focusBody.Children.OfType<CheckBox>().Any());
                             var custom=focusBody.Children.OfType<Expander>().Single();Check(!custom.IsExpanded&&((StackPanel)custom.Content).Children.OfType<CheckBox>().Count()==3);custom.IsExpanded=true;focus.UpdateLayout();
+                            var switches=((StackPanel)custom.Content).Children.OfType<CheckBox>().ToArray();Check(switches[0].IsChecked==true&&switches[1].IsChecked==enabledAuthorizer); // New normal ON/ON; existing read-only custom grant remains ON/OFF.
                             var explicitGrant=Find(focus,"Authorize selected permissions from this device") as Button;
                             Check((explicitGrant!=null)==enabledAuthorizer);
                             if(explicitGrant!=null){explicitGrant.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(focus.IsVisible&&focus.IsEnabled&&panel.IsEnabled);}
+                            ((Button)Find(focus,"Cancel")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(!focus.IsVisible); // Cancellation never issues a grant.
                         }catch(Exception error){modalFailure=error;}finally{if(focus!=null)focus.Close();}
                     }));
                     ((Button)Find(dialog,"Add device")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

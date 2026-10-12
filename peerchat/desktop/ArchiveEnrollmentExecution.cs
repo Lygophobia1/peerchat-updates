@@ -176,10 +176,18 @@ internal sealed class ArchiveEnrollmentExecution {
     }
     public Device[] SnapshotDevices(long account,long generation){
         var rows=Devices(native(3,Command(3)));foreach(var d in rows)d.Automatic=AutomaticSync(account,generation,d.PeerId);
-        var bytes=native(21,Command(21,w=>{w.Write(account);w.Write(generation);}));var header=Command(21);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
-        using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,Encoding.UTF8)){stream.Position=header.Length;Check(r.ReadInt64()==rows.Length);var seen=new HashSet<string>();foreach(var item in rows){Check(r.ReadInt64()==64);var peer=Encoding.ASCII.GetString(r.ReadBytes(64));var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));long read=r.ReadInt64(),serve=r.ReadInt64();Check(read>=0&&read<=1&&serve>=0&&serve<=1);d.GrantedRead=read==1;d.GrantedServe=serve==1;}Check(stream.Position==stream.Length);}return rows;
+        var bytes=native(21,Command(21,w=>{w.Write(account);w.Write(generation);w.Write(1L);}));var header=Command(21);Check(bytes.Length>=header.Length&&bytes.Take(header.Length).SequenceEqual(header));
+        using(var stream=new MemoryStream(bytes,false))using(var r=new BinaryReader(stream,Encoding.UTF8)){stream.Position=header.Length;Check(r.ReadInt64()==rows.Length);var seen=new HashSet<string>();foreach(var item in rows){Check(r.ReadInt64()==64);var peer=Encoding.ASCII.GetString(r.ReadBytes(64));var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));long read=r.ReadInt64(),serve=r.ReadInt64();Check(read>=0&&read<=1&&serve>=0&&serve<=1);d.GrantedRead=read==1;d.GrantedServe=serve==1;}Check(ReadApproval(r,rows));Check(stream.Position==stream.Length);}return rows;
+    }
+    static bool ReadApproval(BinaryReader r,Device[] rows){
+        Func<string> text=()=>{long n=r.ReadInt64();Check(n>=0&&n<=128&&n<=r.BaseStream.Length-r.BaseStream.Position);return new UTF8Encoding(false,true).GetString(r.ReadBytes((int)n));};
+        Func<bool> flag=()=>{long n=r.ReadInt64();Check(n==0||n==1);return n==1;};
+        Check(text()=="PeerChat/ArchiveDeviceApproval/v1"&&r.ReadInt64()==rows.Length);
+        var seen=new HashSet<string>();foreach(var item in rows){string peer=text();var d=rows.SingleOrDefault(row=>row.PeerId==peer);Check(d!=null&&seen.Add(peer));d.MayAuthorize=flag();d.PairAuthorized=flag();d.LocalGrantPresent=flag();d.LocalGrantRead=flag();d.LocalGrantServe=flag();Check(d.LocalGrantPresent==(d.LocalGrantRead||d.LocalGrantServe));d.ApprovalKnown=true;}return true;
     }
     public sealed class Device {
+        public bool NeedsApproval {get{return ApprovalKnown&&!(Local?(GrantedRead||GrantedServe):PairAuthorized)&&!LocalGrantPresent;}}
+        public bool ApprovalKnown,MayAuthorize,PairAuthorized,LocalGrantPresent,LocalGrantRead,LocalGrantServe;
         public bool Automatic=true,GrantedRead,GrantedServe;
         public string PeerId;public bool Local,ApprovedIssuer,MayRead,MayServe,Revoked,Authorized;
         public string AuthorizationState {get {return Authorized||MayRead||MayServe?"Authorized":Revoked?"Revoked":"Not authorized";}}

@@ -45,6 +45,7 @@ int main(){try{
     ar::reconcileInitialSync(reader,execution);check(!execution.running()); // No implicit same-account permission.
     rejects([&]{source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);});
     rejects([&]{source.approveIssuer(pa.peerId,false);});source.approveIssuer(pa.peerId,true);
+    for(const auto& d:source.devices())check(d.mayAuthorize&&!d.pairAuthorized&&!d.localGrantPresent);
     auto serving=source.authorizeDevice(pa.peerId,ar::ServeHistory,20,true);
     auto reading=source.authorizeDevice(pb.peerId,ar::ReadHistory,20,true);
     check(source.pendingPublications().size()==2&&!source.policy().permits(pa.peerId,pa.peerId,ar::ServeHistory));
@@ -54,6 +55,8 @@ int main(){try{
     check(source.pendingPublications().empty()&&!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     rejects([&]{reader.approveIssuer(pa.peerId,false);});reader.approveIssuer(pa.peerId,true);
     admission=reader.authorizationDiagnostics(8,1);
+    for(const auto& d:reader.devices())check((d.local||d.pairAuthorized)&&!d.mayAuthorize&&!d.localGrantPresent);
+    for(const auto& d:source.devices()){check((d.local||d.pairAuthorized)&&d.mayAuthorize&&d.localGrantPresent);check(d.localGrantRead==(d.peerId==pb.peerId)&&d.localGrantServe==(d.peerId==pa.peerId));}
     check(admission.find("source_provide=allowed reader_receive=allowed")!=std::string::npos);
     check(admission.find("local_generation=1")!=std::string::npos&&admission.find("server_generation=1")!=std::string::npos);
     auto diagnosticCommand=ar::applicationHeader(22);diagnosticCommand.number(8);diagnosticCommand.number(1);

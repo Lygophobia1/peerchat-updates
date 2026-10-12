@@ -40,7 +40,7 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     auto result=applicationHeader(operation);
     if(operation==19){auto peer=r.string();auto write=r.number();require(write<=1);if(write){auto enabled=r.number();require(enabled<=1);r.end();enrollment.automaticSync(peer,enabled!=0);}else r.end();result.number(enrollment.automaticSync(peer));return result.data;}
     if(operation==20){r.end();auto peers=execution.providingDevices(now);result.number(peers.size());for(const auto& peer:peers)result.string(peer);return result.data;}
-    if(operation==21){r.end();auto devices=enrollment.devices();result.number(devices.size());for(const auto& d:devices){result.string(d.peerId);result.number(d.grantedRead);result.number(d.grantedServe);}return result.data;}
+    if(operation==21){bool approval=false;if(r.remaining()){require(r.number()==1);approval=true;}r.end();auto devices=enrollment.devices();result.number(devices.size());for(const auto& d:devices){result.string(d.peerId);result.number(d.grantedRead);result.number(d.grantedServe);}if(approval){result.string("PeerChat/ArchiveDeviceApproval/v1");result.number(devices.size());for(const auto& d:devices){result.string(d.peerId);result.number(d.mayAuthorize);result.number(d.pairAuthorized);result.number(d.localGrantPresent);result.number(d.localGrantRead);result.number(d.localGrantServe);}}return result.data;}
     if(operation==12){auto source=r.string();auto rescan=r.number();require(rescan<=1);r.end();execution.start(enrollment.sourceIssuer(source),source,rescan!=0);}
     if(operation==14){r.end();execution.stop();}
     if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();

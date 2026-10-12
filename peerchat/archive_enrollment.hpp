@@ -46,6 +46,7 @@ public:
     struct DeviceView {
         std::string peerId;bool local=false,approvedIssuer=false;
         bool mayRead=false,mayServe=false,revoked=false,authorized=false,grantedRead=false,grantedServe=false;
+        bool mayAuthorize=false,pairAuthorized=false,localGrantPresent=false,localGrantRead=false,localGrantServe=false;
     };
     // This profile-worker component owns only archive authorization application
     // state. SessionTransportManager/DeliveryManager remain the media-free route
@@ -195,6 +196,21 @@ public:
         require(fresh());std::vector<DeviceView> result;
         for(const auto& entry:descriptors_){
             const auto& d=entry.second;DeviceView row{d.device,d.device==local_.peerId,policy_.trustsAuthority(d.publicKey),false,false};
+            // Presentation-only eligibility; issuing/using a grant still invokes
+            // the existing native consent and admission checks. OFF does not
+            // erase approval, and separate self-grants are not pair approval.
+            auto valid=[&](const std::string& issuer,const std::string& subject)->std::uint64_t{
+                auto server=current_.find({issuer,subject});auto cached=policy_.cachedGrant(issuer,subject);auto key=policy_.authorityKey(issuer);
+                if(server==current_.end()||!server->second.verified||!server->second.eligible||server->second.grant.revoked||!cached||!key||!policy_.trustsAuthority(*key)||!member(account_,issuer)||!member(account_,subject))return 0;
+                const auto& g=server->second.grant;if(cached->revoked||cached->generation!=g.generation||cached->issuanceId!=g.issuanceId||cached->capabilities!=g.capabilities)return 0;
+                return g.capabilities;
+            };
+            row.mayAuthorize=member(account_,local_.peerId)&&policy_.trustsAuthority(local_.publicKey);
+            auto own=valid(local_.peerId,d.device);row.localGrantPresent=own!=0;row.localGrantRead=(own&ReadHistory)!=0;row.localGrantServe=(own&ServeHistory)!=0;
+            for(const auto& issuer:policy_.authorityReferences()){
+                auto remote=valid(issuer,d.device),local=valid(issuer,local_.peerId);
+                row.pairAuthorized=row.pairAuthorized||((remote&ServeHistory)&&(local&ReadHistory))||((remote&ReadHistory)&&(local&ServeHistory));
+            }
             for(const auto& grant:current_)if(grant.second.grant.device==d.device){
                 row.mayRead=row.mayRead||policy_.permits(grant.first.first,d.device,ReadHistory);
                 row.mayServe=row.mayServe||policy_.permits(grant.first.first,d.device,ServeHistory);

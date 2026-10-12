@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.Web.Script.Serialization;
 using System.Threading;
+using System.Linq;
 using PeerChatDesktop;
 
 static class ArchiveApplicationBoundaryTest {
@@ -80,6 +81,10 @@ static class ArchiveApplicationBoundaryTest {
         read=Client(a).Consent(8,1,5,pb,1,true); // Same scoped explicit cross-device command as Windows Manage.
         PairMetadata(a,pa,descriptors,new[]{serve,read},2);PairMetadata(b,pb,descriptors,new[]{serve,read},2);
         var source=Client(a);var reader=Client(b);Check(reader.Progress(8,1).Running); // Actual native automatic authorized initial sync.
+        var sourceRows=source.SnapshotDevices(8,1);var target=sourceRows.Single(d=>d.PeerId==pb);
+        Check(target.ApprovalKnown&&target.MayAuthorize&&target.PairAuthorized&&target.LocalGrantPresent&&target.LocalGrantRead&&!target.LocalGrantServe&&!target.NeedsApproval);
+        var sourceSelf=sourceRows.Single(d=>d.PeerId==pa);Check(!sourceSelf.LocalGrantRead&&sourceSelf.LocalGrantServe); // Existing one-way custom grants are not reset by projection.
+        var recipient=reader.SnapshotDevices(8,1).Single(d=>d.PeerId==pa);Check(recipient.ApprovalKnown&&recipient.PairAuthorized&&!recipient.LocalGrantPresent&&!recipient.NeedsApproval);
         var admission=reader.AuthorizationDiagnostics(8,1);Check(admission.Length<=49152&&admission.Contains("local_device="+pb)&&admission.Contains("source_provide=allowed reader_receive=allowed"));
         Check(admission.Contains("History Sync execution")&&admission.Contains("active_scope_issuer="+pa)&&admission.Contains("archive_route")&&admission.Contains("messages_processed="));
         ulong ra=0,rb=0;ArchiveRelayScope scope;var until=DateTime.UtcNow.AddSeconds(10);
