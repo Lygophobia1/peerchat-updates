@@ -2,6 +2,10 @@
 #include "group_device_reconciliation.hpp"
 
 namespace peerchat::group_devices {
+struct AuthenticatedTransition {
+    group_keys::RosterSnapshot before,after;
+    Blob proof;
+};
 // Native replica persistence/admission only. No sockets, retry owner or key release.
 // Caller supplies authenticated consecutive server snapshots; activation remains
 // default OFF until application session verification and revocation gates pass.
@@ -20,6 +24,18 @@ class Replica {
         for(std::uint64_t i=0;i<count;++i){group_keys::RosterDevice d;d.accountId=r.number();d.peerId=r.string();
             auto role=r.number(),invited=r.number();protocol::check(role>=1&&role<=3&&invited<=1);
             d.role=static_cast<GroupRole>(role);d.invited=invited!=0;s.devices.push_back(std::move(d));}return s;
+    }
+    static bool sameSnapshot(const group_keys::RosterSnapshot& a,const group_keys::RosterSnapshot& b){
+        auto canonical=[](group_keys::RosterSnapshot value){
+            std::sort(value.devices.begin(),value.devices.end(),[](const auto& x,const auto& y){return x.peerId<y.peerId;});
+            protocol::Writer w(protocol::GroupEvent);snapshot(w,value);return w.data;
+        };
+        return canonical(a)==canonical(b);
+    }
+    static Blob receipt(const AuthenticatedTransition& step){
+        protocol::Writer w(protocol::GroupEvent);w.string("PeerChat/group-replica-receipt/v1");
+        w.bytes(step.proof);snapshot(w,step.before);snapshot(w,step.after);
+        protocol::check(w.data.size()<=65536);return w.data;
     }
     void root(const GroupLedger& ledger)const{
         protocol::check(ledger.state().created&&ledger.state().groupId==legacy_);
@@ -40,7 +56,8 @@ public:
     // Existing application roster owner supplies the authenticated snapshot and
     // local ledger. No second session/retry owner and no implicit activation.
     static void applyAuthenticated(Storage& store,group_keys::GroupKeyManager& keys,
-                                   group_keys::RosterSnapshot incoming,GroupLedger* ledger,bool enabled=false){
+                                   group_keys::RosterSnapshot incoming,GroupLedger* ledger,bool enabled=false,
+                                   const std::vector<AuthenticatedTransition>& recovery={}){
         const std::string server=incoming.serverGroupId;
         auto old=keys.roster(server);group_keys::RosterSnapshot before;if(old)before=*old;
         try{
@@ -63,7 +80,12 @@ public:
                     if(found!=previous.end()?found->second!=account.second:account.second.size()>1)deviceChange=true;
                 }
             }
-            if(deviceChange){
+            if(!recovery.empty()){
+                protocol::check(enabled&&old&&ledger&&sameSnapshot(before,recovery.front().before)&&
+                    sameSnapshot(incoming,recovery.back().after));
+                Replica replica(store,server,incoming.legacyGroupId,true);
+                protocol::check(replica.recoverAuthenticated(recovery,*ledger)==Reconciliation::Accepted);
+            }else if(deviceChange){
                 protocol::check(enabled&&ledger&&incoming.generation==before.generation+1);
                 auto proof=std::find_if(incoming.deviceApprovals.begin(),incoming.deviceApprovals.end(),[&](const auto& row){return row.appliedGeneration==incoming.generation;});
                 protocol::check(proof!=incoming.deviceApprovals.end());
@@ -83,6 +105,43 @@ public:
             // A failed current snapshot cannot leave old key authority usable.
             keys.revoke(server);throw;
         }
+    }
+    // New sibling bootstrap is membership metadata ONLY. No historical message,
+    // attachment, history grant or old content key is imported by this boundary.
+    static void bootstrapAuthenticated(Storage& store,group_keys::GroupKeyManager& keys,
+                                       group_keys::RosterSnapshot incoming,const std::vector<GroupEvent>& events,
+                                       const std::vector<AuthenticatedTransition>& evidence,GroupLedger& live,bool enabled=false){
+        const auto server=incoming.serverGroupId;
+        try{
+            protocol::check(enabled&&!keys.roster(server)&&!live.state().created&&
+                store.groupEvents(incoming.legacyGroupId).empty()&&!events.empty()&&events.size()<=256&&evidence.size()<=32);
+            incoming=keys.checked(std::move(incoming));
+            protocol::check(!incoming.creationProof.empty()&&events.front().kind==GroupEventKind::Create&&
+                encodeGroupEvent(events.front())==incoming.creationProof);
+            Replica replica(store,server,incoming.legacyGroupId,true);GroupLedger candidate;
+            std::vector<GroupEvent> metadata;std::vector<std::pair<GroupEvent,Blob>> receipts;
+            std::size_t proofIndex=0,bytes=0;
+            for(std::size_t i=0;i<events.size();++i){
+                const auto& event=events[i];auto wire=encodeGroupEvent(event);bytes+=wire.size();
+                protocol::check(wire.size()<=4096&&bytes<=256*1024&&event.groupId==incoming.legacyGroupId&&event.message.empty()&&
+                    (!i||events[i-1].logicalOrder<event.logicalOrder||
+                        (events[i-1].logicalOrder==event.logicalOrder&&events[i-1].eventId<event.eventId)));
+                if(event.kind==GroupEventKind::AuthorizeDevice||event.kind==GroupEventKind::RevokeDevice){
+                    protocol::check(proofIndex<evidence.size());const auto& step=evidence[proofIndex++];
+                    protocol::check(encodeGroupEvent(readApproval(step.proof).event)==wire&&
+                        replica.admit(step.before,step.after,step.proof,candidate)==Reconciliation::Accepted);
+                    for(const auto* state:{&step.before,&step.after})protocol::check(state->creationProof.empty()||state->creationProof==incoming.creationProof);
+                    receipts.push_back({event,receipt(step)});
+                }else{
+                    protocol::check(event.kind>=GroupEventKind::Create&&event.kind<=GroupEventKind::SetRole&&candidate.append(event));
+                    metadata.push_back(event);
+                }
+            }
+            protocol::check(proofIndex==evidence.size()&&group_keys::GroupKeyManager::matchesSignedLedger(incoming,candidate.state())&&
+                (evidence.empty()?incoming.generation==1:sameSnapshot(incoming,evidence.back().after)));
+            replica.root(candidate);store.commitGroupReplicaReceipts(receipts,metadata);
+            keys.apply(std::move(incoming));live=std::move(candidate);
+        }catch(...){keys.revoke(server);throw;}
     }
     // Existing groups keep their accepted-event replay behavior. Device events
     // require individually protected receipts; recovery does not enable live
@@ -105,9 +164,30 @@ public:
     }
     Reconciliation accept(const group_keys::RosterSnapshot& before,const group_keys::RosterSnapshot& after,const Blob& proof,GroupLedger& ledger){
         auto candidate=ledger;auto result=admit(before,after,proof,candidate);if(result!=Reconciliation::Accepted)return result;
-        auto event=readApproval(proof).event;protocol::Writer w(protocol::GroupEvent);w.string("PeerChat/group-replica-receipt/v1");
-        w.bytes(proof);snapshot(w,before);snapshot(w,after);protocol::check(w.data.size()<=65536);
-        store_.commitGroupReplicaReceipt(event,w.data);ledger=std::move(candidate);return result;
+        auto event=readApproval(proof).event;
+        store_.commitGroupReplicaReceipt(event,receipt({before,after,proof}));ledger=std::move(candidate);return result;
+    }
+    // Caller must obtain every snapshot through its current authenticated server
+    // session. A public/truncated proof list is NOT an authenticated epoch chain.
+    // Verify the entire page before one atomic protected commit or live mutation.
+    Reconciliation recoverAuthenticated(const std::vector<AuthenticatedTransition>& steps,GroupLedger& ledger){
+        if(!enabled_)return Reconciliation::LedgerRejected;
+        if(steps.empty()||steps.size()>32)return Reconciliation::InvalidProof;
+        auto candidate=ledger;root(candidate);
+        std::vector<std::pair<GroupEvent,Blob>> receipts;
+        for(std::size_t i=0;i<steps.size();++i){
+            const auto& step=steps[i];
+            if(i&&!sameSnapshot(steps[i-1].after,step.before))return Reconciliation::RosterMismatch;
+            auto result=admit(step.before,step.after,step.proof,candidate);
+            if(result!=Reconciliation::Accepted)return result;
+            for(const auto* state:{&step.before,&step.after})if(!state->creationProof.empty()){
+                auto creation=std::find_if(candidate.events().begin(),candidate.events().end(),[&](const auto& event){return event.kind==GroupEventKind::Create&&candidate.accepted(event.eventId);});
+                if(creation==candidate.events().end()||encodeGroupEvent(*creation)!=state->creationProof)return Reconciliation::RosterMismatch;
+            }
+            receipts.push_back({readApproval(step.proof).event,receipt(step)});
+        }
+        store_.commitGroupReplicaReceipts(receipts);ledger=std::move(candidate);
+        return Reconciliation::Accepted;
     }
     GroupLedger restore(){
         GroupLedger ledger;

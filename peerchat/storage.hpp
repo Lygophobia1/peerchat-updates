@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace peerchat {
 namespace platform { class IdentityProvider; class StoragePlatform; class SqlDatabase; class RecordProtector; }
@@ -128,6 +129,9 @@ public:
     bool appendGroupEvent(const GroupEvent& event);
     Blob groupReplicaReceipt(const std::string& groupId,const std::string& eventId);
     void commitGroupReplicaReceipt(const GroupEvent& event,const Blob& receipt);
+    // One bounded verified recovery page: no partially persisted epoch chain.
+    void commitGroupReplicaReceipts(const std::vector<std::pair<GroupEvent,Blob>>& receipts,
+                                   const std::vector<GroupEvent>& bootstrapMetadata={});
     std::vector<GroupEvent> groupEvents(const std::string& groupId);
     std::vector<std::string> groupIds();
     GroupAccount groupAccount();

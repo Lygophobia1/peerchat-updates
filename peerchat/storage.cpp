@@ -622,10 +622,36 @@ Blob Storage::groupReplicaReceipt(const std::string& group,const std::string& id
     return impl_->get("group-replica/"+group+"/"+id);
 }
 void Storage::commitGroupReplicaReceipt(const GroupEvent& event,const Blob& receipt){
+    commitGroupReplicaReceipts({{event,receipt}});
+}
+void Storage::commitGroupReplicaReceipts(const std::vector<std::pair<GroupEvent,Blob>>& receipts,const std::vector<GroupEvent>& bootstrapMetadata){
+    require((!receipts.empty()||!bootstrapMetadata.empty())&&receipts.size()<=32&&bootstrapMetadata.size()<=256,"Invalid group replica recovery page");
+    Transaction transaction(impl_->sql);
+    const auto& group=receipts.empty()?bootstrapMetadata.front().groupId:receipts.front().first.groupId;
+    std::set<std::string> ids;
+    for(const auto& event:bootstrapMetadata){
+        require(identifier(group,32)&&event.groupId==group&&identifier(event.eventId)&&event.logicalOrder>0&&event.logicalOrder<=INT64_MAX&&
+            event.kind>=GroupEventKind::Create&&event.kind<=GroupEventKind::SetRole&&event.message.empty()&&ids.insert(event.eventId).second,
+            "Invalid group replica bootstrap metadata");
+        auto plain=encodeGroupEvent(event);require(plain.size()<=4096,"Group bootstrap metadata exceeds bound");
+        Statement existing(impl_->sql,"SELECT group_id,b FROM group_events WHERE event_id=?");existing.text(1,event.eventId);
+        if(existing.row()){
+            require(existing.text(0)==group,"Group bootstrap event identity conflict");
+            Secret saved{impl_->protect(existing.bytes(1),"PeerChat.v1/group-event/"+event.eventId+"/"+group,false)};
+            require(saved.data==plain,"Conflicting group bootstrap event");
+        }else{
+            auto encrypted=impl_->protect(plain,"PeerChat.v1/group-event/"+event.eventId+"/"+group,true);
+            Statement insert(impl_->sql,"INSERT INTO group_events(event_id,group_id,logical_order,b) VALUES(?,?,?,?)");
+            insert.text(1,event.eventId);insert.text(2,group);insert.number(3,event.logicalOrder);insert.blob(4,encrypted);insert.row();
+        }
+    }
+    for(const auto& row:receipts){
+    const auto& event=row.first;const auto& receipt=row.second;
     require(identifier(event.groupId,32)&&identifier(event.eventId)&&event.logicalOrder>0&&event.logicalOrder<=INT64_MAX&&
         (event.kind==GroupEventKind::AuthorizeDevice||event.kind==GroupEventKind::RevokeDevice)&&
         !receipt.empty()&&receipt.size()<=65536,"Invalid group replica receipt");
-    Transaction transaction(impl_->sql);auto key="group-replica/"+event.groupId+"/"+event.eventId;
+    require(event.groupId==group&&ids.insert(event.eventId).second,"Invalid group replica recovery identity");
+    auto key="group-replica/"+event.groupId+"/"+event.eventId;
     Secret old{impl_->get(key)};require(old.data.empty()||old.data==receipt,"Conflicting group replica receipt");
     auto plain=encodeGroupEvent(event);Statement existing(impl_->sql,"SELECT group_id,b FROM group_events WHERE event_id=?");existing.text(1,event.eventId);
     if(existing.row()){
@@ -638,6 +664,7 @@ void Storage::commitGroupReplicaReceipt(const GroupEvent& event,const Blob& rece
         insert.text(1,event.eventId);insert.text(2,event.groupId);insert.number(3,event.logicalOrder);insert.blob(4,encrypted);insert.row();
     }
     if(old.data.empty())impl_->put(key,receipt);
+    }
     transaction.commit();
 }
 std::vector<std::string> Storage::groupIds() {

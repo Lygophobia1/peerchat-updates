@@ -62,12 +62,32 @@ internal static class GroupDeviceServerTest {
             fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","actor-expired",true,actorToken);
             Require(db.ApplyGroupDeviceProofForSession(actorToken,approve.Actor,db.Live.Epoch,fresh.Generation,reenroll)==null,"Expired session approved device");
             Require(Convert.ToInt64(db.GroupRoster(approve.GroupId,1,approve.Actor)["rosterGeneration"])==3,"Rejected session attempts mutated roster");
+            string recoveryToken=new string('2',64);db.CreateSession(recoveryToken,1,expires);
+            var recoveryLease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","recovery",true,recoveryToken);
+            var recovery=db.ReadGroupDeviceRecoveryForSession(recoveryToken,approve.Actor,db.Live.Epoch,recoveryLease.Generation,approve.GroupId,1);
+            Require(recovery!=null&&Convert.ToBoolean(recovery["complete"])&&Convert.ToInt64(recovery["nextGeneration"])==3,"Authenticated recovery missed consecutive persisted epochs");
+            var rows=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)recovery["transitions"];
+            Require(rows.Count==2&&Convert.ToString(rows[0]["proof"])==approve.Encoded&&Convert.ToString(rows[1]["proof"])==revoke.Encoded,"Recovery altered proof provenance or ordering");
+            Require(db.ReadGroupDeviceRecoveryForSession(targetToken,approve.Target,db.Live.Epoch,targetLease.Generation,approve.GroupId,1)==null,"Revoked device fetched group recovery evidence");
+            Require(db.ReadGroupDeviceRecoveryForSession(foreignToken,approve.Actor,db.Live.Epoch,recoveryLease.Generation,approve.GroupId,1)==null,"Foreign session fetched recovery evidence");
+            Require(db.ReadGroupDeviceRecoveryForSession(recoveryToken,approve.Actor,db.Live.Epoch,recoveryLease.Generation+1,approve.GroupId,1)==null,"Stale lease fetched recovery evidence");
         }
         using(var db=new AccountDatabase(sessionPath)){
             string token=new string('1',64);db.CreateSession(token,1,DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds());
             var fresh=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","after-server-restart",true,token);
             Require(db.Live.Epoch!=oldEpoch&&db.ApplyGroupDeviceProofForSession(token,approve.Actor,oldEpoch,fresh.Generation,reenroll)==null,"Server restart reused old issuing context");
             Require(db.ApplyGroupDeviceProofForSession(token,approve.Actor,db.Live.Epoch,fresh.Generation,reenroll)!=null,"Fresh server epoch could not explicitly reenroll");
+            var recovery=db.ReadGroupDeviceRecoveryForSession(token,approve.Actor,db.Live.Epoch,fresh.Generation,approve.GroupId,1);
+            int restoredRows=((System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)recovery["transitions"]).Count;
+            if(!Convert.ToBoolean(recovery["complete"])){
+                Require(Convert.ToString(recovery["reason"])=="page_limit","Server restart recovery stopped unexpectedly");
+                recovery=db.ReadGroupDeviceRecoveryForSession(token,approve.Actor,db.Live.Epoch,fresh.Generation,approve.GroupId,Convert.ToInt64(recovery["nextGeneration"]));
+                restoredRows+=((System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)recovery["transitions"]).Count;
+            }
+            Require(restoredRows==3&&Convert.ToBoolean(recovery["complete"])&&Convert.ToInt64(recovery["nextGeneration"])==4,"Server restart lost durable recovery epochs");
+            db.Execute("DELETE FROM group_device_epochs WHERE proof_id='"+revoke.Id+"';");
+            recovery=db.ReadGroupDeviceRecoveryForSession(token,approve.Actor,db.Live.Epoch,fresh.Generation,approve.GroupId,1);
+            Require(!Convert.ToBoolean(recovery["complete"])&&Convert.ToString(recovery["reason"])=="epoch_evidence_unavailable"&&Convert.ToInt64(recovery["nextGeneration"])==2,"Missing historical epoch was fabricated or skipped");
         }
         string identityPath=Path.Combine(root,"device-identity.sqlite");
         using(var db=new AccountDatabase(identityPath)){
@@ -134,6 +154,14 @@ internal static class GroupDeviceServerTest {
             Require(Convert.ToInt64(window[window.Count-1]["appliedGeneration"])==41,"Window lost newest proof");
             long prior=0;foreach(var row in window){long gen=Convert.ToInt64(row["appliedGeneration"]);Require(gen>prior,"Window reordered evidence");prior=gen;}
             Require(System.Text.Encoding.UTF8.GetByteCount(json.Serialize(roster))<16*1024,"Small roster exceeded legacy response bound");
+            string token=new string('3',64);db.CreateSession(token,1,DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds());
+            var lease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","window",true,token);
+            long cursor=1;int pages=0;
+            while(cursor<41){var page=db.ReadGroupDeviceRecoveryForSession(token,approve.Actor,db.Live.Epoch,lease.Generation,approve.GroupId,cursor);
+                long next=Convert.ToInt64(page["nextGeneration"]);Require(next>cursor&&next<=41,"Bounded recovery did not advance");
+                Require(System.Text.Encoding.UTF8.GetByteCount(json.Serialize(page))<16*1024,"Recovery page exceeded frame budget");cursor=next;pages++;
+            }
+            Require(pages>1,"Large recovery did not paginate");
         }
         using(var db=new AccountDatabase(Path.Combine(root,"race.sqlite"))){
             Accounts(db,creation,member,sibling);var competing=Read(root,"stale.bin");

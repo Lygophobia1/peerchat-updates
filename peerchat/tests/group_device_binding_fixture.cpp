@@ -96,6 +96,68 @@ int main(int argc,char** argv){try{
         throw std::runtime_error("Exact device revocation did not reconcile");
     auto restored=current;restored.generation=4;
     {
+        const std::vector<group_devices::AuthenticatedTransition> chain={
+            {previous,current,validWire},{current,retired,evidence.at("revoke.bin")},
+            {retired,restored,evidence.at("reenroll.bin")}};
+        auto terminal=restored;terminal.creationProof=rooted.creationProof;
+        auto run=[&](const std::wstring& name,const std::vector<group_devices::AuthenticatedTransition>& page,bool enabled,bool expected){
+            Storage database((root/name).wstring());database.appendGroupEvent(create);
+            group_keys::GroupKeyManager keys(database,1,owner.peerId,true);keys.apply(rooted);
+            GroupLedger ledger;ledger.append(create);bool accepted=true;
+            try{group_devices::Replica::applyAuthenticated(database,keys,terminal,&ledger,enabled,page);}catch(...){accepted=false;}
+            if(accepted!=expected)throw std::runtime_error("Authenticated epoch recovery result mismatch");
+            if(expected){
+                if(ledger.events().size()!=4||!ledger.state().device(1,target.peerId)||keys.roster(server)->generation!=4)
+                    throw std::runtime_error("Missing epochs did not converge to authenticated terminal roster");
+                auto recovered=group_devices::Replica::restoreStored(database,create.groupId);
+                if(recovered.events().size()!=4||!recovered.state().device(1,target.peerId))throw std::runtime_error("Recovery page did not survive reopen");
+            }else if(database.groupEvents(create.groupId).size()!=1||ledger.events().size()!=1||keys.roster(server))
+                throw std::runtime_error("Rejected recovery page partially committed or retained authority");
+        };
+        run(L"recovery-valid",chain,true,true);run(L"recovery-disabled",chain,false,false);
+        auto invalidChain=chain;invalidChain.back().proof.back()^=1;run(L"recovery-bad-last",invalidChain,true,false);
+        invalidChain=chain;invalidChain.erase(invalidChain.begin()+1);run(L"recovery-missing-epoch",invalidChain,true,false);
+        invalidChain=chain;invalidChain[1].before.distributorPeerId=target.peerId;run(L"recovery-discontinuity",invalidChain,true,false);
+        invalidChain=chain;invalidChain.back().after.generation=5;run(L"recovery-wrong-terminal",invalidChain,true,false);
+        invalidChain=chain;invalidChain[1].after.devices.front().role=GroupRole::Admin;run(L"recovery-role-substitution",invalidChain,true,false);
+        invalidChain=chain;invalidChain.resize(33,chain.front());run(L"recovery-page-bound",invalidChain,true,false);
+        auto changed=create;changed.value=L"Other signed root";signGroupEvent(changed,owner);
+        invalidChain=chain;invalidChain[1].after.creationProof=encodeGroupEvent(changed);run(L"recovery-conflicting-root",invalidChain,true,false);
+        std::vector<GroupEvent> metadata={create};for(const auto& step:chain)metadata.push_back(group_devices::readApproval(step.proof).event);
+        auto bootstrap=[&](const std::wstring& name,std::vector<GroupEvent> records,std::vector<group_devices::AuthenticatedTransition> proofs,
+                           group_keys::RosterSnapshot final,bool enabled,bool expected){
+            Storage database((root/name).wstring());group_keys::GroupKeyManager keys(database,1,target.peerId,true);GroupLedger live;bool accepted=true;
+            try{group_devices::Replica::bootstrapAuthenticated(database,keys,final,records,proofs,live,enabled);}catch(...){accepted=false;}
+            if(accepted!=expected)throw std::runtime_error("Authenticated sibling bootstrap result mismatch");
+            if(expected){
+                auto reopened=group_devices::Replica::restoreStored(database,create.groupId);
+                if(!live.state().device(1,target.peerId)||reopened.events().size()!=4||!reopened.state().device(1,target.peerId)||
+                    !live.state().messages.empty()||!database.groupKey(create.groupId,1).empty())throw std::runtime_error("Sibling bootstrap lost membership or imported historical content/key");
+            }else if(live.state().created||keys.roster(server)||!database.groupEvents(create.groupId).empty())
+                throw std::runtime_error("Failed bootstrap partially persisted membership");
+        };
+        bootstrap(L"bootstrap-verified",metadata,chain,terminal,true,true);
+        bootstrap(L"bootstrap-disabled",metadata,chain,terminal,false,false);
+        auto missingProofs=chain;missingProofs.pop_back();bootstrap(L"bootstrap-missing-proof",metadata,missingProofs,terminal,true,false);
+        auto wrongTerminal=terminal;wrongTerminal.generation=5;bootstrap(L"bootstrap-epoch-substitution",metadata,chain,wrongTerminal,true,false);
+        auto badMetadata=metadata;badMetadata.front()=changed;bootstrap(L"bootstrap-wrong-root",badMetadata,chain,terminal,true,false);
+        auto tamperedProofs=chain;tamperedProofs.back().proof.back()^=1;bootstrap(L"bootstrap-tamper",metadata,tamperedProofs,terminal,true,false);
+        auto historical=create;historical.kind=GroupEventKind::Message;historical.logicalOrder=5;historical.subjectAccountId=0;
+        historical.subjectPeerId.clear();historical.subjectPublicKey.clear();historical.subjectName.clear();historical.value.clear();historical.message=L"Historical content must not enroll";signGroupEvent(historical,owner);
+        badMetadata=metadata;badMetadata.push_back(historical);bootstrap(L"bootstrap-no-old-history",badMetadata,chain,terminal,true,false);
+        bootstrap(L"bootstrap-revoked-recipient",metadata,chain,retired,true,false);
+        // Failure at the LAST persisted row must roll back the earlier rows too.
+        Storage database((root/L"recovery-persistence-rollback").wstring());database.appendGroupEvent(create);
+        const auto last=group_devices::readApproval(chain.back().proof).event;
+        database.commitGroupReplicaReceipt(last,Blob{0});
+        group_keys::GroupKeyManager keys(database,1,owner.peerId,true);keys.apply(rooted);GroupLedger ledger;ledger.append(create);bool rejected=false;
+        try{group_devices::Replica::applyAuthenticated(database,keys,terminal,&ledger,true,chain);}catch(...){rejected=true;}
+        if(!rejected||keys.roster(server)||ledger.events().size()!=1||database.groupEvents(create.groupId).size()!=2||
+            !database.groupReplicaReceipt(create.groupId,valid.eventId).empty()||
+            !database.groupReplicaReceipt(create.groupId,group_devices::readApproval(chain[1].proof).event.eventId).empty()||
+            database.groupReplicaReceipt(create.groupId,last.eventId)!=Blob{0})throw std::runtime_error("Late recovery persistence failure did not roll back the page");
+    }
+    {
         Storage appStore((root/L"application-replica").wstring());appStore.appendGroupEvent(create);
         GroupLedger appLedger;appLedger.append(create);
         group_keys::GroupKeyManager appKeys(appStore,1,owner.peerId,true);appKeys.apply(rooted);

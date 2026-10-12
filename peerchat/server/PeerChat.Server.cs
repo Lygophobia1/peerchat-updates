@@ -64,6 +64,7 @@ namespace PeerChat.Server {
                 "CREATE INDEX IF NOT EXISTS group_roster_members_by_device ON group_roster_devices(public_identity,state,group_id);" +
                 "CREATE TABLE IF NOT EXISTS group_device_identity_proofs(public_identity TEXT PRIMARY KEY REFERENCES devices(public_identity) ON DELETE CASCADE,account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,signed_proof TEXT NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_device_proofs(proof_id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, actor_identity TEXT NOT NULL, target_identity TEXT NOT NULL, applied_generation INTEGER NOT NULL, revoked INTEGER NOT NULL, signed_proof TEXT NOT NULL);" +
+                "CREATE TABLE IF NOT EXISTS group_device_epochs(proof_id TEXT PRIMARY KEY REFERENCES group_device_proofs(proof_id) ON DELETE CASCADE,before_roster TEXT NOT NULL,after_roster TEXT NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_invites(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, recipient_account_id INTEGER NOT NULL REFERENCES accounts(id), invite_id TEXT NOT NULL UNIQUE, inviter_account_id INTEGER NOT NULL REFERENCES accounts(id), inviter_identity TEXT NOT NULL, state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(group_id,recipient_account_id));" +
                 "CREATE INDEX IF NOT EXISTS group_invites_recipient_state ON group_invites(recipient_account_id,state,updated_utc);");
             // Existing Milestone 1 databases predate privacy controls. Add the non-sensitive
@@ -209,6 +210,47 @@ namespace PeerChat.Server {
             long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account))return null;
             return ApplyGroupDeviceProof(account,device,proof);
         }}
+        // Recovery remains gated below RPC activation. Snapshots were captured
+        // atomically with the original verified proof, never reconstructed from
+        // today's membership. Ordinary roster gaps require signed-ledger recovery.
+        internal Dictionary<string,object> ReadGroupDeviceRecoveryForSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,string group,long afterGeneration){lock(gate){
+            long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account)||
+                !GroupId(group)||GroupRole(group,account,device)==null||afterGeneration<=0)return null;
+            long current=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group));
+            if(afterGeneration>current)return null;
+            var rows=new List<Dictionary<string,object>>();var json=new JavaScriptSerializer{MaxJsonLength=65536};
+            long next=afterGeneration;string reason="none";int bytes=256;IntPtr statement=IntPtr.Zero;
+            try{
+                if(SqliteNative.prepare(database,"SELECT p.signed_proof,p.applied_generation,e.before_roster,e.after_roster FROM group_device_proofs p LEFT JOIN group_device_epochs e ON e.proof_id=p.proof_id WHERE p.group_id="+Quote(group)+" AND p.applied_generation>"+afterGeneration+" ORDER BY p.applied_generation LIMIT 32",out statement)!=0)throw new InvalidOperationException("Cannot read group recovery evidence.");
+                while(SqliteNative.step(statement)==100){
+                    var proof=GroupDeviceProof.Parse(SqliteNative.columnText(statement,0));long applied=SqliteNative.columnLong(statement,1);
+                    if(proof.GroupId!=group||proof.Generation+1!=applied||applied>current)throw new InvalidOperationException("Stored group recovery proof is invalid.");
+                    if(applied!=next+1){reason="signed_ledger_gap";break;}
+                    string before=SqliteNative.columnText(statement,2),after=SqliteNative.columnText(statement,3);
+                    if(String.IsNullOrEmpty(before)||String.IsNullOrEmpty(after)){reason="epoch_evidence_unavailable";break;}
+                    var a=json.Deserialize<Dictionary<string,object>>(before);var b=json.Deserialize<Dictionary<string,object>>(after);
+                    if(Convert.ToString(a["groupId"])!=group||Convert.ToString(b["groupId"])!=group||
+                        Convert.ToString(a["legacyGroupId"])!=proof.LegacyGroupId||Convert.ToString(b["legacyGroupId"])!=proof.LegacyGroupId||
+                        Convert.ToInt64(a["rosterGeneration"])!=proof.Generation||Convert.ToInt64(b["rosterGeneration"])!=applied)
+                        throw new InvalidOperationException("Stored group recovery snapshot is invalid.");
+                    var row=new Dictionary<string,object>{{"before",a},{"after",b},{"proof",proof.Encoded}};
+                    int cost=Encoding.UTF8.GetByteCount(json.Serialize(row))+1;
+                    if(bytes+cost>8192){reason=rows.Count==0?"epoch_evidence_too_large":"page_limit";break;}
+                    bytes+=cost;rows.Add(row);next=applied;
+                }
+            }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+            if(next!=current&&reason=="none")reason="signed_ledger_gap";
+            return new Dictionary<string,object>{{"groupId",group},{"fromGeneration",afterGeneration},{"nextGeneration",next},{"currentGeneration",current},{"complete",next==current},{"reason",reason},{"transitions",rows}};
+        }}
+        string GroupDeviceEpochSnapshot(string group,long account,string device){
+            var snapshot=GroupRoster(group,account,device,false);
+            if(snapshot==null)throw new InvalidOperationException("Cannot capture authenticated group epoch.");
+            snapshot.Remove("deviceApprovals");snapshot.Remove("deviceApprovalsIncluded");snapshot.Remove("deviceApprovalsTruncated");
+            var members=(List<Dictionary<string,object>>)snapshot["members"];
+            foreach(var member in members)member.Remove("username");
+            if(members.Count>256)throw new InvalidOperationException("Group epoch exceeds verified replica bound.");
+            return new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(snapshot);
+        }
         public bool PublishGroupDeviceIdentity(long account,string device,GroupDeviceIdentityProof proof){lock(gate){
             if(proof==null||proof.Account!=account||proof.Device!=device||!OwnsDevice(account,device))return false;
             Execute("INSERT INTO group_device_identity_proofs(public_identity,account_id,signed_proof) VALUES("+Quote(device)+","+account+","+Quote(proof.Encoded)+") ON CONFLICT(public_identity) DO NOTHING;");
@@ -237,12 +279,15 @@ namespace PeerChat.Server {
             if(proof.Revoke?(targetRole==null||count<=1):(targetRole!=null||count>=8||
                 ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(proof.GroupId)+" AND public_identity="+Quote(proof.Target))!=0))return null;
             Execute("BEGIN IMMEDIATE;");try{
+                string beforeEpoch=GroupDeviceEpochSnapshot(proof.GroupId,account,device);
                 if(proof.Revoke){
                     Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(proof.GroupId)+" AND account_id="+account+" AND public_identity="+Quote(proof.Target)+";");
                     Execute("UPDATE group_rosters SET owner_identity="+Quote(device)+" WHERE group_id="+Quote(proof.GroupId)+" AND owner_identity="+Quote(proof.Target)+" AND owner_account_id="+account+";");
                 }else Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(proof.GroupId)+","+account+","+Quote(proof.Target)+","+Quote(role)+",'member');");
                 Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(device)+" WHERE group_id="+Quote(proof.GroupId)+";");
                 Execute("INSERT INTO group_device_proofs(proof_id,group_id,account_id,actor_identity,target_identity,applied_generation,revoked,signed_proof) VALUES("+Quote(proof.Id)+","+Quote(proof.GroupId)+","+account+","+Quote(device)+","+Quote(proof.Target)+","+(current+1)+","+(proof.Revoke?1:0)+","+Quote(proof.Encoded)+");");
+                string afterEpoch=GroupDeviceEpochSnapshot(proof.GroupId,account,device);
+                Execute("INSERT INTO group_device_epochs(proof_id,before_roster,after_roster) VALUES("+Quote(proof.Id)+","+Quote(beforeEpoch)+","+Quote(afterEpoch)+");");
                 Execute("COMMIT;");return GroupRoster(proof.GroupId,account,device);
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
