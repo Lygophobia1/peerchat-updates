@@ -3,7 +3,11 @@
 Physical dev.118 feedback: the repaired images finished, approximately one minute;
 locking Android still paused the download until unlock. Windows throughput was
 also reported slow, but Windows did not exhibit the lock/background lifetime bug.
-Android multimedia remains **FAILED/PENDING RETEST**.
+The subsequent user physical test accepted Android background/locked file
+transfers in dev.119, including an 18,919,915-byte video. This gate is now
+**PHYSICALLY ACCEPTED**. Slow transfer performance remains under investigation.
+The phone is no longer available through ADB; no additional device or network
+disconnection/resume test was requested. Do not infer those untested outcomes.
 
 ## Android-only lifetime correction
 

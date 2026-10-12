@@ -168,6 +168,16 @@ int main(int argc,char** argv){
             for(int n=0;n<20;++n)restored.tick(h.now+251+n,[](const std::string&){return 1;},[&](const std::string&,const Blob&){++sends;return true;});
             check(sends>0&&restored.snapshots()[0].state==State::Transferring);
         }
+        {
+            Harness h(root/L"preparation-journal-backoff");write(h.source,bytes(100001));
+            FaultStore fault(*h.ja);TransferManager manager([]{return std::make_unique<windows::Sha256>();},&fault);
+            manager.offer(h.b,h.id,std::make_unique<windows::FileSource>(h.source.wstring()),h.now);
+            check(manager.hasPreparationWork(h.now));fault.broken=true;unsigned sends=0;
+            rejected([&]{manager.tick(h.now,[](const std::string&){return 1;},[&](const std::string&,const Blob&){++sends;return true;});});
+            check(sends==0&&!manager.hasPreparationWork(h.now+249)&&manager.hasPreparationWork(h.now+250));
+            fault.broken=false;manager.tick(h.now+250,[](const std::string&){return 1;},[](const std::string&,const Blob&){return true;});
+            check(manager.hasPreparationWork(h.now+250));manager.cancel(h.id);check(!manager.hasPreparationWork(h.now+250));
+        }
         std::filesystem::remove_all(root);
         std::cout<<"Durable transfer restart: resumed prefix, duplicate, source change, uncommitted tail, missing partial, rename crash, DPAPI tamper, cancellation, profile/device binding PASS\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<"\n";std::filesystem::remove_all(root);return 1;}

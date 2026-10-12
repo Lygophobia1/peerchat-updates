@@ -13,3 +13,5 @@ google-services.json
 /server/portable/obj/
 /tests/portable/bin/
 /tests/portable/obj/
+/tests/performance/bin/
+/tests/performance/obj/

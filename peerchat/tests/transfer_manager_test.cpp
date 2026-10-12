@@ -57,6 +57,11 @@ struct Harness {
 Blob data(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*17);return b;}
 int main(){
     try{
+        {Harness h;check(!h.sender.hasPreparationWork(h.now));h.offer(data(2*ChunkBytes+1));check(h.sender.hasPreparationWork(h.now));
+            while(h.sender.hasPreparationWork(h.now))h.pump();
+            check(!h.sender.hasPreparationWork(h.now)); // Offer/ACK waits must not spin.
+            h.finish();check(!h.sender.hasPreparationWork(h.now)&&!h.receiver.hasPreparationWork(h.now));}
+        {Harness h;h.offer(data(2*ChunkBytes));check(h.sender.hasPreparationWork(h.now));h.sender.cancel(h.id);check(!h.sender.hasPreparationWork(h.now));}
         for(size_t size:{size_t(1<<20),size_t(3<<20),size_t(10<<20),size_t(32<<20)}){
             Harness h;auto bytes=data(size);h.offer(bytes);
             for(int n=0;n<20000&&h.sender.snapshots()[0].state!=State::Complete;++n)h.pump();

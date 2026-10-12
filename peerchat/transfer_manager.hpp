@@ -214,6 +214,10 @@ public:
         auto i=entries_.find(id);if(i==entries_.end()||(terminal(i->second.state)&&i->second.state!=State::Suspended))return;
         auto& e=i->second;e.state=State::Cancelled;if(e.sink)e.sink->discard();e.sink.reset();e.source.reset();e.hash.reset();e.reply=packet(Kind::Cancel,id).data;touch(e);save();
     }
+    bool hasPreparationWork(std::uint64_t now)const{
+        if(now<persistenceRetryAt_)return false;
+        return std::any_of(entries_.begin(),entries_.end(),[](const auto& row){return row.second.state==State::Preparing||row.second.state==State::Recovering;});
+    }
     void unsupportedPeer(const std::string& peer){
         for(auto& p:entries_)if(p.second.peer==peer&&p.second.sending&&!terminal(p.second.state)){fail(p.second,"Recipient does not support file transfers");p.second.reply.reset();}
     }

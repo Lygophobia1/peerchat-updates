@@ -4,9 +4,10 @@
 #include <fstream>
 #include <iostream>
 #include <thread>
+#include <atomic>
 using namespace peerchat;
 void require(bool b,const char* text){if(!b)throw std::runtime_error(text);}
-int main(){
+int main(int argc,char** argv){
     Node left,right;std::string a,b;std::uint64_t la=0,ra=0;bool readyLeft=false,readyRight=false;
     auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/("file-session-"+Storage::newMessageId());
     try{
@@ -42,6 +43,52 @@ int main(){
         wait([&]{return la&&ra;},"no relay demands");
         require(left.relayReady(la,a>b)&&right.relayReady(ra,b>a),"relay binding failed");
         wait([&]{return readyLeft&&readyRight;},"mutual TLS and device trust failed");
+        if(argc==2&&std::string(argv[1])=="--benchmark"){
+            // Blocking relay writers model production independently of UI polling.
+            // Do not quantize every payload/ACK through the test observer's sleep.
+            std::atomic<bool> forwarding{true},forwardFailed{false};
+            auto forward=[&](Node& from,Node& to,std::uint64_t outgoing,std::uint64_t incoming){
+                try{unsigned char bytes[65536];while(forwarding){
+                    int count=from.takeRelayOutput(outgoing,bytes,sizeof(bytes),50);
+                    if(count>0&&!to.relayReceive(incoming,bytes,count)){forwardFailed=true;break;}
+                }}catch(...){forwardFailed=true;}
+            };
+            std::thread leftWriter(forward,std::ref(left),std::ref(right),la,ra);
+            std::thread rightWriter(forward,std::ref(right),std::ref(left),ra,la);
+            struct ForwardingGuard{
+                std::atomic<bool>& running;std::thread& left;std::thread& right;
+                ~ForwardingGuard(){running=false;left.join();right.join();}
+            } forwardingGuard{forwarding,leftWriter,rightWriter};
+            auto clock=[] {return std::chrono::steady_clock::now();};
+            for(size_t size:{size_t(1048576),size_t(3145728),size_t(10485760)}){
+                auto source=root/("benchmark-"+std::to_string(size)+".bin");Blob expected(size);
+                for(size_t i=0;i<size;++i)expected[i]=static_cast<unsigned char>(i*19);
+                {std::ofstream f(source,std::ios::binary);f.write(reinterpret_cast<const char*>(expected.data()),size);require(bool(f),"benchmark source write failed");}
+                auto destination=root/("received-"+std::to_string(size));std::filesystem::create_directory(destination);
+                auto start=clock();auto id=left.fileTransfer(1,b,"",source.wstring());std::string token(id.begin(),id.end());
+                auto next=clock();bool accepted=false,finished=false;auto payload=start;
+                while(clock()-start<std::chrono::seconds(120)){
+                    poll();require(!forwardFailed,"benchmark relay writer failed");
+                    if(clock()>=next){next=clock()+std::chrono::milliseconds(250);
+                        auto row=right.fileTransfer(0);auto at=row.find(L"\"id\":\""+id+L"\"");
+                        if(at!=std::wstring::npos){auto end=row.find(L"}",at);auto item=row.substr(at,end-at);
+                            if(!accepted&&item.find(L"\"state\":2")!=std::wstring::npos){right.fileTransfer(2,"",token,destination.wstring());accepted=true;payload=clock();}
+                            if(item.find(L"\"state\":4")!=std::wstring::npos){
+                                auto sent=left.fileTransfer(0);auto senderAt=sent.find(L"\"id\":\""+id+L"\"");
+                                if(senderAt!=std::wstring::npos&&sent.substr(senderAt,sent.find(L"}",senderAt)-senderAt).find(L"\"state\":4")!=std::wstring::npos){finished=true;break;}
+                            }
+                        }
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                require(finished,"benchmark did not complete");
+                auto final=destination/(id+L"-"+source.filename().wstring());std::ifstream f(final,std::ios::binary);Blob actual(std::istreambuf_iterator<char>(f),{});require(actual==expected,"benchmark final integrity failed");
+                auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(clock()-start).count();auto payloadMs=std::chrono::duration_cast<std::chrono::milliseconds>(clock()-payload).count();
+                std::cout<<"HOST_NATIVE_TLS_RELAY bytes="<<size<<" total_ms="<<elapsed<<" accepted_to_complete_ms="<<payloadMs<<" payload_MiB_per_s="<<(size/1048576.0)/(payloadMs/1000.0)<<"\n";
+                std::cout<<unicode::encode(left.fileTransfer(11))<<unicode::encode(right.fileTransfer(11));
+            }
+            return 0; // Join writers before Node destruction, including exceptions.
+        }
         auto name=std::wstring(L"binary-") + L"\u65e5\u672c.bin";auto source=root/name;std::vector<char> bytes(2*1024*1024);
         for(size_t i=0;i<bytes.size();++i)bytes[i]=static_cast<char>(i*19);
         {std::ofstream file(source,std::ios::binary);file.write(bytes.data(),bytes.size());require(file.good(),"test source write failed");}

@@ -95,6 +95,7 @@ struct Node::Impl {
         bool mailbox=false,archive=false;std::shared_ptr<std::promise<Blob>> bytesResponse;
     };
     std::atomic<bool> running{false};std::thread worker;std::mutex commandMutex,eventMutex;
+    std::condition_variable commandChanged;
     std::deque<Command> commands;std::deque<NodeEvent> events;
     std::unique_ptr<Storage> store;std::unique_ptr<TlsCredentials> credentials;Profile profile;
     std::unique_ptr<delivery::DeliveryManager> deliveries;
@@ -198,6 +199,7 @@ struct Node::Impl {
     }
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
+        if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds()))result+=widenUtf8(row)+L"\n";return result;}
         if(command.sourceKind==1||command.sourceKind==7){
             auto contact=contacts.find(command.peer);
             if(!protocol::id(command.peer)||contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify the recipient device before sending a file");
@@ -683,10 +685,10 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         std::wstring text=error==WSAECONNREFUSED?L"TCP connection refused: the peer is not listening on this port or Firewall blocked it.":error==WSAETIMEDOUT?L"TCP connection timeout: the peer or Firewall did not respond.":error==WSAEHOSTUNREACH||error==WSAENETUNREACH?L"Peer unreachable/offline: Windows has no network route to the peer endpoint.":L"TCP connection failed: check the peer address, listener, and Firewall.";
         emit(connectionEvent(NodeEvent::Kind::Error,text,c));
     }
-    bool command(Command c){std::lock_guard<std::mutex> lock(commandMutex);if(!running||commands.size()>=512)return false;commands.push_back(std::move(c));return true;}
+    bool command(Command c){std::lock_guard<std::mutex> lock(commandMutex);if(!running||commands.size()>=512)return false;commands.push_back(std::move(c));commandChanged.notify_one();return true;}
     void publishContacts(){NodeEvent e;e.kind=NodeEvent::Kind::Contacts;for(const auto& item:contacts)e.contacts.push_back(item.second);emit(std::move(e));}
     void publishGroups(){NodeEvent event;event.kind=NodeEvent::Kind::Groups;if(groupAccount.accountId)for(const auto& item:groups){const auto& state=item.second.state();if(state.members.count(groupAccount.accountId)||state.invitations.count(groupAccount.accountId))event.groups.push_back(state);}emit(std::move(event));}
-    void stop(){running=false;if(worker.joinable())worker.join();std::lock_guard<std::mutex> lock(commandMutex);commands.clear();}
+    void stop(){running=false;commandChanged.notify_all();if(worker.joinable())worker.join();std::lock_guard<std::mutex> lock(commandMutex);commands.clear();}
     bool exists(const std::string& id)const {return sessionTransports&&!id.empty()&&sessionTransports->hasRepresentation(id);}
     void resolve(const std::wstring& host,std::uint16_t port,const std::string& expected,const std::wstring& source=L"Direct",const std::wstring& route=L"manual"){
         if(host.empty()||host.size()>253||!port||(!expected.empty()&&!protocol::id(expected)))throw std::runtime_error("Invalid peer address");
@@ -1630,10 +1632,19 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 // manager-owned relay/control work above.
                 bool hasDirectSocket=listener!=INVALID_SOCKET;
                 for(const auto& connection:connections)if(!connection->dead&&!connection->relay){hasDirectSocket=true;break;}
-                if(!hasDirectSocket){Sleep(20);continue;}
+                if(!hasDirectSocket){
+                    // Hash/revalidate one bounded chunk per pass, servicing
+                    // commands/timers between passes instead of sleeping per chunk.
+                    if(transfers&&transfers->hasPreparationWork(nowMilliseconds()))continue;
+                    // Preserve the idle/timer budget, but received relay bytes
+                    // and commands must not incur another fixed polling delay.
+                    std::unique_lock<std::mutex> lock(commandMutex);
+                    commandChanged.wait_for(lock,std::chrono::milliseconds(20),[&]{return !running||!commands.empty();});
+                    continue;
+                }
                 fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);if(listener!=INVALID_SOCKET)FD_SET(listener,&reads);
                 for(auto& c:connections)if(!c->dead&&!c->relay){if(!c->connecting)FD_SET(c->socket,&reads);if(c->connecting||c->sent<c->output.size())FD_SET(c->socket,&writes);FD_SET(c->socket,&errors);}
-                timeval timeout{0,20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
+                timeval timeout{0,transfers&&transfers->hasPreparationWork(nowMilliseconds())?0:20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
                 if(listener!=INVALID_SOCKET&&FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";attachDirectTransport(*c);nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
                 for(auto& c:connections)if(!c->dead&&!c->relay)try{
                     if(FD_ISSET(c->socket,&errors)){int error=0,length=sizeof(error);getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length);error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"socket error "+std::to_wstring(error);c->dead=true;}
