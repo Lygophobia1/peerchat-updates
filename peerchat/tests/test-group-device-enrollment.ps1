@@ -1,4 +1,4 @@
-param([switch]$PortableCrypto)
+param([switch]$PortableCrypto,[switch]$PortableServer)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $out=Join-Path $root ('build\tests\group-device-'+[Guid]::NewGuid().ToString('N'))
@@ -18,4 +18,12 @@ try{
     if($LASTEXITCODE){throw 'Server device proof compilation failed'}
     & "$out\server-test.exe" "$out\state"
     if($LASTEXITCODE){throw 'Server device proof regression failed'}
+    if($PortableServer){
+        $dotnet='C:\Program Files\dotnet\dotnet.exe'
+        if((& $dotnet --version) -ne '10.0.401'){throw 'Pinned .NET SDK 10.0.401 required'}
+        $modern=Join-Path $out 'modern-state';New-Item -ItemType Directory -Path $modern|Out-Null
+        Copy-Item -Path "$out\state\*.bin" -Destination $modern
+        & $dotnet run --project tests/portable/PeerChat.Server.PortabilityTests.csproj -c Release -- --group-device $modern
+        if($LASTEXITCODE){throw 'Portable server device proof regression failed'}
+    }
 }finally{$env:PATH=$savedPath;Pop-Location}

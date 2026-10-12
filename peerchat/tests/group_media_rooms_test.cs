@@ -99,9 +99,10 @@ internal static class GroupMediaRoomsTest {
         state=Apply(service,b,state,"join_viewer",s2);
         Require(db.GroupRemove(group,1,devices[0],2,devices[1],state.RosterGeneration)!=null,"Removal fixture failed.");
         service.Reconcile(group);state=Snapshot(service,a,group);
-        Require(state.Rooms.All(r=>r.Members.All(d=>d.PeerId!=devices[1])),"Removed viewer retained.");
+        Require(state.Rooms.All(r=>r.Members.All(d=>d.AccountId!=2)),"Removed account retained a viewer or sibling voice device.");
         Apply(service,b,state,"join_voice",live,expected:"group_not_authorized");
-        Require(db.GroupRemove(group,1,devices[0],2,secondDevice.Device,state.RosterGeneration)!=null,"Second device removal failed.");
+        Apply(service,secondDevice,state,"join_voice",move,expected:"group_not_authorized");
+        Require(db.GroupRemove(group,1,devices[0],2,secondDevice.Device,state.RosterGeneration)==null,"Account removal left a separately removable sibling authorization.");
         service.Reconcile(group);state=Snapshot(service,a,group);Require(Room(state,"Move").Members.Count==0,"Removed voice member retained.");
         Require(db.GroupRemove(group,1,devices[0],3,devices[2],state.RosterGeneration)!=null,"Sharer removal failed.");
         service.Reconcile(group);state=Snapshot(service,a,group);Require(Room(state,"S2").Sharer==null&&Room(state,"S2").Members.Count==0,"Removed sharer did not clear viewers.");
