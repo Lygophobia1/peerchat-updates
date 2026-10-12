@@ -50,7 +50,10 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
             Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
                 bitmap?.let{Image(it.asImageBitmap(),row.name,Modifier.fillMaxWidth().heightIn(max=200.dp).clickable{expanded=true},contentScale=ContentScale.Fit)}
                 Text(if(longMessage)"Long message" else row.name,style=MaterialTheme.typography.bodyMedium)
-                if(preview!=null)BoundedTextViewer(preview,!longMessage||codeLike(preview),if(longMessage)"Long message" else row.name)
+                if(preview!=null){
+                    if(longMessage&&needsCompactMessage(preview))CompactLongMessage(preview)
+                    else BoundedTextViewer(preview,!longMessage||codeLike(preview),if(longMessage)"Long message" else row.name)
+                }
                 Text("${row.size} bytes · "+when(row.state){0->"Preparing";1->"Waiting for recipient";2->"File offered";3->"Transferring";4->"Transfer complete";5->"Cancelled";6->"Failed";7->"Recovering";else->"Suspended"},
                     style=MaterialTheme.typography.labelSmall)
                 if(row.state==3&&row.size>0)LinearProgressIndicator(progress={row.done.toFloat()/row.size.toFloat()},modifier=Modifier.fillMaxWidth())

@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sys/syscall.h>
+#include <cerrno>
 #include <mbedtls/sha256.h>
 
 namespace peerchat::transfer::posix {
@@ -79,11 +81,27 @@ public:
     void flush()override{check(fsync(file_->fd)==0);}
     Blob read(std::uint64_t offset,size_t count)override{check(offset<=offset_&&count<=offset_-offset);return posix::read(file_->fd,offset,count);}
     void commit()override{
-        check(offset_==metadata_.size);flush();
+        check(offset_==metadata_.size);
+        if(fsync(file_->fd)!=0)throw CompletionError(CompletionError::Stage::FileSync,errno);
         if(!committed_){
-            if(linkat(cache_->fd(),partial_.c_str(),cache_->fd(),final_.c_str(),0)!=0){struct stat s{};check(errno==EEXIST&&fstatat(cache_->fd(),final_.c_str(),&s,AT_SYMLINK_NOFOLLOW)==0&&s.st_dev==identity(file_->fd).st_dev&&s.st_ino==identity(file_->fd).st_ino);}
-            check(fsync(cache_->fd())==0);check(unlinkat(cache_->fd(),partial_.c_str(),0)==0);check(fsync(cache_->fd())==0);committed_=true;
+            // Android SELinux forbids app hard links. renameat2 NOREPLACE is a
+            // single atomic same-directory publication with no overwrite. No
+            // unsafe existence-check + ordinary rename fallback is permitted.
+            if(syscall(__NR_renameat2,cache_->fd(),partial_.c_str(),cache_->fd(),final_.c_str(),1 /* RENAME_NOREPLACE */)!=0){
+                const int error=errno;struct stat s{};
+                if(error!=EEXIST)throw CompletionError(CompletionError::Stage::Rename,error);
+                const auto owned=identity(file_->fd);
+                if(fstatat(cache_->fd(),final_.c_str(),&s,AT_SYMLINK_NOFOLLOW)!=0||!S_ISREG(s.st_mode)||s.st_dev!=owned.st_dev||s.st_ino!=owned.st_ino)
+                    throw CompletionError(CompletionError::Stage::DestinationConflict,error);
+                // Recover a pre-fix interrupted hard-link publication only when
+                // both names refer to this exact recorded owned inode.
+                if(unlinkat(cache_->fd(),partial_.c_str(),0)!=0)throw CompletionError(CompletionError::Stage::PartialCleanup,errno);
+            }
+            committed_=true;
         }
+        // Repeat after reopen too: a crash/failure after rename must not skip
+        // durable directory publication. Complete/ACK follows this success.
+        if(fsync(cache_->fd())!=0)throw CompletionError(CompletionError::Stage::DirectorySync,errno);
     }
     void discard()override{if(committed_)return;struct stat s{};check(fstatat(cache_->fd(),partial_.c_str(),&s,AT_SYMLINK_NOFOLLOW)==0&&s.st_dev==identity(file_->fd).st_dev&&s.st_ino==identity(file_->fd).st_ino);check(unlinkat(cache_->fd(),partial_.c_str(),0)==0&&fsync(cache_->fd())==0);}
     Blob sourceToken()const{check(committed_);FileSource source(cache_,final_,metadata_.name);return source.resumeToken();}

@@ -13,6 +13,20 @@ import org.robolectric.annotation.Config
 @Config(sdk=[34])
 class BoundedTextViewerTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun normalAndTransferredTextUseBoundedPreviewWithoutChangingContent(){
+        val text="a".repeat(599)+"😀\r\n日本語\n"+"last line\n".repeat(1000)
+        assertTrue(needsCompactMessage(text))
+        assertFalse(needsCompactMessage("Short 日本語"))
+        assertTrue(needsCompactMessage("\n".repeat(13)))
+        assertEquals("a".repeat(599),messagePreview(text))
+        val original=text
+        compose.setContent{PeerChatTheme(true){CompactLongMessage(text)}}
+        compose.onNodeWithText("View full message").performClick()
+        compose.onNodeWithTag("text-scroll").assertExists()
+        compose.onNodeWithText("Close").performClick()
+        compose.onNodeWithText("View full message").assertExists()
+        assertEquals(original,text)
+    }
     @Test fun unicodeChunksKeepExactContentAndBoundLayout(){
         val text="a".repeat(2047)+"😀日本語"+"b".repeat(9000)
         val rows=textViewRows(text)

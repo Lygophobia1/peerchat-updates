@@ -316,6 +316,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
         }
     }
+    private var transferDiagnosticsAt=0L
     private fun transfer(operation:Int,write:(NativeRecordWriter)->Unit={}):ByteArray {
         val request=NativeRecordWriter(30).also(write).bytes()
         return checkNotNull(com.peerchat.android.TransferBridge.request(checkNotNull(profile).handle,operation,request)){"Native transfer operation rejected"}
@@ -561,6 +562,15 @@ class MessagingBackend(context: Context,private val profileName: String="default
             {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},
             {peer->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),Long.MAX_VALUE))})
         val attachments=attachmentSnapshots(transfer(4))
+        val diagnosticNow=android.os.SystemClock.elapsedRealtime()
+        if(attachments.isNotEmpty()&&diagnosticNow>=transferDiagnosticsAt){
+            transferDiagnosticsAt=diagnosticNow+1000
+            val record=NativeRecord(transfer(5),30)
+            repeat(record.number().toInt().coerceIn(0,64)){
+                android.util.Log.i("PeerChatTransfer",record.text()+" projection_observed_ms="+diagnosticNow)
+            }
+            record.end()
+        }
         mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){

@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <chrono>
 
 namespace peerchat::transfer {
 // Logical bulk-transfer mechanics only. The caller supplies an authenticated,
@@ -61,6 +62,15 @@ public:
     virtual std::unique_ptr<Sink> sink(const DurableState&)=0;
 };
 struct PersistenceError:std::runtime_error{explicit PersistenceError(const std::string& reason):std::runtime_error("Protected transfer journal unavailable: "+reason){}};
+// Platform finalizers supply only controlled stage names + numeric errno,
+// never a path, filename, payload or arbitrary provider exception text.
+struct CompletionError:std::runtime_error {
+    enum class Stage { FileSync, Rename, DestinationConflict, DirectorySync, PartialCleanup };
+    CompletionError(Stage stage,int error):std::runtime_error(std::string("atomic finalize ")+name(stage)+" failed (errno "+std::to_string(error)+")"){}
+private:
+    static const char* name(Stage value){switch(value){case Stage::FileSync:return "file sync";case Stage::Rename:return "rename";
+        case Stage::DestinationConflict:return "destination conflict";case Stage::DirectorySync:return "directory sync";case Stage::PartialCleanup:return "partial cleanup";}return "unknown";}
+};
 constexpr std::uint64_t RetentionMilliseconds=7ull*24*60*60*1000;
 inline bool safeName(const std::string& name){
     if(name.empty()||name.size()>240||name=="."||name==".."||name.back()=='.'||name.back()==' ')return false;
@@ -72,6 +82,12 @@ inline bool safeName(const std::string& name){
     return true;
 }
 class TransferManager {
+    struct Timer {
+        std::uint64_t& total;
+        std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+        explicit Timer(std::uint64_t& value):total(value){}
+        ~Timer(){total+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());}
+    };
     struct Entry:Snapshot {
         std::unique_ptr<Source> source;
         std::unique_ptr<Sink> sink;
@@ -82,14 +98,18 @@ class TransferManager {
         Blob location;
         std::uint64_t updated=0,expires=0;
         bool digestReady=false;
+        std::uint64_t observedAt=0,routeAt=0,firstPayloadAt=0,lastAckAt=0,payloadBytes=0;
+        std::uint64_t readUs=0,hashUs=0,writeUs=0,flushUs=0,commitUs=0,routeChanges=0,backpressure=0,ackWaitTicks=0;
     };
     std::map<std::string,Entry> entries_;
     std::function<std::unique_ptr<Hash>()> hash_;
     StateStore* store_=nullptr;
     std::uint64_t persistenceRetryAt_=0;
+    std::uint64_t journalUs_=0;
     static bool terminal(State s){return s==State::Complete||s==State::Cancelled||s==State::Failed||s==State::Suspended;}
     void save(){
         if(!store_)return;
+        Timer timer(journalUs_);
         std::vector<DurableState> records;
         for(auto& p:entries_){
             auto& e=p.second;DurableState d;static_cast<Snapshot&>(d)=e;
@@ -148,6 +168,21 @@ public:
         save();
     }
     std::vector<Snapshot> snapshots()const{std::vector<Snapshot> result;for(auto& p:entries_)result.push_back(p.second);return result;}
+    // Session-only counters, not journal/wire state. No names, paths or content.
+    std::vector<std::string> diagnostics(std::uint64_t now)const{
+        std::vector<std::string> rows;
+        for(const auto& p:entries_){const auto& e=p.second;
+            rows.push_back("transfer="+p.first+" sending="+std::to_string(e.sending)+" state="+std::to_string(static_cast<unsigned>(e.state))+
+                " size="+std::to_string(e.metadata.size)+" acknowledged_or_durable="+std::to_string(e.done)+
+                " payload_bytes="+std::to_string(e.payloadBytes)+" elapsed_ms="+std::to_string(e.observedAt&&now>=e.observedAt?now-e.observedAt:0)+
+                " route_delay_ms="+std::to_string(e.routeAt>=e.observedAt?e.routeAt-e.observedAt:0)+
+                " first_payload_delay_ms="+std::to_string(e.firstPayloadAt>=e.observedAt?e.firstPayloadAt-e.observedAt:0)+
+                " last_ack_ms="+std::to_string(e.lastAckAt)+" read_us="+std::to_string(e.readUs)+" hash_us="+std::to_string(e.hashUs)+
+                " write_us="+std::to_string(e.writeUs)+" flush_us="+std::to_string(e.flushUs)+" commit_us="+std::to_string(e.commitUs)+
+                " route_changes="+std::to_string(e.routeChanges)+" backpressure="+std::to_string(e.backpressure)+
+                " ack_wait_ticks="+std::to_string(e.ackWaitTicks)+" journal_all_transfers_us="+std::to_string(journalUs_));
+        }return rows;
+    }
     bool hasPendingControl(const std::string& id)const{auto found=entries_.find(id);return found!=entries_.end()&&found->second.reply.has_value();}
     // Local adapter readout only; tokens never travel in a transfer packet.
     std::vector<DurableState> retainedRecords()const{
@@ -200,6 +235,7 @@ public:
         auto durableSend=[&](const Snapshot& entry,const Blob& frame){save();return send(entry,frame);};
         for(auto& p:entries_){
             auto& e=p.second;
+            if(!e.observedAt)e.observedAt=now;
             if(store_){
                 if(e.state!=State::Complete&&e.state!=State::Cancelled&&e.state!=State::Failed&&store_->wallTime()>=e.expires)fail(e,"Retained transfer expired");
             }else if(!terminal(e.state)&&now-e.lastActivity>IdleMilliseconds){fail(e,"File transfer expired");}
@@ -209,9 +245,9 @@ public:
                     auto total=e.sending?e.metadata.size:e.done;
                     if(e.prepared<total){
                         auto n=static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,total-e.prepared));
-                        auto b=e.sending?e.source->read(e.prepared,n):e.sink->read(e.prepared,n);
+                        Blob b;{Timer timer(e.readUs);b=e.sending?e.source->read(e.prepared,n):e.sink->read(e.prepared,n);}
                         if(b.size()!=n)throw std::runtime_error("Restart read failed");
-                        e.hash->update(b.data(),b.size());e.prepared+=b.size();e.lastActivity=now;continue;
+                        {Timer timer(e.hashUs);e.hash->update(b.data(),b.size());}e.prepared+=b.size();e.lastActivity=now;continue;
                     }
                     if(e.sending){
                         auto digest=e.hash->finish();e.hash.reset();
@@ -222,29 +258,30 @@ public:
                 }
                 if(e.state==State::Preparing){
                     if(e.prepared<e.metadata.size){
-                        auto b=e.source->read(e.prepared,static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,e.metadata.size-e.prepared)));
+                        Blob b;{Timer timer(e.readUs);b=e.source->read(e.prepared,static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,e.metadata.size-e.prepared)));}
                         if(b.empty()||b.size()>ChunkBytes||b.size()>e.metadata.size-e.prepared)throw std::runtime_error("Source read failed");
-                        e.hash->update(b.data(),b.size());e.prepared+=b.size();e.lastActivity=now;continue;
+                        {Timer timer(e.hashUs);e.hash->update(b.data(),b.size());}e.prepared+=b.size();e.lastActivity=now;continue;
                     }
                     auto digest=e.hash->finish();e.hash.reset();
                     if(e.digestReady&&digest!=e.metadata.digest){fail(e,"Source no longer matches verified content");continue;}
                     e.metadata.digest=digest;e.state=State::Offered;e.digestReady=true;touch(e);
                 }
                 auto current=route(e);if(!current){e.route=0;e.ready=false;continue;}
+                if(!e.routeAt)e.routeAt=now;
                 if(e.reply){if(durableSend(e,*e.reply))e.reply.reset();continue;}
                 if(terminal(e.state)||!e.sending)continue;
                 if(e.route!=current){
                     auto w=packet(Kind::Offer,e.metadata.id);w.string(e.metadata.name);w.number(e.metadata.size);w.bytes(Blob(e.metadata.digest.begin(),e.metadata.digest.end()));
-                    if(durableSend(e,w.data)){e.route=current;e.ready=false;e.finishSent=false;e.sentUntil=e.done;}
+                    if(durableSend(e,w.data)){++e.routeChanges;e.route=current;e.ready=false;e.finishSent=false;e.sentUntil=e.done;}
                     continue;
                 }
-                if(!e.ready||e.sentUntil!=e.done)continue;
+                if(!e.ready||e.sentUntil!=e.done){++e.ackWaitTicks;continue;}
                 if(e.done<e.metadata.size){
-                    auto b=e.source->read(e.done,static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,e.metadata.size-e.done)));
+                    Blob b;{Timer timer(e.readUs);b=e.source->read(e.done,static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,e.metadata.size-e.done)));}
                     if(b.empty()||b.size()>ChunkBytes||b.size()>e.metadata.size-e.done)throw std::runtime_error("Source changed or unreadable");
                     auto w=packet(Kind::Chunk,e.metadata.id);w.number(e.done);w.bytes(b);
                     e.highWaterSent=std::max(e.highWaterSent,e.done+b.size());touch(e);
-                    if(durableSend(e,w.data))e.sentUntil=e.done+b.size();
+                    if(durableSend(e,w.data)){e.sentUntil=e.done+b.size();e.payloadBytes+=b.size();if(!e.firstPayloadAt)e.firstPayloadAt=now;}else ++e.backpressure;
                 }else if(!e.finishSent){auto w=packet(Kind::Finish,e.metadata.id);if(durableSend(e,w.data))e.finishSent=true;}
             }catch(const PersistenceError&){throw;} // Retry persistence on the existing next tick; never ACK it early.
             catch(const std::exception& error){if(store_)suspend(e,error.what());else fail(e,"Local file I/O or hash failure");}
@@ -278,7 +315,7 @@ public:
             auto offset=r.number();r.end();protocol::check(e.sending&&offset<=e.metadata.size&&offset<=e.highWaterSent);
             if(e.state==State::Recovering)return; // No peer event may bypass full source revalidation.
             if(terminal(e.state))return;
-            e.done=offset;e.sentUntil=offset;e.ready=true;e.finishSent=false;e.state=State::Transferring;e.lastActivity=now;return;
+            e.done=offset;e.sentUntil=offset;e.ready=true;e.finishSent=false;e.state=State::Transferring;e.lastActivity=now;e.lastAckAt=now;return;
         }
         if(kind==Kind::Cancel){r.end();if(!terminal(e.state)||e.state==State::Suspended){e.state=State::Cancelled;try{if(e.sink)e.sink->discard();}catch(...){e.error="Owned partial cleanup failed; manual attention required";}e.sink.reset();e.source.reset();e.hash.reset();}e.reply.reset();return;}
         if(kind==Kind::Complete){r.end();protocol::check(e.sending&&e.done==e.metadata.size&&e.finishSent);e.state=State::Complete;e.source.reset();return;}
@@ -290,7 +327,13 @@ public:
             protocol::check(e.state==State::Transferring&&e.sink&&e.hash);
             if(offset<e.done){protocol::check(offset+b.size()<=e.done);e.reply=offsetPacket(Kind::Resume,e);return;}
             protocol::check(offset==e.done);
-            try{e.sink->append(b);e.sink->flush();e.hash->update(b.data(),b.size());e.done+=b.size();e.lastActivity=now;touch(e);e.reply=offsetPacket(Kind::Resume,e);}catch(...){if(store_)suspend(e,"receive disk or hash failure");else fail(e,"Receive disk or hash failure");}
+            try{
+                {Timer timer(e.writeUs);e.sink->append(b);}
+                {Timer timer(e.flushUs);e.sink->flush();}
+                {Timer timer(e.hashUs);e.hash->update(b.data(),b.size());}
+                e.payloadBytes+=b.size();if(!e.observedAt)e.observedAt=now;if(!e.firstPayloadAt)e.firstPayloadAt=now;
+                e.done+=b.size();e.lastActivity=now;touch(e);e.reply=offsetPacket(Kind::Resume,e);
+            }catch(...){if(store_)suspend(e,"receive disk or hash failure");else fail(e,"Receive disk or hash failure");}
             return;
         }
         if(kind==Kind::Finish){
@@ -299,8 +342,9 @@ public:
             protocol::check(e.state==State::Transferring&&e.done==e.metadata.size&&e.hash&&e.sink);
             try{
                 if(e.hash->finish()!=e.metadata.digest){fail(e,"File integrity verification failed");return;}
-                e.sink->commit();e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply=packet(Kind::Complete,id).data;
-            }catch(...){if(store_)suspend(e,"atomic file completion failed");else fail(e,"Atomic file completion failed");}
+                {Timer timer(e.commitUs);e.sink->commit();}e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply=packet(Kind::Complete,id).data;
+            }catch(const CompletionError& error){if(store_)suspend(e,error.what());else fail(e,error.what());}
+            catch(...){if(store_)suspend(e,"atomic file completion failed");else fail(e,"Atomic file completion failed");}
             return;
         }
         throw std::runtime_error("Unknown file control");

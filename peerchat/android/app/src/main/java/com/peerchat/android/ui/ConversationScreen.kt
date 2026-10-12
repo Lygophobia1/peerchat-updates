@@ -144,7 +144,8 @@ import kotlinx.coroutines.delay
                     Avatar(m.senderName, size = 28)
                     Text(m.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
-                SelectionContainer { Text(linkedText(m.text)) }
+                if(needsCompactMessage(m.text))CompactLongMessage(m.text)
+                else SelectionContainer { Text(linkedText(m.text)) }
                 Text("${m.time}" + if (m.outgoing) " · ${when (m.status) {
                     MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
                     MessageStatus.Queued -> "Queued";

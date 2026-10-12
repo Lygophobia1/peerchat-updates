@@ -26,6 +26,32 @@ internal fun textViewRows(text:String):List<String> = text.split('\n').flatMap{l
     while(start<line.length){var end=(start+2048).coerceAtMost(line.length);if(end<line.length&&line[end-1].isHighSurrogate()&&line[end].isLowSurrogate())end--;rows.add(line.substring(start,end));start=end}
     rows.ifEmpty{listOf("")}
 }
+internal fun needsCompactMessage(text:String):Boolean = text.length>2048 || text.count{it=='\n'}>12
+internal fun messagePreview(text:String):String {
+    var end=minOf(text.length,600)
+    if(end<text.length&&end>0&&text[end-1].isHighSurrogate()&&text[end].isLowSurrogate())end--
+    return text.substring(0,end).lineSequence().take(8).joinToString("\n")
+}
+@Composable internal fun CompactLongMessage(text:String) {
+    var full by remember(text){mutableStateOf(false)}
+    val clipboard=LocalClipboardManager.current
+    Text(messagePreview(text),maxLines=8,overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        fontFamily=if(codeLike(text))FontFamily.Monospace else FontFamily.Default)
+    Row{
+        TextButton({full=true}){Text("View full message")}
+        TextButton({clipboard.setText(AnnotatedString(text))}){Text("Copy")}
+    }
+    if(full)FullTextDialog(text,codeLike(text),"Long message"){full=false}
+}
+@Composable private fun FullTextDialog(text:String,monospace:Boolean,title:String,close:()->Unit) {
+    val clipboard=LocalClipboardManager.current
+    androidx.compose.ui.window.Dialog(onDismissRequest=close,properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)){
+        Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.safeDrawingPadding().padding(12.dp)){
+            Row(verticalAlignment=Alignment.CenterVertically){Text(title,Modifier.weight(1f));TextButton(close){Text("Close")};TextButton({clipboard.setText(AnnotatedString(text))}){Text("Copy")}}
+            TextViewport(text,monospace,Modifier.fillMaxWidth().weight(1f))
+        }}
+    }
+}
 @Composable private fun TextViewport(text:String,monospace:Boolean,modifier:Modifier) {
     val rows=remember(text){textViewRows(text)};val list=rememberLazyListState()
     val accent=MaterialTheme.colorScheme.primary
@@ -53,10 +79,5 @@ internal fun textViewRows(text:String):List<String> = text.split('\n').flatMap{l
         TextButton({clipboard.setText(AnnotatedString(text))}){Text("Copy")}
         TextButton({full=true}){Text("Open full")}
     }
-    if(full)androidx.compose.ui.window.Dialog(onDismissRequest={full=false},properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)){
-        Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.safeDrawingPadding().padding(12.dp)){
-            Row(verticalAlignment=Alignment.CenterVertically){Text(title,Modifier.weight(1f));TextButton({full=false}){Text("Close")};TextButton({clipboard.setText(AnnotatedString(text))}){Text("Copy")}}
-            TextViewport(text,monospace,Modifier.fillMaxWidth().weight(1f))
-        }}
-    }
+    if(full)FullTextDialog(text,monospace,title){full=false}
 }

@@ -46,7 +46,7 @@ class ChatAttachmentTest {
         string code=String.Concat(Enumerable.Repeat("public class Sample {\n  int value = 1;\n}\n",70));
         Check(((BoundedTextView)new ChatText{Message=code}.Content).Viewer.FontFamily.Source=="Consolas","code-like content typography");
         var page=new StackPanel{Width=320};for(int i=0;i<30;i++)page.Children.Add(new ChatText{Message=prose});
-        var clock=System.Diagnostics.Stopwatch.StartNew();page.Measure(new Size(320,double.PositiveInfinity));Check(page.DesiredSize.Height<30*260&&clock.Elapsed.TotalSeconds<15,"several long messages have unbounded/slow layout");
+        var clock=System.Diagnostics.Stopwatch.StartNew();page.Measure(new Size(320,double.PositiveInfinity));Console.WriteLine("long_message_layout height="+page.DesiredSize.Height+" elapsed_seconds="+clock.Elapsed.TotalSeconds);Check(page.DesiredSize.Height<30*260&&clock.Elapsed.TotalSeconds<15,"several long messages have unbounded/slow layout");
         var longRow=new CoreAdapter.FileTransferData{id="typed",name=ChatAttachmentProjection.LongMessageName,state=4,time=100,size=Encoding.UTF8.GetByteCount(prose)};
         Check(ChatAttachmentProjection.IsLongMessage(longRow)&&!ChatAttachmentProjection.IsLongMessage(completed),"typed text/file distinction");
         var longModel=new MessageModel{Data=new MessageData{time=100}};longModel.SetAttachment(longRow);Check(longModel.Text=="Long message"&&!longModel.Stamp.Contains("File attachment"),"typed text presented as a file");

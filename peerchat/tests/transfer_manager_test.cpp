@@ -16,7 +16,7 @@ struct MemorySource:Source {
     std::string name()const override{return filename;}
     Blob read(std::uint64_t off,size_t limit)override{return Blob(bytes.begin()+off,bytes.begin()+off+std::min<std::uint64_t>(limit,bytes.size()-off));}
 };
-struct Result {Blob bytes;bool committed=false,destroyed=false;bool diskFailure=false;};
+struct Result {Blob bytes;bool committed=false,destroyed=false;bool diskFailure=false,commitFailure=false;};
 struct MemoryRecord:MemorySource {
     explicit MemoryRecord(Blob bytes):MemorySource(std::move(bytes),ProtectedTextSource::Name){}
     Blob resumeToken()const override{return Blob{1,2,3};}
@@ -25,7 +25,7 @@ struct MemorySink:Sink {
     Result& result;explicit MemorySink(Result& r):result(r){}
     ~MemorySink(){result.destroyed=true;}
     void append(const Blob& b)override{if(result.diskFailure)throw std::runtime_error("disk full");result.bytes.insert(result.bytes.end(),b.begin(),b.end());}
-    void commit()override{result.committed=true;}
+    void commit()override{if(result.commitFailure)throw CompletionError(CompletionError::Stage::Rename,13);result.committed=true;}
 };
 struct Harness {
     std::string a=std::string(64,'a'),b=std::string(64,'b'),id=std::string(32,'1');
@@ -57,6 +57,14 @@ struct Harness {
 Blob data(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*17);return b;}
 int main(){
     try{
+        for(size_t size:{size_t(1<<20),size_t(3<<20),size_t(10<<20),size_t(32<<20)}){
+            Harness h;auto bytes=data(size);h.offer(bytes);
+            for(int n=0;n<20000&&h.sender.snapshots()[0].state!=State::Complete;++n)h.pump();
+            check(h.result.committed&&h.result.bytes==bytes&&h.sender.snapshots()[0].done==size);
+            auto diagnostics=h.sender.diagnostics(h.now);
+            check(diagnostics.size()==1&&diagnostics[0].find("payload_bytes="+std::to_string(size))!=std::string::npos);
+            std::cout<<"Representative native transfer size="<<size<<" "<<diagnostics[0]<<"\n";
+        }
         {
             auto protector=std::make_shared<platform::WindowsRecordProtector>();auto id=std::string(32,'e');
             std::string text;for(unsigned n=0;n<3000;++n)text+=u8"Exact multiline 日本語 😀\r\n";
@@ -101,6 +109,11 @@ int main(){
         {Harness h;Digest wrong{};h.sender.offer(h.b,h.id,std::make_unique<MemorySource>(data(50000)),h.now,&wrong);
             h.finish();check(h.sender.snapshots()[0].state==State::Failed&&!h.result.committed&&h.receiver.snapshots().empty());}
         {Harness h;h.offer(data(50000));h.result.diskFailure=true;h.finish();check(!h.result.committed&&h.receiver.snapshots()[0].state==State::Failed);}
+        {Harness h;h.offer(data(50000));h.result.commitFailure=true;h.finish();
+            check(!h.result.committed&&h.receiver.snapshots()[0].state==State::Failed);
+            check(h.receiver.snapshots()[0].error=="atomic finalize rename failed (errno 13)");
+            check(h.sender.snapshots()[0].state!=State::Complete);
+        }
         {Harness h;h.offer(data(50000));while(!h.accepted)h.pump();h.receiver.cancel(h.id);h.pump();check(h.result.destroyed&&!h.result.committed&&h.sender.snapshots()[0].state==State::Cancelled);}
         for(auto name:{"../bad","C:bad","CON.txt","NUL","LPT1.bin","bad\\name","bad.","bad ","a\nb"})check(!safeName(name));
         {Harness h;h.offer(data(100));while(!h.accepted)h.pump();h.receiver.cancel(h.id);
