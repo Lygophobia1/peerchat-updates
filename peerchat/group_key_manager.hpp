@@ -24,18 +24,22 @@ struct RosterSnapshot {
 // this owner checks the current roster and local signed ledger before key use.
 class GroupKeyManager {
 public:
-    GroupKeyManager(Storage& storage,std::uint64_t localAccountId,std::string localPeerId)
-        :store_(storage),localAccountId_(localAccountId),localPeerId_(std::move(localPeerId)){
+    GroupKeyManager(Storage& storage,std::uint64_t localAccountId,std::string localPeerId,bool deviceEnrollmentEnabled=false)
+        :store_(storage),localAccountId_(localAccountId),localPeerId_(std::move(localPeerId)),deviceEnrollmentEnabled_(deviceEnrollmentEnabled){
         if(!localAccountId_||!protocol::id(localPeerId_))throw std::invalid_argument("Group-key profile binding is invalid");
     }
     void apply(RosterSnapshot snapshot){
         if(!protocol::id(snapshot.legacyGroupId,32)||!protocol::id(snapshot.serverGroupId,32)||
            !protocol::id(snapshot.distributorPeerId)||snapshot.generation==0||
            snapshot.generation>INT64_MAX||snapshot.devices.empty())throw std::runtime_error("Invalid authenticated group roster");
-        std::set<std::string> identities;std::set<std::uint64_t> accounts;bool local=false,distributor=false;
+        std::set<std::string> identities;std::map<std::uint64_t,std::pair<GroupRole,std::size_t>> accounts;bool local=false,distributor=false;
         for(const auto& member:snapshot.devices){
-            if(!member.accountId||!protocol::id(member.peerId)||!identities.insert(member.peerId).second||
-               !accounts.insert(member.accountId).second)throw std::runtime_error("Invalid group roster device binding");
+            if(!member.accountId||member.accountId>INT64_MAX||!protocol::id(member.peerId)||!identities.insert(member.peerId).second||
+               (member.role!=GroupRole::Member&&member.role!=GroupRole::Admin&&member.role!=GroupRole::Owner))
+                throw std::runtime_error("Invalid group roster device binding");
+            auto account=accounts.emplace(member.accountId,std::make_pair(member.role,std::size_t(0))).first;
+            if((account->second.second&&!deviceEnrollmentEnabled_)||account->second.first!=member.role||++account->second.second>8)
+                throw std::runtime_error("Invalid group roster account/device permissions");
             if(member.accountId==localAccountId_&&member.peerId==localPeerId_)local=true;
             if(!member.invited&&member.peerId==snapshot.distributorPeerId)distributor=true;
         }
@@ -76,11 +80,13 @@ public:
     static bool matchesSignedLedger(const RosterSnapshot& snapshot,const GroupState& ledger){
         if(!ledger.created||ledger.groupId!=snapshot.legacyGroupId)return false;
         std::size_t currentMembers=0;
-        for(const auto& member:snapshot.devices)if(!member.invited){
+        std::set<std::string> devices;
+        for(const auto& member:snapshot.devices){
+            if(!devices.insert(member.peerId).second)return false;
+            if(member.invited)continue;
             ++currentMembers;
-            auto found=ledger.members.find(member.accountId);
-            if(found==ledger.members.end()||found->second.peerId!=member.peerId||
-               found->second.role!=member.role)return false;
+            const auto* found=ledger.device(member.accountId,member.peerId);
+            if(!found||found->role!=member.role||Storage::publicKeyId(found->publicKey)!=member.peerId)return false;
         }
         // A partial server roster cannot authorize a key for a larger signed
         // group. Finish signed-roster reconciliation before distributing material.
@@ -134,6 +140,9 @@ public:
 private:
     static std::uint64_t findAccount(const RosterSnapshot& snapshot,const std::string& peer){for(const auto& member:snapshot.devices)if(member.peerId==peer)return member.accountId;return 0;}
     Storage& store_;std::uint64_t localAccountId_;std::string localPeerId_;
+    // Default production owners remain closed until signed proof reconciliation
+    // is integrated. Opt-in does not replace exact signed-ledger admission.
+    bool deviceEnrollmentEnabled_=false;
     std::map<std::string,RosterSnapshot> rosters_;
 };
 }

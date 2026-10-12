@@ -1,4 +1,5 @@
 #include "../group_device_binding.hpp"
+#include "../group_device_reconciliation.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,12 +17,21 @@ int main(int argc,char** argv){try{
     write(root/L"create.bin",encodeGroupEvent(create));
     auto text=std::string("PeerChat group roster v1|")+create.groupId+"|"+owner.peerId;
     auto server=hex(digestDevicePayload(Blob(text.begin(),text.end()))).substr(0,32);
+    std::map<std::string,Blob> evidence;
     auto proof=[&](const char* name,const Profile& actor,const Profile& destination,std::uint64_t account,std::uint64_t generation,bool revoke=false){
         GroupEvent event;event.groupId=create.groupId;event.logicalOrder=generation+1;event.kind=revoke?GroupEventKind::RevokeDevice:GroupEventKind::AuthorizeDevice;
         event.actorAccountId=event.subjectAccountId=account;event.actorPeerId=actor.peerId;event.subjectPeerId=destination.peerId;
         if(!revoke)event.subjectPublicKey=destination.publicKey;
         event.value=revoke?L"PeerChat/group-device-revocation/v1":L"PeerChat/group-device-authorization/v1";signGroupEvent(event,actor);
-        write(root/name,group_devices::approvalProof(server,generation,event,destination.publicKey,group_devices::identityProof(account,destination),actor));
+        auto wire=group_devices::approvalProof(server,generation,event,destination.publicKey,group_devices::identityProof(account,destination),actor);
+        auto parsed=group_devices::readApproval(wire);
+        if(parsed.serverGroup!=server||parsed.generation!=generation||parsed.account!=account||encodeGroupEvent(parsed.event)!=encodeGroupEvent(event))
+            throw std::runtime_error("Native signed approval roundtrip failed");
+        auto damaged=wire;damaged.back()^=1;bool rejected=false;
+        try{group_devices::readApproval(damaged);}catch(const std::exception&){rejected=true;}
+        if(!rejected)throw std::runtime_error("Native approval parser accepted damaged signature");
+        write(root/name,wire);
+        evidence.emplace(name,std::move(wire));
     };
     proof("approve.bin",owner,target,1,1);proof("stale.bin",owner,extra,1,1);
     proof("revoke.bin",owner,target,1,2,true);proof("reenroll.bin",owner,target,1,3);
@@ -38,11 +48,42 @@ int main(int argc,char** argv){try{
     valid.actorAccountId=valid.subjectAccountId=1;valid.actorPeerId=owner.peerId;valid.subjectPeerId=target.peerId;
     valid.subjectPublicKey=target.publicKey;valid.value=L"PeerChat/group-device-authorization/v1";signGroupEvent(valid,owner);
     auto targetProof=group_devices::identityProof(1,target);
+    auto validWire=group_devices::approvalProof(server,1,valid,target.publicKey,targetProof,owner);
+    group_keys::RosterSnapshot previous{create.groupId,server,owner.peerId,1,{{1,owner.peerId,GroupRole::Owner,false}}};
+    auto current=previous;current.generation=2;current.devices.push_back({1,target.peerId,GroupRole::Owner,false});
+    GroupLedger signedLedger(true);if(!signedLedger.append(create))throw std::runtime_error("Reconciliation create failed");
+    auto checkRejection=[&](const group_keys::RosterSnapshot& snapshot,group_devices::Reconciliation reason){
+        auto isolated=signedLedger;auto result=group_devices::reconcileApproval(previous,snapshot,validWire,isolated);
+        if(result!=reason||isolated.state().device(1,target.peerId))throw std::runtime_error("Invalid roster mutated enrolled ledger");
+    };
+    auto wrong=current;wrong.generation=3;checkRejection(wrong,group_devices::Reconciliation::StaleGeneration);
+    wrong=current;wrong.devices.back().accountId=2;checkRejection(wrong,group_devices::Reconciliation::RosterMismatch);
+    wrong=current;wrong.devices.back().role=GroupRole::Admin;checkRejection(wrong,group_devices::Reconciliation::RosterMismatch);
+    wrong=current;wrong.serverGroupId=std::string(32,'f');checkRejection(wrong,group_devices::Reconciliation::WrongGroup);
+    GroupLedger closedLedger;closedLedger.append(create);
+    if(group_devices::reconcileApproval(previous,current,validWire,closedLedger)!=group_devices::Reconciliation::LedgerRejected)
+        throw std::runtime_error("Reconciliation enabled production enrollment implicitly");
+    if(group_devices::reconcileApproval(previous,current,validWire,signedLedger)!=group_devices::Reconciliation::Accepted||!signedLedger.state().device(1,target.peerId))
+        throw std::runtime_error("Exact double-signed consecutive roster reconciliation failed");
+    if(group_devices::reconcileApproval(previous,current,validWire,signedLedger)==group_devices::Reconciliation::Accepted)
+        throw std::runtime_error("Replayed enrollment changed current ledger");
+    auto duplicate=current;duplicate.devices.back()=duplicate.devices.front();
+    if(group_keys::GroupKeyManager::matchesSignedLedger(duplicate,signedLedger.state()))
+        throw std::runtime_error("Duplicate roster slot replaced a distinct enrolled device");
+    auto retired=previous;retired.generation=3;
+    if(group_devices::reconcileApproval(current,retired,evidence.at("revoke.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||signedLedger.state().device(1,target.peerId))
+        throw std::runtime_error("Exact device revocation did not reconcile");
+    auto restored=current;restored.generation=4;
+    if(group_devices::reconcileApproval(retired,restored,evidence.at("reenroll.bin"),signedLedger)!=group_devices::Reconciliation::Accepted||!signedLedger.state().device(1,target.peerId))
+        throw std::runtime_error("Fresh explicit reenrollment did not reconcile");
     auto adversarial=[&](const char* name,const std::string& group,const Blob& identity,const Blob& signedEvent){
         protocol::Writer writer(protocol::GroupEvent);writer.string("PeerChat/group-device-approval/v1");
         writer.string(group);writer.string(create.groupId);writer.number(1);writer.number(1);
         writer.string(owner.peerId);writer.bytes(owner.publicKey);writer.string(target.peerId);writer.bytes(target.publicKey);
-        writer.bytes(identity);writer.bytes(signedEvent);writer.bytes(signDevicePayload(writer.data,owner));write(root/name,writer.data);
+        writer.bytes(identity);writer.bytes(signedEvent);writer.bytes(signDevicePayload(writer.data,owner));
+        if(group==server){bool rejected=false;try{group_devices::readApproval(writer.data);}catch(const std::exception&){rejected=true;}
+            if(!rejected)throw std::runtime_error("Native approval parser trusted invalid nested evidence");}
+        write(root/name,writer.data);
     };
     auto badIdentity=targetProof;badIdentity[0]^=1;
     adversarial("bad-target-signature.bin",server,badIdentity,encodeGroupEvent(valid));

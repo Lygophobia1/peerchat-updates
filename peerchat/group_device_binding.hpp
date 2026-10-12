@@ -31,4 +31,37 @@ inline Blob approvalProof(const std::string& serverGroup,std::uint64_t generatio
     writer.bytes(targetIdentitySignature);writer.bytes(encodeGroupEvent(event));
     auto signature=signDevicePayload(writer.data,actor);writer.bytes(signature);return writer.data;
 }
+struct SignedApproval {
+    std::string serverGroup;
+    std::uint64_t generation=0,account=0;
+    Blob actorPublicKey,targetPublicKey,targetIdentitySignature;
+    GroupEvent event;
+};
+// Verifies public cryptographic evidence only. Callers must separately admit
+// authenticated current account/device mappings and exact server roster epoch.
+// Parsing never issues a grant, mutates a ledger or releases a group key.
+inline SignedApproval readApproval(const Blob& wire){
+    protocol::check(wire.size()<=4096);
+    protocol::Reader reader(wire);protocol::check(reader.type()==protocol::GroupEvent);
+    auto text=[&](std::size_t limit){auto value=reader.string();protocol::check(value.size()<=limit);return value;};
+    auto bytes=[&](std::size_t limit){auto value=reader.bytes();protocol::check(value.size()<=limit);return value;};
+    protocol::check(text(64)=="PeerChat/group-device-approval/v1");
+    SignedApproval result;result.serverGroup=text(32);auto legacy=text(32);
+    result.generation=reader.number();result.account=reader.number();
+    auto actor=text(64);result.actorPublicKey=bytes(72);
+    auto target=text(64);result.targetPublicKey=bytes(72);result.targetIdentitySignature=bytes(64);
+    auto eventWire=bytes(2048);auto signedEnd=reader.cursor;auto signature=bytes(64);reader.end();
+    protocol::check(protocol::id(result.serverGroup,32)&&protocol::id(legacy,32)&&protocol::id(actor)&&protocol::id(target)&&
+        actor!=target&&result.generation>0&&result.generation<INT64_MAX&&result.account>0&&result.account<=INT64_MAX&&
+        result.actorPublicKey.size()==72&&result.targetPublicKey.size()==72&&Storage::publicKeyId(result.actorPublicKey)==actor);
+    protocol::check(verifyDevicePayload(identityInput(result.account,target,result.targetPublicKey),result.targetIdentitySignature,result.targetPublicKey));
+    protocol::check(verifyDevicePayload(Blob(wire.begin(),wire.begin()+signedEnd),signature,result.actorPublicKey));
+    result.event=decodeGroupEvent(eventWire);const auto& event=result.event;
+    protocol::check(event.groupId==legacy&&event.logicalOrder>0&&event.actorAccountId==result.account&&
+        event.subjectAccountId==result.account&&event.actorPeerId==actor&&event.subjectPeerId==target&&
+        event.subjectName.empty()&&event.message.empty()&&verifyGroupEventSignature(event,result.actorPublicKey));
+    protocol::check((event.kind==GroupEventKind::AuthorizeDevice&&event.value==L"PeerChat/group-device-authorization/v1"&&event.subjectPublicKey==result.targetPublicKey)||
+        (event.kind==GroupEventKind::RevokeDevice&&event.value==L"PeerChat/group-device-revocation/v1"&&event.subjectPublicKey.empty()));
+    return result;
+}
 }

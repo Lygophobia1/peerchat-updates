@@ -75,6 +75,32 @@ static void deviceEnrollment(const std::filesystem::path& root){
     require(ledger.state().members.size()==1&&ledger.state().device(8,second.peerId),"Device enrollment changed logical membership");
     group_keys::RosterSnapshot oldRoster{create.groupId,newGroupId(),first.peerId,1,{{8,first.peerId,GroupRole::Owner,false}}};
     require(!group_keys::GroupKeyManager::matchesSignedLedger(oldRoster,ledger.state()),"Incomplete server roster authorized enrolled ledger");
+    auto enrolledRoster=oldRoster;enrolledRoster.generation=2;
+    enrolledRoster.devices.push_back({8,second.peerId,GroupRole::Owner,false});
+    group_keys::GroupKeyManager closedKeys(firstStore,8,first.peerId);
+    bool closed=false;try{closedKeys.apply(enrolledRoster);}catch(const std::exception&){closed=true;}
+    require(closed,"Production key owner activated enrollment prematurely");
+    group_keys::GroupKeyManager firstKeys(firstStore,8,first.peerId,true),secondKeys(secondStore,8,second.peerId,true);
+    firstKeys.apply(enrolledRoster);secondKeys.apply(enrolledRoster);
+    require(firstKeys.ensureCurrentKey(enrolledRoster.serverGroupId,ledger.state()),"Enrolled device roster did not provision current key");
+    auto enrolledOffers=firstStore.pendingGroupKeyHandoffs(second.peerId);
+    require(enrolledOffers.size()==1&&secondKeys.accept(enrolledOffers[0],first.peerId,ledger.state()),"Same-account exact-device key handoff rejected");
+    require(secondStore.groupKey(create.groupId,1).empty(),"Enrollment implicitly shared historical key");
+    MessageLayer firstMessages(firstStore,firstKeys,first,8),secondMessages(secondStore,secondKeys,second,8);
+    auto siblingMessage=secondMessages.create(create.groupId,ledger.state(),body("same-account enrolled sender"));
+    require(siblingMessage.result==Result::Accepted,"Enrolled sibling could not encrypt future group text");
+    auto receivedSibling=firstMessages.receive(create.groupId,ledger.state(),siblingMessage.wire);expect(receivedSibling,Result::Accepted);
+    require(receivedSibling.envelope.senderAccount==8&&receivedSibling.envelope.senderDevice==second.peerId,"Sibling attribution lost exact device identity");
+    expect(firstMessages.receive(create.groupId,ledger.state(),siblingMessage.wire),Result::DuplicateMessage);
+    auto spoofedSibling=siblingMessage.envelope;spoofedSibling.messageId=Storage::newMessageId();resign(spoofedSibling,first);
+    expect(firstMessages.receive(create.groupId,ledger.state(),serialize(spoofedSibling)),Result::SignatureFailed);
+    auto unapprovedRoster=enrolledRoster;unapprovedRoster.generation=3;
+    unapprovedRoster.devices.push_back({8,third.peerId,GroupRole::Owner,false});
+    group_keys::GroupKeyManager unapprovedKeys(firstStore,8,first.peerId,true);unapprovedKeys.apply(unapprovedRoster);
+    require(!unapprovedKeys.ensureCurrentKey(unapprovedRoster.serverGroupId,ledger.state()),"Account-only server entry obtained a key without signed device grant");
+    auto elevated=enrolledRoster;elevated.generation=3;elevated.devices.back().role=GroupRole::Admin;
+    bool roleRejected=false;try{firstKeys.apply(elevated);}catch(const std::exception&){roleRejected=true;}
+    require(roleRejected,"Same-account sibling role diverged from account authority");
     // A separately authorized device can approve its own account's next device.
     auto next=approve(second,third,8);require(ledger.append(next),"Authorized sibling could not approve own-account device");
     GroupEvent chat;chat.groupId=create.groupId;chat.logicalOrder=ledger.state().maxLogicalOrder+1;
@@ -85,6 +111,12 @@ static void deviceEnrollment(const std::filesystem::path& root){
     revoke.actorPeerId=first.peerId;revoke.subjectPeerId=second.peerId;revoke.value=L"PeerChat/group-device-revocation/v1";
     signGroupEvent(revoke,first);require(ledger.append(revoke),"Device-specific revocation failed");
     require(!ledger.state().device(8,second.peerId)&&ledger.state().device(8,third.peerId),"Revocation changed sibling membership");
+    auto revokedRoster=oldRoster;revokedRoster.generation=4;revokedRoster.devices.push_back({8,third.peerId,GroupRole::Owner,false});
+    firstKeys.apply(revokedRoster);
+    require(firstStore.pendingGroupKeyHandoffs(second.peerId).empty(),"Revoked recipient retained pending key handoff");
+    require(firstKeys.ensureCurrentKey(revokedRoster.serverGroupId,ledger.state()),"Revocation did not rotate current key for surviving devices");
+    require(!firstKeys.maySend(enrolledOffers[0],second.peerId)&&!secondKeys.accept(enrolledOffers[0],first.peerId,ledger.state()),"Revoked device retained current key authority");
+    expect(firstMessages.receive(create.groupId,ledger.state(),siblingMessage.wire),Result::StaleRosterGeneration);
     auto stale=approve(second,second,8);require(!ledger.append(stale),"Revoked device issued fresh approval");
     chat.logicalOrder=ledger.state().maxLogicalOrder+1;chat.message=L"Revoked message";signGroupEvent(chat,second);
     require(rejected(chat),"Revoked device signed a new accepted group message");

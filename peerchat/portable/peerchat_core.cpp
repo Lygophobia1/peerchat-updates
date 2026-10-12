@@ -2,6 +2,7 @@
 #include "../session_transport_manager.hpp"
 #include "../group.hpp"
 #include "../group_device_binding.hpp"
+#include "../group_device_reconciliation.hpp"
 #include "../delivery_manager.hpp"
 #include "../archive_application.hpp"
 #include "../protocol.hpp"

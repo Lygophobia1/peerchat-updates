@@ -83,8 +83,8 @@ Result MessageLayer::context(const std::string& local,const GroupState& ledger,c
     roster=keys_.rosterForLegacy(local);
     if(!roster||!group_keys::GroupKeyManager::matchesSignedLedger(*roster,ledger))return Result::RosterUnavailable;
     if(!group_keys::GroupKeyManager::currentMember(*roster,account_,device_.peerId))return Result::LocalNotMember;
-    auto member=ledger.members.find(account_);
-    if(member==ledger.members.end()||member->second.publicKey!=device_.publicKey||Storage::publicKeyId(device_.publicKey)!=device_.peerId)
+    const auto* member=ledger.device(account_,device_.peerId);
+    if(!member||member->publicKey!=device_.publicKey||Storage::publicKeyId(device_.publicKey)!=device_.peerId)
         return Result::UnauthorizedSenderDevice;
     return Result::Accepted;
 }
@@ -125,12 +125,12 @@ Reception MessageLayer::receive(const std::string& local,const GroupState& ledge
         if(e.groupId!=roster->serverGroupId){result.result=Result::WrongGroup;return result;}
         if(e.rosterGeneration!=roster->generation){result.result=e.rosterGeneration<roster->generation?Result::StaleRosterGeneration:Result::FutureRosterGeneration;return result;}
         if(e.keyGeneration!=roster->generation){result.result=e.keyGeneration<roster->generation?Result::StaleKeyGeneration:Result::FutureKeyGeneration;return result;}
-        auto member=ledger.members.find(e.senderAccount);
-        if(member==ledger.members.end()){result.result=Result::SenderNotMember;return result;}
-        if(!group_keys::GroupKeyManager::currentMember(*roster,e.senderAccount,e.senderDevice)||member->second.peerId!=e.senderDevice||
-            Storage::publicKeyId(member->second.publicKey)!=e.senderDevice){result.result=Result::UnauthorizedSenderDevice;return result;}
+        if(!ledger.members.count(e.senderAccount)){result.result=Result::SenderNotMember;return result;}
+        const auto* member=ledger.device(e.senderAccount,e.senderDevice);
+        if(!member||!group_keys::GroupKeyManager::currentMember(*roster,e.senderAccount,e.senderDevice)||
+            Storage::publicKeyId(member->publicKey)!=e.senderDevice){result.result=Result::UnauthorizedSenderDevice;return result;}
         result.result=Result::SignatureFailed;
-        if(!verifyDevicePayload(signingPayload(e),e.signature,member->second.publicKey))return result;
+        if(!verifyDevicePayload(signingPayload(e),e.signature,member->publicKey))return result;
         result.result=Result::StorageFailed;Secret key{store_.groupKey(local,e.keyGeneration)};
         if(key.bytes.empty()){result.result=Result::MissingGroupKey;return result;}
         Secret plaintext;auto tag=e.tag;result.result=Result::AeadAuthFailed;
