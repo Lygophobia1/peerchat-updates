@@ -29,6 +29,8 @@ Approved additional-device policy: an existing authorized group device may expli
 
 ## Remaining sequence
 
+dev.100 adds the native signing-only double-proof builder and authoritative server SQLite enrollment/revocation boundary. Production enrollment remains disabled; no RPC/UI claims success. CNG/portable adversarial proofs, exact-epoch race, bounds, durable receipts, leave/rejoin, existing group fanout/key/control, History Sync security/import/TLS, packaged registration/application/WPF, 120 Android tests/builds/lint, ARM64/JNI and full Windows/updater/version audits passed. See GROUP_DEVICE_SERVER_PROOF_DEV100.md for scope, preserved package hashes and activation prerequisites. Next work is exact enrolled-device key/message provisioning and signed replica reconciliation, not another account-identity or retry owner.
+
 1. Secure multi-device proof + roster integration, independent revocation/epochs, then Windows group attachments using the existing transfer pipeline with truthful per-recipient state.
 2. Group-history catch-up only with independently verified historical entitlement and original provenance.
 3. Shared group crypto/runtime portability and Android group application/UI integration.

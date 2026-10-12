@@ -62,6 +62,7 @@ namespace PeerChat.Server {
                 "CREATE TABLE IF NOT EXISTS group_rosters(group_id TEXT PRIMARY KEY, legacy_group_id TEXT NOT NULL, owner_account_id INTEGER NOT NULL, owner_identity TEXT NOT NULL, distributor_identity TEXT NOT NULL, roster_generation INTEGER NOT NULL, creation_event_id TEXT NOT NULL DEFAULT '', created_utc INTEGER NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_roster_devices(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, public_identity TEXT NOT NULL, role TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(group_id,account_id,public_identity));" +
                 "CREATE INDEX IF NOT EXISTS group_roster_members_by_device ON group_roster_devices(public_identity,state,group_id);" +
+                "CREATE TABLE IF NOT EXISTS group_device_proofs(proof_id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, account_id INTEGER NOT NULL, actor_identity TEXT NOT NULL, target_identity TEXT NOT NULL, applied_generation INTEGER NOT NULL, revoked INTEGER NOT NULL, signed_proof TEXT NOT NULL);" +
                 "CREATE TABLE IF NOT EXISTS group_invites(group_id TEXT NOT NULL REFERENCES group_rosters(group_id) ON DELETE CASCADE, recipient_account_id INTEGER NOT NULL REFERENCES accounts(id), invite_id TEXT NOT NULL UNIQUE, inviter_account_id INTEGER NOT NULL REFERENCES accounts(id), inviter_identity TEXT NOT NULL, state TEXT NOT NULL, created_utc INTEGER NOT NULL, updated_utc INTEGER NOT NULL, PRIMARY KEY(group_id,recipient_account_id));" +
                 "CREATE INDEX IF NOT EXISTS group_invites_recipient_state ON group_invites(recipient_account_id,state,updated_utc);");
             // Existing Milestone 1 databases predate privacy controls. Add the non-sensitive
@@ -182,6 +183,30 @@ namespace PeerChat.Server {
                 Execute("COMMIT;");return GroupRoster(group,account,device);
             }catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
+        // Internal production boundary: RPC/UI activation waits for signed replica
+        // reconciliation and current-key provisioning. Never admits account login alone.
+        public Dictionary<string,object> ApplyGroupDeviceProof(long account,string device,GroupDeviceProof proof){lock(gate){
+            if(proof==null||proof.Account!=account||proof.Actor!=device||!OwnsDevice(account,device)||
+               !OwnsDevice(account,proof.Target)||GroupRole(proof.GroupId,account,device)==null||
+               ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(proof.GroupId))!=proof.LegacyGroupId)return null;
+            long current=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(proof.GroupId));
+            long applied=ScalarLong(database,"SELECT applied_generation FROM group_device_proofs WHERE proof_id="+Quote(proof.Id));
+            if(applied!=0)return current==applied?GroupRoster(proof.GroupId,account,device):null;
+            if(current!=proof.Generation)return null;
+            string role=GroupRole(proof.GroupId,account,device),targetRole=GroupRole(proof.GroupId,account,proof.Target);
+            long count=ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(proof.GroupId)+" AND account_id="+account+" AND state='member'");
+            if(proof.Revoke?(targetRole==null||count<=1):(targetRole!=null||count>=8||
+                ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(proof.GroupId)+" AND public_identity="+Quote(proof.Target))!=0))return null;
+            Execute("BEGIN IMMEDIATE;");try{
+                if(proof.Revoke){
+                    Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(proof.GroupId)+" AND account_id="+account+" AND public_identity="+Quote(proof.Target)+";");
+                    Execute("UPDATE group_rosters SET owner_identity="+Quote(device)+" WHERE group_id="+Quote(proof.GroupId)+" AND owner_identity="+Quote(proof.Target)+" AND owner_account_id="+account+";");
+                }else Execute("INSERT INTO group_roster_devices(group_id,account_id,public_identity,role,state) VALUES("+Quote(proof.GroupId)+","+account+","+Quote(proof.Target)+","+Quote(role)+",'member');");
+                Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(device)+" WHERE group_id="+Quote(proof.GroupId)+";");
+                Execute("INSERT INTO group_device_proofs(proof_id,group_id,account_id,actor_identity,target_identity,applied_generation,revoked,signed_proof) VALUES("+Quote(proof.Id)+","+Quote(proof.GroupId)+","+account+","+Quote(device)+","+Quote(proof.Target)+","+(current+1)+","+(proof.Revoke?1:0)+","+Quote(proof.Encoded)+");");
+                Execute("COMMIT;");return GroupRoster(proof.GroupId,account,device);
+            }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+        }}
         public Dictionary<string,object> GroupRoster(string group,long account,string device){lock(gate){
             if(!GroupId(group)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null&&GroupRole(group,account,device,"invited")==null)return null;
             long generation=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group));
@@ -268,11 +293,11 @@ namespace PeerChat.Server {
             if(!GroupId(group)||String.IsNullOrEmpty(actorDevice)||String.IsNullOrEmpty(targetDevice)||actor==target||!OwnsDevice(actor,actorDevice)||!OwnsDevice(target,targetDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
             string role=GroupRole(group,actor,actorDevice),targetRole=GroupRole(group,target,targetDevice);
             if(targetRole==null||targetRole=="owner"||role!="owner"&&!(role=="admin"&&targetRole=="member"))return null;
-            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+" AND public_identity="+Quote(targetDevice)+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(actorDevice)+" WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return GroupRoster(group,actor,actorDevice);}catch{try{Execute("ROLLBACK;");}catch{}throw;}
+            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity="+Quote(actorDevice)+" WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return GroupRoster(group,actor,actorDevice);}catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
         public Dictionary<string,object> GroupLeave(string group,long account,string device,long expectedGeneration){lock(gate){
             if(!GroupId(group)||String.IsNullOrEmpty(device)||!OwnsDevice(account,device)||GroupRole(group,account,device)==null||GroupRole(group,account,device)=="owner"||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
-            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity=owner_identity WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return new Dictionary<string,object>{{"groupId",group},{"state","left"}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}
+            Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+";");Execute("UPDATE group_rosters SET roster_generation=roster_generation+1,distributor_identity=owner_identity WHERE group_id="+Quote(group)+";");Execute("COMMIT;");return new Dictionary<string,object>{{"groupId",group},{"state","left"}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
         void MakeFriends(long a,long b){Execute("INSERT OR IGNORE INTO friendships(account_low,account_high,created_utc) VALUES("+Low(a,b)+","+High(a,b)+","+UnixNow()+");");}
         // Every state transition is serialized and transactional. The authenticated account ID is
