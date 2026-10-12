@@ -79,9 +79,9 @@ static class ArchiveSettingsSmoke {
                 var switchState=(TextBlock)toggle.Template.FindName("SwitchState",toggle);
                 Check(switchState.Text=="OFF");toggle.IsChecked=true;dialog.UpdateLayout();Check(switchState.Text=="ON");
                 toggle.IsChecked=false;dialog.UpdateLayout();Check(switchState.Text=="OFF");
-                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="THIS DEVICE"));
-                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="OTHER DEVICES"));
-                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="SYNC STATUS"));
+                Check(panel.MaxWidth==720);
+                Check(Find(dialog,"History sync status card") is Border);
+                Check(Find(dialog,"View sync details") is Expander);
                 Check(panel.Children.OfType<CheckBox>().All(c=>c==toggle||Object.Equals(c.Content,"History Sync"))); // Mailbox remains separate; no raw history permissions.
                 Check(Find(dialog,"Archive device selector")==null);
                 Check(panel.Children.OfType<CheckBox>().Single(c=>Object.Equals(c.Content,"History Sync")).Template!=null);
@@ -93,7 +93,7 @@ static class ArchiveSettingsSmoke {
                 foreach(var label in new[]{"Add device","Pause","Refresh history devices"})Check(Find(dialog,label) is Button);
                 Check(!panel.Children.OfType<Button>().Any(b=>Object.Equals(b.Content,"Refresh history devices")));
                 ((Button)Find(dialog,"Refresh history devices")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Check(panel.Children.OfType<TextBlock>().Any(t=>t.Text=="Sign in and establish authenticated server presence first."));
+                Check(((TextBlock)Find(dialog,"History sync status")).Text=="Sign in and establish authenticated server presence first.");
                 Check(panel.IsEnabled);
                 // Aggregate permissions can already be ON under another issuer.
                 // The new action is explicit, not an automatic Save side effect.
@@ -139,7 +139,7 @@ static class ArchiveSettingsSmoke {
                 File.WriteAllBytes(metadataPath,protectedNames);Check(names.Get(8,first,"")=="Main PC"&&!(bool)typeof(HistoryDeviceNames).GetProperty("DetailsUnavailable").GetValue(names,null));
                 var assembly=typeof(DesktopApplication).Assembly;var progressType=assembly.GetType("PeerChatDesktop.ArchiveEnrollmentExecution+SyncProgress");
                 Func<string,bool,bool,long,long?,HistoryProgressView> project=(state,running,complete,count,total)=>{var p=Activator.CreateInstance(progressType);progressType.GetField("State").SetValue(p,state);progressType.GetField("Running").SetValue(p,running);progressType.GetField("Complete").SetValue(p,complete);progressType.GetField("Processed").SetValue(p,count);progressType.GetField("Received").SetValue(p,count);progressType.GetField("Conversations").SetValue(p,4L);return (HistoryProgressView)typeof(HistoryProgressView).GetMethod("Create",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,new object[]{p,"Work VM",new string[0],total});};
-                foreach(var pair in new[]{new[]{"Connecting to archive","Connecting"},new[]{"Synchronizing history","Downloading history"},new[]{"Archive route unavailable","Waiting for device"},new[]{"Archive authorization unavailable","Authorization required"},new[]{"Paused","Paused"},new[]{"History synchronization is off","Permission disabled"},new[]{"Archive data rejected","Failed"}})Check(project(pair[0],true,false,842,null).State==pair[1]);
+                foreach(var pair in new[]{new[]{"Connecting to archive","Connecting"},new[]{"Synchronizing history","Downloading history"},new[]{"Archive route unavailable","Waiting for device"},new[]{"Archive authorization unavailable","Waiting for verification"},new[]{"Paused","Paused"},new[]{"History synchronization is off","Permission disabled"},new[]{"Archive data rejected","Failed"}})Check(project(pair[0],true,false,842,null).State==pair[1]);
                 var download=project("Synchronizing history",true,false,50,null);Check(download.Indeterminate&&download.Direction.Contains("Work VM")&&download.Counters.Contains("50 new messages")&&download.Counters.Contains("4 conversations"));
                 var known=project("Synchronizing history",true,false,50,100);Check(!known.Indeterminate&&known.Percent==50);Check(!project("History synchronized",false,true,50,null).Active);
                 // Actual rendered progress events with no active voice timer.
@@ -151,14 +151,17 @@ static class ArchiveSettingsSmoke {
                 typeof(DesktopApplication).GetField("historyAccount",flags).SetValue(desktop,8L);
                 typeof(DesktopApplication).GetField("historyGeneration",flags).SetValue(desktop,1UL);
                 typeof(DesktopApplication).GetField("historyCommandInFlight",flags).SetValue(desktop,true); // No test RPC/auth.
+                // The following live-transfer fixture has verified local access,
+                // unlike the preceding deliberate unapproved setup-dialog fixture.
+                deviceType.GetField("Authorized").SetValue(own,true);deviceType.GetField("MayRead").SetValue(own,true);deviceType.GetField("MayServe").SetValue(own,true);
                 var snapshot=Activator.CreateInstance(progressType);progressType.GetField("State").SetValue(snapshot,"Synchronizing history");progressType.GetField("Source").SetValue(snapshot,first);progressType.GetField("Running").SetValue(snapshot,true);progressType.GetField("Enabled").SetValue(snapshot,true);
                 typeof(DesktopApplication).GetField("archiveProgress",flags).SetValue(desktop,snapshot);
                 var live=(StackPanel)typeof(DesktopApplication).GetMethod("ArchiveSettingsPanel",flags).Invoke(desktop,new object[]{dialog});dialog.Content=new ScrollViewer{Content=live};dialog.UpdateLayout();await Task.Delay(30); // Process WPF Loaded/Unloaded subscription boundaries.
                 var voiceClock=(System.Windows.Threading.DispatcherTimer)typeof(DesktopApplication).GetField("voiceTimer",flags).GetValue(desktop);voiceClock.Stop();
                 var publish=typeof(DesktopApplication).GetMethod("PublishHistoryPresentation",flags);
-                for(long batch=1;batch<=4;batch++){progressType.GetField("Received").SetValue(snapshot,batch*8);publish.Invoke(desktop,null);dialog.UpdateLayout();Check(live.Children.OfType<TextBlock>().Any(t=>t.Text.Contains((batch*8)+" new messages received")));Check(((ProgressBar)Find(dialog,"History sync progress")).IsIndeterminate);}
+                for(long batch=1;batch<=4;batch++){progressType.GetField("Received").SetValue(snapshot,batch*8);publish.Invoke(desktop,null);dialog.UpdateLayout();Check(((TextBlock)Find(dialog,"History sync committed count")).Text.Contains((batch*8)+" new messages received"));Check(((ProgressBar)Find(dialog,"History sync progress")).IsIndeterminate);}
                 progressType.GetField("Running").SetValue(snapshot,false);progressType.GetField("Complete").SetValue(snapshot,true);progressType.GetField("State").SetValue(snapshot,"History synchronized");progressType.GetField("LastSuccessful").SetValue(snapshot,1791740000000L);publish.Invoke(desktop,null);dialog.UpdateLayout();
-                Check(live.Children.OfType<TextBlock>().Any(t=>t.Text.Contains("Last successful sync:")&&!t.Text.Contains("Not recorded")));
+                Check(((TextBlock)Find(dialog,"History sync subtitle")).Text.Contains("Last synced")&&!((TextBlock)Find(dialog,"History sync subtitle")).Text.Contains("Not recorded"));
                 var currentCallback=typeof(DesktopApplication).GetMethod("IsHistoryCallbackCurrent",flags);long epoch=(long)typeof(DesktopApplication).GetField("archiveUiEpoch",flags).GetValue(desktop);
                 Check((bool)currentCallback.Invoke(desktop,new object[]{fakeOwner,1UL,epoch}));
                 Check(!(bool)currentCallback.Invoke(desktop,new object[]{fakeOwner,2UL,epoch}));Check(!(bool)currentCallback.Invoke(desktop,new object[]{new DiscoveryClient("127.0.0.1",1,""),1UL,epoch}));

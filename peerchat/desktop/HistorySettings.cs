@@ -31,17 +31,19 @@ public sealed class HistoryProgressView {
     // No current native reliable total exists. Optional total is for future
     // authoritative snapshots, never estimated from bytes/cursors/time.
     internal static HistoryProgressView Create(ArchiveEnrollmentExecution.SyncProgress p,string source,string[] providers,long? reliableTotal=null){
-        var value=new HistoryProgressView{State="Authorization required",Direction="History authorization needs attention.",Counters=""};
+        var value=new HistoryProgressView{State="Waiting for verification",Direction="Sign in to verify history access.",Counters=""};
         if(p==null)return value;
         string raw=(p.State??"").ToLowerInvariant();
-        value.State=raw.Contains("failed")||raw.Contains("rejected")?"Failed":raw.Contains("authorization")?"Authorization required":raw.Contains("off")?"Permission disabled":raw.Contains("paused")?"Paused":p.Complete?"Complete":raw.Contains("unavailable")||raw.Contains("timed out")||raw.Contains("waiting")?"Waiting for device":raw.Contains("connecting")?"Connecting":raw.Contains("synchronizing")?"Downloading history":"Idle";
+        value.State=p.DisplayState=="Error"?"Failed":raw.Contains("off")?"Permission disabled":raw.Contains("paused")?"Paused":p.DisplayState=="Complete"?"Complete":raw.Contains("authorization")?"Waiting for verification":p.DisplayState=="Waiting"?"Waiting for device":p.DisplayState=="Connecting"?"Connecting":p.DisplayState=="Syncing"?"Downloading history":"Idle";
         value.Direction=value.State=="Downloading history"?"↓ Downloading history from "+source:value.State=="Connecting"?"Connecting to "+source:value.State=="Waiting for device"?"Waiting for "+source:value.State=="Complete"?"Up to date — last sync completed":value.State=="Authorization required"?"History authorization needs attention.":value.State;
         value.Active=p.Running&&(value.State=="Downloading history"||value.State=="Connecting"||value.State=="Waiting for device");
         value.Counters=p.Received+" new messages received this session · "+p.Conversations+" conversations completed";
         value.Counters+="\nLast successful sync: "+(p.LastSuccessful==0?"Not recorded":new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(p.LastSuccessful).ToLocalTime().ToString("g"));
-        if(providers!=null&&providers.Length>0){value.Active=true;string serving="↑ Providing history to "+String.Join(", ",providers);value.Direction=p.Running?value.Direction+"\n"+serving:serving;value.State=p.Running?value.State:"Providing history";if(!p.Running)value.Counters="Providing session active; sent-message totals are not exposed.";}
+        if(providers!=null&&providers.Length>0&&value.State!="Complete"){value.Active=true;string serving="↑ Providing history to "+String.Join(", ",providers);value.Direction=p.Running?value.Direction+"\n"+serving:serving;value.State=p.Running?value.State:"Providing history";if(!p.Running)value.Counters="Providing session active; sent-message totals are not exposed.";}
         value.Indeterminate=value.Active&&(!reliableTotal.HasValue||providers!=null&&providers.Length>0);
-        if(reliableTotal.HasValue&&reliableTotal.Value>0&&p.Processed<=reliableTotal.Value)value.Percent=100.0*p.Processed/reliableTotal.Value;else if(value.Active)value.Indeterminate=true;
+        if(value.State=="Connecting"||value.State=="Waiting for device")value.Indeterminate=true;
+        else if(value.State=="Complete")value.Percent=100;
+        else if(reliableTotal.HasValue&&reliableTotal.Value>0&&p.Processed<=reliableTotal.Value)value.Percent=100.0*p.Processed/reliableTotal.Value;else if(value.Active)value.Indeterminate=true;
         return value;
     }
 }
@@ -67,19 +69,42 @@ public partial class DesktopApplication {
         HistoryPresentationChanged+=(s,e)=>{bool current=historyAccount>0&&discovery!=null&&historyAccount==discovery.AccountId&&historyGeneration==authenticatedFriendSnapshotGeneration;var view=current?CurrentHistoryView():null;indicator.Visibility=view!=null&&view.Active?Visibility.Visible:Visibility.Collapsed;indicator.Content=view==null?"":view.Direction;};
     }
     StackPanel HistorySettingsPanel(Window dialog){
-        var panel=new StackPanel();var sync=VoiceProcessingSwitch("History Sync",false);sync.IsThreeState=true;sync.IsChecked=null;sync.IsEnabled=false;
-        panel.Children.Add(sync);panel.Children.Add(HistoryText("Automatically keep history up to date across approved devices. Existing custom permissions and automatic-sync preferences are preserved."));
-        var localPanel=new StackPanel();var remotePanel=new StackPanel();
-        var status=HistoryText("History authorization needs attention. Sign in to load this account's devices.");AutomationProperties.SetName(status,"History sync status");
-        var counters=HistoryText("");var bar=new ProgressBar{Height=6,Maximum=100,Visibility=Visibility.Collapsed,Margin=new Thickness(0,6,0,6)};AutomationProperties.SetName(bar,"History sync progress");
-        var actions=new WrapPanel();panel.Children.Add(HistoryTitle("SYNC STATUS"));panel.Children.Add(status);panel.Children.Add(bar);panel.Children.Add(counters);panel.Children.Add(actions);
-        panel.Children.Add(HistoryTitle("THIS DEVICE"));panel.Children.Add(localPanel);panel.Children.Add(HistoryTitle("OTHER DEVICES"));panel.Children.Add(remotePanel);
-        var advancedPanel=new StackPanel();var advanced=new Expander{Header="Advanced history security",Content=advancedPanel,IsExpanded=false,Margin=new Thickness(0,16,0,0),Foreground=Brush("#EDF1F5")};panel.Children.Add(advanced);
-        var raw=HistoryText("");advancedPanel.Children.Add(raw);
+        var panel=new StackPanel{MaxWidth=720,HorizontalAlignment=HorizontalAlignment.Stretch};var sync=VoiceProcessingSwitch("History Sync",false);sync.IsThreeState=true;sync.IsChecked=null;sync.IsEnabled=false;sync.FontSize=16;
+        panel.Children.Add(sync);panel.Children.Add(HistoryText("Keep conversations up to date across your approved devices."));
+        var localPanel=new StackPanel();var remotePanel=new StackPanel();var expandedDevices=new HashSet<string>();
+        var status=HistoryText("Verifying History Sync");status.FontSize=16;status.FontWeight=FontWeights.SemiBold;AutomationProperties.SetName(status,"History sync status");
+        var subtitle=HistoryText("Sign in to verify history access.");subtitle.FontSize=12;subtitle.Foreground=Brush("#A1AEBB");
+        var counters=HistoryText("");AutomationProperties.SetName(counters,"History sync committed count");AutomationProperties.SetName(subtitle,"History sync subtitle");var conversations=HistoryText("");conversations.FontSize=12;
+        var bar=new ProgressBar{Height=8,Maximum=100,Foreground=Brush("#83B9F7"),Visibility=Visibility.Collapsed,Margin=new Thickness(0,4,0,6)};AutomationProperties.SetName(bar,"History sync progress");
+        var detailsText=HistoryText("");detailsText.FontSize=12;
+        var statusAction=HistoryButton("Sync now",()=>{});var actionRow=new DockPanel{Margin=new Thickness(0,8,0,0)};DockPanel.SetDock(statusAction,Dock.Right);actionRow.Children.Add(statusAction);
+        var details=new Expander{Header="View sync details",Foreground=Brush("#A1AEBB"),Content=detailsText,FontSize=12,VerticalAlignment=VerticalAlignment.Center};AutomationProperties.SetName(details,"View sync details");actionRow.Children.Add(details);
+        var statusBody=new StackPanel();statusBody.Children.Add(status);statusBody.Children.Add(subtitle);statusBody.Children.Add(counters);statusBody.Children.Add(bar);statusBody.Children.Add(conversations);statusBody.Children.Add(actionRow);
+        var statusCard=new Border{Child=statusBody,Padding=new Thickness(18),Background=Brush("#131E28"),BorderBrush=Brush("#2B3946"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Margin=new Thickness(0,12,0,18)};AutomationProperties.SetName(statusCard,"History sync status card");panel.Children.Add(statusCard);
+        var actions=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};var deviceHeading=new DockPanel();DockPanel.SetDock(actions,Dock.Right);deviceHeading.Children.Add(actions);var title=HistoryTitle("Your devices");title.FontSize=16;deviceHeading.Children.Add(title);panel.Children.Add(deviceHeading);
+        var deviceRows=new StackPanel();deviceRows.Children.Add(localPanel);deviceRows.Children.Add(remotePanel);panel.Children.Add(new Border{Child=deviceRows,BorderBrush=Brush("#2B3946"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Margin=new Thickness(0,6,0,14)});
+        var advancedPanel=new StackPanel();var advanced=new Expander{Header="Advanced history settings",Content=advancedPanel,IsExpanded=false,Margin=new Thickness(0,2,0,8),Foreground=Brush("#A1AEBB")};panel.Children.Add(advanced);
+        panel.Children.Add(HistoryText("History is encrypted and shared only with devices you approve."));
+        var raw=HistoryText("");raw.FontSize=12;advancedPanel.Children.Add(raw);
         bool cachedCurrent=discovery!=null&&archiveLoadedOwner==discovery&&historyAccount==discovery.AccountId&&historyGeneration==authenticatedFriendSnapshotGeneration;
         long account=cachedCurrent?historyAccount:0;ulong generation=cachedCurrent?historyGeneration:0;bool updating=false,operating=false;bool? desiredSync=null;ArchiveEnrollmentExecution.Device[] renderedRows=null;
         var automatic=new Dictionary<string,bool>();Action render=null;Func<uint,ArchiveEnrollmentExecution.Device,long,bool?,Task<bool>> run=null;
-        Action progress=()=>{var view=CurrentHistoryView();status.Text="Phase: "+view.State+"\nSource: "+HistoryPeerName(archiveProgress==null?"":archiveProgress.Source)+"\n"+view.Direction;counters.Text=view.Counters;bar.Visibility=view.Active?Visibility.Visible:Visibility.Collapsed;bar.IsIndeterminate=view.Indeterminate;bar.Value=view.Percent;if(archiveProgress!=null){updating=true;sync.IsThreeState=false;sync.IsChecked=archiveProgress.Enabled;sync.IsEnabled=true;updating=false;}raw.Text=(archiveProgress==null?"No validated snapshot.":archiveProgress.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation+"\n"+archiveAuthorizationDiagnostic;};
+        Action progress=()=>{
+            var p=archiveProgress;var view=CurrentHistoryView();string sourceName=HistoryPeerName(p==null?"":p.Source);var localDevice=historyDevices.FirstOrDefault(d=>d.Local);
+            bool approval=account>0&&localDevice!=null&&!localDevice.Authorized&&!localDevice.MayRead&&!localDevice.MayServe;
+            status.Text=approval?"!  Device approval required":view.State=="Complete"?"✓  All conversations up to date":view.State=="Connecting"?"◌  Connecting to "+sourceName:view.State=="Downloading history"?"↻  Syncing conversations":view.State=="Waiting for device"?"◷  Waiting for "+sourceName:view.State=="Failed"?"!  History Sync couldn't finish":view.State=="Permission disabled"?"History Sync is OFF":view.State=="Paused"?"History Sync paused":view.State=="Providing history"?"Providing history":"Verifying History Sync";
+            status.Foreground=Brush(view.State=="Complete"?"#8DD4A4":view.State=="Failed"?"#F2AAA5":"#EDF1F5");
+            string last=p==null||p.LastSuccessful==0?"Not recorded":new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(p.LastSuccessful).ToLocalTime().ToString("g");
+            subtitle.Text=approval?"This device needs approval before exchanging history.":view.State=="Complete"?"Last synced "+last:view.State=="Connecting"?"Establishing a secure history connection":view.State=="Downloading history"?"Receiving history from "+sourceName:view.State=="Waiting for device"?"History will sync when this device is available.":view.State=="Failed"?(p==null?"Unable to read the current operation.":p.State):view.Direction;
+            counters.Text=p==null?"":view.State=="Complete"&&p.Received==0?"No new messages — up to date":view.State=="Failed"?"Last verified: "+p.Received+" messages imported":p.Received+" new messages received this session";
+            conversations.Text=p==null?"":p.Conversations+" conversations synchronized";
+            bar.Visibility=!approval&&(view.Active||view.State=="Complete")?Visibility.Visible:Visibility.Collapsed;bar.IsIndeterminate=view.Indeterminate;bar.Value=view.Indeterminate?0:view.Percent;
+            detailsText.Text="Source: "+sourceName+"\nNewly imported messages: "+(p==null?0:p.Received)+"\nConversations completed: "+(p==null?0:p.Conversations)+"\nConnection: "+(view.State=="Downloading history"?"Encrypted history transfer":view.State=="Complete"?"Verified history completed":"Not currently verified live")+"\nLast successful sync: "+last;
+            statusAction.Content=approval?"Review device":view.Active?"Pause":view.State=="Failed"?"Retry":"Sync now";
+            statusAction.IsEnabled=account>0&&(approval||view.Active||historyDevices.Any(d=>!d.Local&&d.MayServe)&&localDevice!=null&&localDevice.MayRead);
+            if(p!=null){updating=true;sync.IsThreeState=false;sync.IsChecked=p.Enabled;sync.IsEnabled=true;updating=false;}
+            raw.Text=(p==null?"No validated snapshot.":p.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation+"\n"+archiveAuthorizationDiagnostic;
+        };
         run=async(action,target,capabilities,auto)=>{
             var owner=discovery;long current=owner==null?0:owner.AccountId;ulong revision=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
             if(operating||historyCommandInFlight)return false;
@@ -151,16 +176,26 @@ public partial class DesktopApplication {
             // Cached rows belong to the last authenticated snapshot, not the
             // new panel's initially unset account. Wait for run() to bind it.
             bool bound=account>0&&account==historyAccount&&generation==historyGeneration;
-            foreach(var d in bound?historyDevices:new ArchiveEnrollmentExecution.Device[0]){var card=new StackPanel{Margin=new Thickness(8)};card.Children.Add(HistoryTitle(HistoryName(account,d)));card.Children.Add(HistoryText((d.Local?"Windows · This device":"Platform unknown")+" · "+(d.Local?"Authenticated server session":archiveProgress!=null&&archiveProgress.Source==d.PeerId&&archiveProgress.DisplayState=="Syncing"?"Available":"Availability unknown")+"\n"+d.AuthorizationState));
-                card.Children.Add(HistoryText((d.MayRead||d.MayServe?"Verified history access":d.Authorized?"Registered grant · review trust and custom permissions":"Approval required before history can be exchanged")+(d.Automatic?"":" · Automatic sync paused in custom settings")));
-                var row=new WrapPanel();row.Children.Add(HistoryButton(d.Authorized?"Manage":"Authorize device",()=>manage(d,!d.Authorized)));if(!d.Local&&d.MayServe){var now=HistoryButton("Sync now",async()=>await run(12,d,0,null));now.IsEnabled=sync.IsChecked==true&&!(archiveProgress!=null&&archiveProgress.Running);row.Children.Add(now);}card.Children.Add(row);
-                (d.Local?localPanel:remotePanel).Children.Add(new Border{Child=card,BorderBrush=Brush("#28343F"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(6),Margin=new Thickness(0,5,0,5)});
+            foreach(var d in bound?historyDevices:new ArchiveEnrollmentExecution.Device[0]){
+                var body=new StackPanel();var row=new DockPanel{LastChildFill=true};var chevron=HistoryText("›");chevron.FontSize=20;DockPanel.SetDock(chevron,Dock.Right);row.Children.Add(chevron);
+                var icon=HistoryText(d.Local?"▣":"□");icon.FontSize=24;icon.Width=38;icon.VerticalAlignment=VerticalAlignment.Center;DockPanel.SetDock(icon,Dock.Left);row.Children.Add(icon);
+                var caption=new StackPanel();var name=HistoryText(HistoryName(account,d));name.FontWeight=FontWeights.SemiBold;name.FontSize=14;name.Margin=new Thickness(0,0,0,4);caption.Children.Add(name);
+                bool approved=d.MayRead||d.MayServe;string availability=d.Local?"History Sync "+(archiveProgress!=null&&archiveProgress.Enabled?"ON":"OFF"):archiveProgress!=null&&archiveProgress.Source==d.PeerId&&archiveProgress.DisplayState=="Syncing"?"Connected":"Availability unknown";
+                var summary=HistoryText((approved?"Approved":d.Authorized?"Permission verification needed":d.Revoked?"Revoked":"Approval needed")+" · "+availability);summary.FontSize=11;summary.Foreground=Brush("#A1AEBB");summary.Margin=new Thickness(0);caption.Children.Add(summary);row.Children.Add(caption);
+                var header=new Button{Content=row,Padding=new Thickness(14,10,14,10),MinHeight=68,Background=Brushes.Transparent,Foreground=Brush("#EDF1F5"),BorderThickness=new Thickness(0),HorizontalContentAlignment=HorizontalAlignment.Stretch,Margin=new Thickness(0)};AutomationProperties.SetName(header,"History device "+HistoryName(account,d));body.Children.Add(header);
+                var detail=new StackPanel{Margin=new Thickness(52,0,14,12),Visibility=expandedDevices.Contains(d.PeerId)?Visibility.Visible:Visibility.Collapsed};detail.Children.Add(HistoryText("History access: "+(d.GrantedRead&&d.GrantedServe?"Receive and provide":d.GrantedRead?"Receive":d.GrantedServe?"Provide":"Not authorized")));
+                detail.Children.Add(HistoryText("Last synced: "+(archiveProgress!=null&&archiveProgress.Source==d.PeerId&&archiveProgress.LastSuccessful>0?new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(archiveProgress.LastSuccessful).ToLocalTime().ToString("g"):"Not known for this device")));
+                var controls=new WrapPanel();controls.Children.Add(HistoryButton("Manage",()=>manage(d,!d.Authorized)));if(!d.Local&&d.MayServe){var now=HistoryButton("Sync now",async()=>await run(12,d,0,null));now.IsEnabled=sync.IsChecked==true&&historyDevices.Any(local=>local.Local&&local.MayRead)&&!(archiveProgress!=null&&archiveProgress.Running);controls.Children.Add(now);}detail.Children.Add(controls);body.Children.Add(detail);
+                header.Click+=(s,e)=>{bool open=detail.Visibility!=Visibility.Visible;detail.Visibility=open?Visibility.Visible:Visibility.Collapsed;chevron.Text=open?"⌄":"›";if(open)expandedDevices.Add(d.PeerId);else expandedDevices.Remove(d.PeerId);};
+                (d.Local?localPanel:remotePanel).Children.Add(new Border{Child=body,BorderBrush=Brush("#28343F"),BorderThickness=new Thickness(0,0,0,1)});
             }
-            if(localPanel.Children.Count==0)localPanel.Children.Add(HistoryText("Sign in to verify this device."));if(remotePanel.Children.Count==0)remotePanel.Children.Add(HistoryText("No other history devices registered. Open History Sync on the other device to register its public identity; this does not authorize it."));if(account>0)progress();
+            if(localPanel.Children.Count==0)localPanel.Children.Add(HistoryText("Sign in to verify this device."));if(remotePanel.Children.Count==0)remotePanel.Children.Add(new TextBlock{Text="No other registered history devices.",Margin=new Thickness(14),Foreground=Brush("#A1AEBB"),FontSize=12});if(account>0)progress();
             if(HistoryNames.DetailsUnavailable){status.Text="History device details unavailable. Retry in Advanced history security; device identities and permissions are unchanged.";raw.Text+="\nOptional protected nickname metadata could not be read.";TraceUi("history optional nickname metadata unavailable");}
         };
         actions.Children.Add(HistoryButton("Add device",()=>{var pending=historyDevices.FirstOrDefault(d=>!d.Local&&!d.Authorized);if(pending==null){status.Text="No new registered device. Open History Sync on the other device; authorization is still required.";return;}manage(pending,true);}));
-        var retry=HistoryButton("Retry",async()=>{var source=historyDevices.FirstOrDefault(d=>archiveProgress!=null&&d.PeerId==archiveProgress.Source&&d.MayServe&&!d.Local)??historyDevices.FirstOrDefault(d=>d.MayServe&&!d.Local);await run(source==null?0u:12u,source,0,null);});actions.Children.Add(retry);
+        statusAction.Click+=async(s,e)=>{var local=historyDevices.FirstOrDefault(d=>d.Local);if(Object.Equals(statusAction.Content,"Review device")&&local!=null){manage(local,!local.Authorized);return;}if(Object.Equals(statusAction.Content,"Pause")){await run(14,null,0,null);return;}var source=historyDevices.FirstOrDefault(d=>archiveProgress!=null&&d.PeerId==archiveProgress.Source&&d.MayServe&&!d.Local)??historyDevices.FirstOrDefault(d=>d.MayServe&&!d.Local);await run(source==null?0u:12u,source,0,null);};
+        var retry=HistoryButton("Retry",async()=>await run(0,null,0,null));advancedPanel.Children.Add(retry);
+        advancedPanel.Children.Add(HistoryButton("Copy History Diagnostics",()=>CopyDiagnosticText(archiveAuthorizationDiagnostic,"History diagnostics copied.")));
         advancedPanel.Children.Add(HistoryButton("Pause",async()=>await run(14,null,0,null)));
         advancedPanel.Children.Add(HistoryButton("Refresh history devices",async()=>await run(0,null,0,null)));
         advancedPanel.Children.Add(HistoryText("Trust must be explicitly established in a device's Manage / Advanced section. Login and nicknames never grant access. Multiple authorities may grant different permissions; Manage changes only grants issued by this device."));
@@ -168,7 +203,7 @@ public partial class DesktopApplication {
         Func<bool,Task> load=async reset=>{try{var page=await Task.Run(()=>core.ArchiveAttachments(reset?0:cursor));if(!dialog.IsVisible)return;attachments.ItemsSource=page.records;attachments.SelectedIndex=page.records.Length>0?0:-1;cursor=page.next;next.IsEnabled=!page.complete;}catch{status.Text="Historical attachment metadata unavailable.";}};
         files.Children.Add(HistoryButton("Refresh attachments",async()=>await load(true)));next.Click+=async(s,e)=>await load(false);files.Children.Add(next);
         files.Children.Add(HistoryButton("Download selected attachment…",async()=>{var file=attachments.SelectedItem as CoreAdapter.ArchiveAttachment;var source=historyDevices.FirstOrDefault(d=>archiveProgress!=null&&d.PeerId==archiveProgress.Source&&d.MayServe&&!d.Local);if(file==null||source==null||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration){status.Text="Sync from an authorized source first.";return;}var choose=new Microsoft.Win32.SaveFileDialog{FileName=file.name,Title="Choose download folder",OverwritePrompt=false};if(choose.ShowDialog(dialog)==true)try{await Task.Run(()=>core.FileTransfer(5,source.PeerId,file.id,Path.GetDirectoryName(choose.FileName)));ShowFileTransfers();}catch{status.Text="Attachment request rejected; no insecure fallback.";}}));
-        panel.Children.Add(HistoryText("Historical attachments: Download on demand in conversations."));advancedPanel.Children.Add(new Expander{Header="Historical attachment testing",Content=files,IsExpanded=false});
+        advancedPanel.Children.Add(new Expander{Header="Historical attachment testing",Content=files,IsExpanded=false});
         sync.Click+=async(s,e)=>{if(!updating){desiredSync=sync.IsChecked==true;await run(11,null,0,null);}};
         render();panel.Loaded+=async(s,e)=>{historySettingsOpen=true;await run(0,null,0,null);};
         panel.Unloaded+=(s,e)=>historySettingsOpen=false;

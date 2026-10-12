@@ -91,7 +91,7 @@ internal sealed class ArchiveEnrollmentExecution {
             string value=(State??"").ToLowerInvariant();
             if(value.Contains("failed")||value.Contains("rejected"))return "Error";
             if(value.Contains("off")||value.Contains("paused"))return "Paused";
-            if(Complete)return "Complete";
+            if(!Running&&(Complete||value=="history synchronized"))return "Complete";
             if(value.Contains("unavailable")||value.Contains("waiting")||value.Contains("timed out"))return "Waiting";
             if(value.Contains("synchronizing"))return "Syncing";
             if(value.Contains("connecting"))return "Connecting";
