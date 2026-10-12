@@ -182,14 +182,19 @@ public:
     // One bounded hash/read/packet operation per transfer per tick. A route token
     // changes only with SessionTransportManager's winning authenticated session.
     void tick(std::uint64_t now,const std::function<std::uint64_t(const std::string&)>& route,const std::function<bool(const std::string&,const Blob&)>& send){
+        tickScoped(now,[&](const Snapshot& e){return route(e.peer);},[&](const Snapshot& e,const Blob& frame){return send(e.peer,frame);});
+    }
+    // Execution adapters choose the authorized route for this exact transfer.
+    // Shared preparation, journal, deadlines and completion ownership are unchanged.
+    void tickScoped(std::uint64_t now,const std::function<std::uint64_t(const Snapshot&)>& route,const std::function<bool(const Snapshot&,const Blob&)>& send){
         if(now<persistenceRetryAt_)return;
-        try{tickImpl(now,route,send);persistenceRetryAt_=0;}
+        try{tickImplScoped(now,route,send);persistenceRetryAt_=0;}
         catch(const PersistenceError&){persistenceRetryAt_=now+250;throw;}
     }
-    void tickImpl(std::uint64_t now,const std::function<std::uint64_t(const std::string&)>& route,const std::function<bool(const std::string&,const Blob&)>& send){
+    void tickImplScoped(std::uint64_t now,const std::function<std::uint64_t(const Snapshot&)>& route,const std::function<bool(const Snapshot&,const Blob&)>& send){
         // Every acknowledgement/offer is gated by durable metadata. A failed
         // journal write propagates to the adapter; never ACK uncommitted progress.
-        auto durableSend=[&](const std::string& peer,const Blob& frame){save();return send(peer,frame);};
+        auto durableSend=[&](const Snapshot& entry,const Blob& frame){save();return send(entry,frame);};
         for(auto& p:entries_){
             auto& e=p.second;
             if(store_){
@@ -222,12 +227,12 @@ public:
                     if(e.digestReady&&digest!=e.metadata.digest){fail(e,"Source no longer matches verified content");continue;}
                     e.metadata.digest=digest;e.state=State::Offered;e.digestReady=true;touch(e);
                 }
-                auto current=route(e.peer);if(!current){e.route=0;e.ready=false;continue;}
-                if(e.reply){if(durableSend(e.peer,*e.reply))e.reply.reset();continue;}
+                auto current=route(e);if(!current){e.route=0;e.ready=false;continue;}
+                if(e.reply){if(durableSend(e,*e.reply))e.reply.reset();continue;}
                 if(terminal(e.state)||!e.sending)continue;
                 if(e.route!=current){
                     auto w=packet(Kind::Offer,e.metadata.id);w.string(e.metadata.name);w.number(e.metadata.size);w.bytes(Blob(e.metadata.digest.begin(),e.metadata.digest.end()));
-                    if(durableSend(e.peer,w.data)){e.route=current;e.ready=false;e.finishSent=false;e.sentUntil=e.done;}
+                    if(durableSend(e,w.data)){e.route=current;e.ready=false;e.finishSent=false;e.sentUntil=e.done;}
                     continue;
                 }
                 if(!e.ready||e.sentUntil!=e.done)continue;
@@ -236,8 +241,8 @@ public:
                     if(b.empty()||b.size()>ChunkBytes||b.size()>e.metadata.size-e.done)throw std::runtime_error("Source changed or unreadable");
                     auto w=packet(Kind::Chunk,e.metadata.id);w.number(e.done);w.bytes(b);
                     e.highWaterSent=std::max(e.highWaterSent,e.done+b.size());touch(e);
-                    if(durableSend(e.peer,w.data))e.sentUntil=e.done+b.size();
-                }else if(!e.finishSent){auto w=packet(Kind::Finish,e.metadata.id);if(durableSend(e.peer,w.data))e.finishSent=true;}
+                    if(durableSend(e,w.data))e.sentUntil=e.done+b.size();
+                }else if(!e.finishSent){auto w=packet(Kind::Finish,e.metadata.id);if(durableSend(e,w.data))e.finishSent=true;}
             }catch(const PersistenceError&){throw;} // Retry persistence on the existing next tick; never ACK it early.
             catch(const std::exception& error){if(store_)suspend(e,error.what());else fail(e,"Local file I/O or hash failure");}
         }

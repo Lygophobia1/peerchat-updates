@@ -21,6 +21,9 @@ public:
         std::function<Blob(const Blob&)> control{};
         bool attachments=false;
     };
+    // Platform execution seam into the ONE profile TransferManager. No sockets,
+    // retry policy, transfer journal or key ownership lives in this endpoint.
+    using TransferReceiver=std::function<void(const std::string&,const Blob&,std::uint64_t)>;
 private:
     const Profile& local_;
     Storage& store_;
@@ -36,6 +39,7 @@ private:
     std::deque<Event> events_;
     bool closed_=false;
     std::optional<ArchiveAdmission> archive_;
+    TransferReceiver transfer_;
     bool archiveBound_=false,archiveBindingSent_=false;
     bool authorized()const{
         return archive_?archive_->policy&&archive::currentSessionAuthorization(*archive_->policy,archive_->scope):
@@ -122,7 +126,10 @@ private:
             return;
         }
         protocol::check(friends_.contains(runtime_.peerId));
-        if(reader.type()==protocol::Text){
+        if(reader.type()==protocol::FileTransfer){
+            protocol::check(bool(transfer_)&&(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)!=0);
+            transfer_(runtime_.peerId,bytes,now_);
+        }else if(reader.type()==protocol::Text){
             auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_,friends_.localAccount());
             if(result.message){
                 protocol::Writer ack(protocol::Ack);ack.string(result.messageId);packet(ack);
@@ -139,10 +146,10 @@ public:
             delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
             session::SessionEpoch epoch,session::TransportInstanceId id,std::unique_ptr<TlsSession> tls,
             const std::string& expected,session::RouteObservation route,std::uint64_t now,
-            std::optional<ArchiveAdmission> archiveAdmission={})
+            std::optional<ArchiveAdmission> archiveAdmission={},TransferReceiver transferReceiver={})
         :local_(local),store_(store),sessions_(sessions),deliveries_(deliveries),friends_(friends),
          epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
-         archive_(std::move(archiveAdmission)),now_(now),began_(now){
+         archive_(std::move(archiveAdmission)),transfer_(std::move(transferReceiver)),now_(now),began_(now){
         runtime_.expected=expected;
         protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&authorized()&&
             route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
@@ -168,7 +175,7 @@ public:
             protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
-                (archive_?protocol::CapabilityArchiveControl:0)|(archive_&&archive_->attachments?protocol::CapabilityFileTransfer:0);
+                (archive_?protocol::CapabilityArchiveControl:0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
             if(!live)close(true);
@@ -190,6 +197,12 @@ public:
             auto value=reliable::textPacket(message,runtime_.logicalOrdering);packet(value);
             protocol::check(deliveries_.submittedMessage(runtime_.peerId,message.id,id_));
         }
+    }
+    bool sendTransfer(const Blob& bytes){
+        if(archive_||!transfer_||!ready()||!friends_.contains(runtime_.expected)||
+           !(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)||output_.size()>MaxOutput/2)return false;
+        protocol::check(bytes.size()<=65536);protocol::Reader reader(bytes);protocol::check(reader.type()==protocol::FileTransfer);
+        protocol::Writer frame(protocol::FileTransfer);frame.data=bytes;packet(frame);return true;
     }
     Blob takeOutput(){
         if(archive_&&!authorized()){close(false);return {};}

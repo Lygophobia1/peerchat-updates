@@ -36,7 +36,8 @@ data class ConversationUi(
     val members: List<MemberUi> = emptyList(), val messages: List<MessageUi> = emptyList(),
     val voiceRooms: List<VoiceRoomUi> = emptyList(), val shareRooms: List<ShareRoomUi> = emptyList(),
     val hasOlder: Boolean = true, val notifications: Boolean = true,
-    val memberAudio: List<MemberAudioUi> = emptyList()
+    val memberAudio: List<MemberAudioUi> = emptyList(),
+    val attachments:List<com.peerchat.android.application.AttachmentSnapshot> = emptyList()
 )
 data class ServerUi(val host: String = "", val port: String = "7443", val certificatePin: String = "")
 data class ServerTrustUi(val server: ServerUi, val observed: String, val expected: String = "")
@@ -120,6 +121,8 @@ sealed interface UiAction {
     data class HistorySync(val context:ArchiveEnrollmentSnapshot,val enabled:Boolean):UiAction
     data class ArchiveConsent(val context:ArchiveEnrollmentSnapshot,val action:ArchiveDeviceAction,val device:String,val read:Boolean=false,val serve:Boolean=false):UiAction
     data class PreviewMessage(val text: String) : UiAction
+    data class SendAttachment(val uri:android.net.Uri):UiAction
+    data class AttachmentAction(val id:String,val accept:Boolean):UiAction
     data object Older : UiAction
     data object ToggleNotifications : UiAction
     data class Notice(val text: String?) : UiAction
@@ -175,7 +178,8 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Draft -> if(action.text.length<=4096)state.copy(drafts=state.drafts+(action.conversationId to action.text)) else state
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
-        UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize -> state // Real application commands only, never demo trust.
+        UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize,
+        is UiAction.SendAttachment,is UiAction.AttachmentAction -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

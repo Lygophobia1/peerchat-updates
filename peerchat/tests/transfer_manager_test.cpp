@@ -52,6 +52,20 @@ struct Harness {
 Blob data(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*17);return b;}
 int main(){
     try{
+        {
+            TransferManager manager{[]{return std::make_unique<windows::Sha256>();}};
+            auto peer=std::string(64,'a'),live=std::string(32,'1'),archive=std::string(32,'2');
+            manager.offer(peer,live,std::make_unique<MemorySource>(data(1)),1);
+            manager.offer(peer,archive,std::make_unique<MemorySource>(data(1)),1);
+            std::vector<std::string> sent;
+            // Same peer, distinct purposes: an available DM route must never
+            // release an archive offer through a grant-less transport.
+            for(unsigned n=0;n<3;++n)manager.tickScoped(n+2,[&](const Snapshot& row){return row.metadata.id==live?101u:0u;},
+                [&](const Snapshot& row,const Blob&){sent.push_back(row.metadata.id);return true;});
+            check(sent==std::vector<std::string>{live});
+            manager.tickScoped(6,[](const Snapshot&){return 102u;},[&](const Snapshot& row,const Blob&){sent.push_back(row.metadata.id);return true;});
+            check(sent.size()==3&&std::count(sent.begin(),sent.end(),archive)==1);
+        }
         for(size_t size:{size_t(0),size_t(1),size_t(32768),size_t(32769),size_t(2*1024*1024)}){
             Harness h;auto bytes=data(size);h.offer(bytes,u8"résumé-日本.bin");h.duplicate=true;h.finish();
             check(h.sender.snapshots()[0].state==State::Complete&&h.result.committed&&h.result.bytes==bytes);

@@ -314,6 +314,22 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
         }
     }
+    private fun transfer(operation:Int,write:(NativeRecordWriter)->Unit={}):ByteArray {
+        val request=NativeRecordWriter(30).also(write).bytes()
+        return checkNotNull(com.peerchat.android.TransferBridge.request(checkNotNull(profile).handle,operation,request)){"Native transfer operation rejected"}
+    }
+    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled&&friends.any{it.peerId==peerId})
+        val directoryRecord=NativeRecord(transfer(0),30);val directory=java.io.File(directoryRecord.text());directoryRecord.end()
+        val (path,name)=importAttachment(context,uri,directory)
+        // A failed native journal may already retain the source. Never delete it
+        // on a ambiguous offer failure; cleanup cannot destroy a resumable copy.
+        val response=NativeRecord(transfer(1){it.text(peerId);it.text(path);it.text(name)},30)
+        val id=response.text();response.end();publish();id
+    }}
+    override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled);transfer(if(accept)2 else 3){it.text(id)};publish();Unit
+    }}
     override suspend fun requestFriend(username:String) = withContext(Dispatchers.IO) {synchronized(gate){
         require(username.isNotBlank()&&username.length<=64)
         val owner=checkNotNull(accounts)
@@ -538,7 +554,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val conversations=nativeConversationProjection(friends,
             {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},
             {peer->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),Long.MAX_VALUE))})
-        mutable.value=mutable.value.copy(conversations=conversations.toList(),mailboxStorageAllowed=mailboxAllowed())
+        val attachments=attachmentSnapshots(transfer(4))
+        mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
         val receiver=executions[lastNativeReceiveAttempt]

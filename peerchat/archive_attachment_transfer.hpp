@@ -87,6 +87,9 @@ public:
         for(const auto& item:entries_)if(item.second.scope.expectedRemoteDeviceId==peer&&currentSessionAuthorization(policy_,item.second.scope))return item.second.scope;
         return {};
     }
+    std::optional<session::ReliableAuthorization> scopeForTransfer(const std::string& id)const{
+        auto found=entries_.find(id);return found==entries_.end()?std::optional<session::ReliableAuthorization>{}:found->second.scope;
+    }
     void maintain(std::uint64_t now){
         for(auto it=entries_.begin();it!=entries_.end();){auto& e=it->second;
             auto s=snapshot(e.transferId);

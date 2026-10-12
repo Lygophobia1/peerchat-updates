@@ -39,7 +39,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                 status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;3L->MessageStatus.Stored;1L->MessageStatus.Sent;else->MessageStatus.Queued})
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
-            messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8)
+            messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8,attachments=c.attachments)
     }
     // Diagnostics are safe owner metadata, never messages, credentials or keys.
     val diagnostics=buildString {
@@ -348,6 +348,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 try {backend.respondFriend(action.accountId,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Friend response failed; authorization unchanged.")}
             }
+            is UiAction.SendAttachment -> {
+                val c=current.conversations.find{"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
+                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri)}
+                    catch(_:Exception){mutable.value=mutable.value.copy(notice="File could not be offered. Check connection, file access and available storage.")}}
+            }
+            is UiAction.AttachmentAction -> viewModelScope.launch{try{backend.attachmentAction(action.id,action.accept)}
+                catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}
             is UiAction.PreviewMessage -> {
                 if(mutable.value.sendBusy)return
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return

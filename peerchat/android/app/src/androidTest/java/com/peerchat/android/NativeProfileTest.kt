@@ -116,4 +116,24 @@ class NativeProfileTest {
         }
         assertArrayEquals(expected, AndroidIdentityProvider(context, "default").publicRepresentation())
     }
+    @Test fun localTransferAdapterReopensAndRejectsUnauthenticatedOffers(){
+        val name="test_${UUID.randomUUID()}"
+        fun record()=com.peerchat.android.application.NativeRecordWriter(30).bytes()
+        var path=""
+        try{
+            repeat(16){
+                NativeProfile(context,name).use{native->
+                    val r=com.peerchat.android.application.NativeRecord(checkNotNull(TransferBridge.request(native.handle,0,record())),30)
+                    val current=r.text();r.end()
+                    if(path.isNotEmpty())assertEquals(path,current);path=current
+                    assertTrue(File(path).isDirectory)
+                    assertTrue(com.peerchat.android.application.attachmentSnapshots(checkNotNull(TransferBridge.request(native.handle,4,record()))).isEmpty())
+                    val offer=com.peerchat.android.application.NativeRecordWriter(30).also{it.text("a".repeat(64));it.text("../escape");it.text("file.png")}.bytes()
+                    assertNull(TransferBridge.request(native.handle,1,offer))
+                    assertNull(TransferBridge.request(native.handle,0,ByteArray(4097)))
+                }
+            }
+            assertNull(TransferBridge.request(0,0,record()))
+        }finally{clean(name)}
+    }
 }

@@ -1,6 +1,22 @@
 #include "../portable/reliable_endpoint.hpp"
+#include "../windows_transfer_io.hpp"
 #include <filesystem>
 #include <iostream>
+
+namespace {
+struct MemoryFile final:peerchat::transfer::Source {
+    peerchat::Blob bytes;std::string label;
+    MemoryFile(peerchat::Blob value,std::string name):bytes(std::move(value)),label(std::move(name)){}
+    std::uint64_t size()const override{return bytes.size();}std::string name()const override{return label;}
+    peerchat::Blob read(std::uint64_t offset,size_t count)override{return {bytes.begin()+offset,bytes.begin()+offset+count};}
+};
+struct ReceivedFile {peerchat::Blob bytes;bool committed=false;};
+struct MemoryDestination final:peerchat::transfer::Sink {
+    std::shared_ptr<ReceivedFile> result;explicit MemoryDestination(std::shared_ptr<ReceivedFile> value):result(std::move(value)){}
+    void append(const peerchat::Blob& bytes)override{result->bytes.insert(result->bytes.end(),bytes.begin(),bytes.end());}
+    void commit()override{result->committed=true;}
+};
+}
 
 int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     auto require=[](bool value,const char* reason){if(!value)throw std::runtime_error(reason);};
@@ -66,6 +82,32 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         try{left.receive({},++now);}catch(const std::exception&){unauthorized=true;}
         require(unauthorized,"Logged-out friendship continued accepting transport bytes");left.close(false);right.close(false);
     }
-    std::cout<<"PASS: 102 real Schannel/shared-runtime relay lifecycles, Hello/initial pin, existing owners, Unicode, durable messages/ACKs, disconnect-before-ACK retry/dedupe, logout and retired endpoint rejection. HOST ONLY\n";
+    af.replace(10,3,{{20,bob.peerId,{bob.peerId}}});
+    transfer::TransferManager uploads([]{return std::make_unique<transfer::windows::Sha256>();});
+    transfer::TransferManager downloads([]{return std::make_unique<transfer::windows::Sha256>();});
+    unsigned fileFrames=0;
+    ReliableEndpoint left(alice,a,as,ad,af,{1},{301},std::make_unique<TlsSession>(ac,false),bob.peerId,route(301,false),++now,{},
+        [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;uploads.receive(peer,frame,time);});
+    ReliableEndpoint right(bob,b,bs,bd,bf,{1},{302},std::make_unique<TlsSession>(bc,true),alice.peerId,route(302,true),++now,{},
+        [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;downloads.receive(peer,frame,time);});
+    protocol::Writer premature(protocol::FileTransfer);require(!left.sendTransfer(premature.data),"File sent before authenticated winner");
+    left.receive({},++now);right.receive({},++now);exchange(left,right);require(left.ready()&&right.ready(),"File route failed authentication");
+    Blob picture(100000),document(70000);for(size_t i=0;i<picture.size();++i)picture[i]=static_cast<unsigned char>(i);
+    for(size_t i=0;i<document.size();++i)document[i]=static_cast<unsigned char>(255-i);
+    auto pictureId=Storage::newMessageId(),documentId=Storage::newMessageId();
+    uploads.offer(bob.peerId,pictureId,std::make_unique<MemoryFile>(picture,"picture.png"),++now);
+    downloads.offer(alice.peerId,documentId,std::make_unique<MemoryFile>(document,"file.bin"),++now);
+    auto receivedPicture=std::make_shared<ReceivedFile>(),receivedDocument=std::make_shared<ReceivedFile>();
+    for(unsigned n=0;n<100;++n){
+        uploads.tick(++now,[&](const std::string&){return left.ready()?301:0;},[&](const std::string&,const Blob& bytes){return left.sendTransfer(bytes);});
+        downloads.tick(++now,[&](const std::string&){return right.ready()?302:0;},[&](const std::string&,const Blob& bytes){return right.sendTransfer(bytes);});exchange(left,right);
+        for(const auto& item:downloads.snapshots())if(item.state==transfer::State::AwaitingAcceptance)downloads.accept(item.metadata.id,std::make_unique<MemoryDestination>(receivedPicture),++now);
+        for(const auto& item:uploads.snapshots())if(item.state==transfer::State::AwaitingAcceptance)uploads.accept(item.metadata.id,std::make_unique<MemoryDestination>(receivedDocument),++now);
+        if(uploads.completedRecords().size()==2&&downloads.completedRecords().size()==2)break;
+    }
+    require(receivedPicture->committed&&receivedPicture->bytes==picture&&receivedDocument->committed&&receivedDocument->bytes==document&&fileFrames>8,"Bidirectional authenticated binary transfer corrupted or incomplete");
+    require(uploads.completedRecords().size()==2&&downloads.completedRecords().size()==2,"File completion acknowledgement missing");
+    af.replace(0,4,{});require(!left.sendTransfer(premature.data),"Logged-out endpoint sent file bytes");
+    std::cout<<"PASS: 102 real Schannel/shared-runtime relay lifecycles, durable text/ACK/dedupe, bidirectional binary picture/file transfers through existing TransferManager, authenticated winner/capability/logout gates. HOST ONLY\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}}

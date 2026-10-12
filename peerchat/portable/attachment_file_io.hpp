@@ -49,6 +49,7 @@ public:
         protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/CacheSource/v1");w.string(path_);w.string(name_);identityFields(w,file_->fd,true);token_=std::move(w.data);
     }
     std::uint64_t size()const override{return size_;}std::string name()const override{return name_;}Blob resumeToken()const override{return token_;}
+    const std::string& cacheName()const{return path_;}
     Blob read(std::uint64_t offset,size_t count)override{check(offset<=size_&&count<=size_-offset);return posix::read(file_->fd,offset,count);}
     static std::unique_ptr<FileSource> reopen(std::shared_ptr<Cache> cache,const DurableState& d){protocol::Reader r(d.location);check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSource/v1");auto path=r.string(),name=r.string();auto result=std::make_unique<FileSource>(std::move(cache),path,name);verifyIdentity(r,result->file_->fd,true);r.end();check(result->size()==d.metadata.size&&result->name()==d.metadata.name);return result;}
 };

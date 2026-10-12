@@ -10,7 +10,7 @@ data class MessageSnapshot(val id: String,val senderDevice: String,val recipient
 data class ConnectionSnapshot(val ready: Boolean=false,val pending: Boolean=false,val retrying: Boolean=false,
     val retryDelayMs: Long=0,val networkRevision: Long=0,val failure: String="none")
 data class ConversationSnapshot(val friend: FriendIdentity,val connection: ConnectionSnapshot,
-    val messages: List<MessageSnapshot>)
+    val messages: List<MessageSnapshot>,val attachments:List<AttachmentSnapshot> = emptyList())
 data class MessagingSnapshot(val accountId: Long=0,val username: String="",val localPeerId: String="",
     val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList(),
     val incomingRequests:List<AccountRequestSnapshot> = emptyList(),

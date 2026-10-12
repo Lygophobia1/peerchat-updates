@@ -31,12 +31,15 @@ import kotlinx.coroutines.delay
     var draft by rememberSaveable(c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
     var sending by remember(c.id) { mutableStateOf(false) }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
+    val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null)dispatch(UiAction.SendAttachment(uri))
+    }
     LaunchedEffect(c.id,state.drafts[c.id]){if(!sending&&!state.demo)draft=state.drafts[c.id] ?: ""}
-    LaunchedEffect(c.id, c.messages.lastOrNull()?.id) {
+    LaunchedEffect(c.id, c.messages.lastOrNull()?.id,c.attachments.lastOrNull()?.id) {
         val nearBottom=(list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)>=list.layoutInfo.totalItemsCount-3
         if (c.messages.isNotEmpty()&&nearBottom) {
             val dateSeparators = c.messages.indices.count { it == 0 || c.messages[it - 1].date != c.messages[it].date }
-            list.scrollToItem(c.messages.size + dateSeparators) // + older item, then -1 for last index
+            list.scrollToItem(c.messages.size + dateSeparators+c.attachments.size) // + older item, then -1 for last index
         }
     }
     LaunchedEffect(sending) {
@@ -75,7 +78,7 @@ import kotlinx.coroutines.delay
             } }
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-                ActionIcon(Icons.Default.Add, "Attachments", { dispatch(UiAction.Notice("File sharing is not available in this preview.")) })
+                ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo&&c.kind==ChatKind.Direct)picker.launch(arrayOf("*/*")) })
                 OutlinedTextField(draft, { if (it.length <= 4096){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
@@ -116,6 +119,7 @@ import kotlinx.coroutines.delay
                     item(key = message.id) { MessageBubble(message, c.kind == ChatKind.Group &&
                         (index == 0 || c.messages[index - 1].senderId != message.senderId), dispatch) }
                 }
+                c.attachments.forEach{attachment->item(key="attachment-${attachment.id}"){AttachmentCard(attachment,dispatch)}}
             }
         }
     }
