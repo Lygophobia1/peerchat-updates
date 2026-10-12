@@ -39,9 +39,11 @@ internal sealed class ArchiveEnrollmentExecution {
     readonly Func<uint,byte[],byte[]> native;
     readonly Func<string,Dictionary<string,object>,Dictionary<string,object>> rpc;
     long revision;
+    public string LastFailedStage {get;private set;}
     public ArchiveEnrollmentExecution(Func<uint,byte[],byte[]> native,
         Func<string,Dictionary<string,object>,Dictionary<string,object>> rpc) {
-        this.native=native;this.rpc=rpc;
+        this.native=(operation,input)=>{try{return native(operation,input);}catch{LastFailedStage="native_operation_"+operation;throw;}};
+        this.rpc=(operation,fields)=>{try{return rpc(operation,fields);}catch{LastFailedStage=operation=="archive_descriptor_register"||operation=="archive_grant_register"||operation=="archive_authorization_state"?"server_"+operation:"server_archive_request";throw;}};
     }
     static void Check(bool value){if(!value)throw new InvalidDataException("Archive metadata rejected.");}
     static string Text(Dictionary<string,object> row,string name){object value;return row.TryGetValue(name,out value)?value as string:null;}

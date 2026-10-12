@@ -77,7 +77,7 @@ static class ArchiveApplicationBoundaryTest {
         PairMetadata(a,pa,descriptors,new byte[0][],1);PairMetadata(b,pb,descriptors,new byte[0][],1);
         foreach(var h in new[]{a,b})using(var approve=new Wire(4)){approve.Text(pa);approve.Number(1);Request(h,4,approve);}
         byte[] serve,read;using(var w=new Wire(5)){w.Text(pa);w.Number(2);w.Number(1);serve=Request(a,5,w);}
-        using(var w=new Wire(5)){w.Text(pb);w.Number(1);w.Number(1);read=Request(a,5,w);}
+        read=Client(a).Consent(8,1,5,pb,1,true); // Same scoped explicit cross-device command as Windows Manage.
         PairMetadata(a,pa,descriptors,new[]{serve,read},2);PairMetadata(b,pb,descriptors,new[]{serve,read},2);
         var source=Client(a);var reader=Client(b);Check(reader.Progress(8,1).Running); // Actual native automatic authorized initial sync.
         var admission=reader.AuthorizationDiagnostics(8,1);Check(admission.Length<=49152&&admission.Contains("local_device="+pb)&&admission.Contains("source_provide=allowed reader_receive=allowed"));
@@ -142,6 +142,11 @@ static class ArchiveApplicationBoundaryTest {
             for(int cycle=0;cycle<5;++cycle){
                 Check(ui_start(handle,args[1],0,"Isolated archive test")==1);
                 Simple(handle,1,true); // No cached prior-profile authentication.
+                bool archiveError=false;
+                foreach(Dictionary<string,object> e in new JavaScriptSerializer().Deserialize<object[]>(Marshal.PtrToStringUni(ui_poll(handle))))if(Convert.ToInt32(e["kind"])==8){
+                    Check(ArchiveEnrollmentExecution.IsArchiveEvent("",(string)e["peer"],(string)e["expected"],8,(string)e["text"]));archiveError=true;
+                }
+                Check(archiveError); // Archive rejection cannot be projected as a friend failure.
                 Check(ui_authenticated_friends(handle,8,1,"")==1);
                 var current=Simple(handle,1);
                 if(descriptor==null){
@@ -191,10 +196,10 @@ static class ArchiveApplicationBoundaryTest {
             Check(!execution.HistorySync(8,4,false));Views(handle,peer,true,false);
             bool stalePolicy=false;try{execution.HistorySync(8,3,true);}catch(Exception){stalePolicy=true;}Check(stalePolicy);
             Check(!execution.HistorySync(8,4));Check(execution.HistorySync(8,4,true));Views(handle,peer,true,true);
-            bool stale=false;try{execution.Consent(8,3,6,peer,0,true);}catch(Exception){stale=true;}Check(stale);Views(handle,peer,true,true);
+            bool stale=false;try{execution.Consent(8,3,6,peer,0,true);}catch(Exception){stale=true;}Check(stale&&execution.LastFailedStage=="native_operation_10");Views(handle,peer,true,true);
             execution.Consent(8,4,6,peer,0,true);
             failPublication=true;bool failed=false;try{execution.PublishPending(8,4,peer);}catch(IOException){failed=true;}
-            Check(failed&&publications==0);Simple(handle,3,true);
+            Check(failed&&publications==0&&execution.LastFailedStage=="server_archive_grant_register");Simple(handle,3,true);
             failPublication=false;Check(execution.PublishPending(8,4,peer)==1&&publications==1);Views(handle,peer,true,false);
             Check(execution.PublishPending(8,4,peer)==0&&publications==1);
             wrongAccount=true;failed=false;try{execution.Refresh(8,4,peer);}catch(InvalidDataException){failed=true;}

@@ -100,6 +100,8 @@ public partial class DesktopApplication {
     Task archiveTask=Task.FromResult(0);DateTime archiveNextUtc=DateTime.MinValue,archiveMetadataUtc=DateTime.MinValue,archiveServingUntilUtc=DateTime.MinValue;
     ArchiveEnrollmentExecution.SyncProgress archiveProgress;
     string archiveAuthorizationDiagnostic="No authenticated History Sync snapshot yet.";
+    string historyLastOperationDiagnostic="";long historyLastOperationAccount;ulong historyLastOperationGeneration;
+    string CurrentHistoryDiagnostics(){return archiveAuthorizationDiagnostic+(discovery!=null&&discovery.AccountId==historyLastOperationAccount&&authenticatedFriendSnapshotGeneration==historyLastOperationGeneration?historyLastOperationDiagnostic:"");}
     long archiveProjectedCount=-1,archiveUiEpoch;
     bool historyCommandInFlight;
     event EventHandler HistoryPresentationChanged;
@@ -349,7 +351,7 @@ public partial class DesktopApplication {
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
-        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{HistorySync=()=>archiveAuthorizationDiagnostic,Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
+        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
         // Profile selection and any legacy migration finish before the native owner exists.

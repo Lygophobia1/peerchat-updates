@@ -103,19 +103,20 @@ public partial class DesktopApplication {
             statusAction.Content=approval?"Review device":view.Active?"Pause":view.State=="Failed"?"Retry":"Sync now";
             statusAction.IsEnabled=account>0&&(approval||view.Active||historyDevices.Any(d=>!d.Local&&d.MayServe)&&localDevice!=null&&localDevice.MayRead);
             if(p!=null){updating=true;sync.IsThreeState=false;sync.IsChecked=p.Enabled;sync.IsEnabled=true;updating=false;}
-            raw.Text=(p==null?"No validated snapshot.":p.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation+"\n"+archiveAuthorizationDiagnostic;
+            raw.Text=(p==null?"No validated snapshot.":p.Summary)+"\nAccount: "+account+"\nAuthentication snapshot: "+generation+"\n"+CurrentHistoryDiagnostics();
         };
         run=async(action,target,capabilities,auto)=>{
             var owner=discovery;long current=owner==null?0:owner.AccountId;ulong revision=authenticatedFriendSnapshotGeneration;string local=model.OwnId;
-            if(operating||historyCommandInFlight)return false;
+            if(operating||historyCommandInFlight){if(action!=0)status.Text="A History Sync operation is already running. Wait for it to finish before authorizing.";return false;}
             if(closing||owner==null||current<=0||mailboxContextAccount!=current||revision==0||revision>Int64.MaxValue){status.Text="Sign in and establish authenticated server presence first.";return false;}
             if(action!=0&&(account!=current||generation!=revision)){status.Text="Account context changed. Wait for device verification before making changes.";return false;}
             if(action==5&&capabilities==0){status.Text="At least one history permission is required while this device is authorized. Revoke the device if you want to disable history access completely.";return false;}
             if(action>=4&&action<=7&&!Confirm("Confirm history device access",HistoryName(current,target)+"\nAccount "+current+"\nDevice identity:\n"+target.PeerId+"\n\n"+(action==4?"Trust this device to sign history permissions?":action==5?"Apply Receive / Provide permissions to this exact device?":action==6?"Revoke this device's history access?":"Disable this trusted history authorizer?")+"\nThis does not erase history already received.","Confirm"))return false;
             operating=historyCommandInFlight=true;long operationEpoch=++archiveUiEpoch;panel.IsEnabled=false;
+            ArchiveEnrollmentExecution execution=null;
             try{
                 var result=await Task.Run(()=>{
-                    var execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));execution.Refresh(current,(long)revision,local);
+                    execution=new ArchiveEnrollmentExecution((op,input)=>core.Archive(op,input),(op,fields)=>owner.Archive(op,local,fields));execution.Refresh(current,(long)revision,local);
                     if(action>=4&&action<=7)execution.Consent(current,(long)revision,action,target.PeerId,capabilities,true);
                     if(auto.HasValue){if(!auto.Value&&archiveProgress!=null&&archiveProgress.Running&&(target.Local||archiveProgress.Source==target.PeerId))execution.PauseSync(current,(long)revision);execution.AutomaticSync(current,(long)revision,target.PeerId,auto);}
                     bool enabled=execution.HistorySync(current,(long)revision,action==11?desiredSync:null);execution.PublishPending(current,(long)revision,local);
@@ -127,7 +128,7 @@ public partial class DesktopApplication {
                 if(!IsHistoryCallbackCurrent(owner,revision,operationEpoch)||!dialog.IsVisible||!panel.IsVisible)return false;
                 account=historyAccount=current;generation=historyGeneration=revision;archiveLoadedOwner=owner;archiveLoadedGeneration=revision;historyDevices=result.Rows;historyProviding=result.Providing;automatic=result.Preferences;archiveProgress=result.Progress;archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);
                 updating=true;sync.IsThreeState=false;sync.IsChecked=result.Enabled;sync.IsEnabled=true;updating=false;render();PublishHistoryPresentation();return true;
-            }catch(Exception error){if(discovery==owner&&authenticatedFriendSnapshotGeneration==revision&&operationEpoch==archiveUiEpoch&&panel.IsVisible){sync.IsEnabled=false;status.Text="History operation failed. Retry without changing device permissions.";raw.Text="Operation rejected: "+error.GetType().Name;TraceUi("history settings operation rejected: "+error.GetType().Name);}return false;}
+            }catch(Exception error){if(discovery==owner&&authenticatedFriendSnapshotGeneration==revision&&operationEpoch==archiveUiEpoch&&panel.IsVisible){string stage=execution==null?"before_execution":execution.LastFailedStage??"response_validation_or_projection";historyLastOperationAccount=current;historyLastOperationGeneration=revision;historyLastOperationDiagnostic="\n=== History Sync last settings operation ===\naction="+action+" local_device="+local+" target_device="+(target==null?"none":target.PeerId)+" account="+current+" authentication_generation="+revision+" stage="+stage+" error_type="+error.GetType().Name;sync.IsEnabled=false;status.Text="History operation failed at "+stage+". No automatic permission retry was performed.";raw.Text=CurrentHistoryDiagnostics();TraceUi("history settings operation rejected: action="+action+" target="+(target==null?"none":target.PeerId)+" stage="+stage+" error="+error.GetType().Name);}return false;}
             finally{operating=historyCommandInFlight=false;panel.IsEnabled=true;archiveNextUtc=DateTime.MinValue;}
         };
         Action<ArchiveEnrollmentExecution.Device,bool> manage=(device,setup)=>{
@@ -195,7 +196,7 @@ public partial class DesktopApplication {
         actions.Children.Add(HistoryButton("Add device",()=>{var pending=historyDevices.FirstOrDefault(d=>!d.Local&&!d.Authorized);if(pending==null){status.Text="No new registered device. Open History Sync on the other device; authorization is still required.";return;}manage(pending,true);}));
         statusAction.Click+=async(s,e)=>{var local=historyDevices.FirstOrDefault(d=>d.Local);if(Object.Equals(statusAction.Content,"Review device")&&local!=null){manage(local,!local.Authorized);return;}if(Object.Equals(statusAction.Content,"Pause")){await run(14,null,0,null);return;}var source=historyDevices.FirstOrDefault(d=>archiveProgress!=null&&d.PeerId==archiveProgress.Source&&d.MayServe&&!d.Local)??historyDevices.FirstOrDefault(d=>d.MayServe&&!d.Local);await run(source==null?0u:12u,source,0,null);};
         var retry=HistoryButton("Retry",async()=>await run(0,null,0,null));advancedPanel.Children.Add(retry);
-        advancedPanel.Children.Add(HistoryButton("Copy History Diagnostics",()=>CopyDiagnosticText(archiveAuthorizationDiagnostic,"History diagnostics copied.")));
+        advancedPanel.Children.Add(HistoryButton("Copy History Diagnostics",()=>CopyDiagnosticText(CurrentHistoryDiagnostics(),"History diagnostics copied.")));
         advancedPanel.Children.Add(HistoryButton("Pause",async()=>await run(14,null,0,null)));
         advancedPanel.Children.Add(HistoryButton("Refresh history devices",async()=>await run(0,null,0,null)));
         advancedPanel.Children.Add(HistoryText("Trust must be explicitly established in a device's Manage / Advanced section. Login and nicknames never grant access. Multiple authorities may grant different permissions; Manage changes only grants issued by this device."));
