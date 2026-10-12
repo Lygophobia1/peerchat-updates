@@ -19,6 +19,7 @@ struct RosterSnapshot {
     std::uint64_t generation=0;
     std::vector<RosterDevice> devices;
     Blob creationProof{};
+    std::vector<PublicDeviceApproval> deviceApprovals{};
 };
 
 // Profile-scoped group-key owner. The server roster is an authenticated control
@@ -32,6 +33,8 @@ public:
     }
     void apply(RosterSnapshot snapshot){
         if(!snapshot.creationProof.empty())verifiedCreation(snapshot.serverGroupId,snapshot.legacyGroupId,snapshot.creationProof);
+        protocol::check(snapshot.deviceApprovals.empty()||!snapshot.creationProof.empty());
+        verifyDeviceApprovals(snapshot.serverGroupId,snapshot.legacyGroupId,snapshot.generation,snapshot.deviceApprovals);
         if(!protocol::id(snapshot.legacyGroupId,32)||!protocol::id(snapshot.serverGroupId,32)||
            !protocol::id(snapshot.distributorPeerId)||snapshot.generation==0||
            snapshot.generation>INT64_MAX||snapshot.devices.empty())throw std::runtime_error("Invalid authenticated group roster");
@@ -54,6 +57,9 @@ public:
             if(old->second.legacyGroupId!=snapshot.legacyGroupId||snapshot.generation<old->second.generation)
                 throw std::runtime_error("Stale or conflicting group roster");
             if(snapshot.generation==old->second.generation){
+                for(const auto& previous:old->second.deviceApprovals)for(const auto& current:snapshot.deviceApprovals)
+                    if(previous.appliedGeneration==current.appliedGeneration&&previous.proof!=current.proof)throw std::runtime_error("Conflicting group approval evidence");
+                if(snapshot.deviceApprovals.empty())snapshot.deviceApprovals=old->second.deviceApprovals;
                 if(old->second.distributorPeerId!=snapshot.distributorPeerId||old->second.devices.size()!=snapshot.devices.size())
                     throw std::runtime_error("Conflicting group roster generation");
                 for(size_t i=0;i<snapshot.devices.size();++i){const auto& a=old->second.devices[i];const auto& b=snapshot.devices[i];if(a.accountId!=b.accountId||a.peerId!=b.peerId||a.role!=b.role||a.invited!=b.invited)throw std::runtime_error("Conflicting group roster generation");}

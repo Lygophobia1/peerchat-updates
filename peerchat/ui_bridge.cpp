@@ -87,10 +87,11 @@ UI_API int ui_remove(void* handle,const wchar_t* peer){try{auto& bridge=*static_
 UI_API int ui_history(void* handle,const wchar_t* peer,long long before){try{static_cast<UiBridge*>(handle)->node.loadHistory(identity(peer),before);return 1;}catch(...){return 0;}}
 UI_API int ui_erase_history(void* handle,const wchar_t* peer){try{return static_cast<UiBridge*>(handle)->node.eraseHistory(identity(peer))?1:0;}catch(...){return 0;}}
 UI_API int ui_group_account(void* handle,unsigned long long account,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.setGroupAccount(account,name?name:L"");return account&&name&&*name;}catch(...){return 0;}}
-static int authenticatedGroupRoster(void* handle,unsigned long long account,unsigned long long discoveryGeneration,const wchar_t* group,const wchar_t* legacy,unsigned long long rosterGeneration,const wchar_t* distributor,const wchar_t* encodedMembers,const peerchat::Blob& proof){try{
+static int authenticatedGroupRoster(void* handle,unsigned long long account,unsigned long long discoveryGeneration,const wchar_t* group,const wchar_t* legacy,unsigned long long rosterGeneration,const wchar_t* distributor,const wchar_t* encodedMembers,const peerchat::Blob& proof,const std::vector<peerchat::group_keys::PublicDeviceApproval>& approvals={}){try{
     if(!handle||!group||!legacy||!distributor||!encodedMembers)return 0;
     peerchat::group_keys::RosterSnapshot roster;roster.serverGroupId=identity(group);roster.legacyGroupId=identity(legacy);roster.distributorPeerId=identity(distributor);roster.generation=rosterGeneration;
     roster.creationProof=proof;
+    roster.deviceApprovals=approvals;peerchat::group_keys::verifyDeviceApprovals(roster.serverGroupId,roster.legacyGroupId,roster.generation,approvals);
     if(!proof.empty())peerchat::group_keys::verifiedCreation(roster.serverGroupId,roster.legacyGroupId,proof);
     std::wstringstream rows(encodedMembers);std::wstring row;
     while(std::getline(rows,row,L'\n')){
@@ -111,6 +112,11 @@ UI_API int ui_authenticated_group_roster_evidence(void* handle,unsigned long lon
     return authenticatedGroupRoster(handle,account,discoveryGeneration,group,legacy,rosterGeneration,distributor,members,copied);
 }catch(...){return 0;}}
 UI_API void ui_clear_authenticated_group_rosters(void* handle){try{if(handle)static_cast<UiBridge*>(handle)->node.clearAuthenticatedGroupRosters();}catch(...){}}
+UI_API int ui_authenticated_group_roster_proofs(void* handle,unsigned long long account,unsigned long long discoveryGeneration,const wchar_t* group,const wchar_t* legacy,unsigned long long rosterGeneration,const wchar_t* distributor,const wchar_t* members,const unsigned char* bytes,unsigned int size){try{
+    if(!group||!legacy||!bytes||!size||size>135168)return 0;
+    auto evidence=peerchat::group_keys::readRosterEvidence(peerchat::Blob(bytes,bytes+size),identity(group),identity(legacy),rosterGeneration);
+    return authenticatedGroupRoster(handle,account,discoveryGeneration,group,legacy,rosterGeneration,distributor,members,evidence.root,evidence.approvals);
+}catch(...){return 0;}}
 UI_API int ui_begin_group_control(void* handle,const wchar_t* group,unsigned long long targetAccount,const wchar_t* targetPeer,unsigned long long discoveryGeneration){try{return handle&&group&&targetPeer&&static_cast<UiBridge*>(handle)->node.beginGroupControl(identity(group),targetAccount,identity(targetPeer),discoveryGeneration)?1:0;}catch(...){return 0;}}
 UI_API const wchar_t* ui_group_create(void* handle,const wchar_t* name){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=widen(bridge.node.createGroup(name?name:L""));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API const wchar_t* ui_group_create_proof(void* handle,const wchar_t* group){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=bridge.node.groupCreationProof(identity(group));}catch(...){bridge.output.clear();}return bridge.output.c_str();}

@@ -80,6 +80,18 @@ internal static class GroupDeviceServerTest {
                 Require(db.GroupRosterMember(proof.GroupId,1,proof.Target)==(i<7),"Rejected target leaked into roster");
             }
         }
+        using(var db=new AccountDatabase(Path.Combine(root,"window.sqlite"))){
+            Accounts(db,creation,member,sibling);Require(db.AddDevice(1,approve.Target),"Window target registration");
+            for(int i=0;i<40;i++){var proof=Read(root,"window-"+i+".bin");Require(db.ApplyGroupDeviceProof(1,proof.Actor,proof)!=null,"Window approval/revoke failed");}
+            var roster=db.GroupRoster(approve.GroupId,1,approve.Actor);
+            var window=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)roster["deviceApprovals"];
+            var json=new System.Web.Script.Serialization.JavaScriptSerializer();
+            Require(Convert.ToBoolean(roster["deviceApprovalsTruncated"])&&window.Count>0&&window.Count<32,"Evidence window did not report truncation");
+            Require(System.Text.Encoding.UTF8.GetByteCount(json.Serialize(window))<=8192,"Evidence exceeded reserved frame budget");
+            Require(Convert.ToInt64(window[window.Count-1]["appliedGeneration"])==41,"Window lost newest proof");
+            long prior=0;foreach(var row in window){long gen=Convert.ToInt64(row["appliedGeneration"]);Require(gen>prior,"Window reordered evidence");prior=gen;}
+            Require(System.Text.Encoding.UTF8.GetByteCount(json.Serialize(roster))<16*1024,"Small roster exceeded legacy response bound");
+        }
         using(var db=new AccountDatabase(Path.Combine(root,"race.sqlite"))){
             Accounts(db,creation,member,sibling);var competing=Read(root,"stale.bin");
             Require(db.AddDevice(1,approve.Target)&&db.AddDevice(1,competing.Target),"Race target registration");
@@ -104,6 +116,8 @@ internal static class GroupDeviceServerTest {
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,approve)!=null,"Exact receipt did not survive restart");
             var evidence=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)db.GroupRoster(approve.GroupId,1,approve.Actor)["deviceApprovals"];
             Require(evidence.Count==1&&Convert.ToInt64(evidence[0]["appliedGeneration"])==2&&Convert.ToString(evidence[0]["proof"])==approve.Encoded,"Verified approval projection lost durable proof");
+            var bulk=db.GroupRostersForDevice(1,approve.Actor);
+            Require(bulk.Count==1&&!Convert.ToBoolean(bulk[0]["deviceApprovalsIncluded"])&&((System.Collections.IList)bulk[0]["deviceApprovals"]).Count==0,"Bulk rosters multiplied historical proof payloads");
             Require(db.AddDevice(1,sibling)==false,"Device could move accounts");
             Require(db.AddDevice(1,Read(root,"stale.bin").Target),"Stale fixture same-account registration");
             Require(db.ApplyGroupDeviceProof(1,approve.Actor,Read(root,"stale.bin"))==null,"Stale generation accepted");

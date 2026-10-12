@@ -78,6 +78,7 @@ public sealed class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_group_account(IntPtr handle,ulong account,string name);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster_evidence(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members,[In] byte[] proof,uint proofSize);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster_proofs(IntPtr handle,ulong account,ulong discoveryGeneration,string group,string legacy,ulong rosterGeneration,string distributor,string members,[In] byte[] proof,uint proofSize);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern void ui_clear_authenticated_group_rosters(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern int ui_begin_group_control(IntPtr handle,string group,ulong targetAccount,string targetPeer,ulong discoveryGeneration);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
@@ -167,7 +168,20 @@ public sealed class CoreAdapter : IDisposable {
         if(localAccount<=0||discoveryGeneration==0||roster==null)return false;
         var rows=new List<string>();foreach(var member in roster.Members){if(member.AccountId<=0||String.IsNullOrEmpty(member.PeerId)||String.IsNullOrEmpty(member.Role)||String.IsNullOrEmpty(member.State)||member.PeerId.IndexOfAny(new[]{'|','\r','\n'})>=0)return false;rows.Add(member.AccountId+"|"+member.PeerId+"|"+member.Role+"|"+member.State);}
         byte[] proof=new byte[0];if(!String.IsNullOrEmpty(roster.CreationProof)){if(roster.CreationProof.Length>4096)return false;try{proof=Convert.FromBase64String(roster.CreationProof);}catch(FormatException){return false;}if(proof.Length==0||proof.Length>2048)return false;}
-        return ui_authenticated_group_roster_evidence(handle,(ulong)localAccount,discoveryGeneration,roster.GroupId,roster.LegacyGroupId,(ulong)roster.RosterGeneration,roster.DistributorPeerId,String.Join("\n",rows),proof,(uint)proof.Length)!=0;
+        if(roster.DeviceApprovals==null||roster.DeviceApprovals.Count>32)return false;
+        using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){
+            writer.Write(new byte[]{(byte)'P',(byte)'T',1,5});
+            byte[] domain=Encoding.UTF8.GetBytes("PeerChat/group-roster-evidence/v1");writer.Write((ulong)domain.Length);writer.Write(domain);
+            writer.Write((ulong)proof.Length);writer.Write(proof);writer.Write((ulong)roster.DeviceApprovals.Count);
+            long previous=0;
+            foreach(var receipt in roster.DeviceApprovals){
+                if(receipt==null||receipt.AppliedGeneration<=previous||receipt.AppliedGeneration>roster.RosterGeneration||String.IsNullOrEmpty(receipt.Proof)||receipt.Proof.Length>5464)return false;
+                byte[] wire;try{wire=Convert.FromBase64String(receipt.Proof);}catch(FormatException){return false;}
+                if(wire.Length==0||wire.Length>4096)return false;
+                writer.Write((ulong)receipt.AppliedGeneration);writer.Write((ulong)wire.Length);writer.Write(wire);previous=receipt.AppliedGeneration;
+            }
+            var evidence=stream.ToArray();return ui_authenticated_group_roster_proofs(handle,(ulong)localAccount,discoveryGeneration,roster.GroupId,roster.LegacyGroupId,(ulong)roster.RosterGeneration,roster.DistributorPeerId,String.Join("\n",rows),evidence,(uint)evidence.Length)!=0;
+        }
     }
     public void ClearAuthenticatedGroupRosters(){ui_clear_authenticated_group_rosters(handle);}
     public bool BeginGroupControl(string serverGroupId,long targetAccount,string targetPeer,ulong discoveryGeneration){return targetAccount>0&&ui_begin_group_control(handle,serverGroupId,(ulong)targetAccount,targetPeer,discoveryGeneration)!=0;}

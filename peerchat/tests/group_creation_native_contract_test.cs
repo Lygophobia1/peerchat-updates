@@ -14,6 +14,13 @@ internal static class GroupCreationNativeContractTest {
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create(IntPtr handle,string name);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_group_create_proof(IntPtr handle,string group);
     [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster_evidence(IntPtr handle,ulong account,ulong generation,string group,string legacy,ulong rosterGeneration,string distributor,string members,[In] byte[] proof,uint size);
+    [DllImport("PeerChat.Core.dll",CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_authenticated_group_roster_proofs(IntPtr handle,ulong account,ulong generation,string group,string legacy,ulong rosterGeneration,string distributor,string members,[In] byte[] proof,uint size);
+    static byte[] Evidence(byte[] root,ulong count=0){
+        using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){
+            writer.Write(new byte[]{(byte)'P',(byte)'T',1,5});var domain=System.Text.Encoding.UTF8.GetBytes("PeerChat/group-roster-evidence/v1");
+            writer.Write((ulong)domain.Length);writer.Write(domain);writer.Write((ulong)root.Length);writer.Write(root);writer.Write(count);return stream.ToArray();
+        }
+    }
     static void Require(bool value,string message){if(!value)throw new Exception(message);}
     static void CreatePreDistributorRosterDatabase(string path){
         IntPtr database,error;
@@ -38,6 +45,12 @@ internal static class GroupCreationNativeContractTest {
             Require(proof.LegacyGroupId==group&&proof.OwnerAccountId==1&&proof.OwnerIdentity.Length==64&&proof.ServerGroupId.Length==32,"Server did not accept the actual native owner Create proof.");
             byte[] root=Convert.FromBase64String(encoded);string members="1|"+proof.OwnerIdentity+"|owner|member";
             Require(ui_authenticated_group_roster_evidence(handle,1,1,proof.ServerGroupId,group,1,proof.OwnerIdentity,members,root,(uint)root.Length)!=0,"Native root projection rejected real signed creation");
+            var bundle=Evidence(root);
+            Require(ui_authenticated_group_roster_proofs(handle,1,1,proof.ServerGroupId,group,1,proof.OwnerIdentity,members,bundle,(uint)bundle.Length)!=0,"Copied native evidence boundary rejected valid root");
+            var badBundle=Evidence(root,33);
+            Require(ui_authenticated_group_roster_proofs(handle,1,1,proof.ServerGroupId,group,1,proof.OwnerIdentity,members,badBundle,(uint)badBundle.Length)==0,"Evidence count limit bypassed");
+            badBundle=(byte[])bundle.Clone();badBundle[badBundle.Length-9]^=1;
+            Require(ui_authenticated_group_roster_proofs(handle,1,1,proof.ServerGroupId,group,1,proof.OwnerIdentity,members,badBundle,(uint)badBundle.Length)==0,"Copied evidence admitted altered root");
             byte[] damaged=(byte[])root.Clone();damaged[damaged.Length-1]^=1;
             Require(ui_authenticated_group_roster_evidence(handle,1,1,proof.ServerGroupId,group,1,proof.OwnerIdentity,members,damaged,(uint)damaged.Length)==0,"Adapter admitted damaged root");
             Require(ui_authenticated_group_roster_evidence(handle,1,1,new string('f',32),group,1,proof.OwnerIdentity,members,root,(uint)root.Length)==0,"Adapter admitted wrong root namespace");

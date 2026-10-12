@@ -9,6 +9,15 @@ internal static class GroupRegistrationTest {
         const string group="0123456789abcdef0123456789abcdef";
         const string peer="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         try{
+            var row=new System.Collections.Generic.Dictionary<string,object>{{"appliedGeneration",2L},{"proof",Convert.ToBase64String(new byte[]{1,2,3})}};
+            var response=new System.Collections.Generic.Dictionary<string,object>{{"deviceApprovals",new object[]{row}}};
+            var evidence=GroupRosterEvidenceProjection.Read(response,2);
+            Require(evidence.Count==1&&evidence[0].AppliedGeneration==2,"Managed evidence changed the authenticated epoch");
+            foreach(var invalid in new object[]{new object[]{row,row},new object[]{new System.Collections.Generic.Dictionary<string,object>{{"appliedGeneration",3L},{"proof","AQID"}}},new object[]{new System.Collections.Generic.Dictionary<string,object>{{"appliedGeneration",2L},{"proof","invalid!"}}},"not a list"}){
+                bool rejected=false;try{GroupRosterEvidenceProjection.Read(new System.Collections.Generic.Dictionary<string,object>{{"deviceApprovals",invalid}},2);}catch(InvalidDataException){rejected=true;}
+                Require(rejected,"Managed evidence limits/encoding/order failed closed");
+            }
+            Require(GroupRosterEvidenceProjection.Read(new System.Collections.Generic.Dictionary<string,object>(),2).Count==0,"Legacy roster compatibility changed");
             var store=new PendingGroupRegistrationStore(path);
             Require(store.Load(19,peer).Length==0,"A new profile contained a pending group.");
             store.Add(19,peer,group);

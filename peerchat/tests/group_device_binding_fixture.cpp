@@ -46,6 +46,7 @@ int main(int argc,char** argv){try{
     };
     proof("approve.bin",owner,target,1,1);proof("stale.bin",owner,extra,1,1);
     proof("revoke.bin",owner,target,1,2,true);proof("reenroll.bin",owner,target,1,3);
+    for(std::uint64_t i=0;i<40;++i)proof(("window-"+std::to_string(i)+".bin").c_str(),owner,target,1,i+1,i%2!=0);
     proof("wrong-account.bin",owner,target,2,1);
     proof("revoke-primary.bin",target,owner,1,2,true);
     for(std::uint64_t i=0;i<8;++i){
@@ -95,6 +96,14 @@ int main(int argc,char** argv){try{
         throw std::runtime_error("Exact device revocation did not reconcile");
     auto restored=current;restored.generation=4;
     group_keys::verifyDeviceApprovals(server,create.groupId,3,{{2,validWire},{3,evidence.at("revoke.bin")}});
+    {
+        protocol::Writer w(protocol::GroupEvent);w.string("PeerChat/group-roster-evidence/v1");w.bytes(encodeGroupEvent(create));w.number(2);
+        w.number(2);w.bytes(validWire);w.number(3);w.bytes(evidence.at("revoke.bin"));
+        auto parsed=group_keys::readRosterEvidence(w.data,server,create.groupId,3);
+        if(parsed.approvals.size()!=2||parsed.root!=encodeGroupEvent(create))throw std::runtime_error("Copied roster proof projection changed evidence");
+        auto reject=[&](const Blob& bytes){bool failed=false;try{group_keys::readRosterEvidence(bytes,server,create.groupId,3);}catch(...){failed=true;}if(!failed)throw std::runtime_error("Malformed roster evidence admitted");};
+        auto altered=w.data;altered.back()^=1;reject(altered);altered=w.data;altered.push_back(0);reject(altered);reject(Blob(135169,0));
+    }
     auto rejectEvidence=[&](const std::vector<group_keys::PublicDeviceApproval>& rows,std::uint64_t generation=3){
         bool failed=false;try{group_keys::verifyDeviceApprovals(server,create.groupId,generation,rows);}catch(...){failed=true;}
         if(!failed)throw std::runtime_error("Invalid public device receipt admitted");
