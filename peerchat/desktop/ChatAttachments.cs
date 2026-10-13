@@ -153,7 +153,7 @@ public sealed class AttachmentCard:StackPanel {
         Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
-        var actions=new WrapPanel();Children.Add(actions);
+        var actions=new WrapPanel();Children.Add(actions);actions.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
         if(row.state==2&&!row.sending)actions.Children.Add(ActionButton("Download…",()=>Signal(row,"accept")));
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
         if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
@@ -192,7 +192,7 @@ public partial class DesktopApplication {
         var refresh=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};refresh.Tick+=async(s,e)=>await RefreshChatAttachments();refresh.Start();window.Closed+=(s,e)=>{refresh.Stop();chatCatalog.Clear();};
         Find<Button>("Attachment").ToolTip="Attach file to this conversation";
         window.AddHandler(AttachmentCard.ActionEvent,new RoutedEventHandler(async(s,e)=>{
-            var action=(AttachmentActionEventArgs)e;var row=action.Transfer;e.Handled=true;
+            var action=(AttachmentActionEventArgs)e;var row=action.Transfer;e.Handled=true;if(action.Action=="diagnostics"){OpenContextDiagnostics(DiagnosticSection.FileTransfers,row.id);return;}
             if(action.Action=="preview-snippet"||action.Action=="full-snippet"){
                 var card=action.OriginalSource as AttachmentCard;bool full=action.Action=="full-snippet";
                 if(!SafeAttachmentPreview.TryNativeRead()){if(card!=null&&!full)card.ProtectedPreview(row.id,"","Preview busy — try again");return;}

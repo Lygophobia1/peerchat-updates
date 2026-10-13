@@ -347,7 +347,7 @@ public sealed class GroupTelemetryProjection {
         var viewers=screen.Where(r=>Number(r,"encoderCount")==0).SelectMany(Routes).ToArray();if(viewers.Length==1)p.PresentedFps=Number(viewers[0],"presentedFps");
         p.Health="Capture 10ms blocks: "+Metric(Number(v,"captureBlocks"))+" · Mixed blocks: "+Metric(Number(v,"mixedBlocks"))+" · Playout busy/silence blocks: "+Metric(Number(v,"underrunBlocks"))+"\nAEC reference underruns: "+Metric(Number(v,"aec_reference_underruns"))+" · AEC delay estimate: "+Metric(Number(v,"aec_delay_ms"))+" ms (not network latency)";
         p.ScreenHealth=String.Join("\n",screen.Select(r=>"Encoder queue drops: "+Metric(Number(r,"encoderQueueDrops"))+" · Average captured/encoded FPS: "+Metric(Number(r,"captureFpsAverage"))+" / "+Metric(Number(r,"encodeFpsAverage"))));
-        p.ScreenHealth+="\n"+String.Join("\n",screen.SelectMany(Routes).Select(r=>MediaPerformanceSummary.Screen(Convert.ToString(Value(r,"details")))));
+        p.ScreenHealth+="\n"+String.Join("\n",screen.SelectMany(Routes).Select((r,index)=>"Viewer route "+(index+1)+" · "+Safe(r,"sourceKey")+":\n"+MediaPerformanceSummary.Screen(Convert.ToString(Value(r,"details")))));
         p.Participants=String.Join("\n",all.Select(r=>Safe(r,"sourceKey")+" · "+Safe(r,"state")+" · "+(Flag(r,"connected")?(Flag(r,"turn")?"TURN":"Selected non-TURN route"):"Not connected")+" · sent payload "+Metric(Number(r,"sendPayloadBits")/1000000)+" Mbps · received payload "+Metric(Number(r,"receivePayloadBits")/1000000)+" Mbps · received packets/s · decoded/presented FPS "+Metric(Number(r,"receivedPacketsPerSecond"))+" / "+Metric(Number(r,"decodedFps"))+" / "+Metric(Number(r,"presentedFps"))));return p;
     }
 }

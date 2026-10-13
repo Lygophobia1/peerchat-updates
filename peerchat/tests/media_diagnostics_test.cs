@@ -31,6 +31,13 @@ class MediaDiagnosticsTest {
         Check(next.Sections[0].Details=="DM voice unchanged"&&frozen.SnapshotId=="frozen"&&frozen.TimestampUtc=="old"&&frozen.Groups[0].RoomVoiceState=="received_packets=2");
         next.Groups[0].RoomVoiceState="changed";Check(live.Groups[0].RoomVoiceState=="received_packets=2");
         Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(DiagnosticsService.RefreshGroupView(next,null,DateTime.UtcNow),"group-a","Voice")).Contains("unavailable"));
+        var samples=new SampleDiagnosticLayoutProvider();
+        foreach(DiagnosticSection section in Enum.GetValues(typeof(DiagnosticSection)))foreach(DiagnosticExampleState state in Enum.GetValues(typeof(DiagnosticExampleState))){
+            if(section==DiagnosticSection.GroupCalls)continue;
+            var sample=samples.Read(new DiagnosticContext(section,"stable-test-id"),state);Check(sample.Sample&&sample.Banner.Contains("SAMPLE")&&sample.Context.StableId=="stable-test-id");Check(sample.Pages.Select(p=>p.Tab).SequenceEqual(DiagnosticNavigation.Tabs(section)));
+            if(state==DiagnosticExampleState.Unavailable||state==DiagnosticExampleState.Disconnected)Check(sample.Pages.SelectMany(p=>p.Panels).All(p=>p.Samples.Length==0));
+        }
+        bool rejected=false;try{samples.Read(new DiagnosticContext(DiagnosticSection.GroupCalls,"test"),DiagnosticExampleState.Active);}catch(InvalidOperationException){rejected=true;}Check(rejected);
         int result=0;var app=new Application();var desktop=new DesktopApplication(args[0],0);
         var flags=BindingFlags.Instance|BindingFlags.NonPublic;
         var window=(Window)typeof(DesktopApplication).GetField("window",flags).GetValue(desktop);
@@ -55,6 +62,24 @@ class MediaDiagnosticsTest {
             var graphWindow=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop);Check(graphWindow!=null&&app.Windows.Cast<Window>().Count(w=>w==graphWindow)==1);
             var tabs=(TabControl)typeof(DesktopApplication).GetField("groupDiagnosticTabs",flags).GetValue(desktop);Check(tabs.Items.Count==6);graphWindow.Width=540;graphWindow.Height=420;graphWindow.UpdateLayout();Check(tabs.ActualWidth>0);graphWindow.Close();Check(typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop)==null);
             openGraphs.Invoke(desktop,null);graphWindow=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop);graphWindow.UpdateLayout();var visual=(FrameworkElement)graphWindow.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,System.Windows.Media.PixelFormats.Pbgra32);bitmap.Render(visual);var png=new System.Windows.Media.Imaging.PngBitmapEncoder();png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var image=System.IO.File.Create(System.IO.Path.Combine(args[0],"group-diagnostics.png")))png.Save(image);graphWindow.Close();
+            var openContext=typeof(DesktopApplication).GetMethod("OpenContextDiagnostics",flags);string originalCall=model.VoiceCallId;
+            foreach(DiagnosticSection section in Enum.GetValues(typeof(DiagnosticSection))){
+                openContext.Invoke(desktop,new object[]{section,"stable-context-test"});graphWindow=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop);var same=graphWindow;
+                openContext.Invoke(desktop,new object[]{section,"stable-context-test"});Check(Object.ReferenceEquals(same,typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop)));
+                tabs=(TabControl)typeof(DesktopApplication).GetField("groupDiagnosticTabs",flags).GetValue(desktop);Check(tabs.Items.Count==DiagnosticNavigation.Tabs(section).Length);
+                foreach(TabItem tab in tabs.Items){tabs.SelectedItem=tab;graphWindow.UpdateLayout();Check(tab.Content!=null);}
+                graphWindow.Width=540;graphWindow.Height=420;graphWindow.UpdateLayout();Check(tabs.ActualWidth>0);graphWindow.Width=1400;graphWindow.Height=900;graphWindow.UpdateLayout();
+                var nav=(ComboBox)typeof(DesktopApplication).GetField("diagnosticNavigation",flags).GetValue(desktop);Check(nav.Items.Count==4&&nav.SelectedIndex==(int)section&&nav.Focusable);
+                var selector=(ComboBox)typeof(DesktopApplication).GetField("diagnosticExamples",flags).GetValue(desktop);Check((selector.Visibility==Visibility.Collapsed)==(section==DiagnosticSection.GroupCalls));
+                if(section!=DiagnosticSection.GroupCalls)foreach(DiagnosticExampleState state in Enum.GetValues(typeof(DiagnosticExampleState))){selector.SelectedItem=state;graphWindow.UpdateLayout();Check(((string)typeof(DesktopApplication).GetMethod("CurrentDiagnosticExport",flags).Invoke(desktop,null)).Contains("SAMPLE"));}
+                if(section!=DiagnosticSection.GroupCalls)selector.SelectedItem=DiagnosticExampleState.Active;
+                tabs.SelectedIndex=0;graphWindow.UpdateLayout();var surface=(FrameworkElement)graphWindow.Content;var picture=new System.Windows.Media.Imaging.RenderTargetBitmap((int)surface.ActualWidth,(int)surface.ActualHeight,96,96,System.Windows.Media.PixelFormats.Pbgra32);picture.Render(surface);var encoding=new System.Windows.Media.Imaging.PngBitmapEncoder();encoding.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(picture));using(var file=System.IO.File.Create(System.IO.Path.Combine(args[0],section+".png")))encoding.Save(file);
+                foreach(double scale in new[]{1.25,1.5,2.0}){graphWindow.Width=960;graphWindow.Height=720;surface.LayoutTransform=new System.Windows.Media.ScaleTransform(scale,scale);graphWindow.UpdateLayout();Check(tabs.ActualWidth>0&&surface.ActualHeight>0);}surface.LayoutTransform=System.Windows.Media.Transform.Identity;graphWindow.UpdateLayout();
+                Check(nav.Focus());Check(nav.MoveFocus(new System.Windows.Input.TraversalRequest(System.Windows.Input.FocusNavigationDirection.Next)));nav.IsDropDownOpen=true;Check(nav.IsDropDownOpen);nav.IsDropDownOpen=false;
+                if(section==DiagnosticSection.FileTransfers){tabs.SelectedIndex=2;graphWindow.UpdateLayout();Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");typeof(DesktopApplication).GetMethod("RefreshDiagnosticLayout",flags).Invoke(desktop,null);Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");}
+            }
+            Check(model.VoiceCallId==originalCall);graphWindow.Close();
+            var attachment=new AttachmentCard{Transfer=new CoreAdapter.FileTransferData{id="stable-transfer-id",name="fixture.bin",size=1048576,state=3}};AttachmentActionEventArgs selectedTransfer=null;attachment.AddHandler(AttachmentCard.ActionEvent,new RoutedEventHandler((sender,eventArgs)=>selectedTransfer=(AttachmentActionEventArgs)eventArgs));var entry=attachment.Children.OfType<WrapPanel>().Single().Children.OfType<Button>().Single(b=>Object.Equals(b.Content,"Open Diagnostics"));entry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(selectedTransfer!=null&&selectedTransfer.Action=="diagnostics"&&selectedTransfer.Transfer.id=="stable-transfer-id");
             typeof(DesktopApplication).GetMethod("ShowDiagnosticsWindow",flags).Invoke(desktop,new object[]{null});
             var diagnostics=app.Windows.Cast<Window>().Single(w=>w.Title=="Connection & Diagnostics");
             Func<System.Windows.DependencyObject,System.Collections.Generic.IEnumerable<System.Windows.DependencyObject>> walk=null;

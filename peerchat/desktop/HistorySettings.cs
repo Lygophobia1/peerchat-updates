@@ -76,7 +76,7 @@ public partial class DesktopApplication {
     // separate from native grant issuance so the complete UI flow is testable.
     StackPanel BuildHistorySettingsPanel(Window dialog,Func<DiscoveryClient,string,ArchiveEnrollmentExecution> createExecution){
         var panel=new StackPanel{MaxWidth=720,HorizontalAlignment=HorizontalAlignment.Stretch};var sync=VoiceProcessingSwitch("History Sync",false);sync.IsThreeState=true;sync.IsChecked=null;sync.IsEnabled=false;sync.FontSize=16;
-        panel.Children.Add(sync);panel.Children.Add(HistoryText("Keep conversations up to date across your approved devices."));
+        panel.Children.Add(sync);panel.Children.Add(HistoryText("Keep conversations up to date across your approved devices."));AddDiagnosticEntry(panel,DiagnosticSection.HistorySync,()=>{var device=historyDevices.FirstOrDefault(d=>d.Local);return device==null?"":device.PeerId;});
         var localPanel=new StackPanel();var remotePanel=new StackPanel();var expandedDevices=new HashSet<string>();
         var status=HistoryText("Verifying History Sync");status.FontSize=16;status.FontWeight=FontWeights.SemiBold;AutomationProperties.SetName(status,"History sync status");
         var subtitle=HistoryText("Sign in to verify history access.");subtitle.FontSize=12;subtitle.Foreground=Brush("#A1AEBB");
