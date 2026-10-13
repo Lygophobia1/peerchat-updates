@@ -62,8 +62,8 @@ internal fun accountHistoryPage(friend:FriendIdentity,before:Long,
 internal fun chronologicalMessages(rows:List<MessageSnapshot>):List<MessageSnapshot> =
     rows.sortedWith(compareByDescending<MessageSnapshot>{it.sequence}
         .thenByDescending{when(it.delivery){2L->3;3L->2;1L->1;else->0}})
-        .distinctBy{it.id}.sortedWith(compareBy<MessageSnapshot>{it.timestamp}
-            .thenBy{it.logicalOrder}.thenBy{it.id}.thenBy{it.senderDevice}.thenBy{it.recipientDevice})
+        .distinctBy{it.id}.sortedWith(compareBy<MessageSnapshot>{it.logicalOrder}
+            .thenBy{it.senderDevice}.thenBy{it.id}.thenBy{it.recipientDevice})
 
 internal fun nativeWakeOutputComplete(receivedNanos:Long,wakeStartedNanos:Long,
     attached:Boolean,finished:Boolean,outputIdleNanos:Long):Boolean =

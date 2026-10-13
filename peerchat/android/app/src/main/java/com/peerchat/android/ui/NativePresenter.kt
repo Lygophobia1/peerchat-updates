@@ -31,12 +31,13 @@ import com.peerchat.android.platform.tls.ServerChannel
 internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState): PeerChatUiState {
     val conversations=snapshot.conversations.map { c ->
         val id="account:${c.friend.accountId}"
-        val messages=c.messages.map {m ->
+        val messages=chronologicalMessages(c.messages).map {m ->
             val outgoing=m.senderDevice==snapshot.localPeerId
             MessageUi(m.id,m.senderDevice,if(outgoing)snapshot.username else c.friend.username,m.text,outgoing,
                 SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
                 date=SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
-                status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;3L->MessageStatus.Stored;1L->MessageStatus.Sent;else->MessageStatus.Queued})
+                status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;3L->MessageStatus.Stored;1L->MessageStatus.Sent;else->MessageStatus.Queued},
+                timestamp=m.timestamp,logicalOrder=m.logicalOrder)
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8,attachments=c.attachments)

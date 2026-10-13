@@ -31,15 +31,16 @@ import kotlinx.coroutines.delay
     var draft by rememberSaveable(c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
     var sending by remember(c.id) { mutableStateOf(false) }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
+    val timeline=remember(c.messages,c.attachments){conversationTimeline(c)}
     val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
         if(uri!=null)dispatch(UiAction.SendAttachment(uri))
     }
     LaunchedEffect(c.id,state.drafts[c.id]){if(!sending&&!state.demo)draft=state.drafts[c.id] ?: ""}
-    LaunchedEffect(c.id, c.messages.lastOrNull()?.id,c.attachments.lastOrNull()?.id) {
+    LaunchedEffect(c.id, timeline.lastOrNull()?.key,timeline.size) {
         val nearBottom=(list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)>=list.layoutInfo.totalItemsCount-3
-        if (c.messages.isNotEmpty()&&nearBottom) {
-            val dateSeparators = c.messages.indices.count { it == 0 || c.messages[it - 1].date != c.messages[it].date }
-            list.scrollToItem(c.messages.size + dateSeparators+c.attachments.size) // + older item, then -1 for last index
+        if (timeline.isNotEmpty()&&nearBottom) {
+            val dateSeparators = timeline.indices.count { it == 0 || timeline[it - 1].date != timeline[it].date }
+            list.scrollToItem(timeline.size + dateSeparators) // + older item, then -1 for last index
         }
     }
     LaunchedEffect(sending) {
@@ -110,16 +111,18 @@ import kotlinx.coroutines.delay
                 item(key = "older") { if (c.hasOlder) TextButton({ dispatch(UiAction.BeginOlder) }, enabled = !state.olderLoading, modifier = Modifier.fillMaxWidth()) {
                     Text(if(state.demo) {if (state.olderLoading) "Loading older preview…" else "Load older preview messages"} else if (state.olderLoading) "Loading older messages…" else "Load older messages")
                 } }
-                c.messages.forEachIndexed { index, message ->
-                    if (index == 0 || c.messages[index - 1].date != message.date) item(key = "date-${message.id}") {
+                timeline.forEachIndexed { index, row ->
+                    if (index == 0 || timeline[index - 1].date != row.date) item(key = "date-${row.key}") {
                         Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
-                            Text(message.date, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(row.date, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    item(key = message.id) { MessageBubble(message, c.kind == ChatKind.Group &&
-                        (index == 0 || c.messages[index - 1].senderId != message.senderId), dispatch) }
+                    item(key = row.key) { when(row){
+                        is ConversationTimelineEntry.Text -> MessageBubble(row.message,c.kind==ChatKind.Group&&
+                            (index==0||(timeline[index-1] as? ConversationTimelineEntry.Text)?.message?.senderId!=row.message.senderId),dispatch)
+                        is ConversationTimelineEntry.File -> AttachmentCard(row.attachment,dispatch,state.attachmentPreviews[row.attachment.id])
+                    } }
                 }
-                c.attachments.forEach{attachment->item(key="attachment-${attachment.id}"){AttachmentCard(attachment,dispatch,state.attachmentPreviews[attachment.id])}}
             }
         }
     }

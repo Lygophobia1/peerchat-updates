@@ -23,7 +23,8 @@ data class MemberUi(val accountId: String, val name: String, val online: Boolean
 data class MessageUi(
     val id: String, val senderId: String, val senderName: String, val text: String,
     val outgoing: Boolean, val time: String, val date: String = "Today",
-    val status: MessageStatus = MessageStatus.Received
+    val status: MessageStatus = MessageStatus.Received,
+    val timestamp:Long=0,val logicalOrder:Long=0
 )
 data class VoiceRoomUi(val id: String, val name: String, val participants: List<String>, val joined: Boolean = false,
     val muted: Boolean = false, val deafened: Boolean = false)

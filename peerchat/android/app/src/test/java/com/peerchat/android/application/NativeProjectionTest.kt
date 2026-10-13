@@ -50,6 +50,18 @@ class NativeProjectionTest {
         // This projection contains no verified/trusted flag or approval command.
         assertEquals("Jonah",current.single().username)
     }
+    @Test fun repliesUseNativeLogicalOrderDespiteClockSkewAndArrivalOrder() {
+        val sent=MessageSnapshot("1".repeat(32),a,b,9000,10,12,0,"Outgoing fixture")
+        val reply=MessageSnapshot("2".repeat(32),b,a,1000,11,13,2,"Reply fixture")
+        val delivered=sent.copy(delivery=2,sequence=14)
+        val expected=listOf(delivered,reply)
+        assertEquals(expected,chronologicalMessages(listOf(reply,sent,delivered)))
+        assertEquals(expected,chronologicalMessages(listOf(delivered,reply,sent)))
+        assertEquals(expected,chronologicalMessages(expected.reversed()))
+        // Projection never changes persisted timestamps, logical clocks or IDs.
+        assertEquals(9000L,expected.first().timestamp)
+        assertEquals(1000L,expected.last().timestamp)
+    }
     @Test fun duplicateNamesRemainSeparateAccountDeviceBindings() {
         val result=reconcileFriends(emptyList(),listOf(FriendIdentity(8,"Jonah",a,true),FriendIdentity(9,"Jonah",b,false)))
         assertEquals(listOf(8L,9L),result.map {it.accountId})
