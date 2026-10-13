@@ -255,6 +255,9 @@ int main(){try{
         auto providerScope=ar::sessionAuthorization(se.policy(),sb.peerId,sa.peerId,sb.peerId);unsigned steps=0;
         while(!restored.snapshot().complete){auto request=restored.request(*restored.scope(),100,1);check(!request.empty());auto response=ar::serveSyncControl(splitA,sa,se.policy(),providerScope,request,[&](const std::string& peer){return splitA.historicalDeviceAccount(peer);},201);restored.control(*restored.scope(),response,201,100);check(++steps<100);}
         restored.tick(101,1);check(splitB.message(recovered.id)&&splitB.message(recovered.id)->text==recovered.text&&splitB.history(pc.peerId).size()==1);
+        auto verifyStatus=[&](ar::Execution& owner,unsigned activity){protocol::Writer w(ar::LocalFormat);owner.statusProjection(w,101);protocol::Reader r(w.data);check(r.type()==ar::LocalFormat&&r.string()=="PeerChat/ArchiveStatus/v1"&&r.number()==activity&&r.number()==1&&r.number()==201&&r.number()==1&&r.number()==1&&r.number()==0&&r.string()==sa.peerId);};
+        verifyStatus(restored,0);restored.startAutomatic(sb.peerId,sa.peerId,102);verifyStatus(restored,1); // New activity never overwrites the previous full result.
+        while(!restored.snapshot().complete){auto request=restored.request(*restored.scope(),102,1);auto response=ar::serveSyncControl(splitA,sa,se.policy(),providerScope,request,[&](const std::string& peer){return splitA.historicalDeviceAccount(peer);},202);restored.control(*restored.scope(),response,202,102);check(++steps<200);}restored.tick(103,1);check(restored.received()==0&&restored.snapshot().conversations==1); // A new scan is not cumulative conversation completion.
     }
     {ar::Execution reopened(splitB,sb,re.policy(),splitDelivery,splitSessions);check(reopened.needsAutomaticSync(0)&&reopened.lastAutomaticSource()==sa.peerId);}
     check(splitB.archiveAuthorizationState()==policyBefore&&!re.policy().trustsAuthority(sa.publicKey));

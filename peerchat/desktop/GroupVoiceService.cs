@@ -45,6 +45,8 @@ public sealed class GroupVoiceService:IDisposable {
     IntPtr handle;string desiredGroup="",desiredRoom="",boundEpoch="",boundParticipation="",boundSources="",failedParticipation="";ulong generation;
     readonly List<PendingSignal> signals=new List<PendingSignal>();
     volatile string diagnosticState="Local participation: Not joined";
+    volatile string metrics="{}";
+    public string Metrics(string selectedGroup){return status.GroupId==selectedGroup?metrics:"{}";}
     public event Action<GroupVoiceFailure> Failed;
     ulong apmFailureReported;
     void Fail(string group,string room,string reason,string stage,string participation){
@@ -65,7 +67,7 @@ public sealed class GroupVoiceService:IDisposable {
     public bool RoomAction(string group,string room,string operation){if(operation!="rename"&&operation!="close"&&operation!="start_share"&&operation!="stop_share"&&operation!="join_viewer"&&operation!="leave_viewer")return false;var d=discovery();return d!=null&&d.QueueGroupRoom(group,operation,room);}
     public Task SetMuted(bool value){return Task.Run(()=>{lock(gate){if(handle!=IntPtr.Zero&&pc_group_voice_mute(handle,value?1:0)!=0)status=new GroupVoiceRoomStatus(status.GroupId,status.RoomId,status.State,status.Error,status.Joined,value,status.Deafened);}});}
     public Task SetDeafened(bool value){return Task.Run(()=>{lock(gate){if(handle!=IntPtr.Zero){pc_group_voice_deafen(handle,value?1:0);status=new GroupVoiceRoomStatus(status.GroupId,status.RoomId,status.State,status.Error,status.Joined,status.Muted,value);}}});}
-    void Stop(){if(handle!=IntPtr.Zero)pc_group_voice_stop(handle);boundEpoch=boundParticipation=boundSources="";signals.Clear();}
+    void Stop(){if(handle!=IntPtr.Zero)pc_group_voice_stop(handle);metrics="{}";boundEpoch=boundParticipation=boundSources="";signals.Clear();}
     // Called on the existing application pulse. The asynchronous control work
     // remains serialized and never blocks the WPF dispatcher on device teardown.
     public async Task Pump(){
@@ -106,7 +108,7 @@ public sealed class GroupVoiceService:IDisposable {
                     if(pending.Attempts>=4){signals.Remove(pending);continue;}
                     pending.Request=d.QueueGroupMediaSignal(group,room,target.AccountId,target.PeerId,output.routeId,(long)output.generation,output.kind,output.data,output.mid);++pending.Attempts;
                 }
-                var current=json.Deserialize<NativeState>(Marshal.PtrToStringUni(pc_group_voice_snapshot(handle)));
+                metrics=Marshal.PtrToStringUni(pc_group_voice_snapshot(handle));var current=json.Deserialize<NativeState>(metrics);
                 if(current.apmFailure!=0&&apmFailureReported!=generation){apmFailureReported=generation;var report=Failed;if(report!=null)report(new GroupVoiceFailure(group,room,"Audio processing degraded; raw microphone audio continues","audio_processing",Marshal.PtrToStringUni(pc_group_voice_snapshot(handle)),generation));}
                 string connection=voice.Members.Count==1?"In voice · alone":current.routes.Any(r=>r.connected)?"In voice · connected":current.routes.Any(r=>r.state=="4"||r.state=="5")?"In voice · participant media unavailable":"In voice · connecting";
                 status=new GroupVoiceRoomStatus(group,room,connection,current.error??"",current.active,current.muted,current.deafened);

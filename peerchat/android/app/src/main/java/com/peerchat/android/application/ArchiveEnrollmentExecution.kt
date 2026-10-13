@@ -29,8 +29,10 @@ internal class ArchiveEnrollmentExecution(
         val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text();val attachments=r.number()
         val received=r.number();val revision=r.number();val success=r.number();val scan=r.number();val enabled=r.number()
         var deferred=0L;var rejected=0L;if(r.hasRemaining()){require(r.text()=="PeerChat/ArchiveScanAccounting/v1");deferred=r.number();rejected=r.number();require(deferred>=0&&rejected>=0)}
+        var activity=-1;var outcome=0;var at=0L;var imported=0L;var completed=0L;var unresolved=0L;var resultSource="";var provided=0L;var providers=emptyList<String>()
+        if(r.hasRemaining()){require(r.text()=="PeerChat/ArchiveStatus/v1");activity=r.number().toInt();outcome=r.number().toInt();require(activity in 0..6&&outcome in 0..4);at=r.number();imported=r.number();completed=r.number();unresolved=r.number();resultSource=r.text();provided=r.number();val count=r.number();require(count in 0..8&&at in 0..253402300799999L&&imported>=0&&completed>=0&&unresolved>=0&&provided>=0&&(resultSource.isEmpty()||resultSource.matches(Regex("[0-9a-f]{64}"))));providers=List(count.toInt()){r.text().also{require(it.matches(Regex("[0-9a-f]{64}")))}};require(providers.distinct().size==providers.size)}
         require(state.length<=128&&complete<=1&&running<=1&&enabled<=1&&success<=253402300799999L&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
-        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments,received,revision,success,scan,enabled==1L,generation,deferred,rejected)
+        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments,received,revision,success,scan,enabled==1L,generation,deferred,rejected,activity,outcome,at,imported,completed,unresolved,resultSource,provided,providers)
     }
     fun devices(account:Long,generation:Long,base:ByteArray):List<ArchiveDeviceSnapshot>{
         val rows=archiveDeviceSnapshots(base)

@@ -107,6 +107,7 @@ public sealed class ActiveDiagnosticOperation {
 }
 
 public sealed class DiagnosticsSources {
+    public Func<string> Transfers {get;set;}
     public Func<string> HistorySync {get;set;}
     public Func<string> Connection {get;set;}
     public Func<string> ConnectionEvents {get;set;}
@@ -134,6 +135,7 @@ public sealed class DiagnosticsService {
     public DiagnosticsSnapshot Capture(){
         var sections=new List<DiagnosticsSection>();
         Add(sections,"History Sync authorization",Read(sources.HistorySync));
+        Add(sections,"File transfers",Read(sources.Transfers));
         Add(sections,"Connection",Read(sources.Connection));Add(sections,"Connection events",Read(sources.ConnectionEvents));
         Add(sections,"Security",Read(sources.Security));
         var voice=ReadVoice();Add(sections,"Voice",String.IsNullOrWhiteSpace(voice)?Read(sources.Voice):voice);
@@ -320,4 +322,34 @@ public sealed class DiagnosticsRetentionStore {
     static FailureSnapshot CloneFailure(FailureSnapshot v){return new FailureSnapshot{Id=v.Id,TimestampUtc=v.TimestampUtc,Title=DiagnosticsPrivacyFilter.Redact(v.Title),OperationType=v.OperationType,OperationId=DiagnosticsPrivacyFilter.Redact(v.OperationId),FailureDomain=v.FailureDomain,Reason=DiagnosticsPrivacyFilter.Redact(v.Reason),Stage=DiagnosticsPrivacyFilter.Redact(v.Stage),Generation=v.Generation,Module=v.Module,Diagnostics=BoundSnapshot(v.Diagnostics)};}
     void WriteAtomic(string path,string value){Directory.CreateDirectory(root);string temporary=path+".tmp";File.WriteAllText(temporary,value,new System.Text.UTF8Encoding(false));try{if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);}finally{if(File.Exists(temporary))File.Delete(temporary);}}
 }
+}
+
+namespace PeerChatDesktop {
+// Presentation consumes native-owned counters/rates. No transport collection,
+// counter deltas, persisted live samples or per-window statistics engines.
+public sealed class GroupTelemetryProjection {
+    public bool VoiceActive,ScreenActive;public double? CapturedFps,EncodedFps,PresentedFps,UploadMbps,DownloadMbps;
+    public string Voice="Voice: Idle",Screen="Screen Share: Idle",Transport="N/A",Participants="",Health="",ScreenHealth="";
+    public string Text {get{return Voice+"\n"+Screen+"\nTransport: "+Transport+"\nCaptured FPS: "+Metric(CapturedFps)+" · Encoded FPS: "+Metric(EncodedFps)+" · Presented FPS: "+Metric(PresentedFps)+"\nPayload submission upload (total): "+Metric(UploadMbps)+" Mbps · Payload received download (total): "+Metric(DownloadMbps)+" Mbps\nRTT / packet loss / end-to-end latency: N/A\n"+Health+"\n"+ScreenHealth+"\n"+Participants;}}
+    public static string Metric(double? value){return value.HasValue?value.Value.ToString("0.00",System.Globalization.CultureInfo.InvariantCulture):"N/A";}
+    static Dictionary<string,object> Parse(string raw){try{if(String.IsNullOrEmpty(raw)||raw.Length>262144)return new Dictionary<string,object>();return new JavaScriptSerializer{MaxJsonLength=262144}.Deserialize<Dictionary<string,object>>(raw)??new Dictionary<string,object>();}catch{return new Dictionary<string,object>();}}
+    static object Value(Dictionary<string,object> row,string key){object value;return row.TryGetValue(key,out value)?value:null;}
+    static bool Flag(Dictionary<string,object> row,string key){return Object.Equals(Value(row,key),true);}
+    static double? Number(Dictionary<string,object> row,string key){var value=Value(row,key);if(value==null)return null;try{double d=Convert.ToDouble(value,System.Globalization.CultureInfo.InvariantCulture);return d>=0&&!Double.IsNaN(d)&&!Double.IsInfinity(d)?(double?)d:null;}catch{return null;}}
+    static string Safe(Dictionary<string,object> row,string key){string value=Convert.ToString(Value(row,key));return DiagnosticsPrivacyFilter.Redact(value.Length>160?value.Substring(0,160):value);}
+    static IEnumerable<Dictionary<string,object>> Routes(Dictionary<string,object> row){var values=Value(row,"routes") as System.Collections.IEnumerable;return values==null?Enumerable.Empty<Dictionary<string,object>>():values.Cast<object>().Take(32).OfType<Dictionary<string,object>>();}
+    public static GroupTelemetryProjection Create(string voice,IEnumerable<string> screens){
+        var p=new GroupTelemetryProjection();var v=Parse(voice);p.VoiceActive=Flag(v,"active");var screen=(screens??new string[0]).Take(8).Select(Parse).Where(r=>Flag(r,"active")).ToArray();p.ScreenActive=screen.Length>0;
+        p.Voice=p.VoiceActive?"Voice: Joined · Opus · "+Routes(v).Count(r=>Flag(r,"connected"))+" / "+Routes(v).Count()+" remote routes connected":"Voice: Idle";p.Screen=p.ScreenActive?"Screen Share: "+(screen.Any(r=>Number(r,"encoderCount")>0)?"Sharing (You)":"Watching")+" · H.264":"Screen Share: Idle";
+        var all=Routes(v).Concat(screen.SelectMany(Routes)).ToArray();bool connected=all.Any(r=>Flag(r,"connected"));p.Transport=connected?all.Where(r=>Flag(r,"connected")).All(r=>Flag(r,"turn"))?"TURN / WebRTC UDP":"Mixed / see participants":"N/A (no connected route)";
+        Func<string,double?> rate=key=>{var values=all.Select(r=>Number(r,key)).ToArray();return values.Length>0&&values.All(n=>n.HasValue)?values.Sum(n=>n.Value)/1000000:(double?)null;};p.UploadMbps=rate("sendPayloadBits");p.DownloadMbps=rate("receivePayloadBits");
+        var encoders=screen.Where(r=>Number(r,"encoderCount")>0).ToArray();if(encoders.Length==1){p.CapturedFps=Number(encoders[0],"capturedFps");p.EncodedFps=Number(encoders[0],"encodedFps");}
+        var viewers=screen.Where(r=>Number(r,"encoderCount")==0).SelectMany(Routes).ToArray();if(viewers.Length==1)p.PresentedFps=Number(viewers[0],"presentedFps");
+        p.Health="Capture 10ms blocks: "+Metric(Number(v,"captureBlocks"))+" · Mixed blocks: "+Metric(Number(v,"mixedBlocks"))+" · Playout busy/silence blocks: "+Metric(Number(v,"underrunBlocks"))+"\nAEC reference underruns: "+Metric(Number(v,"aec_reference_underruns"))+" · AEC delay estimate: "+Metric(Number(v,"aec_delay_ms"))+" ms (not network latency)";
+        p.ScreenHealth=String.Join("\n",screen.Select(r=>"Encoder queue drops: "+Metric(Number(r,"encoderQueueDrops"))+" · Average captured/encoded FPS: "+Metric(Number(r,"captureFpsAverage"))+" / "+Metric(Number(r,"encodeFpsAverage"))));
+        p.ScreenHealth+="\n"+String.Join("\n",screen.SelectMany(Routes).Select(r=>MediaPerformanceSummary.Screen(Convert.ToString(Value(r,"details")))));
+        p.Participants=String.Join("\n",all.Select(r=>Safe(r,"sourceKey")+" · "+Safe(r,"state")+" · "+(Flag(r,"connected")?(Flag(r,"turn")?"TURN":"Selected non-TURN route"):"Not connected")+" · sent payload "+Metric(Number(r,"sendPayloadBits")/1000000)+" Mbps · received payload "+Metric(Number(r,"receivePayloadBits")/1000000)+" Mbps · received packets/s · decoded/presented FPS "+Metric(Number(r,"receivedPacketsPerSecond"))+" / "+Metric(Number(r,"decodedFps"))+" / "+Metric(Number(r,"presentedFps"))));return p;
+    }
+}
+
 }

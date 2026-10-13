@@ -49,6 +49,8 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         appendLine("Profile identity: ${snapshot.localPeerId}")
         appendLine("History Sync admission:")
         appendLine(snapshot.archiveAuthorizationDiagnostics)
+        appendLine("File transfer measurements (native, confirmed/durable bytes):")
+        appendLine(snapshot.transferDiagnostics)
         for(c in snapshot.conversations) {
             appendLine("${c.friend.username}:${c.friend.accountId} · Server Relay")
             appendLine("Ready=${c.connection.ready} Pending=${c.connection.pending} Retrying=${c.connection.retrying}")

@@ -90,6 +90,9 @@ internal sealed class ArchiveEnrollmentExecution {
     public sealed class SyncProgress {
         public string State,Source;public long Processed,Conversations,Attachments,Received,HistoryRevision,LastSuccessful,ScanGeneration;public bool Complete,Running,Enabled;
         public long Deferred,RejectedBatches;
+        public int Activity=-1,LastResult;public long ResultAt,ResultImported,ResultConversations,ResultDeferred,ProvidedQueued;public string ResultSource="";public string[] Providers=new string[0];
+        public string CurrentActivity {get{return Activity<0?DisplayState:new[]{"Idle","Connecting","Importing","Waiting","Paused","Off","Failed"}[Activity];}}
+        public string LastResultSummary {get{return LastResult==0?"No completed result recorded":new[]{"None","Full","Partial","Failed","Cancelled"}[LastResult]+" · "+ResultImported+" messages imported · "+ResultConversations+" conversations completed · "+ResultDeferred+" unresolved records";}}
         public string DisplayState {get {
             string value=(State??"").ToLowerInvariant();
             if(value.StartsWith("partial history",StringComparison.Ordinal))return "Partial";
@@ -116,6 +119,7 @@ internal sealed class ArchiveEnrollmentExecution {
             result.Received=r.ReadInt64();result.HistoryRevision=r.ReadInt64();result.LastSuccessful=r.ReadInt64();result.ScanGeneration=r.ReadInt64();
             long enabled=r.ReadInt64();Check(enabled==0||enabled==1);result.Enabled=enabled==1;
             if(stream.Position<stream.Length){Check(text()=="PeerChat/ArchiveScanAccounting/v1");result.Deferred=r.ReadInt64();result.RejectedBatches=r.ReadInt64();Check(result.Deferred>=0&&result.RejectedBatches>=0);}
+            if(stream.Position<stream.Length){Check(text()=="PeerChat/ArchiveStatus/v1");long activity=r.ReadInt64(),outcome=r.ReadInt64();Check(activity>=0&&activity<=6&&outcome>=0&&outcome<=4);result.Activity=(int)activity;result.LastResult=(int)outcome;result.ResultAt=r.ReadInt64();result.ResultImported=r.ReadInt64();result.ResultConversations=r.ReadInt64();result.ResultDeferred=r.ReadInt64();result.ResultSource=text();result.ProvidedQueued=r.ReadInt64();long count=r.ReadInt64();Check(count>=0&&count<=8&&result.ResultAt>=0&&result.ResultAt<=253402300799999L&&result.ResultImported>=0&&result.ResultConversations>=0&&result.ResultDeferred>=0&&result.ProvidedQueued>=0);var peers=new List<string>();for(long n=0;n<count;n++){string peer=text();Check(peer.Length==64);peers.Add(peer);}result.Providers=peers.ToArray();}
             Check(result.Received>=0&&result.HistoryRevision>=0&&result.LastSuccessful>=0&&result.LastSuccessful<=253402300799999L&&result.ScanGeneration>=0);
             Check(result.Processed>=0&&result.Conversations>=0&&result.Attachments>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
         }

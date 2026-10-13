@@ -46,7 +46,7 @@ public:
     }
     // Explicit new scan preserves every per-conversation resume cursor. A
     // completed scan is never silently restarted by a transport poll.
-    void rescan(){current();require(!pending_&&complete_&&attachments_->snapshot().complete);attachments_->rescan();position_.after=position_.through=0;deferred_=0;complete_=false;persist();}
+    void rescan(){current();require(!pending_&&complete_&&attachments_->snapshot().complete);attachments_->rescan();position_.after=position_.through=0;processed_=conversations_=deferred_=0;complete_=false;persist();}
     Blob nextRequest(bool allowDeferred=false){
         current();require(!pending_);if(complete_)return attachments_->nextRequest();
         Blob request;

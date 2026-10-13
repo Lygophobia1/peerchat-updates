@@ -182,6 +182,8 @@ public sealed class AttachmentCard:StackPanel {
 }
 public partial class DesktopApplication {
     bool chatAttachmentRefreshing;long chatAttachmentCursor;DateTime chatCatalogAt=DateTime.MinValue;
+    string attachmentTelemetry="";long attachmentTelemetryAccount;ulong attachmentTelemetryGeneration;
+    string AttachmentDiagnostics(){return discovery!=null&&attachmentTelemetryAccount==discovery.AccountId&&attachmentTelemetryGeneration==authenticatedFriendSnapshotGeneration?attachmentTelemetry:"No current profile/account transfer snapshot.";}
     readonly SemaphoreSlim attachmentCopies=new SemaphoreSlim(2,2);
     readonly Dictionary<string,CoreAdapter.FileTransferData> chatCatalog=new Dictionary<string,CoreAdapter.FileTransferData>();
     string dragConversation;bool dragTargetCaptured;
@@ -234,7 +236,8 @@ public partial class DesktopApplication {
     async Task RefreshChatAttachments(){
         if(closing||chatAttachmentRefreshing||fileTransferOperating||!model.Listening)return;chatAttachmentRefreshing=true;
         try{
-            var rows=await Task.Run(()=>core.FileTransfers());if(closing)return;
+            var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;
+            var sample=await Task.Run(()=>new{Rows=core.FileTransfers(),Diagnostics=core.FileTransfer(11)});if(closing||owner!=discovery||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration)return;var rows=sample.Rows;attachmentTelemetry=sample.Diagnostics;attachmentTelemetryAccount=account;attachmentTelemetryGeneration=generation;
             if(DateTime.UtcNow-chatCatalogAt>TimeSpan.FromSeconds(5)){
                 var page=await Task.Run(()=>core.ArchiveAttachments(chatAttachmentCursor));if(closing)return;
                 foreach(var item in page.records??new CoreAdapter.ArchiveAttachment[0]){

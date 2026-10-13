@@ -485,7 +485,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
             peerchat::protocol::check(instance->archiveApplication&&instance->archiveExecution);
             auto scope=request->authorization;auto owner=instance.get();
             archive=peerchat::portable::ReliableEndpoint::ArchiveAdmission{&instance->archiveApplication->policy(),scope,
-                [owner,scope](const peerchat::Blob& bytes){peerchat::protocol::Reader r(bytes);if(r.type()==peerchat::protocol::ArchiveControl&&r.string()==peerchat::archive::AttachmentDomain){peerchat::protocol::check(r.number()==1);if(r.number()>=3){owner->prepareAttachments(runtimeNow());owner->archiveTransfers->control(scope,bytes,runtimeNow());return peerchat::Blob{};}}return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());},true};
+                [owner,scope](const peerchat::Blob& bytes){peerchat::protocol::Reader r(bytes);if(r.type()==peerchat::protocol::ArchiveControl&&r.string()==peerchat::archive::AttachmentDomain){peerchat::protocol::check(r.number()==1);if(r.number()>=3){owner->prepareAttachments(runtimeNow());owner->archiveTransfers->control(scope,bytes,runtimeNow());return peerchat::Blob{};}}return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());},true,[owner,scope](const peerchat::Blob& bytes){owner->archiveExecution->sourceQueued(scope,bytes);}};
         }
         instance->prepareAttachments(runtimeNow());auto owner=instance.get();
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,

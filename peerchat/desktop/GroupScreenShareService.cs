@@ -34,18 +34,20 @@ public sealed class GroupScreenShareService:IDisposable {
     sealed class PublishedState {
         internal readonly Dictionary<string,GroupScreenRoomStatus> Status=new Dictionary<string,GroupScreenRoomStatus>(StringComparer.Ordinal);
         internal readonly Dictionary<string,string> Details=new Dictionary<string,string>(StringComparer.Ordinal);
+        internal readonly Dictionary<string,string[]> Metrics=new Dictionary<string,string[]>(StringComparer.Ordinal);
     }
     volatile PublishedState published=new PublishedState();
     // Called only under the worker gate. Published dictionaries are immutable
     // after replacement, so rendering never waits for native teardown/pumping.
     void Publish(){var next=new PublishedState();foreach(var s in sessions.Values)next.Status.Add(Key(s.Group,s.Room),s.Status);
         foreach(var group in sessions.Values.GroupBy(s=>s.Group))next.Details.Add(group.Key,String.Join("\n",group.Select(s=>"Room ID: "+s.Room+"\nShare generation: "+s.Share+"\nLocal role: "+(s.Sender?"Sharer":"Viewer")+"\nBackend: WebRTC Compatibility\nTopology: RelayMesh\nState: "+s.Status.State+"\n"+s.Diagnostics)));
-        published=next;}
+        foreach(var group in sessions.Values.GroupBy(s=>s.Group))next.Metrics.Add(group.Key,group.Where(s=>!s.Failed&&s.Handle!=IntPtr.Zero).Select(s=>s.Diagnostics).ToArray());published=next;}
     public event Action<GroupVoiceFailure> Failed;
     public GroupScreenShareService(Func<DiscoveryClient> discovery,Func<string> device,Func<Task<GroupVoiceMediaConfiguration>> configuration){this.discovery=discovery;this.device=device;this.configuration=configuration;}
     static string Key(string group,string room){return group+":"+room;}
     public GroupScreenRoomStatus Snapshot(string group,string room){GroupScreenRoomStatus status;return published.Status.TryGetValue(Key(group,room),out status)?status:new GroupScreenRoomStatus(group,room,"Inactive","",false,false,false,0);}
     public string Diagnostics(string group){string details;return published.Details.TryGetValue(group,out details)?details:"Local screen participation: Inactive";}
+    public string[] Metrics(string group){string[] rows;return published.Metrics.TryGetValue(group,out rows)?rows.ToArray():new string[0];}
     public Task<bool> StartSharing(string group,string room,ScreenSource source,ScreenSharePreferenceData preferences){return Select(group,room,true,source,0,preferences);}
     public Task<bool> Watch(string group,string room,ulong window,ScreenSharePreferenceData preferences){return Select(group,room,false,null,window,preferences);}
     Task<bool> Select(string group,string room,bool sender,ScreenSource source,ulong window,ScreenSharePreferenceData preferences){

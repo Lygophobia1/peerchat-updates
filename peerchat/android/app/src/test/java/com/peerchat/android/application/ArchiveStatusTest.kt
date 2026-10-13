@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ArchiveStatusTest {
+    @Test fun currentReaderActivityDoesNotReplaceCompletedResultAndProviderCountersAreSeparate(){
+        val native:(Int,ByteArray)->ByteArray={op,_->NativeRecordWriter(31).also{w->
+            w.text("PeerChat/ArchiveApplication/v1");w.number(1);w.number(op.toLong());w.text("Connecting to archive");w.number(0);w.number(0);w.number(0);w.number(1);w.text("a".repeat(64));w.number(0)
+            w.number(0);w.number(25);w.number(1000);w.number(2);w.number(1);w.text("PeerChat/ArchiveScanAccounting/v1");w.number(0);w.number(0)
+            w.text("PeerChat/ArchiveStatus/v1");w.number(1);w.number(2);w.number(1000);w.number(22);w.number(3);w.number(236);w.text("a".repeat(64));w.number(8);w.number(1);w.text("b".repeat(64))
+        }.bytes()}
+        val p=ArchiveEnrollmentExecution(native){_,_->error("No status RPC")}.progress(4,2)
+        assertEquals("Connecting",p.currentActivity);assertFalse(p.complete);assertTrue(p.lastResultSummary.startsWith("Partial"));assertEquals(22L,p.resultImported);assertEquals(236L,p.resultDeferred);assertEquals(8L,p.providedQueued);assertEquals(0L,p.received);assertEquals(1,p.providers.size)
+        assertTrue(p.copy(projectionFresh=false).currentActivity.contains("unavailable"));assertEquals(p.lastResultSummary,p.copy(projectionFresh=false).lastResultSummary)
+    }
     @Test fun partialAccountingDoesNotClaimFullCompletion(){
         val native:(Int,ByteArray)->ByteArray={op,_->NativeRecordWriter(31).also{w->
             w.text("PeerChat/ArchiveApplication/v1");w.number(1);w.number(op.toLong());w.text("Partial history: 3 unresolved records");w.number(25);w.number(1);w.number(0);w.number(0);w.text("a".repeat(64));w.number(0)

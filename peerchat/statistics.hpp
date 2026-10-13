@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <string>
 
 namespace peerchat::statistics {
 // Passive bounded meter. The existing worker owns clock, lifetime and publication;
@@ -24,5 +26,17 @@ public:
         return {highWater_,rate_,elapsed,true,steady_>=2};
     }
     std::uint64_t current(std::uint64_t now,bool active)const{return active&&now>=progressAt_&&now-progressAt_<1000?rate_:0;}
+};
+// Session-local counter views reuse the same meter; no second collection owner.
+class CounterRates {
+    struct Counter {RateMeter meter;std::uint64_t previous=0;};
+    std::map<std::string,Counter> rows_;
+public:
+    void clear(){rows_.clear();}
+    std::uint64_t sample(const std::string& key,std::uint64_t value,std::uint64_t now,bool active){
+        auto i=rows_.find(key);if(i==rows_.end()){if(rows_.size()>=256)return 0;i=rows_.emplace(key,Counter{}).first;i->second.meter.baseline(value,now);}
+        if(value<i->second.previous)i->second.meter.baseline(value,now);
+        i->second.previous=value;i->second.meter.observe(value,now,active);return i->second.meter.current(now,active);
+    }
 };
 }

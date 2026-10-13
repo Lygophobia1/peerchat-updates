@@ -103,7 +103,7 @@ class ArchiveDevicesUiTest {
         compose.runOnIdle{state.value=state.value.copy(archiveProgress=state.value.archiveProgress.copy(received=10,conversations=2))}
         compose.onNodeWithText("10 new messages received this session · 2 conversations completed").assertExists()
         compose.runOnIdle{assertTrue(actions.isEmpty());state.value=state.value.copy(archiveProgress=state.value.archiveProgress.copy(state="History synchronized",running=false,complete=true,lastSuccessful=1791740000000))}
-        compose.onNodeWithText("Phase: Complete",substring=true).assertExists()
+        compose.onNodeWithText("Current activity: Complete",substring=true).assertExists()
         compose.onNodeWithText("Last successful sync: Not recorded").assertDoesNotExist()
     }
 }

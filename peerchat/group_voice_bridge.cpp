@@ -1,11 +1,13 @@
 // Narrow application/native boundary. No C++ object or allocator crosses it.
 // The application serializes all calls; device/callback workers stay native.
 #include "group_voice_session.hpp"
+#include "statistics.hpp"
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 #define GROUP_API extern "C" __declspec(dllexport)
 namespace {
-struct Bridge {bool aec=false;peerchat::GroupVoiceSession session{std::make_unique<peerchat::RelayMeshVoiceTopology>()};std::wstring output;};
+struct Bridge {bool aec=false;peerchat::GroupVoiceSession session{std::make_unique<peerchat::RelayMeshVoiceTopology>()};std::wstring output;peerchat::statistics::CounterRates rates;};
 std::string ascii(const wchar_t* p){std::string s;if(p)for(;*p;++p){if(*p>127)throw std::invalid_argument("Invalid text");s+=static_cast<char>(*p);}return s;}
 std::wstring wide(const std::string& s){return {s.begin(),s.end()};}
 std::wstring quote(const std::wstring& s){std::wostringstream o;o<<L'"';for(auto c:s){if(c==L'"'||c==L'\\')o<<L'\\'<<c;else if(c<32){const wchar_t* hex=L"0123456789abcdef";o<<L"\\u00"<<hex[(c>>4)&15]<<hex[c&15];}else o<<c;}o<<L'"';return o.str();}
@@ -61,12 +63,12 @@ GROUP_API const wchar_t* pc_group_voice_take_signals(void* h){
 GROUP_API const wchar_t* pc_group_voice_snapshot(void* h){
     if(!h)return L"{}";
     auto& b=*static_cast<Bridge*>(h);
-    try{auto s=b.session.snapshot();std::wostringstream o;o<<L"{\"active\":"<<(s.active?L"true":L"false")<<L",\"muted\":"<<(s.muted?L"true":L"false")<<L",\"deafened\":"<<(s.deafened?L"true":L"false")
+    try{auto s=b.session.snapshot();auto now=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());if(!s.active)b.rates.clear();std::wostringstream o;o<<L"{\"active\":"<<(s.active?L"true":L"false")<<L",\"muted\":"<<(s.muted?L"true":L"false")<<L",\"deafened\":"<<(s.deafened?L"true":L"false")
         <<L",\"encodedPackets\":"<<s.encodedPackets<<L",\"fanoutCopies\":"<<s.fanoutCopies<<L",\"apmActive\":"<<(s.apmActive?L"true":L"false")<<L",\"apmFailure\":"<<s.apmFailure
         <<L",\"aec_enabled\":"<<(s.aecEnabled?L"true":L"false")<<L",\"aec_render_reference_active\":"<<(s.referenceActive?L"true":L"false")<<L",\"aec_render_blocks\":"<<s.renderBlocks<<L",\"aec_reference_underruns\":"<<s.referenceUnderruns<<L",\"aec_resets\":"<<s.aecResets<<L",\"aec_delay_ms\":"<<s.aecDelayMs<<L",\"captureBlocks\":"<<s.captureBlocks<<L",\"acceptedPackets\":"<<s.receive.acceptedPackets<<L",\"mixedBlocks\":"<<s.receive.mixedBlocks<<L",\"underrunBlocks\":"<<s.receive.underrunBlocks
         <<L",\"receiveLastError\":"<<s.receive.lastError<<L",\"error\":"<<quote(s.error)<<L",\"routes\":[";bool first=true;
         for(const auto& r:s.routes){if(!first)o<<L',';first=false;o<<L"{\"sourceKey\":"<<quote(wide(r.sourceKey))<<L",\"connected\":"<<(r.connected?L"true":L"false")<<L",\"turn\":"<<(r.turn?L"true":L"false")
-            <<L",\"state\":"<<quote(wide(r.state))<<L",\"reason\":"<<quote(wide(r.reason))<<L",\"sentPackets\":"<<r.sentPackets<<L",\"receivedPackets\":"<<r.receivedPackets<<L'}';}o<<L"]}";b.output=o.str();
+            <<L",\"state\":"<<quote(wide(r.state))<<L",\"reason\":"<<quote(wide(r.reason))<<L",\"sentPackets\":"<<r.sentPackets<<L",\"receivedPackets\":"<<r.receivedPackets<<L",\"sendPayloadBits\":"<<b.rates.sample(r.routeId+"s",r.sentBytes,now,r.connected)<<L",\"receivePayloadBits\":"<<b.rates.sample(r.routeId+"r",r.receivedBytes,now,r.connected)<<L'}';}o<<L"]}";b.output=o.str();
     }catch(...){b.output=L"{}";}return b.output.c_str();
 }
 GROUP_API int pc_group_voice_mute(void* h,int value){try{std::wstring error;return h&&static_cast<Bridge*>(h)->session.mute(value!=0,error);}catch(...){return 0;}}

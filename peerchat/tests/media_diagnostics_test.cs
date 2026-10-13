@@ -6,8 +6,13 @@ using System.Windows;
 using System.Windows.Controls;
 using PeerChatDesktop;
 class MediaDiagnosticsTest {
-    static void Check(bool value){if(!value)throw new Exception("Media summary regression");}
+    static void Check(bool value,[System.Runtime.CompilerServices.CallerLineNumber]int line=0){if(!value)throw new Exception("Media summary regression at line "+line);}
     [STAThread] static int Main(string[] args){
+        var empty=GroupTelemetryProjection.Create("{}",new string[0]);Check(!empty.VoiceActive&&!empty.ScreenActive&&empty.Text.Contains("N/A"));
+        string participant="{\"sourceKey\":\"verified-device\",\"connected\":true,\"turn\":true,\"state\":\"Connected\",\"sendPayloadBits\":1000000,\"receivePayloadBits\":2000000}";
+        var metrics=GroupTelemetryProjection.Create("{\"active\":true,\"routes\":["+participant+"]}",new[]{"{\"active\":true,\"encoderCount\":1,\"capturedFps\":30,\"encodedFps\":29,\"routes\":["+participant+","+participant+","+participant+"]}"});
+        Check(metrics.VoiceActive&&metrics.ScreenActive&&metrics.UploadMbps==4&&metrics.DownloadMbps==8&&metrics.EncodedFps==29&&metrics.Transport.Contains("TURN")&&metrics.Participants.Contains("verified-device"));
+        Check(GroupTelemetryProjection.Create("malformed",new[]{"invalid"}).Text.Contains("N/A"));
         var voice=MediaPerformanceSummary.Voice("rtp_arrival_jitter_ms=4.2\nrtp_missing_estimate=2\nneteq_current_delay_ms=40\nneteq_target_delay_ms=60\nperf_apm_capture=count:8;last_us:100;max_us:300;mean_us:120;deadline_misses:0");
         Check(voice.Contains("4.2")&&voice.Contains("estimate")&&voice.Contains("40 ms")&&voice.Contains("300 µs")&&voice.Contains("unavailable"));
         var screen=MediaPerformanceSummary.Screen("rendered_fps=29\ndecoder_queue_depth=8\ndecoder_oldest_queue_age_ms=230\ndropped_decode_queue=1\nawaiting_recovery_idr=true\nperf_screen_present=count:2;max_us:80000");
@@ -45,6 +50,11 @@ class MediaDiagnosticsTest {
             // Presentation fixture only, not a real group media acceptance claim.
             var displayed=new GroupModel{Data=new GroupData{id=new string('a',32),name="Before",members=new GroupMemberData[0],invites=new GroupMemberData[0]}};
             model.GroupChats[displayed.Id]=displayed;model.Groups=true;model.SelectedGroup=displayed;
+            typeof(DesktopApplication).GetMethod("RefreshGroupDetails",flags).Invoke(desktop,new object[]{true});typeof(DesktopApplication).GetField("groupTelemetry",flags).SetValue(desktop,metrics);
+            var openGraphs=typeof(DesktopApplication).GetMethod("OpenGroupDiagnostics",flags);openGraphs.Invoke(desktop,null);openGraphs.Invoke(desktop,null);
+            var graphWindow=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop);Check(graphWindow!=null&&app.Windows.Cast<Window>().Count(w=>w==graphWindow)==1);
+            var tabs=(TabControl)typeof(DesktopApplication).GetField("groupDiagnosticTabs",flags).GetValue(desktop);Check(tabs.Items.Count==6);graphWindow.Width=540;graphWindow.Height=420;graphWindow.UpdateLayout();Check(tabs.ActualWidth>0);graphWindow.Close();Check(typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop)==null);
+            openGraphs.Invoke(desktop,null);graphWindow=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",flags).GetValue(desktop);graphWindow.UpdateLayout();var visual=(FrameworkElement)graphWindow.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)visual.ActualWidth,(int)visual.ActualHeight,96,96,System.Windows.Media.PixelFormats.Pbgra32);bitmap.Render(visual);var png=new System.Windows.Media.Imaging.PngBitmapEncoder();png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var image=System.IO.File.Create(System.IO.Path.Combine(args[0],"group-diagnostics.png")))png.Save(image);graphWindow.Close();
             typeof(DesktopApplication).GetMethod("ShowDiagnosticsWindow",flags).Invoke(desktop,new object[]{null});
             var diagnostics=app.Windows.Cast<Window>().Single(w=>w.Title=="Connection & Diagnostics");
             Func<System.Windows.DependencyObject,System.Collections.Generic.IEnumerable<System.Windows.DependencyObject>> walk=null;

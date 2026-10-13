@@ -501,7 +501,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,now+10000)
                 archiveLoadedGeneration=generation
                 archiveRetryAt=0L
-            }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive authorization or source unavailable"));archiveRetryAt=now+60000}
+            }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(projectionFresh=false));archiveRetryAt=now+60000}
             finally{val admission=try{execution.authorizationDiagnostics(active.accountId,generation)}catch(error:Exception){"Admission snapshot unavailable: ${error.javaClass.simpleName}"};mutable.value=mutable.value.copy(archiveAuthorizationDiagnostics=admission)}
         }
         // Drain bounded events; payload history/delivery is always reread from
@@ -586,9 +586,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(attachments.isNotEmpty()&&diagnosticNow>=transferDiagnosticsAt){
             transferDiagnosticsAt=diagnosticNow+1000
             val record=NativeRecord(transfer(5),30)
+            val measured=StringBuilder()
             val currentIds=mutableSetOf<String>()
             repeat(record.number().toInt().coerceIn(0,64)){
                 val row=record.text();val id=row.substringBefore(' ');currentIds.add(id)
+                measured.appendLine(row.take(2048))
                 val signature=row.substringBefore(" elapsed_ms=");val previous=transferDiagnosticStates[id]
                 val active=!row.contains(" state=4 ")&&!row.contains(" state=5 ")&&!row.contains(" state=6 ")&&!row.contains(" state=8 ")
                 if(previous?.first!=signature||(active&&diagnosticNow-(previous?.second?:0L)>=10000)){
@@ -597,6 +599,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }
             }
             record.end()
+            mutable.value=mutable.value.copy(transferDiagnostics=measured.toString().take(32768))
             transferDiagnosticStates.keys.retainAll(currentIds)
         }
         mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed())

@@ -20,6 +20,7 @@ public:
         // this endpoint. Empty response is permitted for a consumed page.
         std::function<Blob(const Blob&)> control{};
         bool attachments=false;
+        std::function<void(const Blob&)> queued{};
     };
     // Platform execution seam into the ONE profile TransferManager. No sockets,
     // retry policy, transfer journal or key ownership lives in this endpoint.
@@ -130,7 +131,7 @@ private:
             protocol::check(bool(archive_->control));archive::validateHistoryControl(bytes);
             stage_="archive_control";
             auto response=archive_->control(bytes);protocol::check(authorized());
-            if(!response.empty())sendArchiveControl(response);
+            if(!response.empty()){sendArchiveControl(response);if(archive_->queued)archive_->queued(response);}
             return;
         }
         protocol::check(friends_.contains(runtime_.peerId));

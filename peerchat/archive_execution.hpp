@@ -22,6 +22,18 @@ class Execution {
     std::vector<std::string> transportEvidence_;
     std::uint64_t received_=0,lastSuccessful_=0,scanGeneration_=0;
     std::string presentationContext_;Blob savedPresentation_;
+    std::string resultContext_;Blob savedResult_;
+    unsigned lastResult_=0;std::uint64_t resultAt_=0,resultReceived_=0,resultConversations_=0,resultDeferred_=0,providedQueued_=0;
+    std::string resultSource_;
+    void retainResult(unsigned outcome,std::uint64_t utc)noexcept{
+        if(!reader_||!protocol::id(intentSource_))return;
+        try{auto p=snapshot();protocol::Writer w(LocalFormat);w.string("PeerChat/ArchiveLastResult/v1");w.number(policy_.account());w.string(local_.peerId);w.number(outcome);w.number(utc);w.number(received_);w.number(p.conversations);w.number(p.deferred);w.string(intentSource_);
+            if(w.data==savedResult_)return;
+            storage_.saveArchiveSyncState(resultContext_,savedResult_,w.data);savedResult_=std::move(w.data);
+            lastResult_=outcome;resultAt_=utc;resultReceived_=received_;resultConversations_=p.conversations;resultDeferred_=p.deferred;resultSource_=intentSource_;
+        }catch(...){/* Optional completed diagnostics never gate durable history. */}
+    }
+    static std::uint64_t utcNow(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
     DeviceAccounts directory()const{return [this](const std::string& device){return storage_.historicalDeviceAccount(device);};}
     void intent(const std::string& issuer,const std::string& source,unsigned disposition){
         require(disposition<=2); // 0 explicit pause/failure, 1 running, 2 completed.
@@ -37,6 +49,13 @@ public:
         key.string("PeerChat/ArchivePresentation/v1");
         for(auto b:digestDevicePayload(key.data)){presentationContext_+=hex[b>>4];presentationContext_+=hex[b&15];}
         savedPresentation_=storage_.archiveSyncState(presentationContext_);
+        protocol::Writer resultKey(LocalFormat);resultKey.string("PeerChat/ArchiveLastResultContext/v1");resultKey.number(policy_.account());resultKey.string(local_.peerId);
+        for(auto b:digestDevicePayload(resultKey.data)){resultContext_+=hex[b>>4];resultContext_+=hex[b&15];}
+        try{savedResult_=storage_.archiveSyncState(resultContext_);if(!savedResult_.empty()){
+            protocol::Reader r(savedResult_);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveLastResult/v1"&&r.number()==policy_.account()&&r.string()==local_.peerId);
+            auto outcome=r.number(),at=r.number(),imported=r.number(),conversations=r.number(),deferred=r.number();auto source=r.string();r.end();require(outcome>=1&&outcome<=4&&at<=INT64_MAX&&imported<=INT64_MAX&&conversations<=INT64_MAX&&deferred<=INT64_MAX&&protocol::id(source));
+            lastResult_=static_cast<unsigned>(outcome);resultAt_=at;resultReceived_=imported;resultConversations_=conversations;resultDeferred_=deferred;resultSource_=source;
+        }}catch(...){/* Missing/corrupt optional result must not prevent startup. */}
         if(!savedPresentation_.empty()){
             protocol::Reader r(savedPresentation_);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchivePresentation/v1"&&r.number()==policy_.account()&&r.string()==local_.peerId);
             lastSuccessful_=r.number();r.end();require(lastSuccessful_<=INT64_MAX);
@@ -56,6 +75,28 @@ public:
     std::uint64_t rejectedBatches()const{return rejectedStage_=="none"?0:1;}
     std::uint64_t lastSuccessful()const{return lastSuccessful_;}
     std::uint64_t scanGeneration()const{return scanGeneration_;}
+    // Authoritative current activity is separate from the retained terminal scan.
+    unsigned activity()const{
+        if(!policy_.historySyncEnabled())return 5;
+        if(state_.find("failed")!=std::string::npos||state_.find("rejected")!=std::string::npos)return 6;
+        if(state_.find("Paused")!=std::string::npos)return 4;
+        if(!running_)return 0;
+        if(state_=="Synchronizing history")return 2;
+        if(state_=="Connecting to archive")return 1;
+        return 3;
+    }
+    void statusProjection(protocol::Writer& w,std::uint64_t now)const{
+        w.string("PeerChat/ArchiveStatus/v1");w.number(activity());w.number(lastResult_);w.number(resultAt_);w.number(resultReceived_);w.number(resultConversations_);w.number(resultDeferred_);w.string(resultSource_);w.number(providedQueued_);
+        auto providers=providingDevices(now);w.number(providers.size());for(const auto& peer:providers)w.string(peer);
+    }
+    void sourceQueued(const session::ReliableAuthorization& scope,const Blob& response)noexcept{
+        try{if(scope.archive.source!=local_.peerId||!currentSessionAuthorization(policy_,scope))return;
+            protocol::Reader r(response);if(r.type()!=protocol::ArchiveControl||r.string()!="PeerChat/ArchiveHistory/v1"||r.number()!=1||r.number()!=3)return;
+            // Count only the already validated response header. Diagnostics must
+            // not reparse message bodies or repeat signature verification.
+            (void)historyRequestFields(r);r.number();r.number();auto count=r.number();if(count<=HistoryPageRecords&&providedQueued_<=INT64_MAX-count)providedQueued_+=count;
+        }catch(...){/* Supplemental counters cannot affect transport. */}
+    }
     std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark());}
     // Read-only application diagnostics; holding a route does not imply pages
     // have transferred. No fabricated provider counters or percentage.
@@ -106,6 +147,7 @@ public:
            <<"\nintent_issuer="<<intentIssuer_<<" intent_source="<<intentSource_;
         auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<(progress.complete&&!progress.deferred)<<" page_pending="<<progress.pending<<" pending_request_attempt="<<pendingAttempt_;
         out<<"\nimports_committed="<<received_<<" unresolved_records="<<progress.deferred<<" rejected_batches="<<(rejectedStage_!="none");
+        out<<"\ncurrent_activity="<<activity()<<" last_result="<<lastResult_<<" last_result_at="<<resultAt_<<" last_result_imported="<<resultReceived_<<" last_result_conversations="<<resultConversations_<<" last_result_unresolved="<<resultDeferred_<<" source_records_queued_including_retries="<<providedQueued_;
         if(scope_){const auto& a=scope_->archive;
             out<<"\nactive_scope_issuer="<<a.issuer<<" source="<<a.source<<" reader="<<a.reader<<" source_generation="<<a.sourceGeneration<<" reader_generation="<<a.readerGeneration
                <<" source_grant_id="<<a.sourceGrantId<<" reader_grant_id="<<a.readerGrantId<<" scope_current="<<currentSessionAuthorization(policy_,*scope_);
@@ -123,9 +165,10 @@ public:
     }
     // A corrupt checkpoint/page stops only archive work, never the profile's
     // ordinary messaging worker. The protected record is not overwritten.
-    void failed(){restore_=false;running_=false;pendingAttempt_=0;if(reader_)reader_->cancel();state_="Archive synchronization failed closed";}
+    void failed(){retainResult(3,utcNow());restore_=false;running_=false;pendingAttempt_=0;if(reader_)reader_->cancel();state_="Archive synchronization failed closed";}
     SyncReader::Snapshot snapshot()const{return reader_?reader_->snapshot():SyncReader::Snapshot{0,0,false,false,false};}
     std::vector<session::TransportInstanceId> stop(){
+        if(running_)retainResult(4,utcNow());
         if(!intentIssuer_.empty())intent(intentIssuer_,intentSource_,false);
         running_=false;pendingAttempt_=0;state_="Paused";if(reader_)reader_->cancel();
         return scope_?sessions_.finishArchiveRoute(*scope_):std::vector<session::TransportInstanceId>{};
@@ -213,13 +256,14 @@ public:
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{
             reader_->accept(bytes);pendingAttempt_=0;
+            if(reader_->snapshot().complete)retainResult(reader_->snapshot().deferred?2:1,utc);
             if(reader_->snapshot().complete&&!reader_->snapshot().deferred){
                 require(utc<=INT64_MAX);protocol::Writer w(LocalFormat);w.string("PeerChat/ArchivePresentation/v1");w.number(policy_.account());w.string(local_.peerId);w.number(utc);
                 storage_.saveArchiveSyncState(presentationContext_,savedPresentation_,w.data);savedPresentation_=std::move(w.data);lastSuccessful_=utc;
             }
             return {};
         }
-        catch(...){rejectedStage_=reader_->acceptStage();intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;pendingAttempt_=0;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
+        catch(...){retainResult(3,utc);rejectedStage_=reader_->acceptStage();intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;pendingAttempt_=0;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
     }
     void disconnected(const session::ReliableAuthorization& scope,std::uint64_t attempt){
         if(scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data&&reader_&&pendingAttempt_){

@@ -10,6 +10,7 @@ struct File:Source {Blob data=Blob(10*1024*1024,42);std::uint64_t size()const ov
 struct Destination:Sink {Blob bytes;void append(const Blob& b)override{bytes.insert(bytes.end(),b.begin(),b.end());}void commit()override{};};
 struct BrokenStatistics:StatisticsStateStore{void load(std::vector<DurableState>&)override{throw std::runtime_error("optional statistics unavailable");}void save(const std::vector<DurableState>&)override{throw std::runtime_error("optional statistics unavailable");}};
 int main(){try{
+    statistics::CounterRates rates;check(rates.sample("voice",100,0,true)==0);check(rates.sample("voice",1100,1000,true)==8000);check(rates.sample("voice",1100,2000,true)==0);check(rates.sample("voice",10,3000,true)==0);rates.clear();check(rates.sample("voice",1000,4000,true)==0);
     auto root=std::filesystem::current_path()/"build"/"tests"/Storage::newMessageId();Storage a((root/"a").wstring()),b((root/"b").wstring());auto pa=a.profile(),pb=b.profile();
     // Test-only auditing on disposable databases; never profile initialization.
     auto audit=platform::openWindowsSqlDatabase((root/"a").wstring());

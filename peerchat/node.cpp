@@ -936,7 +936,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }}
             auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
             auto response=archiveExecution->control(c.authorization,frame,utc,nowMilliseconds());
-            if(!response.empty())packet(c,response);
+            if(!response.empty()){packet(c,response);archiveExecution->sourceQueued(c.authorization,response);}
             return;
         }
         if(c.authorization.scope==session::ReliableAuthorizationScope::GroupControl){

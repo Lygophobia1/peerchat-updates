@@ -351,7 +351,7 @@ public partial class DesktopApplication {
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
-        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
+        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Transfers=AttachmentDiagnostics,HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
         // Profile selection and any legacy migration finish before the native owner exists.
@@ -801,6 +801,7 @@ public partial class DesktopApplication {
     GroupVoiceRoomStatus renderedGroupVoice;
     string renderedGroupId="";
     string renderedGroupScreen="";
+    string renderedGroupPresence="";
     async Task<GroupVoiceMediaConfiguration> GroupMediaConfiguration(){
         if(!await EnsureMediaIceConfigurationAsync())return null;
         return new GroupVoiceMediaConfiguration(mediaTurnCredentials,profileSessionGeneration,discoverySessionGeneration,mediaIceConfigurationGeneration);
@@ -821,6 +822,7 @@ public partial class DesktopApplication {
         groupCreateScreen=new Button{Content="▣ Create",ToolTip="Create screen-share room",Padding=new Thickness(9,6,9,6),Margin=new Thickness(6,0,0,0),Visibility=Visibility.Collapsed};
         groupCreateVoice.Click+=(s,e)=>CreateMediaRoom("voice");groupCreateScreen.Click+=(s,e)=>CreateMediaRoom("screen_share");
         int position=actions.Children.IndexOf(Find<Button>("ToggleRightPane"));actions.Children.Insert(position,groupCreateVoice);actions.Children.Insert(position+1,groupCreateScreen);
+        BuildGroupTelemetrySurface(actions);
     }
     void OpenGroupDetails(){var column=(ColumnDefinition)window.FindName("RightPaneColumn");if(column.Width.Value<=0)ToggleRightPane();RefreshGroupDetails(true);}
     void CreateMediaRoom(string kind){
@@ -828,6 +830,7 @@ public partial class DesktopApplication {
         if(values!=null&&!groupVoice.CreateRoom(roster.GroupId,kind,values[0].Trim()))Notify("The authoritative room channel is unavailable.");
     }
     void RefreshGroupDetails(bool force=false){
+        RefreshGroupTelemetry();
         if(groupDetails==null)return;bool selected=model.Groups&&model.SelectedGroup!=null;
         groupDetails.Visibility=selected?Visibility.Visible:Visibility.Collapsed;
         Find<StackPanel>("ContextConnection").Visibility=selected?Visibility.Collapsed:Visibility.Visible;
@@ -840,23 +843,30 @@ public partial class DesktopApplication {
         var rooms=discovery==null||roster==null?null:discovery.GroupRooms(serverId);var voice=groupVoice.Snapshot();
         bool sameVoice=renderedGroupVoice!=null&&voice.GroupId==renderedGroupVoice.GroupId&&voice.RoomId==renderedGroupVoice.RoomId&&voice.State==renderedGroupVoice.State&&voice.Error==renderedGroupVoice.Error&&voice.Joined==renderedGroupVoice.Joined&&voice.Muted==renderedGroupVoice.Muted&&voice.Deafened==renderedGroupVoice.Deafened;
         string screenSignature=rooms==null?"":String.Join(";",rooms.Rooms.Where(r=>r.Kind=="screen_share").Select(r=>{var s=groupScreen.Snapshot(serverId,r.Id);return r.Id+":"+s.State+":"+s.Error+":"+s.Sharing+":"+s.Watching;}));
-        if(!force&&id==renderedGroupId&&rooms==renderedGroupRooms&&sameVoice&&screenSignature==renderedGroupScreen)return;
+        string presenceSignature=(discovery!=null&&discovery.EventChannelConnected)+":"+String.Join(";",friendPresence.OrderBy(p=>p.Key).Select(p=>p.Key+":"+p.Value));
+        if(!force&&id==renderedGroupId&&rooms==renderedGroupRooms&&sameVoice&&screenSignature==renderedGroupScreen&&presenceSignature==renderedGroupPresence)return;
+        renderedGroupPresence=presenceSignature;
         renderedGroupScreen=screenSignature;
         renderedGroupId=id;renderedGroupRooms=rooms;renderedGroupVoice=voice;groupDetails.Children.Clear();
-        Action<string,bool> text=(label,heading)=>groupDetails.Children.Add(new TextBlock{Text=label,Foreground=Brush(heading?"#EDF1F5":"#A1AEBB"),FontSize=heading?15:12,FontWeight=heading?FontWeights.SemiBold:FontWeights.Normal,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,heading?15:4,0,5)});
+        StackPanel sectionTarget=groupDetails;Action<string,bool> text=(label,heading)=>sectionTarget.Children.Add(new TextBlock{Text=label,Foreground=Brush(heading?"#EDF1F5":"#A1AEBB"),FontSize=heading?15:12,FontWeight=heading?FontWeights.SemiBold:FontWeights.Normal,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,heading?15:4,0,5)});
         text("Group Details",true);text(model.SelectedGroup.Name,true);text(ready?"Server-authorized group":"Legacy or unavailable server roster",false);
         text("Members",true);
-        if(serverGroupRosters.TryGetValue(id,out roster))foreach(var member in roster.Members.Where(m=>m.State=="member"))text((String.IsNullOrEmpty(member.Username)?"Account "+member.AccountId:member.Username)+(discovery!=null&&member.AccountId==discovery.AccountId?" (You)":"")+" · "+member.Role,false);
+        if(serverGroupRosters.TryGetValue(id,out roster))foreach(var member in roster.Members.Where(m=>m.State=="member")){
+            string name=(String.IsNullOrEmpty(member.Username)?"Account "+member.AccountId:member.Username)+(discovery!=null&&member.AccountId==discovery.AccountId?" (You)":"");bool online=false;bool known=discovery!=null&&discovery.EventChannelConnected&&(member.AccountId==discovery.AccountId||friendPresence.TryGetValue(member.AccountId,out online));if(known&&member.AccountId==discovery.AccountId)online=true;
+            var line=new DockPanel{Margin=new Thickness(0,6,0,6)};var avatar=new Border{Width=30,Height=30,CornerRadius=new CornerRadius(15),Background=Brush("#28539A"),Margin=new Thickness(0,0,8,0),Child=new TextBlock{Text=name.Substring(0,1),HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Center}};DockPanel.SetDock(avatar,Dock.Left);line.Children.Add(avatar);var presence=new TextBlock{Text=known&&online?"●":"○",Foreground=Brush(known&&online?"#80D88C":"#A1AEBB"),ToolTip=known?(online?"Online":"Offline"):"Presence unknown",VerticalAlignment=VerticalAlignment.Center};DockPanel.SetDock(presence,Dock.Right);line.Children.Add(presence);line.Children.Add(new TextBlock{Text=name+" · "+member.Role,Foreground=Brush("#EDF1F5"),TextWrapping=TextWrapping.Wrap,VerticalAlignment=VerticalAlignment.Center});groupDetails.Children.Add(line);
+        }
         else text("Authoritative member list unavailable",false);
+        var invite=new Button{Content="＋ Invite",Background=Brush("#286BC1"),Foreground=Brushes.White,Padding=new Thickness(10,8,10,8),Margin=new Thickness(0,8,0,8),HorizontalAlignment=HorizontalAlignment.Stretch};invite.Click+=(s,e)=>ShowGroupFlyout("GroupInvite","invite");groupDetails.Children.Add(invite);
         foreach(string kind in new[]{"voice","screen_share"}){
-            text(kind=="voice"?"Voice Rooms":"Screen Share Rooms",true);
+            var heading=new DockPanel{Margin=new Thickness(0,12,0,4)};var create=new Button{Content="＋",ToolTip=kind=="voice"?"Create voice room":"Create screen room",IsEnabled=ready};string roomKind=kind;create.Click+=(s,e)=>CreateMediaRoom(roomKind);DockPanel.SetDock(create,Dock.Right);heading.Children.Add(create);heading.Children.Add(new TextBlock{Text=kind=="voice"?"Voice Rooms":"Screen Share Rooms",Foreground=Brush("#EDF1F5"),FontWeight=FontWeights.SemiBold,VerticalAlignment=VerticalAlignment.Center});groupDetails.Children.Add(heading);
             var list=rooms==null?new GroupRoom[0]:rooms.Rooms.Where(r=>r.Kind==kind).ToArray();
             if(list.Length==0)text("No rooms",false);
             foreach(var room in list){
+                sectionTarget=new StackPanel();groupDetails.Children.Add(new Border{Child=sectionTarget,Background=Brush("#14222E"),CornerRadius=new CornerRadius(8),Padding=new Thickness(10),Margin=new Thickness(0,5,0,5)});
                 text(room.Name,true);text(String.Join(", ",room.Members.Select(m=>String.IsNullOrEmpty(m.Username)?"Account "+m.AccountId:m.Username)),false);
                 bool joined=voice.Joined&&voice.GroupId==serverId&&voice.RoomId==room.Id;
                 text(kind=="voice"?room.Members.Count+" in voice"+(joined?" · "+voice.State:""):"Sharer: "+(room.Sharer==null?"None":room.Sharer.Username)+" · "+room.Members.Count+" viewers",false);
-                var row=new WrapPanel();groupDetails.Children.Add(row);
+                var row=new WrapPanel();sectionTarget.Children.Add(row);
                 if(kind=="voice"){
                     var action=new Button{Content=joined?"Leave":"Join",Padding=new Thickness(10,6,10,6),Margin=new Thickness(0,3,5,3),IsEnabled=ready};
                     action.Click+=async(s,e)=>{bool ok=joined?await groupVoice.Leave():await groupVoice.Join(serverId,room.Id);if(!ok)Notify("Voice participation is unavailable; finish any direct call first.");await groupVoice.Pump();RefreshGroupDetails(true);};row.Children.Add(action);
@@ -869,6 +879,7 @@ public partial class DesktopApplication {
                     if(screen.Sharing||screen.Watching)text(screen.State+(String.IsNullOrEmpty(screen.Error)?"":" · "+screen.Error),false);
                 }
                 if(discovery!=null&&room.CreatorAccountId==discovery.AccountId){var close=new Button{Content="Close room",Padding=new Thickness(8,6,8,6),Margin=new Thickness(4,0,0,0)};close.Click+=(s,e)=>groupVoice.RoomAction(serverId,room.Id,"close");row.Children.Add(close);}
+                sectionTarget=groupDetails;
             }
         }
         if(!String.IsNullOrEmpty(voice.Error)&&voice.GroupId==serverId)text(voice.Error,false);

@@ -1,0 +1,11 @@
+# Development 135 — shared diagnostics and History Sync status
+
+Native History Sync status now separates current activity, the last terminal reader result, and source records queued (including retries). A connected transport never implies completed imports. Last results are optional protected profile objects; corrupt or absent telemetry cannot block history. Existing authenticated mapping checks and durable import cursors remain unchanged. Unresolved legacy provenance is not reassigned or discarded.
+
+Windows group diagnostics use existing native counters through a bounded projection: two-row header, detachable six-tab window, route-specific details, bounded graphs/events, pause, sanitized copy/export. Payload rates are local submission/receipt measurements, not claimed wire bitrate. RTT, packet loss and unavailable latency remain N/A. File diagnostics reuse the existing approximately one-second snapshots. No protocol or transfer flow-control change.
+
+Validation: 145 Android JVM/UI tests, debug/test/release builds and lint passed. Windows client/updater/server build passed. Native archive authorization, mutual-TLS nonempty/reverse imports, restart/replay, cursor, provenance and request ownership regressions passed. Paired Windows workers imported 25 records and preserved 3 unresolved records. Group voice/screen lifecycle, room authorization, WPF diagnostics/context isolation, settings and attachment tests passed. Statistics tests verified no live-sample database writes and idempotent optional completion summaries.
+
+Host-only protected-journal transfer measurements: 1/3/10 MiB accepted-to-completion 523/810/2704 ms in one repeat (1.91/3.70/3.70 MiB/s). These are isolated authenticated Windows workers, not Motorola/Pi/Wi-Fi measurements; no new physical performance claim is made.
+
+User confirmed Android-to-Windows history transfer physically. New status UI and group diagnostics require physical review. Retest active versus prior result, source versus reader counts, partial/unresolved state, reconnect/restart/profile isolation, live group graphs/pause/copy/export, and real file throughput. Manual replacement installation only; identities, grants, history and signing certificate preserved. No Pi deployment.
