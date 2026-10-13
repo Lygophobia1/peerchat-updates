@@ -1296,7 +1296,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 mediaIce=std::move(command.ice);
             }
             else if(command.action==Action::AuthenticatedFriends){
-                if(archiveApplication)archiveApplication->invalidate();
+                if(archiveApplication&&(command.accountId!=authenticatedFriends.localAccount()||
+                   command.sourceHandle!=authenticatedFriends.generation()))archiveApplication->invalidate();
                 archiveAuthenticated=command.accountId>0;
                 std::vector<reliable::FriendIdentity> snapshot;
                 for(const auto& value:command.friends){

@@ -98,6 +98,9 @@ static class ArchiveApplicationBoundaryTest {
         while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb!=0)source.IncomingArchive(8,1,scope);else Thread.Sleep(10);}
         while(ra==0&&DateTime.UtcNow<until){ra=Relay(a,out scope);if(ra==0)Thread.Sleep(10);}
         Check(ra>0&&rb>0&&ui_relay_ready(a,ra,0)==1&&ui_relay_ready(b,rb,1)==1);
+        // Contact reconciliation within the SAME authenticated context cannot
+        // invalidate independently verified same-account archive grants.
+        Check(ui_authenticated_friends(a,8,1,"")==1&&ui_authenticated_friends(b,8,1,"")==1);
         var bytes=new byte[65536];bool complete=false;
         while(DateTime.UtcNow<until){
             int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);

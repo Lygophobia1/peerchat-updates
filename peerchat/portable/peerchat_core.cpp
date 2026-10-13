@@ -331,7 +331,10 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
             values.push_back(std::move(value));
         }
         reader.end();peerchat::protocol::check(account||values.empty());
-        if(instance->archiveApplication)instance->archiveApplication->invalidate();
+        // Friend reconciliation is not archive revocation. A genuinely new
+        // authenticated account/generation still invalidates archive evidence.
+        if(instance->archiveApplication&&(static_cast<std::uint64_t>(account)!=instance->friends.localAccount()||
+           static_cast<std::uint64_t>(generation)!=instance->friends.generation()))instance->archiveApplication->invalidate();
         auto validatedFriends=instance->friends;
         validatedFriends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
         if(account){
@@ -343,8 +346,14 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
         }
         instance->friends=std::move(validatedFriends);
         instance->relayRequests->revoke();
-        for(auto& peer:instance->peers)if(!instance->friends.contains(peer.second->expected())){
-            peer.second->close(false);instance->sessions.removePeer(peer.second->expected());
+        for(auto& peer:instance->peers){
+            if(auto scope=peer.second->archiveScope()){
+                if(!instance->archiveApplication||!peerchat::archive::currentSessionAuthorization(instance->archiveApplication->policy(),*scope))peer.second->close(false);
+                continue; // Own-account archive devices are not friend devices.
+            }
+            if(!instance->friends.contains(peer.second->expected())){
+                peer.second->close(false);instance->sessions.removePeer(peer.second->expected());
+            }
         }
         return PC_CORE_OK;
     });

@@ -66,6 +66,15 @@ class NativeArchiveRouteTest {
                 }
                 assertEquals(1,checkNotNull(ReliableBridge.exchange(ah,source.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
                 assertEquals(1,checkNotNull(ReliableBridge.exchange(bh,reader.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
+                // An unchanged authenticated FRIEND snapshot is not archive
+                // revocation. Same-account archive devices are not friends.
+                for(h in listOf(ah,bh))assertEquals(0,ReliableBridge.friends(h,8,1,noFriends))
+                assertEquals(1,checkNotNull(ReliableBridge.exchange(ah,source.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
+                assertEquals(1,checkNotNull(ReliableBridge.exchange(bh,reader.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
+                // A real new authentication generation MUST invalidate them.
+                for(h in listOf(ah,bh))assertEquals(0,ReliableBridge.friends(h,8,2,noFriends))
+                assertEquals(0,checkNotNull(ReliableBridge.exchange(ah,source.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
+                assertEquals(0,checkNotNull(ReliableBridge.exchange(bh,reader.attempt,ReliableBridge.STATUS,byteArrayOf()))[0].toInt())
                 assertEquals(0,ReliableBridge.close(ah,source.attempt,false));assertEquals(0,ReliableBridge.close(bh,reader.attempt,false))
                 assertArrayEquals(a,ProfileBridge.publicKey(ah));assertArrayEquals(b,ProfileBridge.publicKey(bh))
             }
