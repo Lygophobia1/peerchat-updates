@@ -102,6 +102,14 @@ class NativeProjectionTest {
     @Test fun archiveRelayProjectionPreservesScopeWithoutFriendship() {
         val scope=ArchiveRelayScope(8,a,a,b,2,3,"d".repeat(32),"e".repeat(32))
         assertEquals(scope,ArchiveRelayScope.parse(scope.binding()))
+        assertTrue(incomingArchiveSource(scope,8,a,b))
+        assertFalse(incomingArchiveSource(scope,8,b,a)) // Source echo is not new reader work.
+        assertFalse(incomingArchiveSource(scope,9,a,b))
+        assertFalse(incomingArchiveSource(scope,8,a,c))
+        assertFalse(expiredServerSession(com.peerchat.android.platform.ServerRejected("relay_duplicate_attachment")))
+        assertFalse(expiredServerSession(IllegalArgumentException()))
+        for(code in listOf("session_invalid","session_superseded","event_session_superseded"))
+            assertTrue(expiredServerSession(com.peerchat.android.platform.ServerRejected(code)))
         val record=NativeRecordWriter(1).apply{number(1);number(77);text(a);number(5);blob(scope.binding())}.bytes()
         assertEquals(RelayExecution(77,a,5,scope),relayExecutions(record).single())
         rejected{ArchiveRelayScope.parse(scope.binding()+byteArrayOf(0))}

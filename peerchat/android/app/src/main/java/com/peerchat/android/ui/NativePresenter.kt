@@ -95,14 +95,16 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         if(startupWatchdog?.isActive==true)return
         startupWatchdog=viewModelScope.launch {
             delay(30000)
-            if(mutable.value.loginBusy||mutable.value.startupStatus!=null||(current.authenticated&&!current.serverPresenceLive)) {
+            if(mutable.value.loginBusy||mutable.value.startupStatus!=null) {
                 retainDiagnostic("Messaging startup","Authenticated presence did not become live within startup budget")
-                recoverNetwork(Route.Login,"Connection startup timed out. Sign in to retry; saved authorization is retained.")
+                recoverNetwork(Route.Login,"Connection startup timed out. Sign in to retry; saved authorization is retained.",reason="startup_presence_timeout")
             }
         }
     }
-    private fun recoverNetwork(destination:Route,message:String="Network session reset. Your identity, keys, history and settings are unchanged.",after:(()->Unit)?=null) {
+    private fun recoverNetwork(destination:Route,message:String="Network session reset. Your identity, keys, history and settings are unchanged.",after:(()->Unit)?=null,reason:String="manual_network_reset") {
         if(recovering)return
+        retainDiagnostic("Network recovery","reason=$reason destination=$destination authenticated=${current.authenticated}")
+        android.util.Log.i("PeerChatNetwork","event=login_navigation reason=$reason ui_generation=$uiGeneration authenticated=${current.authenticated}")
         recovering=true;automaticResumeSuppressed=true;uiGeneration++
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
         mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline)
@@ -201,7 +203,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 else -> mutable.value
             }
         }
-        if(snapshot.authenticated&&!snapshot.serverPresenceLive)watchStartup()
+        // An established login may reconnect without reauthentication. Only a
+        // pending explicit startup gets a startup watchdog; subsystem errors
+        // cannot navigate a signed-in user back to Login on a timer.
+        if(snapshot.authenticated&&!snapshot.serverPresenceLive&&mutable.value.startupStatus!=null)watchStartup()
         if(snapshot.serverPresenceLive)startupWatchdog?.cancel()
         project()
     }}

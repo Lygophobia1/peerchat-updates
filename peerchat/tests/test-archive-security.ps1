@@ -50,5 +50,19 @@ try {
         if($LASTEXITCODE -ne 0){throw 'Archive server metadata compilation failed'}
         & "$out\archive-server-test.exe" $fixtures
         if($LASTEXITCODE -ne 0){throw 'Archive server metadata regression failed'}
+        $certificate=$null
+        $pfx=Join-Path $out 'isolated-relay.pfx'
+        try {
+            $certificate=New-SelfSignedCertificate -DnsName 'localhost' -CertStoreLocation 'Cert:\CurrentUser\My' -NotAfter (Get-Date).AddDays(1)
+            $password=[Guid]::NewGuid().ToString('N')
+            Export-PfxCertificate -Cert $certificate -FilePath $pfx -Password (ConvertTo-SecureString $password -AsPlainText -Force)|Out-Null
+            & "$fx\csc.exe" /nologo /target:exe /platform:x64 /optimize+ /main:ArchiveRelayLifecycleTest "/out:$out\archive-relay-test.exe" "/reference:$fx\System.Web.Extensions.dll" $sources (Join-Path $root 'tests/archive_relay_lifecycle_test.cs')
+            if($LASTEXITCODE -ne 0){throw 'Archive relay integration compilation failed'}
+            & "$out\archive-relay-test.exe" $fixtures $pfx $password
+            if($LASTEXITCODE -ne 0){throw 'Archive relay integration regression failed'}
+        } finally {
+            if($certificate){Remove-Item -LiteralPath ('Cert:\CurrentUser\My\'+$certificate.Thumbprint)}
+            if(Test-Path -LiteralPath $pfx){Remove-Item -LiteralPath $pfx}
+        }
     }
 } finally {Pop-Location}

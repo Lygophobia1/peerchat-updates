@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="PortableTestKey.cs" />
     <Compile Include="../../server/DiscoveryIntegrationTest.cs" />
+    <Compile Include="../archive_relay_lifecycle_test.cs" />
     <Compile Include="../../server/*.cs" Exclude="../../server/PeerChat.Server.Admin.cs;../../server/DiscoveryIntegrationTest.cs" />
     <Compile Include="../../server/portable/PortableJson.cs;../../server/portable/PortablePlatform.cs;../../shared/VersionInfo.cs;../../desktop/DiscoveryClient.cs;../../desktop/ArchiveEnrollmentExecution.cs;../server_presence_test.cs;../server_json_fixtures.cs;../group_roster_proof_test.cs;../group_device_server_test.cs;../group_roster_database_test.cs;../encrypted_mailbox_server_test.cs;../fcm_provider_test.cs;../group_ciphertext_fanout_test.cs;../group_media_rooms_test.cs;PortableServerTests.cs;ServerLifecycleTests.cs" />
   </ItemGroup>

@@ -158,6 +158,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+loggedTickFailure)
                 }
                 if(expiredServerSession(failure))synchronized(gate){
+                    android.util.Log.w("PeerChatNetwork","event=authentication_invalidated generation=$generation reason="+(failure as ServerRejected).code)
                     generation++;clearAuthorization();accounts=null;index=null
                     friends=friends.map{it.copy(online=false)}
                     mutable.value=localOfflineSnapshot(mutable.value,"Session expired; local history retained; sign in again")
@@ -544,10 +545,22 @@ class MessagingBackend(context: Context,private val profileName: String="default
             "relay_demand"->{
                 if(event.optString("purpose")=="archive_history"){
                     if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
-                    val scope=ArchiveRelayScope.event(event);val owner=checkNotNull(accounts);val session=checkNotNull(owner.session)
-                    require(scope.account==session.accountId&&scope.source==mutable.value.localPeerId&&scope.reader==event.getString("publicIdentity"))
-                    val execution=archiveExecution(owner,checkNotNull(profile));execution.refreshCurrent(session.accountId,generation,mutable.value.localPeerId);execution.incoming(session.accountId,generation,scope)
-                    val now=System.nanoTime()/1_000_000;archiveServingUntil=now+60000;archiveMetadataAt=now+10000;return
+                    try {
+                        val scope=ArchiveRelayScope.event(event);val owner=checkNotNull(accounts);val session=checkNotNull(owner.session)
+                        // Source attachment echoes reach the reader on this same
+                        // account. They are not new source work or auth failure.
+                        if(!incomingArchiveSource(scope,session.accountId,mutable.value.localPeerId,event.optString("publicIdentity"))){
+                            android.util.Log.i("PeerChatArchive","event=demand_ignored reason=not_source generation=$generation");return
+                        }
+                        val execution=archiveExecution(owner,checkNotNull(profile));execution.refreshCurrent(session.accountId,generation,mutable.value.localPeerId);execution.incoming(session.accountId,generation,scope)
+                        val now=System.nanoTime()/1_000_000;archiveServingUntil=now+60000;archiveMetadataAt=now+10000
+                        android.util.Log.i("PeerChatArchive","event=source_demand_admitted generation=$generation")
+                    }catch(failure:Exception){
+                        if(expiredServerSession(failure))throw failure
+                        android.util.Log.w("PeerChatArchive","event=demand_failed generation=$generation result=${failure.javaClass.simpleName} cleanup=archive_only")
+                        mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive source unavailable; retry pending"))
+                    }
+                    return
                 }
                 if(event.optString("purpose")!="friend"||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                 val peer=event.optString("publicIdentity")

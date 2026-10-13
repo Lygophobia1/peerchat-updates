@@ -27,7 +27,10 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         var stage="relay_rendezvous"
         try {
             android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
-            val relay=accounts.openRelay(remoteAccount,request.peerId,request.archive?.fields())
+            val relay=accounts.openRelay(remoteAccount,request.peerId,request.archive?.fields(),request.attempt) {opened->
+                channel=opened
+                if(stopping){opened.close();throw java.io.IOException("Relay cancelled before pairing")}
+            }
             stage="native_peer_tls_open"
             android.util.Log.i("PeerChatWake","stage=relay_rendezvous_ready account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             channel=relay.channel
@@ -53,6 +56,9 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             }
         } catch(failure: Exception) {
             android.util.Log.i("PeerChatWake","stage="+stage+" attempt=${request.attempt} result="+failure.javaClass.simpleName)
+            if(request.archive!=null)android.util.Log.w("PeerChatArchive","event=attempt_failed attempt=${request.attempt} role="+
+                (if(request.archive.source==request.peerId)"reader" else "source")+" stage=$stage reason="+
+                (if(failure is com.peerchat.android.platform.ServerRejected&&failure.code in setOf("relay_duplicate_attachment","relay_pair_timeout","relay_not_authorized","session_invalid"))failure.code else failure.javaClass.simpleName))
             // No payload/session-token/exception-message logging. Native route
             // retirement and bounded retry stay with the current owner.
         } finally {
@@ -60,6 +66,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             try {channel?.close()}catch(_: Exception){}
             if(writer!==Thread.currentThread())writer?.join(1500)
             ReliableBridge.close(profile,request.attempt,retry)
+            if(request.archive!=null)android.util.Log.i("PeerChatArchive","event=attempt_cleanup attempt=${request.attempt} socket_closed=true retry=$retry")
             finished=true
         }
     }

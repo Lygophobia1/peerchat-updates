@@ -27,6 +27,22 @@ internal static class GroupCiphertextFanoutTest {
     static byte[] Envelope(string group,long generation,long account,string device,string message,int size=20000){var wire=new byte[254+size];Text(wire,0,"PCGE");wire[5]=1;Text(wire,6,group);Number(wire,38,generation);Number(wire,46,generation);Text(wire,54,message);Number(wire,86,account);Text(wire,94,device);wire[170]=(byte)(size>>24);wire[171]=(byte)(size>>16);wire[172]=(byte)(size>>8);wire[173]=(byte)size;for(int i=174;i<wire.Length;i++)wire[i]=(byte)(i*31);return wire;}
     static string State(Dictionary<string,object> result){return Convert.ToString(result["state"]);}
     static void Wait(Func<bool> done,string reason){var end=DateTime.UtcNow.AddSeconds(12);while(DateTime.UtcNow<end){if(done())return;Thread.Sleep(20);}throw new Exception(reason);}
+    static int RelayCount(DiscoveryServer server){
+        var type=typeof(DiscoveryServer);var gate=type.GetField("relayGate",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(server);
+        lock(gate)return ((System.Collections.ICollection)type.GetField("relayEndpoints",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(server)).Count;
+    }
+    static void CancelledPairing(DiscoveryServer server,DiscoveryClient client,string local,string target,string group,long generation){
+        TcpClient tcp;using(var relay=client.OpenAuthenticatedStream(out tcp,true))using(tcp){
+            var json=new System.Web.Script.Serialization.JavaScriptSerializer();
+            var request=new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",client.SessionToken},{"publicIdentity",local},{"targetAccountId","2"},{"targetPublicIdentity",target},{"purpose","group_key"},{"groupId",group},{"rosterGeneration",generation.ToString()}};
+            DiscoveryClient.WriteFrame(relay,Encoding.UTF8.GetBytes(json.Serialize(request)));
+            Wait(()=>RelayCount(server)==1,"Authenticated pending relay did not register.");
+            tcp.Close();
+            var deadline=DateTime.UtcNow.AddSeconds(3);while(DateTime.UtcNow<deadline&&RelayCount(server)!=0)Thread.Sleep(20);
+            Require(RelayCount(server)==0,"Disconnected pending attachment retained relay ownership until pair timeout.");
+        }
+        Console.WriteLine("PASS: authenticated pending pairing releases ownership promptly on disconnect, before retry.");
+    }
     static void Network(string directory,string certificate,string password,string owner,string member,string third,string group,long generation,byte[] wire,AccountDatabase database){
         var probe=new TcpListener(IPAddress.Loopback,0);probe.Start();int port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();
         var config=new ServerConfiguration{DataDirectory=directory,DatabasePath=Path.Combine(directory,"server.db"),LogDirectory=Path.Combine(directory,"logs"),Port=port,CertificatePath=certificate,CertificatePassword=password};
@@ -43,6 +59,7 @@ internal static class GroupCiphertextFanoutTest {
                 client.StartEventChannel(devices[i],e=>{lock(gate)events[index].Add(e);if(e.Event=="group_message")client.QueueGroupAck(e.GroupId,e.MessageId,"accepted");});
             }
             Wait(()=>clients.All(c=>c.EventChannelConnected),"Three authenticated existing event channels did not connect.");
+            CancelledPairing(server,clients[0],owner,member,group,generation);
             // Exercise the production pinned-TLS request and typed projection,
             // not reflection-only dispatch. Ordinary membership epochs have no
             // signed device-transition proof: recovery must expose the gap.
@@ -59,7 +76,8 @@ internal static class GroupCiphertextFanoutTest {
             Console.WriteLine("PASS: actual pinned-TLS recovery, current cursor, unsigned epoch gap, wrong device, future cursor and unrelated group rejection.");
             string message=Encoding.ASCII.GetString(wire,54,32);
             Require(clients[0].QueueGroupMessage(group,message,generation,Convert.ToBase64String(wire)),"Existing event channel rejected send.");
-            Wait(()=>{lock(gate)return events[1].Any(e=>e.Event=="group_message")&&events[2].Any(e=>e.Event=="group_message")&&events[0].Any(e=>e.State=="recipient_acknowledged"&&e.AcceptedCount==2);},"Three-client online fanout / recipient receipts did not complete.");
+            try{Wait(()=>{lock(gate)return events[1].Any(e=>e.Event=="group_message")&&events[2].Any(e=>e.Event=="group_message")&&events[0].Any(e=>e.State=="recipient_acknowledged"&&e.AcceptedCount==2);},"Three-client online fanout / recipient receipts did not complete.");}
+            catch{lock(gate)for(int i=0;i<3;i++)Console.Error.WriteLine("fanout_test client="+i+" connected="+clients[i].EventChannelConnected+" events="+String.Join(",",events[i].Select(e=>e.Event+":"+e.State+":"+e.AcceptedCount)));throw;}
             lock(gate){for(int i=1;i<3;i++)Require(Convert.FromBase64String(events[i].First(e=>e.Event=="group_message").Envelope).SequenceEqual(wire),"Server modified opaque ciphertext.");}
             Require(clients[0].QueueGroupMessage(group,message,generation,Convert.ToBase64String(wire)),"Duplicate request not queued.");
             Wait(()=>{lock(gate)return events[0].Any(e=>e.State=="duplicate_server_request");},"Duplicate server request was not identified.");

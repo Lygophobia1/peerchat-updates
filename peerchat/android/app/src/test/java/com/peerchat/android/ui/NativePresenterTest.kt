@@ -229,6 +229,24 @@ class NativePresenterTest {
         assertTrue(p.state.value.notice!!.contains("timed out"))
         assertTrue(p.state.value.diagnostics.contains("startup budget"))
     }
+    @Test fun establishedLoginAndArchiveRetriesNeverRunStartupLogoutWatchdog(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Home,p.state.value.route)
+        repeat(5){
+            commands.state.value=commands.state.value.copy(serverPresenceLive=false,
+                status="Reconnecting authenticated server events; local history available",
+                archiveProgress=commands.state.value.archiveProgress.copy(state="Archive source unavailable; retry pending"))
+            dispatcher.scheduler.runCurrent();dispatcher.scheduler.advanceTimeBy(31000);dispatcher.scheduler.runCurrent()
+            assertEquals(0,commands.resets);assertEquals(0,commands.signOuts);assertEquals(1,commands.signIns)
+            assertTrue(commands.state.value.authenticated);assertEquals(Route.Home,p.state.value.route)
+            assertEquals(ConnectionState.Reconnecting,p.state.value.connection)
+            commands.state.value=commands.state.value.copy(serverPresenceLive=true)
+            dispatcher.scheduler.runCurrent();assertEquals(ConnectionState.Online,p.state.value.connection)
+        }
+        p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.PreviewMessage("fixture"))
+        dispatcher.scheduler.advanceUntilIdle();assertEquals(1,commands.sends)
+    }
     @Test fun disconnectDuringAuthenticatedSessionAllowsVerifiedSettingsSave() {
         val commands=Commands().apply{reject=false};val p=presenter(commands)
         p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()

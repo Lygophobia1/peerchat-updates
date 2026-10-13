@@ -51,6 +51,8 @@ int main(int argc,char** argv){try{
     auto serve=source.issue(pa.publicKey,ar::ServeHistory,false,100,true);
     auto read=source.issue(pb.publicKey,ar::ReadHistory,false,100,true);
     fixture("serve.bin",ar::encodeGrant(serve));fixture("read.bin",ar::encodeGrant(read));
+    auto bothServe=serve;bothServe.capabilities=ar::AllCapabilities;bothServe.signature=signDevicePayload(ar::grantPayload(bothServe),pa);fixture("serve-both.bin",ar::encodeGrant(bothServe));
+    auto bothRead=read;bothRead.capabilities=ar::AllCapabilities;bothRead.signature=signDevicePayload(ar::grantPayload(bothRead),pa);fixture("read-both.bin",ar::encodeGrant(bothRead));
     auto foreign=read;foreign.account=9;foreign.signature=signDevicePayload(ar::grantPayload(foreign),pa);fixture("foreign.bin",ar::encodeGrant(foreign));
     auto conflict=read;conflict.capabilities=ar::AllCapabilities;conflict.signature=signDevicePayload(ar::grantPayload(conflict),pa);fixture("conflict.bin",ar::encodeGrant(conflict));
     signer->fail=true;

@@ -712,7 +712,8 @@ namespace PeerChat.Server {
         // a presence record, friendship mutation, or peer-trust decision.
         sealed class DirectProbe { public string Id,InitiatorDevice,RecipientDevice,InitiatorHost,RecipientHost;public long Initiator,Recipient,Expires;public int InitiatorPort,RecipientPort;public bool Consented,InitiatorSubmitted,RecipientSubmitted; }
         sealed class RelayEndpoint {
-            public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId,RosterGeneration;public readonly string DeviceId,TargetDeviceId,Binding,Scope,GroupId,SessionTokenHash;public readonly object WriteGate=new object();public readonly ManualResetEvent Ready=new ManualResetEvent(false);
+            public readonly TcpClient Client;public readonly SslStream Tls;public readonly long AccountId,TargetAccountId,RosterGeneration;public readonly string DeviceId,TargetDeviceId,Binding,Scope,GroupId,SessionTokenHash;public readonly object WriteGate=new object();public readonly TaskCompletionSource<bool> Ready=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            public readonly string DiagnosticId=Guid.NewGuid().ToString("N").Substring(0,12);public string PairDiagnosticId;
             public RelayEndpoint Peer;public string SessionId;public bool Incoming;
             public readonly ArchiveRelayAuthorization Archive;
             public string ArchiveKey {get{return Archive==null?"":Archive.Key;}}
@@ -969,10 +970,11 @@ namespace PeerChat.Server {
                 RelayEndpoint peer=waitingRelays.FirstOrDefault(value=>value.Scope==endpoint.Scope&&value.ArchiveKey==endpoint.ArchiveKey&&value.GroupId==endpoint.GroupId&&value.RosterGeneration==endpoint.RosterGeneration&&value.AccountId==endpoint.TargetAccountId&&value.DeviceId==endpoint.TargetDeviceId&&value.TargetAccountId==endpoint.AccountId&&value.TargetDeviceId==endpoint.DeviceId);
                 if(peer==null){waitingRelays.Add(endpoint);return true;}
                 waitingRelays.Remove(peer);string session=RandomToken();endpoint.Peer=peer;peer.Peer=endpoint;endpoint.SessionId=peer.SessionId=session;
-                endpoint.Incoming=String.CompareOrdinal(endpoint.DeviceId,peer.DeviceId)>0;peer.Incoming=!endpoint.Incoming;endpoint.Ready.Set();peer.Ready.Set();return true;
+                endpoint.PairDiagnosticId=peer.PairDiagnosticId=Guid.NewGuid().ToString("N").Substring(0,12);
+                endpoint.Incoming=String.CompareOrdinal(endpoint.DeviceId,peer.DeviceId)>0;peer.Incoming=!endpoint.Incoming;endpoint.Ready.TrySetResult(true);peer.Ready.TrySetResult(true);return true;
             }
         }
-        void RemoveRelay(RelayEndpoint endpoint){lock(relayGate){waitingRelays.Remove(endpoint);relayEndpoints.Remove(endpoint);activeRelayBindings.Remove(endpoint.Binding);}try{if(endpoint.Peer!=null)endpoint.Peer.Client.Close();}catch{}endpoint.Ready.Dispose();}
+        void RemoveRelay(RelayEndpoint endpoint){lock(relayGate){waitingRelays.Remove(endpoint);relayEndpoints.Remove(endpoint);activeRelayBindings.Remove(endpoint.Binding);}try{if(endpoint.Peer!=null)endpoint.Peer.Client.Close();}catch{}endpoint.Ready.TrySetCanceled();}
         void RetireRememberedRoutes(long account,string device){
             List<RelayEndpoint> relays;lock(relayGate)relays=relayEndpoints.Where(value=>value.AccountId==account&&value.DeviceId==device&&accounts.Authenticate(value.SessionTokenHash)==0).ToList();
             foreach(var endpoint in relays)try{endpoint.Client.Close();}catch{}
@@ -1006,21 +1008,35 @@ namespace PeerChat.Server {
             // An authorized route request is demand, not friendship/presence.
             // The recipient's existing session owner still authenticates peer TLS.
             var demand=new Dictionary<string,object>{{"event","relay_demand"},{"accountId",accountId},{"publicIdentity",device},{"targetPublicIdentity",targetDevice},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}};
-            if(archive!=null)archive.AddFields(demand);Notify(targetAccountId,demand);
+            if(archive!=null)archive.AddFields(demand);
             // Supplement native sender-owned retry/outbox; this is not a mailbox.
             // A hint carries no TLS records or plaintext and cannot authorize delivery.
-            pushWakes.Hint(targetAccountId,targetDevice);
             var endpoint=new RelayEndpoint(client,tls,accountId,device,targetAccountId,targetDevice,scope,groupId,rosterGeneration,tokenHash,archive);lock(relayGate)relayEndpoints.Add(endpoint);
-            if(!PairRelay(endpoint)){lock(relayGate)relayEndpoints.Remove(endpoint);WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
+            ulong diagnosticAttempt;if(!UInt64.TryParse(Text(request,"diagnosticAttempt"),NumberStyles.None,CultureInfo.InvariantCulture,out diagnosticAttempt))diagnosticAttempt=0;
+            if(!PairRelay(endpoint)){lock(relayGate)relayEndpoints.Remove(endpoint);Log("DEBUG","relay_lifecycle id="+endpoint.DiagnosticId+" attempt="+diagnosticAttempt+" scope="+scope+" stage=claim reason=duplicate_attachment winner_preserved=true");WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_duplicate_attachment"))));return;}
+            string retirement="channel_closed";Task<byte[]> pendingRelayRead=null;
             try{
-                if(!endpoint.Ready.WaitOne(TimeSpan.FromSeconds(15))){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_pair_timeout"))));return;}
+                Log("DEBUG","relay_lifecycle id="+endpoint.DiagnosticId+" attempt="+diagnosticAttempt+" scope="+scope+" local="+device+" target="+targetDevice+" stage=claimed role="+(archive==null?"peer":device==archive.Reader?"reader":"source"));
+                // Only accepted reader demand recruits an archive source. A
+                // duplicate or source echo cannot start another attachment.
+                if(archive==null||device==archive.Reader){Notify(targetAccountId,demand);pushWakes.Hint(targetAccountId,targetDevice);}
+                // Observe cancellation while waiting for the other endpoint.
+                // Retain this single read for forwarding after pairing: never
+                // create concurrent reads or accept payload before readiness.
+                pendingRelayRead=ReadFrameAsync(tls,43+MaxRelayPayloadBytes);
+                var timeout=Task.Delay(TimeSpan.FromSeconds(15));
+                int completed=Task.WaitAny(new Task[]{endpoint.Ready.Task,pendingRelayRead,timeout});
+                if(completed==1){retirement="disconnected_or_payload_before_pair";return;}
+                if(completed==2){retirement="pair_timeout";WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_pair_timeout"))));return;}
+                endpoint.Ready.Task.GetAwaiter().GetResult();
                 if(scope=="archive_history"&&!CurrentArchiveRelay(endpoint))return;
                 var readyFields=new Dictionary<string,object>{{"type","relay_ready"},{"sessionId",endpoint.SessionId},{"incoming",endpoint.Incoming},{"purpose",scope},{"groupId",groupId},{"rosterGeneration",rosterGeneration}};
                 if(archive!=null)archive.AddFields(readyFields);
                 var ready=Encoding.UTF8.GetBytes(json.Serialize(Ok(readyFields)));lock(endpoint.WriteGate)WriteFrame(tls,ready);
+                Log("DEBUG","relay_lifecycle id="+endpoint.DiagnosticId+" pair="+endpoint.PairDiagnosticId+" scope="+scope+" stage=paired incoming="+endpoint.Incoming);
                 byte[] session=Encoding.ASCII.GetBytes(endpoint.SessionId);
-                while(!stopping){var frame=ReadFrame(tls,session.Length+MaxRelayPayloadBytes);if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;if(scope=="archive_history"&&!CurrentArchiveRelay(endpoint))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
-            }finally{RemoveRelay(endpoint);Log("DEBUG","Authenticated opaque relay channel closed for account "+accountId+".");}
+                while(!stopping){var frame=pendingRelayRead==null?ReadFrame(tls,session.Length+MaxRelayPayloadBytes):pendingRelayRead.GetAwaiter().GetResult();pendingRelayRead=null;if(frame==null||frame.Length<=session.Length)return;for(int i=0;i<session.Length;i++)if(frame[i]!=session[i])return;var peer=endpoint.Peer;if(peer==null||peer.SessionId!=endpoint.SessionId)return;if(scope=="group_key"&&(accounts.Authenticate(endpoint.SessionTokenHash)!=accountId||accounts.Authenticate(peer.SessionTokenHash)!=targetAccountId||!accounts.GroupRelayAuthorized(groupId,accountId,device,targetAccountId,targetDevice,rosterGeneration)))return;if(scope=="archive_history"&&!CurrentArchiveRelay(endpoint))return;lock(peer.WriteGate)WriteFrame(peer.Tls,frame);}
+            }finally{RemoveRelay(endpoint);if(pendingRelayRead!=null)pendingRelayRead.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted);Log("DEBUG","relay_lifecycle id="+endpoint.DiagnosticId+" pair="+(endpoint.PairDiagnosticId??"none")+" scope="+scope+" stage=cleanup reason="+retirement+" ownership_released=true");}
         }
         void Serve(TcpClient client){Interlocked.Increment(ref connectedClients);string correlation=Guid.NewGuid().ToString("N").Substring(0,12),kind="unknown",stage="tls_handshake";long diagnosticAccount=0;Log("DEBUG","Discovery client connected request_id="+correlation+".");using(client)using(var tls=new SslStream(client.GetStream(),false)){try{tls.AuthenticateAsServer(certificate,false,System.Security.Authentication.SslProtocols.Tls12|System.Security.Authentication.SslProtocols.Tls13,false);stage="request_read";var bytes=ReadFrame(tls,MaxRequestBytes);if(bytes==null)return;var request=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));string requestType=Text(request,"type");kind=ReliableIoDiagnostics.RequestKind(requestType);string diagnosticToken=Text(request,"sessionToken");if(!String.IsNullOrEmpty(diagnosticToken))diagnosticAccount=accounts.Authenticate(TokenHash(diagnosticToken));
                 if(requestType=="rpc_open"){stage="rpc";string host="";var ep=client.Client.RemoteEndPoint as IPEndPoint;if(ep!=null)host=ep.Address.ToString();ServeRpc(tls,request,host);return;} if(requestType=="relay_attach"){stage="relay";ServeRelay(client,tls,request);return;}

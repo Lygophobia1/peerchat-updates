@@ -41,6 +41,8 @@ data class ArchiveRelayScope(val account:Long,val issuer:String,val source:Strin
     }
 }
 data class RelayExecution(val attempt: Long,val peerId: String,val networkRevision: Long,val archive:ArchiveRelayScope?=null)
+internal fun incomingArchiveSource(scope:ArchiveRelayScope,account:Long,local:String,remote:String):Boolean =
+    scope.account==account&&scope.source==local&&scope.reader==remote
 internal fun relayExecutions(bytes: ByteArray): List<RelayExecution> {
     val record=NativeRecord(bytes,1);val count=record.number();require(count<=32)
     val result=List(count.toInt()) {
