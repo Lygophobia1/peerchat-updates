@@ -39,7 +39,7 @@ class RelayRetirementTest {
                         server.ReceiveTimeout=2000;
                         using(var adapter=new RelayTransport(new DiscoveryClient(),new CoreAdapter{Throw=cycle%2!=0},1,"local",2,"remote",null)){
                             typeof(RelayTransport).GetField("tcp",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(adapter,client);
-                            typeof(RelayTransport).GetMethod("WriteLoop",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(adapter,new object[]{null,new string('s',43)});
+                            typeof(RelayTransport).GetMethod("WriteLoop",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(adapter,new object[]{null,cycle%3==0?null:new string('s',43)});
                             if(server.GetStream().ReadByte()!=-1)throw new Exception("Retired writer retained server attachment");
                         }
                     }

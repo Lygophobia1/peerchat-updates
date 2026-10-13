@@ -155,7 +155,8 @@ public:
             route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
         if(archive_){
             protocol::check(archive_->policy->localDevice()==local.peerId&&archive_->scope.expectedRemoteDeviceId==expected);
-            protocol::check(sessions_.registerArchiveControlAttempt(epoch,id,archive_->scope,route,now));
+            protocol::check(sessions_.recognizeArchiveControlAttempt(epoch,id,archive_->scope,route)||
+                sessions_.registerArchiveControlAttempt(epoch,id,archive_->scope,route,now));
         }else protocol::check(sessions_.registerAttempt(epoch,id,expected,route,now));
     }
     ~ReliableEndpoint(){close(false);}

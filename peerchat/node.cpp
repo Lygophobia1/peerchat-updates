@@ -179,6 +179,16 @@ struct Node::Impl {
         if(!archiveExecution||!archiveApplication)return;
         try{prepareArchiveTransfers();if(archiveTransfers)archiveTransfers->maintain(nowMilliseconds());}catch(const std::exception&){transferPersistenceFailure();}
         auto retired=archiveExecution->tick(nowMilliseconds(),networkGeneration);
+        // Pending rendezvous has no Connection yet. Still release its platform
+        // pipe when the SAME manager retires it; otherwise retries collide with
+        // the still-open server attachment until its pairing timeout.
+        {std::lock_guard<std::mutex> lock(relayMutex);
+            for(auto it=relayPipes.begin();it!=relayPipes.end();){
+                if(sessionTransports->attachablePeer(sessionEpoch,{it->first})){++it;continue;}
+                {std::lock_guard<std::mutex> pipeLock(it->second->mutex);it->second->closed=true;it->second->output.clear();it->second->queued=0;it->second->changed.notify_all();}
+                it=relayPipes.erase(it);
+            }
+        }
         for(auto& c:connections)if(!c->dead&&c->authorization.permitsArchiveControl()){
             try{
                 if(!archiveAuthenticated||!archive::currentSessionAuthorization(archiveApplication->policy(),c->authorization)||

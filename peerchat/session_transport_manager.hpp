@@ -136,6 +136,22 @@ public:
               (scope.reader==localDeviceId_&&scope.source==authorization.expectedRemoteDeviceId)))return false;
         return registerScopedAttempt(epoch,instance,std::move(authorization),std::move(route),nowMilliseconds);
     }
+    // The physical endpoint adopts the scheduler's existing pending instance;
+    // it does not register a duplicate, reset backoff or replace a winner.
+    // Incoming role is learned at pairing; every already-known route/scope
+    // field must match. RelayRequests::attach remains the one-shot handoff.
+    bool recognizeArchiveControlAttempt(SessionEpoch epoch,TransportInstanceId instance,
+                                       const ReliableAuthorization& authorization,const RouteObservation& route)const{
+        if(epoch!=epoch_||!authorization.valid()||!authorization.permitsArchiveControl()||route.networkRevision<networkRevision_)return false;
+        auto found=transports_.find(instance.value);if(found==transports_.end())return false;
+        const auto& record=found->second;const auto& old=record.authorization;const auto& a=old.archive;const auto& b=authorization.archive;
+        return !record.closed&&!record.cancelled&&record.state==TransportState::Connecting&&!record.locallyTrusted&&!record.remoteAccepted&&
+            old.scope==authorization.scope&&old.groupId==authorization.groupId&&old.rosterGeneration==authorization.rosterGeneration&&
+            old.expectedRemoteDeviceId==authorization.expectedRemoteDeviceId&&a.account==b.account&&a.issuer==b.issuer&&a.source==b.source&&a.reader==b.reader&&
+            a.sourceGeneration==b.sourceGeneration&&a.readerGeneration==b.readerGeneration&&a.sourceGrantId==b.sourceGrantId&&a.readerGrantId==b.readerGrantId&&
+            record.route.revision.value==route.revision.value&&record.route.networkRevision==route.networkRevision&&record.route.endpointUtf8==route.endpointUtf8&&
+            record.route.kind==route.kind&&record.route.routeClass==route.routeClass&&record.route.sourceUtf8==route.sourceUtf8&&record.route.routeUtf8==route.routeUtf8;
+    }
 private:
     // The same lifetime/winner machinery owns both restricted purposes.
     bool registerScopedAttempt(SessionEpoch epoch,TransportInstanceId instance,

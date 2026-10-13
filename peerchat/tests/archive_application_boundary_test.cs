@@ -88,6 +88,13 @@ static class ArchiveApplicationBoundaryTest {
         var admission=reader.AuthorizationDiagnostics(8,1);Check(admission.Length<=49152&&admission.Contains("local_device="+pb)&&admission.Contains("source_provide=allowed reader_receive=allowed"));
         Check(admission.Contains("History Sync execution")&&admission.Contains("active_scope_issuer="+pa)&&admission.Contains("archive_route")&&admission.Contains("messages_processed="));
         ulong ra=0,rb=0;ArchiveRelayScope scope;var until=DateTime.UtcNow.AddSeconds(10);
+        // Retire BEFORE pairing: there is no Connection yet. The platform
+        // writer must still observe EOF and release its server attachment.
+        while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb==0)Thread.Sleep(10);}
+        Check(rb>0);reader.PauseSync(8,1);
+        var pendingBytes=new byte[65536];bool released=false;
+        while(DateTime.UtcNow<until){if(ui_relay_take_output(b,rb,pendingBytes,(uint)pendingBytes.Length,0)<0){released=true;break;}Thread.Sleep(10);}
+        Check(released);reader.StartSync(8,1,pa,true);rb=0;
         while(rb==0&&DateTime.UtcNow<until){rb=Relay(b,out scope);if(rb!=0)source.IncomingArchive(8,1,scope);else Thread.Sleep(10);}
         while(ra==0&&DateTime.UtcNow<until){ra=Relay(a,out scope);if(ra==0)Thread.Sleep(10);}
         Check(ra>0&&rb>0&&ui_relay_ready(a,ra,0)==1&&ui_relay_ready(b,rb,1)==1);

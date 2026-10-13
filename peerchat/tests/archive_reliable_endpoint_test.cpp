@@ -46,6 +46,11 @@ int main(){try{
     auto admissionB=[&]{return ReliableEndpoint::ArchiveAdmission{&reading,archive::sessionAuthorization(reading,source.peerId,source.peerId,reader.peerId)};};
     for(unsigned cycle=0;cycle<10;++cycle){
         auto token=std::uint64_t(cycle*2+1);
+        // Android RelayRequests registers a pending owner BEFORE rendezvous;
+        // endpoint construction must adopt that exact owned attempt, not
+        // register a second scoped transport under the same ID.
+        check(as.registerArchiveControlAttempt({1},{token},admissionA().scope,route(token),now));
+        check(bs.registerArchiveControlAttempt({1},{token+1},admissionB().scope,route(token+1),now));
         ReliableEndpoint left(source,a,as,ad,af,{1},{token},std::make_unique<TlsSession>(ac,false),reader.peerId,route(token),++now,admissionA());
         ReliableEndpoint right(reader,b,bs,bd,bf,{1},{token+1},std::make_unique<TlsSession>(bc,true),source.peerId,route(token+1),++now,admissionB());
         left.receive({},++now);right.receive({},++now);exchange(left,right);

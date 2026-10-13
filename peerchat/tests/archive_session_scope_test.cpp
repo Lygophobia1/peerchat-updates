@@ -14,6 +14,14 @@ int main(){try{
     scope.archive={8,2,3,issuer,source,reader,std::string(32,'e'),std::string(32,'f')};
     check(scope.valid()&&scope.permitsArchiveControl()&&!scope.permitsDirectMessage()&&!scope.permitsGroupKeyControl());
     check(manager.registerArchiveControlAttempt(epoch,{1},scope,relay,0));
+    check(manager.recognizeArchiveControlAttempt(epoch,{1},scope,relay));
+    check(!manager.registerArchiveControlAttempt(epoch,{1},scope,relay,1)); // Registration stays unique.
+    auto altered=scope;altered.archive.readerGeneration++;check(!manager.recognizeArchiveControlAttempt(epoch,{1},altered,relay));
+    altered=scope;altered.archive.readerGrantId=std::string(32,'1');check(!manager.recognizeArchiveControlAttempt(epoch,{1},altered,relay));
+    altered=scope;altered.archive.account++;check(!manager.recognizeArchiveControlAttempt(epoch,{1},altered,relay));
+    auto changedRoute=relay;changedRoute.networkRevision++;check(!manager.recognizeArchiveControlAttempt(epoch,{1},scope,changedRoute));
+    changedRoute=relay;changedRoute.endpointUtf8+="-wrong";check(!manager.recognizeArchiveControlAttempt(epoch,{1},scope,changedRoute));
+    check(!manager.recognizeArchiveControlAttempt({10},{1},scope,relay));
     check(!manager.registerAttempt(epoch,{1},reader,relay,0));
     check(!manager.registerGroupControlAttempt(epoch,{2},scope,relay,0));
     auto wrong=scope;wrong.archive.source=other;check(!manager.registerArchiveControlAttempt(epoch,{2},wrong,relay,0));
@@ -26,6 +34,7 @@ int main(){try{
     check(manager.observeTransport(adapter.identityPresented(reader,0),1));
     check(manager.markLocallyTrusted(epoch,{1})&&manager.markRemoteAccepted(epoch,{1}));
     check(manager.arbitrateWinner(epoch,{1},2).activated());
+    check(!manager.recognizeArchiveControlAttempt(epoch,{1},scope,relay)); // Never re-adopt a winner.
     check(!manager.snapshot(reader)->connected&&manager.snapshot(scope.continuityKey())->connected);
     check(manager.invalidateArchiveControl(epoch,issuer,reader,3).empty());
     check(manager.invalidateArchiveControl({10},issuer,reader,4).empty());
