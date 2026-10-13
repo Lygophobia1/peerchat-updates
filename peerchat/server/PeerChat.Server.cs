@@ -210,7 +210,15 @@ namespace PeerChat.Server {
             long account;if(!CurrentGroupDeviceSession(tokenHash,device,leaseEpoch,leaseGeneration,out account))return null;
             return ApplyGroupDeviceProof(account,device,proof);
         }}
-        // Recovery remains gated below RPC activation. Snapshots were captured
+        // Read-only RPC derives the currently owned lease, then revalidates it
+        // through the same strict account/device/session admission. An account
+        // token alone or an obsolete lease cannot retrieve recovery evidence.
+        internal Dictionary<string,object> ReadGroupDeviceRecoveryForCurrentSession(string tokenHash,string device,string group,long afterGeneration){lock(gate){
+            if(!GroupRosterProof.Id(tokenHash,64)||!GroupRosterProof.Id(device,64)||!GroupId(group)||afterGeneration<=0)return null;
+            var lease=Live.Get(device);if(lease==null)return null;
+            return ReadGroupDeviceRecoveryForSession(tokenHash,device,Live.Epoch,lease.Generation,group,afterGeneration);
+        }}
+        // Snapshots were captured
         // atomically with the original verified proof, never reconstructed from
         // today's membership. Ordinary roster gaps require signed-ledger recovery.
         internal Dictionary<string,object> ReadGroupDeviceRecoveryForSession(string tokenHash,string device,string leaseEpoch,long leaseGeneration,string group,long afterGeneration){lock(gate){
@@ -836,6 +844,13 @@ namespace PeerChat.Server {
             }
             if(type=="group_roster"){
                 var roster=accounts.GroupRoster(Text(request,"groupId"),accountId,identity);return roster==null?Error("group_not_authorized"):Ok(roster);
+            }
+            if(type=="group_device_recovery"){
+                long after;if(!ValidIdentity(identity)||!GroupRosterProof.Id(Text(request,"groupId"),32)||
+                    !Int64.TryParse(Text(request,"afterGeneration"),NumberStyles.None,CultureInfo.InvariantCulture,out after)||after<=0)return Error("invalid_group_recovery_request");
+                try{var evidence=accounts.ReadGroupDeviceRecoveryForCurrentSession(TokenHash(token),identity,Text(request,"groupId"),after);
+                    return evidence==null?Error("group_not_authorized"):Ok(evidence);
+                }catch(InvalidOperationException){Log("WARNING","Group recovery database operation failed.");return Error("group_database_error");}
             }
             if(type=="group_state")return Ok(new Dictionary<string,object>{{"groups",accounts.GroupRostersForDevice(accountId,identity)}});
             if(type=="group_invite_account"){

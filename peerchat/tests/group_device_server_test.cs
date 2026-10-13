@@ -6,6 +6,15 @@ internal static class GroupDeviceServerTest {
     static void Require(bool value,string reason){if(!value)throw new Exception(reason);}
     static GroupDeviceProof Read(string root,string name){return GroupDeviceProof.Parse(Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,name))));}
     static string Peer(byte[] key){using(var sha=SHA256.Create())return GroupRosterProof.Hex(sha.ComputeHash(key));}
+    // Exercise the actual ordinary-RPC dispatcher against an isolated DB,
+    // without opening listeners or injecting any production test hook.
+    static System.Collections.Generic.Dictionary<string,object> RecoveryRpc(AccountDatabase db,string token,string device,string group,string cursor){
+        var type=typeof(DiscoveryServer);
+        var server=System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+        type.GetField("accounts",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).SetValue(server,db);
+        var request=new System.Collections.Generic.Dictionary<string,object>{{"version",1},{"type","group_device_recovery"},{"sessionToken",token},{"publicIdentity",device},{"groupId",group},{"afterGeneration",cursor}};
+        return (System.Collections.Generic.Dictionary<string,object>)type.GetMethod("Handle",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(server,new object[]{request,"",0});
+    }
     static void Accounts(AccountDatabase db,GroupRosterProof creation,string member,string sibling){
         Require(db.CreateAccountWithDevice("owner",new byte[16],new byte[32],creation.OwnerIdentity)==1,"Owner registration");
         Require(db.CreateAccountWithDevice("member",new byte[16],new byte[32],member)==2,"Member registration");
@@ -65,6 +74,43 @@ internal static class GroupDeviceServerTest {
             string recoveryToken=new string('2',64);db.CreateSession(recoveryToken,1,expires);
             var recoveryLease=db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","recovery",true,recoveryToken);
             var recovery=db.ReadGroupDeviceRecoveryForSession(recoveryToken,approve.Actor,db.Live.Epoch,recoveryLease.Generation,approve.GroupId,1);
+            var currentRecovery=db.ReadGroupDeviceRecoveryForCurrentSession(recoveryToken,approve.Actor,approve.GroupId,1);
+            Require(currentRecovery!=null&&Convert.ToInt64(currentRecovery["nextGeneration"])==3,"Current authenticated recovery boundary did not return durable epochs");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(replacementToken,approve.Actor,approve.GroupId,1)==null,"Obsolete session inherited fresh recovery lease");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(foreignToken,approve.Actor,approve.GroupId,1)==null,"Foreign account obtained current recovery evidence");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(targetToken,approve.Target,approve.GroupId,1)==null,"Revoked group device obtained recovery evidence");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(recoveryToken,approve.Actor,approve.GroupId,0)==null,"Zero recovery cursor was accepted");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(recoveryToken,approve.Actor,approve.GroupId,4)==null,"Future recovery cursor was accepted");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(recoveryToken,null,approve.GroupId,1)==null,"Missing device was not contained");
+            Require(db.ReadGroupDeviceRecoveryForCurrentSession(null,approve.Actor,approve.GroupId,1)==null,"Missing token hash was not contained");
+            string rpcToken="isolated-group-recovery-fixture",rpcHash=Peer(System.Text.Encoding.UTF8.GetBytes(rpcToken));db.CreateSession(rpcHash,1,expires);
+            Require(Convert.ToString(RecoveryRpc(db,rpcToken,approve.Actor,approve.GroupId,"1")["error"])=="group_not_authorized","RPC inherited another authenticated session's lease");
+            db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","recovery-rpc",true,rpcHash);
+            var rpc=RecoveryRpc(db,rpcToken,approve.Actor,approve.GroupId,"1");
+            Require(Convert.ToBoolean(rpc["ok"])&&Convert.ToBoolean(rpc["complete"])&&Convert.ToInt64(rpc["nextGeneration"])==3,"Production RPC did not return verified durable evidence");
+            var page=PeerChatDesktop.GroupRecoveryEvidenceProjection.Read(rpc,approve.GroupId,1);
+            Require(page.Steps.Count==2&&page.Steps[0].Before.RosterGeneration==1&&page.Steps[1].After.RosterGeneration==3,"Managed transport altered the real server recovery epochs");
+            var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();
+            foreach(string tamper in new[]{"group","cursor","fraction","complete","proof","omitted","duplicate","mapping"}){
+                var bad=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(serializer.Serialize(rpc));
+                var transitions=System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Cast<object>((System.Collections.IEnumerable)bad["transitions"]));
+                if(tamper=="group")bad["groupId"]=new string('0',32);
+                else if(tamper=="cursor")bad["nextGeneration"]=2;
+                else if(tamper=="fraction")bad["currentGeneration"]=3.5;
+                else if(tamper=="complete")bad["complete"]=false;
+                else if(tamper=="proof")((System.Collections.Generic.Dictionary<string,object>)transitions[0])["proof"]="invalid!";
+                else if(tamper=="omitted")bad["transitions"]=new object[]{transitions[1]};
+                else if(tamper=="duplicate")bad["transitions"]=new object[]{transitions[0],transitions[0]};
+                else {var before=(System.Collections.Generic.Dictionary<string,object>)((System.Collections.Generic.Dictionary<string,object>)transitions[0])["before"];before["groupId"]=new string('0',32);}
+                bool rejected=false;try{PeerChatDesktop.GroupRecoveryEvidenceProjection.Read(bad,approve.GroupId,1);}catch(InvalidDataException){rejected=true;}
+                Require(rejected,"Malformed transport page accepted: "+tamper);
+            }
+            foreach(string malformed in new[]{"0","-1","1.5","9223372036854775808"})
+                Require(Convert.ToString(RecoveryRpc(db,rpcToken,approve.Actor,approve.GroupId,malformed)["error"])=="invalid_group_recovery_request","Malformed RPC recovery cursor accepted");
+            Require(Convert.ToString(RecoveryRpc(db,rpcToken,approve.Target,approve.GroupId,"1")["error"])=="group_not_authorized","RPC substituted a different/revoked device");
+            db.TouchPresence(1,approve.Actor,"",0,"",0,"test","test","recovery-rpc-superseded",true,recoveryToken);
+            Require(Convert.ToString(RecoveryRpc(db,rpcToken,approve.Actor,approve.GroupId,"1")["error"])=="group_not_authorized","Superseded RPC session retained recovery authority");
+            db.RevokeSession(rpcHash);Require(Convert.ToString(RecoveryRpc(db,rpcToken,approve.Actor,approve.GroupId,"1")["error"])=="session_invalid","Revoked RPC session retained recovery authority");
             Require(recovery!=null&&Convert.ToBoolean(recovery["complete"])&&Convert.ToInt64(recovery["nextGeneration"])==3,"Authenticated recovery missed consecutive persisted epochs");
             var rows=(System.Collections.Generic.List<System.Collections.Generic.Dictionary<string,object>>)recovery["transitions"];
             Require(rows.Count==2&&Convert.ToString(rows[0]["proof"])==approve.Encoded&&Convert.ToString(rows[1]["proof"])==revoke.Encoded,"Recovery altered proof provenance or ordering");

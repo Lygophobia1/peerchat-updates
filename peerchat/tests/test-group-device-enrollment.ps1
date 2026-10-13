@@ -14,7 +14,7 @@ try{
     & "$out\fixture.exe" "$out\state"
     if($LASTEXITCODE){throw 'Native binding fixture failed'}
     $fx=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-    & "$fx\csc.exe" /nologo /target:exe /platform:x64 /main:GroupDeviceServerTest "/out:$out\server-test.exe" /reference:System.Web.Extensions.dll shared\VersionInfo.cs server\ServerConfiguration.cs server\GroupRosterProof.cs server\ArchiveAuthorization.cs server\GroupCiphertextFanout.cs server\GroupMediaRooms.cs server\ServerPresence.cs server\ServerRpc.cs server\PeerChat.Server.cs server\MailboxProtocol.cs server\EncryptedMailbox.cs server\EncryptedMailboxChannel.cs tests\group_device_server_test.cs
+    & "$fx\csc.exe" /nologo /target:exe /platform:x64 /main:GroupDeviceServerTest "/out:$out\server-test.exe" /reference:System.Web.Extensions.dll /reference:System.Security.dll shared\VersionInfo.cs server\ServerConfiguration.cs server\GroupRosterProof.cs server\ArchiveAuthorization.cs server\GroupCiphertextFanout.cs server\GroupMediaRooms.cs server\ServerPresence.cs server\ServerRpc.cs server\PeerChat.Server.cs server\MailboxProtocol.cs server\EncryptedMailbox.cs server\EncryptedMailboxChannel.cs desktop\DiscoveryClient.cs desktop\ArchiveEnrollmentExecution.cs tests\group_device_server_test.cs
     if($LASTEXITCODE){throw 'Server device proof compilation failed'}
     & "$out\server-test.exe" "$out\state"
     if($LASTEXITCODE){throw 'Server device proof regression failed'}

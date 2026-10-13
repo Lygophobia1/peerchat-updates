@@ -315,8 +315,14 @@ public sealed class DiscoveryClient {
     public Dictionary<string,object> InviteAccountToGroup(string groupId,long rosterGeneration,long targetAccountId,string localDevice){return Request("group_invite_account",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"groupId",groupId??""},{"rosterGeneration",rosterGeneration.ToString()},{"targetAccountId",targetAccountId.ToString()}});}
     public ServerGroupRoster RegisterNewGroup(string creationProof,string localDevice){return ParseGroupRoster(Request("group_register",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"createProof",creationProof??""}}));}
     public ServerGroupRoster GetGroupRoster(string groupId,string localDevice){return ParseGroupRoster(Request("group_roster",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"groupId",groupId??""}}));}
+    // Public evidence only; native signed-ledger admission remains authoritative.
+    public ServerGroupRecoveryPage GetGroupDeviceRecovery(string groupId,long afterGeneration,string localDevice){
+        if(afterGeneration<=0)throw new ArgumentOutOfRangeException("afterGeneration");
+        var response=Request("group_device_recovery",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"groupId",groupId??""},{"afterGeneration",afterGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture)}});
+        return GroupRecoveryEvidenceProjection.Read(response,groupId,afterGeneration);
+    }
     public List<ServerGroupRoster> GroupState(string localDevice){var response=Request("group_state",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""}});var rosters=new List<ServerGroupRoster>();object raw;if(response.TryGetValue("groups",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var item=value as Dictionary<string,object>;if(item!=null)rosters.Add(ParseGroupRoster(item));}}return rosters;}
-    static ServerGroupRoster ParseGroupRoster(Dictionary<string,object> response){var roster=new ServerGroupRoster{GroupId=Convert.ToString(response["groupId"]),LegacyGroupId=Convert.ToString(response["legacyGroupId"]),RosterGeneration=Convert.ToInt64(response["rosterGeneration"]),DistributorPeerId=Convert.ToString(response["distributorIdentity"])};object creation;if(response.TryGetValue("creationProof",out creation))roster.CreationProof=Convert.ToString(creation);roster.DeviceApprovals=GroupRosterEvidenceProjection.Read(response,roster.RosterGeneration);object raw;if(response.TryGetValue("members",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var member=value as Dictionary<string,object>;if(member==null)continue;object username;member.TryGetValue("username",out username);roster.Members.Add(new ServerGroupMember{AccountId=Convert.ToInt64(member["accountId"]),PeerId=Convert.ToString(member["publicIdentity"]),Role=Convert.ToString(member["role"]),State=Convert.ToString(member["state"]),Username=Convert.ToString(username)});}}return roster;}
+    internal static ServerGroupRoster ParseGroupRoster(Dictionary<string,object> response){var roster=new ServerGroupRoster{GroupId=Convert.ToString(response["groupId"]),LegacyGroupId=Convert.ToString(response["legacyGroupId"]),RosterGeneration=Convert.ToInt64(response["rosterGeneration"]),DistributorPeerId=Convert.ToString(response["distributorIdentity"])};object creation;if(response.TryGetValue("creationProof",out creation))roster.CreationProof=Convert.ToString(creation);roster.DeviceApprovals=GroupRosterEvidenceProjection.Read(response,roster.RosterGeneration);object raw;if(response.TryGetValue("members",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var member=value as Dictionary<string,object>;if(member==null)continue;object username;member.TryGetValue("username",out username);roster.Members.Add(new ServerGroupMember{AccountId=Convert.ToInt64(member["accountId"]),PeerId=Convert.ToString(member["publicIdentity"]),Role=Convert.ToString(member["role"]),State=Convert.ToString(member["state"]),Username=Convert.ToString(username)});}}return roster;}
     public List<GroupInviteResult> GroupInvites(){var response=Request("group_invite_state",new Dictionary<string,object>{{"sessionToken",SessionToken??""}});var results=new List<GroupInviteResult>();object raw;if(response.TryGetValue("invites",out raw)){var values=raw as IEnumerable;if(values!=null)foreach(object value in values){var item=value as Dictionary<string,object>;if(item==null)continue;results.Add(new GroupInviteResult{InviteId=Convert.ToString(item["inviteId"]),GroupId=Convert.ToString(item["groupId"]),InviterAccountId=Convert.ToInt64(item["inviterAccountId"]),InviterUsername=Convert.ToString(item["inviterUsername"]),CreatedUtc=Convert.ToInt64(item["createdUtc"])});}}return results;}
     public Dictionary<string,object> RespondToGroupInvite(string inviteId,string localDevice,bool accept){return Request("group_invite_respond",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"inviteId",inviteId??""},{"action",accept?"accept":"decline"}});}
     public Dictionary<string,object> RevokeGroupInvite(string inviteId,string localDevice){return Request("group_invite_revoke",new Dictionary<string,object>{{"sessionToken",SessionToken??""},{"publicIdentity",localDevice??""},{"inviteId",inviteId??""}});}
@@ -415,6 +421,48 @@ public sealed class DiscoverySearchResult { public long AccountId,CandidateSeenU
 public sealed class PublicAccountResult { public long AccountId; public string Username; public bool Online; }
 public sealed class GroupInviteResult { public string InviteId,GroupId,InviterUsername; public long InviterAccountId,CreatedUtc; }
 public sealed class ServerGroupMember { public long AccountId; public string PeerId,Role,State,Username; }
+// Transport shape checks only, NOT cryptographic approval or key authority.
+internal static class GroupRecoveryEvidenceProjection {
+    static bool Id(string text,int size){return text!=null&&text.Length==size&&text.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f');}
+    static long Integer(Dictionary<string,object> row,string field){object value;if(!row.TryGetValue(field,out value)||!(value is int||value is long))throw new InvalidDataException("Invalid group recovery number.");return Convert.ToInt64(value);}
+    static void Roster(ServerGroupRoster row,string group,long generation){
+        if(row.GroupId!=group||!Id(row.LegacyGroupId,32)||row.RosterGeneration!=generation||!Id(row.DistributorPeerId,64)||row.Members.Count<1||row.Members.Count>256)throw new InvalidDataException("Invalid group recovery roster.");
+        var peers=new HashSet<string>(StringComparer.Ordinal);
+        foreach(var member in row.Members)if(member.AccountId<=0||!Id(member.PeerId,64)||!peers.Add(member.PeerId)||
+            member.Role!="owner"&&member.Role!="admin"&&member.Role!="member"||member.State!="member"&&member.State!="invited")throw new InvalidDataException("Invalid group recovery device mapping.");
+    }
+    static ServerGroupRoster ReadRoster(object value){
+        var row=value as Dictionary<string,object>;if(row==null||Integer(row,"rosterGeneration")<=0)throw new InvalidDataException("Invalid group recovery roster encoding.");
+        var members=row["members"] as IEnumerable;if(members==null||members is string)throw new InvalidDataException("Invalid group recovery members.");int count=0;
+        foreach(object member in members){var item=member as Dictionary<string,object>;if(++count>256||item==null||Integer(item,"accountId")<=0)throw new InvalidDataException("Invalid group recovery member encoding.");}
+        return DiscoveryClient.ParseGroupRoster(row);
+    }
+    internal static ServerGroupRecoveryPage Read(Dictionary<string,object> response,string expectedGroup,long requestedAfter){
+        try{
+            if(response==null||!Id(expectedGroup,32)||requestedAfter<=0||Encoding.UTF8.GetByteCount(new JavaScriptSerializer{MaxJsonLength=8192}.Serialize(response))>8192)throw new InvalidDataException("Group recovery page exceeds its bound.");
+            var page=new ServerGroupRecoveryPage{GroupId=Convert.ToString(response["groupId"]),FromGeneration=Integer(response,"fromGeneration"),NextGeneration=Integer(response,"nextGeneration"),CurrentGeneration=Integer(response,"currentGeneration"),Reason=Convert.ToString(response["reason"])};
+            object complete;if(!response.TryGetValue("complete",out complete)||!(complete is bool))throw new InvalidDataException("Invalid group recovery completion state.");page.Complete=(bool)complete;
+            if(page.GroupId!=expectedGroup||page.FromGeneration!=requestedAfter||page.NextGeneration<requestedAfter||page.CurrentGeneration<page.NextGeneration||page.Complete!=(page.NextGeneration==page.CurrentGeneration)||
+                !new[]{"none","page_limit","signed_ledger_gap","epoch_evidence_unavailable","epoch_evidence_too_large"}.Contains(page.Reason)||page.Complete!=(page.Reason=="none"))throw new InvalidDataException("Group recovery cursor/scope mismatch.");
+            var rows=response["transitions"] as IEnumerable;if(rows==null||rows is string)throw new InvalidDataException("Invalid group recovery transition list.");long cursor=requestedAfter;string legacy=null,root=null;
+            foreach(object value in rows){
+                if(page.Steps.Count>=32||cursor==Int64.MaxValue)throw new InvalidDataException("Group recovery transition limit.");
+                var row=value as Dictionary<string,object>;if(row==null)throw new InvalidDataException("Invalid group recovery transition.");
+                var before=ReadRoster(row["before"]);var after=ReadRoster(row["after"]);
+                Roster(before,expectedGroup,cursor);Roster(after,expectedGroup,cursor+1);
+                if(before.LegacyGroupId!=after.LegacyGroupId||before.CreationProof!=after.CreationProof||legacy!=null&&(legacy!=before.LegacyGroupId||root!=before.CreationProof))throw new InvalidDataException("Group recovery root/scope mismatch.");
+                string proof=Convert.ToString(row["proof"]);
+                var bounded=new Dictionary<string,object>{{"deviceApprovals",new object[]{new Dictionary<string,object>{{"appliedGeneration",cursor+1},{"proof",proof}}}}};
+                GroupRosterEvidenceProjection.Read(bounded,cursor+1);
+                page.Steps.Add(new ServerGroupRecoveryStep{Before=before,After=after,Proof=proof});legacy=before.LegacyGroupId;root=before.CreationProof;cursor++;
+            }
+            if(cursor!=page.NextGeneration||page.Reason=="page_limit"&&page.Steps.Count==0||page.Reason=="epoch_evidence_too_large"&&page.Steps.Count!=0)throw new InvalidDataException("Group recovery page omitted or fabricated an epoch.");
+            return page;
+        }catch(InvalidDataException){throw;}catch(Exception error){if(error is KeyNotFoundException||error is FormatException||error is InvalidCastException||error is InvalidOperationException||error is ArgumentException||error is OverflowException)throw new InvalidDataException("Malformed group recovery evidence.");throw;}
+    }
+}
+public sealed class ServerGroupRecoveryPage { public string GroupId,Reason;public long FromGeneration,NextGeneration,CurrentGeneration;public bool Complete;public List<ServerGroupRecoveryStep> Steps=new List<ServerGroupRecoveryStep>(); }
+public sealed class ServerGroupRecoveryStep { public ServerGroupRoster Before,After;public string Proof; }
 internal static class GroupRosterEvidenceProjection {
     internal static List<ServerGroupApproval> Read(Dictionary<string,object> response,long generation){
         var result=new List<ServerGroupApproval>();object raw;if(!response.TryGetValue("deviceApprovals",out raw))return result;
