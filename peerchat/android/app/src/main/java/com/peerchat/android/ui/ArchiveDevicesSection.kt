@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.peerchat.android.application.*
 
@@ -20,7 +21,10 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     }
     Text("History Sync",style=MaterialTheme.typography.titleMedium)
     Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){
-        Switch(enrollment?.historySyncEnabled?:false,{value->enrollment?.let{dispatch(UiAction.HistorySync(it,value))}},enabled=enrollment!=null&&!state.archiveBusy)
+        // No verified snapshot means unknown, not OFF. Never present a loading
+        // default as a persisted preference (nor write it back to native policy).
+        if(enrollment==null)Text("Verifying History Sync setting…")
+        else Switch(enrollment.historySyncEnabled,{value->dispatch(UiAction.HistorySync(enrollment,value))},enabled=!state.archiveBusy,modifier=Modifier.testTag("history-sync-policy"))
         Text("Keep approved devices up to date automatically.")
     }
     Text("Existing custom permissions and automatic-sync preferences are preserved. Offline Messages is a separate setting.",style=MaterialTheme.typography.bodySmall)

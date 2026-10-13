@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.hpp"
+#include "statistics.hpp"
 #include <algorithm>
 #include <array>
 #include <functional>
@@ -45,7 +46,9 @@ struct Metadata {
     Digest digest{};
     bool operator==(const Metadata& b)const{return id==b.id&&name==b.name&&size==b.size&&digest==b.digest;}
 };
-struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0,created=0; };
+struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0,created=0;
+    bool statisticsKnown=false,etaReliable=false;std::uint64_t statisticsBytes=0,durationMilliseconds=0,currentBitsPerSecond=0;
+};
 // Persistence adapter only: no sockets, retry loop or independent transfer owner.
 struct DurableState:Snapshot {
     Blob location;
@@ -62,6 +65,12 @@ public:
     virtual std::unique_ptr<Sink> sink(const DurableState&)=0;
 };
 struct PersistenceError:std::runtime_error{explicit PersistenceError(const std::string& reason):std::runtime_error("Protected transfer journal unavailable: "+reason){}};
+class StatisticsStateStore {
+public:
+    virtual ~StatisticsStateStore()=default;
+    virtual void load(std::vector<DurableState>&)=0;
+    virtual void save(const std::vector<DurableState>&)=0;
+};
 struct CapacityError:std::runtime_error {
     std::string id;
     CapacityError(const std::string& message,const std::string& transferId={}):std::runtime_error(message),id(transferId){}
@@ -105,15 +114,17 @@ class TransferManager {
         bool digestReady=false;
         std::uint64_t observedAt=0,routeAt=0,firstPayloadAt=0,lastAckAt=0,payloadBytes=0;
         std::uint64_t readUs=0,hashUs=0,writeUs=0,flushUs=0,commitUs=0,routeChanges=0,backpressure=0,ackWaitTicks=0;
+        statistics::RateMeter rateMeter;bool statisticsInitialized=false,statisticsFinished=false;
     };
     std::map<std::string,Entry> entries_;
     std::function<std::unique_ptr<Hash>()> hash_;
     StateStore* store_=nullptr;
+    StatisticsStateStore* statistics_=nullptr;
     std::uint64_t persistenceRetryAt_=0;
     std::uint64_t journalUs_=0;
     static bool terminal(State s){return s==State::Complete||s==State::Cancelled||s==State::Failed||s==State::Suspended;}
     void save(){
-        if(!store_)return;
+        if(!store_&&!statistics_)return;
         Timer timer(journalUs_);
         std::vector<DurableState> records;
         for(auto& p:entries_){
@@ -123,7 +134,22 @@ class TransferManager {
             d.location=e.location;d.highWaterSent=e.highWaterSent;d.digestReady=e.digestReady;
             d.created=e.created;d.updated=e.updated;d.expires=e.expires;records.push_back(std::move(d));
         }
-        try{store_->save(records);}catch(const std::exception& e){throw PersistenceError(std::string(e.what()).substr(0,128));}catch(...){throw PersistenceError("provider failure");}
+        if(store_)try{store_->save(records);}catch(const std::exception& e){throw PersistenceError(std::string(e.what()).substr(0,128));}catch(...){throw PersistenceError("provider failure");}
+        // Optional telemetry storage never gates resume state, payload or ACKs.
+        if(statistics_)try{statistics_->save(records);}catch(...){}
+    }
+    void statistics(Entry& e,std::uint64_t now){
+        if(!e.statisticsInitialized){e.rateMeter.baseline(e.statisticsBytes,e.lastActivity);e.statisticsInitialized=true;}
+        if(e.statisticsFinished){e.currentBitsPerSecond=0;e.etaReliable=false;return;}
+        const bool finished=e.state==State::Complete||e.state==State::Cancelled||e.state==State::Failed;
+        auto measured=e.rateMeter.observe(e.done,now,e.state==State::Transferring,finished,e.state==State::Suspended);
+        e.statisticsBytes=measured.confirmedBytes;e.currentBitsPerSecond=measured.bitsPerSecond;e.etaReliable=measured.etaReliable;
+        if(!measured.sampled)return;
+        e.durationMilliseconds=std::min(RetentionMilliseconds,e.durationMilliseconds+std::min(measured.elapsedMilliseconds,RetentionMilliseconds));
+        // Existing protected created-time supplies end-to-end duration across
+        // resume/restart without persisting live statistics or changing journals.
+        if(store_&&e.created){const auto wall=store_->wallTime();if(wall>=e.created&&wall-e.created<=RetentionMilliseconds)e.durationMilliseconds=wall-e.created;else e.statisticsKnown=false;}
+        e.statisticsFinished=finished;
     }
     void touch(Entry& e){if(store_){e.updated=store_->wallTime();if(!e.created){e.created=e.updated;e.expires=e.created+RetentionMilliseconds;}}}
     void suspend(Entry& e,const std::string& reason){e.state=State::Suspended;e.error="Retained for restart: "+reason.substr(0,160);e.reply.reset();e.ready=false;}
@@ -147,10 +173,11 @@ class TransferManager {
         e.reply=packet(Kind::Cancel,e.metadata.id).data;
     }
 public:
-    explicit TransferManager(std::function<std::unique_ptr<Hash>()> hash,StateStore* store=nullptr):hash_(std::move(hash)),store_(store){if(!hash_)throw std::runtime_error("Hash provider unavailable");}
+    explicit TransferManager(std::function<std::unique_ptr<Hash>()> hash,StateStore* store=nullptr,StatisticsStateStore* statistics=nullptr):hash_(std::move(hash)),store_(store),statistics_(statistics){if(!hash_)throw std::runtime_error("Hash provider unavailable");}
     void restore(std::uint64_t now){
         if(!store_||!entries_.empty())throw std::runtime_error("Invalid transfer restore");
         auto records=store_->load();if(records.size()>MaxRecords)throw std::runtime_error("Transfer journal limit");
+        if(statistics_)try{statistics_->load(records);}catch(...){for(auto& d:records)d.statisticsKnown=false;}
         size_t active=0;
         for(auto& d:records){
             if(!protocol::id(d.metadata.id,32)||!protocol::id(d.peer)||!safeName(d.metadata.name)||d.metadata.size>MaxFileBytes||
@@ -158,7 +185,9 @@ public:
                 d.expires<d.created||d.expires-d.created>RetentionMilliseconds||entries_.count(d.metadata.id))throw std::runtime_error("Invalid protected transfer state");
             Entry e;static_cast<Snapshot&>(e)=d;e.location=d.location;e.highWaterSent=d.highWaterSent;
             e.created=d.created;e.updated=d.updated;e.expires=d.expires;e.digestReady=d.digestReady;e.lastActivity=now;
+            e.statisticsBytes=std::max(e.statisticsBytes,e.done);e.rateMeter.baseline(e.statisticsBytes,now);e.statisticsInitialized=true;e.statisticsFinished=d.state==State::Complete||d.state==State::Cancelled||d.state==State::Failed;
             bool resumable=!terminal(d.state)||d.state==State::Suspended;
+            if(resumable&&store_->wallTime()>=e.created&&store_->wallTime()-e.created<=RetentionMilliseconds)e.statisticsKnown=true;
             if(resumable){
                 if(++active>MaxTransfers)throw std::runtime_error("Transfer restore limit");
                 try{
@@ -172,7 +201,7 @@ public:
         }
         save();
     }
-    std::vector<Snapshot> snapshots()const{std::vector<Snapshot> result;for(auto& p:entries_)result.push_back(p.second);return result;}
+    std::vector<Snapshot> snapshots(std::uint64_t now=0)const{std::vector<Snapshot> result;for(auto& p:entries_){Snapshot s=p.second;if(s.state!=State::Transferring||(now&&p.second.rateMeter.current(now,true)==0)){s.currentBitsPerSecond=0;s.etaReliable=false;}result.push_back(std::move(s));}return result;}
     // Session-only counters, not journal/wire state. No names, paths or content.
     std::vector<std::string> diagnostics(std::uint64_t now)const{
         std::vector<std::string> rows;
@@ -209,7 +238,7 @@ public:
         if(!protocol::id(peer)||!protocol::id(id,32)||!source||!safeName(source->name())||source->size()>MaxFileBytes||entries_.count(id))throw std::runtime_error("Invalid file offer");
         room();Entry e;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();
         if(expectedDigest){e.metadata.digest=*expectedDigest;e.digestReady=true;}
-        e.sending=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
+        e.sending=true;e.statisticsKnown=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
     }
     void accept(const std::string& id,std::unique_ptr<Sink> sink,std::uint64_t now){
         auto i=entries_.find(id);if(i==entries_.end()||i->second.sending||i->second.state!=State::AwaitingAcceptance||!sink)throw std::runtime_error("File offer no longer available");
@@ -301,11 +330,12 @@ public:
             }catch(const PersistenceError&){throw;} // Retry persistence on the existing next tick; never ACK it early.
             catch(const std::exception& error){if(store_)suspend(e,error.what());else fail(e,"Local file I/O or hash failure");}
         }
+        for(auto& item:entries_)statistics(item.second,now);
         save();
     }
     // Caller must verify TLS identity, purpose, negotiated capability and winner
     // BEFORE dispatch. Peer ID is never obtained from the transfer payload.
-    void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveImpl(peer,frame,now);save();}
+    void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveImpl(peer,frame,now);for(auto& item:entries_)statistics(item.second,now);save();}
     void receiveImpl(const std::string& peer,const Blob& frame,std::uint64_t now){
         protocol::Reader r(frame);protocol::check(r.type()==protocol::FileTransfer&&r.number()==1);
         auto kind=static_cast<Kind>(r.number());auto id=r.string();protocol::check(protocol::id(id,32));
@@ -325,7 +355,7 @@ public:
                 else if(terminal(e.state))e.reply=packet(Kind::Cancel,id).data;
                 return;
             }
-            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id);}Entry e;e.metadata=m;e.peer=peer;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;touch(e);entries_.emplace(id,std::move(e));return;
+            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id);}Entry e;e.metadata=m;e.peer=peer;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
         }
         if(kind==Kind::Cancel&&i==entries_.end()){r.end();return;} // Cancellation can race an unobserved offer.
         protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;

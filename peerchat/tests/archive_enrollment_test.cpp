@@ -149,16 +149,23 @@ int main(){try{
     check(reader.policy().historySyncEnabled());
     reader.policy().setHistorySyncEnabled(false);
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
+    check(!execution.needsAutomaticSync(120000));
+    reader.refresh(metadata(pb,4,registered));check(!reader.policy().historySyncEnabled()); // Metadata never resets explicit OFF.
+    auto preference=ar::applicationHeader(11);preference.number(8);preference.number(1);preference.number(0);
+    {auto reply=ar::executeEnrollmentOperation(reader,11,preference.data,1001);protocol::Reader value(reply);check(value.type()==ar::LocalFormat&&value.string()=="PeerChat/ArchiveApplication/v1"&&value.number()==1&&value.number()==11&&value.number()==0);value.end();}
+    preference=ar::applicationHeader(11);preference.number(9);preference.number(1);preference.number(1);preference.number(1);
+    rejects([&]{ar::executeEnrollmentOperation(reader,11,preference.data,1001);});check(!reader.policy().historySyncEnabled());
     {ar::Authorization reopened(b,pb,8,[](auto,const auto&){return true;},[](auto,const auto&,const auto&)->std::optional<ar::CurrentGrant>{return {};});check(!reopened.historySyncEnabled());}
     reader.policy().setHistorySyncEnabled(true);
     check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory)); // Same grant, not re-enrollment.
-    auto bad=metadata(pb,4,registered);bad.grants.back().proof.back()^=1;
+    {ar::Authorization reopened(b,pb,8,[](auto,const auto&){return true;},[](auto,const auto&,const auto&)->std::optional<ar::CurrentGrant>{return {};});check(reopened.historySyncEnabled());}
+    auto bad=metadata(pb,5,registered);bad.grants.back().proof.back()^=1;
     rejects([&]{reader.refresh(bad);});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
-    reader.refresh(metadata(pb,4,registered));
+    reader.refresh(metadata(pb,5,registered));
     rejects([&]{reader.refresh(metadata(pb,2,registered));});check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
-    reader.refresh(metadata(pb,5,registered));now+=30000;
+    reader.refresh(metadata(pb,6,registered));now+=30000;
     check(!reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));rejects([&]{reader.devices();});
-    reader.refresh(metadata(pb,6,registered));reader.authenticated(2);
+    reader.refresh(metadata(pb,7,registered));reader.authenticated(2);
     rejects([&]{reader.refresh(metadata(pb,6,registered));});
     reader.refresh(metadata(pb,1,registered,2));check(reader.policy().permits(pa.peerId,pb.peerId,ar::ReadHistory));
     source.refresh(metadata(pa,3,registered));auto revoked=source.revokeDevice(pb.peerId,30,true);

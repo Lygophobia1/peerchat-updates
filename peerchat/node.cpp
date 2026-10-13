@@ -15,6 +15,7 @@
 #include "archive_application.hpp"
 #include "archive_attachment_transfer.hpp"
 #include "windows_transfer_io.hpp"
+#include "portable/transfer_statistics_storage.hpp"
 #include "windows_mailbox.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
@@ -122,6 +123,7 @@ struct Node::Impl {
     std::wstring snippetRoot;
     std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
+    std::unique_ptr<transfer::ProtectedStatisticsStore> transferStatistics;
     bool transferPersistenceReported=false;
     std::set<std::string> cataloguedTransfers;
     std::uint64_t attachmentCatalogAt=0;
@@ -273,7 +275,7 @@ struct Node::Impl {
         }
         if(command.sourceKind!=0)throw std::runtime_error("Invalid file operation");
         std::wostringstream out;out<<L"[";bool first=true;
-        auto snapshots=transfers->snapshots();if(archiveTransfers){auto pending=archiveTransfers->pending();snapshots.insert(snapshots.end(),pending.begin(),pending.end());}
+        auto snapshots=transfers->snapshots(nowMilliseconds());if(archiveTransfers){auto pending=archiveTransfers->pending();snapshots.insert(snapshots.end(),pending.begin(),pending.end());}
         auto completed=transfers->completedRecords();
         for(auto& s:snapshots){
             auto original=archiveTransfers?archiveTransfers->originalAttachment(s.metadata.id):std::optional<archive::Attachment>{};
@@ -286,6 +288,7 @@ struct Node::Impl {
                 <<L",\"senderPeer\":"<<transferQuote(widenUtf8(original?original->sender:s.sending?profile.peerId:s.peer))
                 <<L",\"peer\":"<<transferQuote(widenUtf8(s.peer))<<L",\"name\":"<<transferQuote(widenUtf8(s.metadata.name))
                 <<L",\"time\":"<<(original?original->utc:s.created)<<L",\"size\":"<<s.metadata.size<<L",\"done\":"<<s.done<<L",\"state\":"<<static_cast<unsigned>(s.state)<<L",\"sending\":"<<(s.sending?L"true":L"false")
+                <<L",\"statisticsKnown\":"<<(s.statisticsKnown?L"true":L"false")<<L",\"statisticsBytes\":"<<s.statisticsBytes<<L",\"durationMs\":"<<s.durationMilliseconds<<L",\"rateBits\":"<<s.currentBitsPerSecond<<L",\"etaReliable\":"<<(s.etaReliable?L"true":L"false")
                 <<L",\"protectedSource\":"<<(protectedSource?L"true":L"false")<<L",\"error\":"<<transferQuote(widenUtf8(s.error))<<L",\"path\":"<<transferQuote(s.state==transfer::State::Complete&&!protectedSource?transferPaths[s.metadata.id]:L"")<<L"}";
         }
         out<<L"]";return out.str();
@@ -1566,7 +1569,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             try{
                 transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
                 transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
-                transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get());
+                transferStatistics=std::make_unique<transfer::ProtectedStatisticsStore>(*store,profile.peerId);
+                transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get(),transferStatistics.get());
                 transfers->restore(nowMilliseconds());
                 for(auto& d:transferJournal->load())if(!d.location.empty()){
                     protocol::Reader location(d.location);auto source=location.text();transferPaths[d.metadata.id]=d.sending?source:location.text();

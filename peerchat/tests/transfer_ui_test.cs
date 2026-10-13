@@ -16,6 +16,10 @@ class TransferUiTest {
         return false;
     }
     [STAThread] static int Main(string[] args){
+        var measured=new CoreAdapter.FileTransferData{state=3,size=100000,done=50000,statisticsKnown=true,statisticsBytes=50000,durationMs=2000,rateBits=80000,etaReliable=true};
+        string stats=ChatAttachmentProjection.Statistics(measured);Require(stats.Contains("Current 0.08 Mbps")&&stats.Contains("Average 0.20 Mbps")&&stats.Contains("ETA 5 s"),"Acknowledged byte statistics formatting");
+        measured.rateBits=0;measured.etaReliable=false;Require(!ChatAttachmentProjection.Statistics(measured).Contains("ETA"),"Stall ETA must be hidden");
+        measured.state=4;measured.done=measured.statisticsBytes=100000;stats=ChatAttachmentProjection.Statistics(measured);Require(stats.Contains("Average 0.40 Mbps")&&!stats.Contains("Current"),"Completed summary retained without live rate");
         int result=1;string profile=Path.Combine(args[0],"profile");Directory.CreateDirectory(profile);
         var app=new Application();var desktop=new DesktopApplication(profile,0);
         var field=typeof(DesktopApplication).GetField("window",BindingFlags.Instance|BindingFlags.NonPublic);

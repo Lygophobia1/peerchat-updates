@@ -17,6 +17,15 @@ class AttachmentParityTest {
     @get:Rule val compose=createComposeRule()
     private val peer="b".repeat(64)
     private fun row(state:Int=2,path:String="")=AttachmentSnapshot("c".repeat(32),peer,"résumé-日本.png",100000,state,false,0,1,"",path)
+    @Test fun statisticsProjectConfirmedBytesWithoutInventingRates(){
+        val current=row(3).copy(done=50000,statisticsKnown=true,statisticsBytes=50000,durationMs=2000,rateBits=80000,etaReliable=true)
+        assertTrue(current.statisticsText.contains("50.00%"));assertTrue(current.statisticsText.contains("Current 0.08 Mbps"));assertTrue(current.statisticsText.contains("Average 0.20 Mbps"));assertTrue(current.statisticsText.contains("ETA 5 s"))
+        assertFalse(current.copy(rateBits=0,etaReliable=false).statisticsText.contains("ETA"))
+        assertTrue(current.copy(state=7).statisticsText.contains("Current 0.00 Mbps"))
+        val complete=current.copy(state=4,done=100000,statisticsBytes=100000)
+        assertTrue(complete.statisticsText.contains("Average 0.40 Mbps"));assertFalse(complete.statisticsText.contains("Current"))
+        assertTrue(row(4).statisticsText.contains("unavailable"))
+    }
     @Test fun receiveRequiresExplicitAcceptanceAndNativeCompletion(){
         val actions=mutableListOf<UiAction>()
         compose.setContent{PeerChatTheme(true){AttachmentCard(row(),actions::add)}}

@@ -22,6 +22,7 @@
 #include "../tls.hpp"
 #include "../archive_attachment_transfer.hpp"
 #include "transfer_storage.hpp"
+#include "transfer_statistics_storage.hpp"
 #include "attachment_file_io.hpp"
 #include "../protected_text_source.hpp"
 #endif
@@ -38,6 +39,7 @@ struct Instance {
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
     std::shared_ptr<peerchat::transfer::posix::Cache> attachmentCache;
     std::unique_ptr<peerchat::transfer::ProtectedStorageJournal> transferJournal;
+    std::unique_ptr<peerchat::transfer::ProtectedStatisticsStore> transferStatistics;
     std::unique_ptr<peerchat::transfer::TransferManager> transfers;
     std::shared_ptr<peerchat::platform::RecordProtector> attachmentRecords;
     std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
@@ -63,7 +65,8 @@ struct Instance {
             transferJournal=std::make_unique<transfer::ProtectedStorageJournal>(*storage,profile.peerId,
                 [this](const transfer::DurableState& d){return openAttachment(d);},
                 [cache](const transfer::DurableState& d){return transfer::posix::FileSink::reopen(cache,d);});
-            auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get());manager->restore(now);transfers=std::move(manager);
+            transferStatistics=std::make_unique<transfer::ProtectedStatisticsStore>(*storage,profile.peerId);
+            auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get(),transferStatistics.get());manager->restore(now);transfers=std::move(manager);
         }
         if(!archiveTransfers&&archiveApplication&&archiveExecution){auto cache=attachmentCache;
             archiveTransfers=std::make_unique<archive::AttachmentTransfers>(*storage,profile,archiveApplication->policy(),*transfers,
@@ -597,6 +600,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             }
             std::stable_sort(rows.begin(),rows.end(),[](const auto& a,const auto& b){auto active=[](const auto& row){return row.state!=transfer::State::Complete&&row.state!=transfer::State::Failed&&row.state!=transfer::State::Cancelled;};if(active(a)!=active(b))return active(a);return a.created>b.created;});
             if(rows.size()>64)rows.resize(64);
+            auto measured=instance->transfers->snapshots(now);for(auto& row:rows){auto found=std::find_if(measured.begin(),measured.end(),[&](const auto& m){return m.metadata.id==row.metadata.id;});if(found!=measured.end())row=*found;}
             w.number(rows.size());
             for(const auto& row:rows){w.string(row.metadata.id);w.string(row.peer);w.string(row.metadata.name);w.number(row.metadata.size);w.number(static_cast<unsigned>(row.state));w.number(row.sending);w.number(row.done);w.number(row.created);w.string(row.error);
                 std::string path;
@@ -607,6 +611,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
                 }
                 w.string(path);
             }
+            w.string("PeerChat/TransferStatisticsSnapshot/v1");w.number(rows.size());for(const auto& row:rows){w.string(row.metadata.id);w.number(row.statisticsKnown);w.number(row.statisticsBytes);w.number(row.durationMilliseconds);w.number(row.currentBitsPerSecond);w.number(row.etaReliable);}
         }else if(operation==5){
             r.end();auto rows=instance->transfers->diagnostics(now);w.number(rows.size());for(const auto& row:rows)w.string(row);
         }else return nullptr;

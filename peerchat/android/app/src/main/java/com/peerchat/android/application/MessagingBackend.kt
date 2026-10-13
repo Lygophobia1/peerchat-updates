@@ -318,6 +318,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
     }
     private var transferDiagnosticsAt=0L
+    private var attachmentProjectionAt=0L;private var attachmentProjectionHandle=0L;private var attachmentProjectionGeneration=0L
+    private var attachmentProjection=emptyList<AttachmentSnapshot>()
     private val transferDiagnosticStates=mutableMapOf<String,Pair<String,Long>>()
     private fun transfer(operation:Int,write:(NativeRecordWriter)->Unit={}):ByteArray {
         val request=NativeRecordWriter(30).also(write).bytes()
@@ -575,7 +577,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val conversations=nativeConversationProjection(friends,
             {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},
             {peer->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),Long.MAX_VALUE))})
-        val attachments=attachmentSnapshots(transfer(4))
+        val projectionNow=android.os.SystemClock.elapsedRealtime()
+        if(native!=attachmentProjectionHandle||generation!=attachmentProjectionGeneration||projectionNow>=attachmentProjectionAt){
+            attachmentProjection=attachmentSnapshots(transfer(4));attachmentProjectionHandle=native;attachmentProjectionGeneration=generation;attachmentProjectionAt=projectionNow+1000
+        }
+        val attachments=attachmentProjection
         val diagnosticNow=android.os.SystemClock.elapsedRealtime()
         if(attachments.isNotEmpty()&&diagnosticNow>=transferDiagnosticsAt){
             transferDiagnosticsAt=diagnosticNow+1000

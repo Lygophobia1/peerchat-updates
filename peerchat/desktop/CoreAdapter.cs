@@ -13,7 +13,7 @@ namespace PeerChatDesktop {
 public sealed class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
-    public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer;public long size,done,time,account;public int state;public bool sending,isArchive,originalSending,protectedSource;}
+    public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr handle,uint operation,string peer,string id,string path);
     public string FileTransfer(uint operation,string peer="",string id="",string path=""){lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");

@@ -19,6 +19,22 @@ import org.robolectric.annotation.Config
 @Config(sdk=[34],qualifiers="w360dp-h800dp-port")
 class ArchiveDevicesUiTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun unknownPolicyIsNotOffAndVerifiedSnapshotsRestoreBothPreferences(){
+        val id="a".repeat(64);val context=ArchiveEnrollmentSnapshot(8,3,id,emptyList(),true)
+        val state=mutableStateOf(PeerChatUiState(demo=false,account=AccountUi("8","Test")))
+        val actions=mutableListOf<UiAction>()
+        compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state.value,actions::add)}}}
+        compose.onNodeWithTag("history-sync-policy").assertDoesNotExist()
+        compose.onNodeWithText("Verifying History Sync setting…").assertExists()
+        compose.runOnIdle{state.value=state.value.copy(archiveEnrollment=context)}
+        compose.onNodeWithTag("history-sync-policy").assertIsOn().performClick()
+        compose.runOnIdle{assertEquals(UiAction.HistorySync(context,false),actions.filterIsInstance<UiAction.HistorySync>().single());state.value=state.value.copy(archiveEnrollment=context.copy(historySyncEnabled=false))}
+        compose.onNodeWithTag("history-sync-policy").assertIsOff()
+        compose.runOnIdle{state.value=state.value.copy(archiveEnrollment=null)}
+        compose.onNodeWithTag("history-sync-policy").assertDoesNotExist()
+        compose.runOnIdle{state.value=state.value.copy(archiveEnrollment=context)}
+        compose.onNodeWithTag("history-sync-policy").assertIsOn()
+    }
     @Test fun issuerConsentIsNeverImpliedByRenderingOrOpeningTheDialog(){
         val id="a".repeat(64)
         val context=ArchiveEnrollmentSnapshot(8,3,id,listOf(ArchiveDeviceSnapshot(id,true,false,false,false)))

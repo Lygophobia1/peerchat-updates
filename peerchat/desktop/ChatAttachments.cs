@@ -32,9 +32,19 @@ public static class ChatAttachmentProjection {
         if(row.state==3&&row.size>0)label+=" · "+Math.Min(100,Math.Max(0,100.0*row.done/row.size)).ToString("0")+"%";
         return label;
     }
+    public static string Statistics(CoreAdapter.FileTransferData row){
+        var culture=System.Globalization.CultureInfo.InvariantCulture;
+        double percent=row.size>0?Math.Min(100,100.0*row.done/row.size):row.state==4?100:0;
+        string average=row.statisticsKnown&&row.durationMs>0?(row.statisticsBytes*8000.0/row.durationMs/1000000).ToString("0.00",culture)+" Mbps":"unavailable";
+        string result=row.done.ToString("N0")+" / "+row.size.ToString("N0")+" bytes · "+percent.ToString("0.0",culture)+"%";
+        if(row.state==4)return result+"\nAverage "+average+" · Duration "+(row.statisticsKnown?(row.durationMs/1000.0).ToString("0.0",culture)+" s":"unavailable");
+        result+="\nCurrent "+(row.state==3?row.rateBits/1000000.0:0).ToString("0.00",culture)+" Mbps · Average "+average;
+        if(row.state==3&&row.etaReliable&&row.rateBits>0&&row.done<row.size){double seconds=Math.Ceiling((row.size-row.done)*8.0/row.rateBits);if(seconds>0&&seconds<=604800)result+=" · ETA "+seconds.ToString("0",culture)+" s";}
+        return result;
+    }
     public static bool Apply(ConversationModel conversation,CoreAdapter.FileTransferData row){
         var message=conversation.Messages.FirstOrDefault(item=>item.Attachment!=null&&LogicalId(item.Attachment)==LogicalId(row));
-        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error)return false;message.SetAttachment(row);return true;}
+        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error&&previous.rateBits==row.rateBits&&previous.durationMs==row.durationMs&&previous.statisticsBytes==row.statisticsBytes&&previous.statisticsKnown==row.statisticsKnown&&previous.etaReliable==row.etaReliable)return false;message.SetAttachment(row);return true;}
         bool outgoing=row.isArchive?row.originalSending:row.sending;
         message=new MessageModel{Data=new MessageData{id=LogicalId(row),sender=row.senderPeer??"",text="",time=row.time,logical=row.time},Outgoing=outgoing};
         message.SetAttachment(row);
@@ -140,6 +150,7 @@ public sealed class AttachmentCard:StackPanel {
         if(!longMessage)Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
         else if(preview==null)Children.Add(new TextBlock{Text="Long message",FontWeight=FontWeights.SemiBold});
         Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
         var actions=new WrapPanel();Children.Add(actions);
