@@ -20,6 +20,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
 import com.peerchat.android.platform.ServerEndpoint
@@ -81,12 +84,31 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             Route.Home -> Home(state, dispatch)
             Route.Conversation -> state.selected?.let { ConversationScreen(it, state, dispatch) }
             Route.Details -> state.selected?.let { DetailsScreen(it, state, dispatch) }
-            Route.Diagnostics -> Scaffold(topBar = { PageBar("Diagnostics", dispatch) }) { padding ->
-                Column(Modifier.padding(padding).padding(24.dp)) {
-                    Text(if(state.demo) "UI demo — no live diagnostics" else "Native connection diagnostics", style = MaterialTheme.typography.titleLarge)
-                    Text(if(state.demo) "Explicit demo mode: no live transport or identity." else state.diagnostics, Modifier.padding(top = 16.dp))
-                }
-            }
+            Route.Diagnostics -> DiagnosticsScreen(state, dispatch)
+        }
+    }
+}
+
+internal fun diagnosticReport(state:PeerChatUiState):String =
+    "PeerChat Android diagnostics\nBuild: ${com.peerchat.android.BuildConfig.VERSION_NAME}\n"+
+        if(state.demo)"Explicit demo mode: no live transport or identity." else state.diagnostics
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable internal fun DiagnosticsScreen(state:PeerChatUiState,dispatch:(UiAction)->Unit){
+    val clipboard=LocalClipboardManager.current
+    val report=diagnosticReport(state)
+    var copied by remember(report){mutableStateOf(false)}
+    Scaffold(topBar={TopAppBar(title={Text("Diagnostics")},navigationIcon={
+        ActionIcon(Icons.AutoMirrored.Filled.ArrowBack,"Back",{dispatch(UiAction.Back)})
+    },actions={TextButton({clipboard.setText(AnnotatedString(report));copied=true},Modifier.testTag("diagnostics-copy")){
+        Text(if(copied)"Copied" else "Copy diagnostics")
+    }})}){padding->
+        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp).testTag("diagnostics-scroll")){
+            Text(if(state.demo)"UI demo — no live diagnostics" else "Native connection diagnostics",style=MaterialTheme.typography.titleLarge)
+            // Copy the complete existing safe projection, never a viewport slice
+            // or a second raw native/log/credential source.
+            SelectionContainer{Text(report,Modifier.padding(top=16.dp).testTag("diagnostics-full-text"))}
+            Text("End of diagnostics",Modifier.padding(top=16.dp).testTag("diagnostics-end"),style=MaterialTheme.typography.labelSmall)
         }
     }
 }

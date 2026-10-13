@@ -17,6 +17,7 @@ class Execution {
     bool completedIntent_=false;
     std::string lastIncoming_="none";
     std::string rejectedStage_="none";
+    std::vector<std::string> transportEvidence_;
     std::uint64_t received_=0,lastSuccessful_=0,scanGeneration_=0;
     std::string presentationContext_;Blob savedPresentation_;
     DeviceAccounts directory()const{return [this](const std::string& device){return storage_.historicalDeviceAccount(device);};}
@@ -83,6 +84,19 @@ public:
         require(needsAutomaticSync(now)&&now<=UINT64_MAX-60000);start(issuer,source,true);nextAutomaticAt_=now+60000;
     }
     const std::string& state()const{return state_;}
+    // Bounded, volatile, read-only evidence. Callers supply constant stages,
+    // never exception messages, TLS tokens, payloads or storage contents.
+    void recordTransport(std::uint64_t attempt,const session::ReliableAuthorization& scope,const char* stage)noexcept{
+        try{
+            if(!scope.valid()||!scope.permitsArchiveControl()||scope.archive.account!=policy_.account())return;
+            const std::string label=stage?stage:"unknown";
+            if(label.empty()||label.size()>64||label.find_first_not_of("abcdefghijklmnopqrstuvwxyz_")!=std::string::npos)return;
+            std::ostringstream line;line<<"archive_transport attempt="<<attempt<<" role="<<(scope.archive.source==local_.peerId?"source":"reader")
+                <<" remote="<<scope.expectedRemoteDeviceId<<" stage="<<label;
+            if(transportEvidence_.size()==8)transportEvidence_.erase(transportEvidence_.begin());
+            transportEvidence_.push_back(line.str());
+        }catch(...){/* Diagnostics cannot affect routing or authorization. */}
+    }
     std::string diagnostics()const{
         std::ostringstream out;
         out<<"\n=== History Sync execution ===\nstate="<<state_<<" running="<<running_<<" restore_pending="<<restore_<<" completed_intent="<<completedIntent_
@@ -99,6 +113,7 @@ public:
             }else out<<"\narchive_route=not_requested";
         }else out<<"\nactive_scope=none";
         out<<"\nlast_incoming_archive="<<lastIncoming_<<"\ndata_rejection_stage="<<rejectedStage_<<"\n";
+        for(const auto& line:transportEvidence_)out<<line<<'\n';
         return out.str();
     }
     // A corrupt checkpoint/page stops only archive work, never the profile's

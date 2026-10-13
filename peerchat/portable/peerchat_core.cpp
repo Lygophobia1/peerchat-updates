@@ -427,6 +427,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         for(auto& peer:instance->peers){
             if(peer.second->closed()||!instance->sessions.attachablePeer({1},{peer.first})||
                (!peer.second->ready()&&peer.second->authenticationExpired(now))){
+                if(auto scope=peer.second->archiveScope())if(instance->archiveExecution)
+                    instance->archiveExecution->recordTransport(peer.first,*scope,peer.second->closed()?peer.second->diagnosticStage():
+                        !instance->sessions.attachablePeer({1},{peer.first})?"manager_retired":"authentication_deadline");
                 peer.second->close(true);
                 if(auto scope=peer.second->archiveScope()){
                     if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope);
@@ -502,7 +505,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                     }
                 }else return nullptr;
             }
-        }catch(...){endpoint.close(false);throw;}
+        }catch(...){
+            if(auto scope=endpoint.archiveScope())if(instance->archiveExecution)instance->archiveExecution->recordTransport(
+                static_cast<std::uint64_t>(token),*scope,endpoint.diagnosticStage());
+            endpoint.close(false);throw;
+        }
         return peerchat::platform::android::Context::input(env,output);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }

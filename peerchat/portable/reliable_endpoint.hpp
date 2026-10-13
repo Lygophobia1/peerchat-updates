@@ -41,6 +41,7 @@ private:
     std::optional<ArchiveAdmission> archive_;
     TransferReceiver transfer_;
     bool archiveBound_=false,archiveBindingSent_=false;
+    const char* stage_="created";
     bool authorized()const{
         return archive_?archive_->policy&&archive::currentSessionAuthorization(*archive_->policy,archive_->scope):
             friends_.contains(runtime_.expected);
@@ -68,6 +69,7 @@ private:
     std::uint64_t now_=0;
     std::uint64_t began_=0;
     void activate(){
+        stage_="winner_selection";
         if(!runtime_.approved||!runtime_.remoteApproved||sessions_.active(id_))return;
         auto result=sessions_.arbitrateWinner(epoch_,id_,now_);
         protocol::check(result.activated());
@@ -81,6 +83,7 @@ private:
         event({EventKind::Ready,runtime_.peerId,{},std::nullopt});pump();
     }
     void approve(){
+        stage_="identity_grant_binding";
         protocol::check(!closed_&&runtime_.hello&&!runtime_.identityMismatch&&authorized());
         if(archive_){
             auto key=tls_->remotePublicKey();
@@ -96,10 +99,12 @@ private:
         protocol::Writer accepted(protocol::Accepted);packet(accepted);activate();
     }
     void dispatch(const Blob& bytes){
+        stage_="frame_decode";
         sessions_.observeTransport(observation_.observedReceive(bytes.size()),now_);
         protocol::Reader reader(bytes);
         auto kind=runtime_.enter(reader,true,tls_->remotePublicKey(),local_.peerId);
         if(kind==reliable::SharedPeerRuntime::FrameKind::Hello){
+            stage_="hello_verification";
             protocol::check(!runtime_.identityMismatch&&authorized());
             protocol::check(sessions_.observeTransport(observation_.identityPresented(runtime_.peerId,runtime_.remoteCapabilities),now_));
             if(archive_){
@@ -111,16 +116,19 @@ private:
             return;
         }
         if(kind==reliable::SharedPeerRuntime::FrameKind::Accepted){
+            stage_="remote_acceptance";
             protocol::check(sessions_.markRemoteAccepted(epoch_,id_));activate();return;
         }
         runtime_.requireOnline(sessions_.active(id_));
         if(archive_){
             protocol::check(authorized());
             if(!archiveBound_){
+                stage_="archive_scope_binding";
                 archive::verifySessionBinding(reader,archive_->scope);
                 archiveBound_=true;event({EventKind::Ready,runtime_.peerId,{},std::nullopt});return;
             }
             protocol::check(bool(archive_->control));archive::validateHistoryControl(bytes);
+            stage_="archive_control";
             auto response=archive_->control(bytes);protocol::check(authorized());
             if(!response.empty())sendArchiveControl(response);
             return;
@@ -162,6 +170,7 @@ public:
     ~ReliableEndpoint(){close(false);}
     bool ready()const{return !closed_&&sessions_.active(id_)&&(!archive_||archiveBound_)&&authorized();}
     bool closed()const noexcept{return closed_;}
+    const char* diagnosticStage()const noexcept{return stage_;}
     void sendArchiveControl(const Blob& bytes){
         protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
         protocol::Writer value(protocol::ArchiveControl);value.data=bytes;packet(value);
@@ -172,11 +181,13 @@ public:
     void receive(const Blob& bytes,std::uint64_t now){
         protocol::check(!closed_);now_=now;
         try{
+            stage_="authorization_current";
             const auto continuity=archive_?archive_->scope.continuityKey():runtime_.expected;
             protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
                 (archive_?protocol::CapabilityArchiveControl:0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
+            stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
             if(!live)close(true);

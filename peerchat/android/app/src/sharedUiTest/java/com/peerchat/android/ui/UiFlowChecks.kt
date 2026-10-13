@@ -12,6 +12,19 @@ import org.junit.Test
 /** UI-only: does not create native handles, identities, aliases or secure records. */
 abstract class UiFlowChecks {
     @get:Rule val compose = createComposeRule()
+    @Test fun diagnosticsScrollsAndCopiesTheFullSafeReport(){
+        val safe=(1..180).joinToString("\n"){"archive_transport attempt=$it stage=archive_control"}+"\nlast_safe_record"
+        var state by mutableStateOf(PeerChatUiState(demo=false,route=Route.Diagnostics,diagnostics=safe))
+        var clipboard:androidx.compose.ui.platform.ClipboardManager?=null
+        compose.setContent{clipboard=androidx.compose.ui.platform.LocalClipboardManager.current;PeerChatTheme(true){PeerChatShell(state,{})}}
+        compose.onNodeWithTag("diagnostics-copy").assertIsDisplayed().performClick()
+        compose.runOnIdle{assertEquals(diagnosticReport(state),clipboard!!.getText()!!.text)}
+        compose.onNodeWithTag("diagnostics-end").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("diagnostics-copy").assertIsDisplayed()
+        compose.runOnIdle{state=state.copy(diagnostics=safe+"\nupdated_safe_record")}
+        compose.onNodeWithTag("diagnostics-copy").performClick()
+        compose.runOnIdle{assertEquals(diagnosticReport(state),clipboard!!.getText()!!.text)}
+    }
     @Test fun stalledSignInKeepsBothRecoveryActionsEnabled() {
         var action:UiAction?=null
         compose.setContent {PeerChatTheme(true){PeerChatShell(PeerChatUiState(demo=false,route=Route.Login,loginBusy=true,startupStatus=null),{action=it})}}

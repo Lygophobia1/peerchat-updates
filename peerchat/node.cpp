@@ -1525,6 +1525,9 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             auto& connection=**it;std::string id=!connection.expected.empty()?connection.expected:connection.peerId;bool mismatch=connection.identityMismatch,wasRelay=connection.relay;
             bool groupControl=connection.authorization.scope!=session::ReliableAuthorizationScope::Friend;
             const bool archiveControl=connection.authorization.permitsArchiveControl();
+            if(archiveControl&&archiveExecution)archiveExecution->recordTransport(connection.attemptId,connection.authorization,
+                connection.online?(connection.archiveBound?"route_closed_after_binding":"route_closed_before_binding"):
+                connection.hello?"route_closed_after_hello":connection.tls&&connection.tls->ready()?"route_closed_after_tls":"route_closed_before_tls");
             std::string groupScopeKey=groupControl?connection.authorization.continuityKey():std::string{};
             if(connection.authorization.permitsArchiveControl()&&archiveExecution)archiveExecution->disconnected(connection.authorization);
             std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;

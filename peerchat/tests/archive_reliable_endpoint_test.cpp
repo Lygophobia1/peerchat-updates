@@ -70,6 +70,11 @@ int main(){try{
         a.rememberAuthenticatedDeviceAccount(source.peerId,8);a.rememberAuthenticatedDeviceAccount(contact.peerId,9);
         b.rememberAuthenticatedDeviceAccount(source.peerId,8);b.rememberAuthenticatedDeviceAccount(reader.peerId,8);b.rememberAuthenticatedDeviceAccount(contact.peerId,9);
         archive::Execution sourceWork(a,source,serving,ad,as),readerWork(b,reader,reading,bd,bs);
+        for(unsigned n=0;n<20;++n)sourceWork.recordTransport(n,scopedA.scope,"peer_tls_receive");
+        sourceWork.recordTransport(999,scopedA.scope,"not a safe diagnostic label");
+        auto evidence=sourceWork.diagnostics();unsigned evidenceCount=0;
+        for(size_t pos=0;(pos=evidence.find("archive_transport attempt=",pos))!=std::string::npos;pos++)++evidenceCount;
+        check(evidenceCount==8&&evidence.find("attempt=999")==std::string::npos&&evidence.find("attempt=19 role=source")!=std::string::npos);
         sourceWork.incoming(scopedA.scope,now,0);readerWork.start(source.peerId,source.peerId,false);
         check(archive::decodeSessionBinding(archive::sessionBinding(scopedA.scope).data,reader.peerId).expectedRemoteDeviceId==source.peerId);
         rejects([&]{archive::decodeSessionBinding(archive::sessionBinding(scopedA.scope).data,contact.peerId);});
