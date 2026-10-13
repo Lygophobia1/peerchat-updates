@@ -105,7 +105,7 @@ static class ArchiveApplicationBoundaryTest {
         while(DateTime.UtcNow<until){
             int n=ui_relay_take_output(a,ra,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(b,rb,bytes,(uint)n)==1);
             n=ui_relay_take_output(b,rb,bytes,(uint)bytes.Length,0);if(n>0)Check(ui_relay_receive(a,ra,bytes,(uint)n)==1);
-            var progress=reader.Progress(8,1);if(progress.Complete){Check(!progress.Running&&progress.Processed==25&&progress.Received==25&&progress.HistoryRevision>0&&progress.LastSuccessful>0);complete=true;break;}Thread.Sleep(10);
+            var progress=reader.Progress(8,1);if(progress.DisplayState=="Partial"&&!progress.Running){Check(!progress.Complete&&progress.Processed==25&&progress.Received==25&&progress.HistoryRevision>0&&progress.LastSuccessful==0&&progress.Deferred==3&&progress.RejectedBatches==0);complete=true;break;}Thread.Sleep(10);
         }
         Check(complete);Check(reader.Progress(8,1).Attachments==1);
         Check(ui_history(b,new string('a',64),Int64.MaxValue)==1);
@@ -140,7 +140,7 @@ static class ArchiveApplicationBoundaryTest {
         if(!downloaded){Console.Error.WriteLine("Reader transfer states: "+Marshal.PtrToStringUni(ui_file_transfer(b,0,"","","")));Console.Error.WriteLine("Source transfer states: "+Marshal.PtrToStringUni(ui_file_transfer(a,0,"","","")));}
         Check(downloaded);var files=Directory.GetFiles(Path.Combine(root,"downloads"));Check(files.Length==1);
         Check(Convert.ToBase64String(File.ReadAllBytes(files[0]))==Convert.ToBase64String(File.ReadAllBytes(Path.Combine(root,"source-file.bin"))));
-        Console.WriteLine("PASS: actual paired Node workers, zero friends, scoped opaque relay, mutual Schannel TLS, catalog sync and verified Unicode attachment download through ONE TransferManager. HOST ONLY");
+        Console.WriteLine("PASS: actual paired Node workers, 25 committed imports with 3 preserved unresolved records, honest partial completion, mutual Schannel TLS and verified Unicode attachment download. HOST ONLY");
     }finally{ui_destroy(b);ui_destroy(a);}}
     public static int Main(string[] args){try{
         Check(ArchiveEnrollmentExecution.IsArchiveEvent("scope","a","b",8,"TLS failed"));

@@ -28,8 +28,9 @@ internal class ArchiveEnrollmentExecution(
         require(r.text()=="PeerChat/ArchiveApplication/v1"&&r.number()==1L&&r.number()==23L)
         val state=r.text();val processed=r.number();val conversations=r.number();val complete=r.number();val running=r.number();val source=r.text();val attachments=r.number()
         val received=r.number();val revision=r.number();val success=r.number();val scan=r.number();val enabled=r.number()
+        var deferred=0L;var rejected=0L;if(r.hasRemaining()){require(r.text()=="PeerChat/ArchiveScanAccounting/v1");deferred=r.number();rejected=r.number();require(deferred>=0&&rejected>=0)}
         require(state.length<=128&&complete<=1&&running<=1&&enabled<=1&&success<=253402300799999L&&(source.isEmpty()||source.matches(Regex("[0-9a-f]{64}"))));r.end()
-        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments,received,revision,success,scan,enabled==1L,generation)
+        return ArchiveSyncProgress(state,processed,conversations,complete==1L,running==1L,source,attachments,received,revision,success,scan,enabled==1L,generation,deferred,rejected)
     }
     fun devices(account:Long,generation:Long,base:ByteArray):List<ArchiveDeviceSnapshot>{
         val rows=archiveDeviceSnapshots(base)

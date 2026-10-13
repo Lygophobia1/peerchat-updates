@@ -107,6 +107,12 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     }
     require(receivedPicture->committed&&receivedPicture->bytes==picture&&receivedDocument->committed&&receivedDocument->bytes==document&&fileFrames>8,"Bidirectional authenticated binary transfer corrupted or incomplete");
     require(uploads.completedRecords().size()==2&&downloads.completedRecords().size()==2,"File completion acknowledgement missing");
+    // Capacity rejection is an application refusal, not TLS/session failure.
+    // Four unaccepted offers are retained; the fifth must leave the winner live.
+    for(unsigned n=0;n<5;++n){protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(transfer::Kind::Offer));offer.string(Storage::newMessageId());offer.string("capacity.bin");offer.number(1);offer.bytes(Blob(32,0));require(left.sendTransfer(offer.data),"Capacity fixture send failed");exchange(left,right);}
+    require(left.ready()&&right.ready()&&downloads.snapshots().size()==6,"Capacity rejection closed the authenticated messaging winner");
+    StoredMessage afterCapacity{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",44,Delivery::Queued,0,a.nextLogicalOrder()};
+    require(a.append(bob.peerId,afterCapacity),"Post-capacity send persistence failed");left.pump();exchange(left,right);require(a.pending(bob.peerId).empty()&&b.message(afterCapacity.id).has_value(),"Messaging failed after file capacity rejection");
     af.replace(0,4,{});require(!left.sendTransfer(premature.data),"Logged-out endpoint sent file bytes");
     std::cout<<"PASS: 102 real Schannel/shared-runtime relay lifecycles, durable text/ACK/dedupe, bidirectional binary picture/file transfers through existing TransferManager, authenticated winner/capability/logout gates. HOST ONLY\n";
     return 0;

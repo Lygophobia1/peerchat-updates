@@ -136,7 +136,7 @@ private:
         protocol::check(friends_.contains(runtime_.peerId));
         if(reader.type()==protocol::FileTransfer){
             protocol::check(bool(transfer_)&&(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)!=0);
-            transfer_(runtime_.peerId,bytes,now_);
+            try{transfer_(runtime_.peerId,bytes,now_);}catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(refusal);}
         }else if(reader.type()==protocol::Text){
             auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_,friends_.localAccount());
             if(result.message){
@@ -170,6 +170,7 @@ public:
     ~ReliableEndpoint(){close(false);}
     bool ready()const{return !closed_&&sessions_.active(id_)&&(!archive_||archiveBound_)&&authorized();}
     bool closed()const noexcept{return closed_;}
+    bool permitsDeferredHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0;}
     const char* diagnosticStage()const noexcept{return stage_;}
     void sendArchiveControl(const Blob& bytes){
         protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
@@ -186,7 +187,7 @@ public:
             protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
-                (archive_?protocol::CapabilityArchiveControl:0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
+                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
             stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});

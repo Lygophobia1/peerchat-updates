@@ -447,7 +447,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
             }
             else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
-                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first);if(!request.empty())peer.second->sendArchiveControl(request);}
+                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first,peer.second->permitsDeferredHistory());if(!request.empty())peer.second->sendArchiveControl(request);}
                 catch(...){instance->archiveExecution->disconnected(*scope,peer.first);peer.second->close(false);}
             }
         }

@@ -47,6 +47,8 @@ constexpr Type FileTransfer=static_cast<Type>(30);
 // session, never on an ordinary friend or group-control stream.
 constexpr Type ArchiveControl=static_cast<Type>(32);
 constexpr std::uint64_t CapabilityArchiveControl=2048;
+// Negotiates an explicit unresolved-conversation response. Never imports it.
+constexpr std::uint64_t CapabilityArchiveDeferred=4096;
 inline Blob frame(const Blob& data){check(data.size()<=MaxPacket);Blob out;for(int i=3;i>=0;i--)out.push_back(static_cast<unsigned char>(data.size()>>(8*i)));out.insert(out.end(),data.begin(),data.end());return out;}
 struct Writer {
     Blob data;

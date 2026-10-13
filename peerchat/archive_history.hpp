@@ -12,6 +12,7 @@ using DeviceAccounts=std::function<std::optional<std::uint64_t>(const std::strin
 struct HistoryRequest {
     std::string id,store,conversation;
     std::uint64_t after=0,through=0;
+    bool allowDeferred=false;
 };
 struct HistoryRecord {std::uint64_t cursor=0;Assertion assertion;};
 struct HistoryPage {
@@ -50,11 +51,20 @@ inline void historyHeader(protocol::Reader& r,std::uint64_t kind){
     require(r.type()==protocol::ArchiveControl&&r.string()=="PeerChat/ArchiveHistory/v1"&&r.number()==1&&r.number()==kind);
 }
 inline Blob encodeHistoryRequest(const HistoryRequest& q){
-    auto w=historyHeader(2);historyRequestFields(w,q);return w.data;
+    auto w=historyHeader(q.allowDeferred?11:2);historyRequestFields(w,q);return w.data;
 }
 inline HistoryRequest decodeHistoryRequest(const Blob& bytes){
-    require(bytes.size()<=1024);protocol::Reader r(bytes);historyHeader(r,2);
-    auto q=historyRequestFields(r);r.end();require(encodeHistoryRequest(q)==bytes);return q;
+    require(bytes.size()<=1024);protocol::Reader r(bytes);require(r.type()==protocol::ArchiveControl&&r.string()=="PeerChat/ArchiveHistory/v1"&&r.number()==1);
+    auto kind=r.number();require(kind==2||kind==11);auto q=historyRequestFields(r);q.allowDeferred=kind==11;r.end();require(encodeHistoryRequest(q)==bytes);return q;
+}
+struct DeferredConversation {HistoryRequest request;std::uint64_t records=0;};
+inline Blob encodeDeferredConversation(const DeferredConversation& d){
+    require(!d.request.store.empty()&&d.request.through>d.request.after&&d.records>0&&d.records<=d.request.through-d.request.after);
+    auto w=historyHeader(10);historyRequestFields(w,d.request);w.number(d.records);w.string("device_mapping_unresolved");return w.data;
+}
+inline DeferredConversation decodeDeferredConversation(const Blob& bytes){
+    require(bytes.size()<=1024);protocol::Reader r(bytes);historyHeader(r,10);DeferredConversation d;d.request=historyRequestFields(r);d.request.allowDeferred=true;
+    d.records=r.number();require(r.string()=="device_mapping_unresolved");r.end();require(encodeDeferredConversation(d)==bytes);return d;
 }
 inline Blob encodeHistoryPage(const HistoryPage& page){
     const auto& q=page.request;validHistoryRequest(q);
@@ -120,7 +130,8 @@ inline void validateHistoryControl(const Blob& bytes){
     if(r.type()==protocol::ArchiveControl&&r.string()==AttachmentDomain){validateAttachmentControl(bytes);return;}
     protocol::Reader history(bytes);
     require(history.type()==protocol::ArchiveControl&&history.string()=="PeerChat/ArchiveHistory/v1"&&history.number()==1);
-    auto kind=history.number();if(kind==2){decodeHistoryRequest(bytes);return;}
+    auto kind=history.number();if(kind==2||kind==11){decodeHistoryRequest(bytes);return;}
+    if(kind==10){decodeDeferredConversation(bytes);return;}
     if(kind==3){decodeHistoryPage(bytes);return;}
     if(kind==4){decodeManifestRequest(bytes);return;}
     require(kind==5);decodeManifestPage(bytes);
@@ -154,7 +165,14 @@ inline Blob serveHistoryPage(Storage& storage,const Profile& local,Authorization
     for(size_t i=0;i<candidates.messages.size();++i){
         if(stage)*stage="source_record_device_mapping";
         const auto& m=candidates.messages[i];auto sender=directory(m.sender),recipient=directory(m.recipient);
-        require(sender&&recipient);
+        if(!sender||!recipient){
+            if(!q.allowDeferred)require(false);
+            // Defer the entire remaining conversation window, including any
+            // otherwise valid prefix of this page. No assertion or import is
+            // fabricated, and the reader's history cursor remains untouched.
+            require(currentSessionAuthorization(authorization,scope));
+            return encodeDeferredConversation({q,storage.archiveHistoryCount(q.conversation,q.after,q.through)});
+        }
         Assertion assertion;try{assertion=verifier.attest({m,*sender,*recipient},scope.archive.issuer,now);}
         catch(...){if(stage)*stage=verifier.stage();throw;}
         auto size=encodeAssertion(assertion).size()+16;
@@ -203,10 +221,21 @@ public:
             require(position_.conversation==conversation&&(!complete_||position_.after==position_.through)&&state()==saved_);
         }
     }
-    Blob nextRequest(){
+    Blob nextRequest(bool allowDeferred=false){
         current();require(!pending_);
         if(complete_){position_.through=0;complete_=false;}
-        position_.id=Storage::newMessageId();persist();pending_=true;return encodeHistoryRequest(position_);
+        position_.id=Storage::newMessageId();position_.allowDeferred=allowDeferred;persist();pending_=true;return encodeHistoryRequest(position_);
+    }
+    std::uint64_t defer(const Blob& bytes){
+        current();require(pending_&&position_.allowDeferred);auto d=decodeDeferredConversation(bytes);const auto& q=d.request;
+        require(q.id==position_.id&&q.conversation==position_.conversation&&q.after==position_.after&&
+            (position_.store.empty()||q.store==position_.store)&&(!position_.through||q.through==position_.through));
+        auto key=historyHeader(12);key.string(context_);auto hash=digestDevicePayload(key.data);static const char hex[]="0123456789abcdef";std::string id;
+        for(auto b:hash){id+=hex[b>>4];id+=hex[b&15];}
+        auto previous=storage_.archiveSyncState(id);storage_.saveArchiveSyncState(id,previous,bytes);
+        // Only accounting is durable here. No history cursor advances and no
+        // rejected body/ownership is stored. A later scan retries this window.
+        position_.store=q.store;position_.through=q.through;persist();pending_=false;return d.records;
     }
     size_t acceptPage(const Blob& bytes){
         acceptStage_="history_current_authorization";current();require(pending_);acceptStage_="history_page_decode";auto page=decodeHistoryPage(bytes);const auto& q=page.request;

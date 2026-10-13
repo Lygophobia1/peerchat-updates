@@ -103,6 +103,7 @@ public:
     ArchiveHistoryPage archiveHistoryPage(const std::string& conversation,std::int64_t afterCursor,
         std::int64_t throughCursor,int limit=8,size_t maximumBytes=256*1024);
     Blob archiveSyncState(const std::string& contextId);
+    std::uint64_t archiveHistoryCount(const std::string& conversation,std::uint64_t after,std::uint64_t through);
     Blob transferJournal(const std::string& device);
     void saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next);
     void saveArchiveSyncState(const std::string& contextId,const Blob& expected,const Blob& next);

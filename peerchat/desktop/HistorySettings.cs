@@ -34,6 +34,7 @@ public sealed class HistoryProgressView {
         var value=new HistoryProgressView{State="Waiting for verification",Direction="Sign in to verify history access.",Counters=""};
         if(p==null)return value;
         string raw=(p.State??"").ToLowerInvariant();
+        if(p.DisplayState=="Partial"){value.State="Partial";value.Direction=p.State;value.Counters=p.Received+" new messages received · "+p.Deferred+" unresolved/deferred records · "+p.RejectedBatches+" rejected batches";return value;}
         value.State=p.DisplayState=="Error"?"Failed":raw.Contains("off")?"Permission disabled":raw.Contains("paused")?"Paused":p.DisplayState=="Complete"?"Complete":raw.Contains("authorization")?"Waiting for verification":p.DisplayState=="Waiting"?"Waiting for device":p.DisplayState=="Connecting"?"Connecting":p.DisplayState=="Syncing"?"Downloading history":"Idle";
         value.Direction=value.State=="Downloading history"?"↓ Downloading history from "+source:value.State=="Connecting"?"Connecting to "+source:value.State=="Waiting for device"?"Waiting for "+source:value.State=="Complete"?"Up to date — last sync completed":value.State=="Authorization required"?"History authorization needs attention.":value.State;
         value.Active=p.Running&&(value.State=="Downloading history"||value.State=="Connecting"||value.State=="Waiting for device");

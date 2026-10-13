@@ -47,12 +47,13 @@ public:
             require(protocol::id(intentIssuer_)&&protocol::id(intentSource_)&&intentSource_!=local_.peerId&&active<=(version=="PeerChat/ArchiveIntent/v1"?1u:2u));restore_=active==1;completedIntent_=active==2;
             // Old false intents cannot distinguish Pause from completion. Never
             // silently undo an explicit legacy pause; Sync now upgrades safely.
-            state_=restore_?"Waiting for archive authorization":completedIntent_?"History synchronized":"Paused or legacy completed; Sync now resumes";
+            state_=restore_?"Waiting for archive authorization":completedIntent_?"History scan finished; verifying current status":"Paused or legacy completed; Sync now resumes";
         }
     }
     const std::optional<session::ReliableAuthorization>& scope()const{return scope_;}
     bool running()const{return running_;}
     std::uint64_t received()const{return received_;}
+    std::uint64_t rejectedBatches()const{return rejectedStage_=="none"?0:1;}
     std::uint64_t lastSuccessful()const{return lastSuccessful_;}
     std::uint64_t scanGeneration()const{return scanGeneration_;}
     std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark());}
@@ -103,7 +104,8 @@ public:
         std::ostringstream out;
         out<<"\n=== History Sync execution ===\nstate="<<state_<<" running="<<running_<<" restore_pending="<<restore_<<" completed_intent="<<completedIntent_
            <<"\nintent_issuer="<<intentIssuer_<<" intent_source="<<intentSource_;
-        auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<progress.complete<<" page_pending="<<progress.pending<<" pending_request_attempt="<<pendingAttempt_;
+        auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<(progress.complete&&!progress.deferred)<<" page_pending="<<progress.pending<<" pending_request_attempt="<<pendingAttempt_;
+        out<<"\nimports_committed="<<received_<<" unresolved_records="<<progress.deferred<<" rejected_batches="<<(rejectedStage_!="none");
         if(scope_){const auto& a=scope_->archive;
             out<<"\nactive_scope_issuer="<<a.issuer<<" source="<<a.source<<" reader="<<a.reader<<" source_generation="<<a.sourceGeneration<<" reader_generation="<<a.readerGeneration
                <<" source_grant_id="<<a.sourceGrantId<<" reader_grant_id="<<a.readerGrantId<<" scope_current="<<currentSessionAuthorization(policy_,*scope_);
@@ -136,7 +138,7 @@ public:
         intent(issuer,source,reader->snapshot().complete?2:1);
         scope_=std::move(scope);reader_=std::move(reader);pendingAttempt_=0;running_=!reader_->snapshot().complete;
         require(scanGeneration_<INT64_MAX);++scanGeneration_;received_=0;rejectedStage_="none";
-        state_=running_?"Connecting to archive":"History synchronized";
+        state_=running_?"Connecting to archive":reader_->snapshot().deferred?"Partial history: "+std::to_string(reader_->snapshot().deferred)+" unresolved records":"History synchronized";
     }
     void incoming(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t network){
         const auto& a=scope.archive;
@@ -178,7 +180,7 @@ public:
             reader_->disconnected();pendingAttempt_=0;state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
             retire(*scope_);return close;
         }
-        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_="History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
+        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_=reader_->snapshot().deferred?"Partial history: "+std::to_string(reader_->snapshot().deferred)+" unresolved records":"History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(reader_->snapshot().pending&&now>=pendingAt_&&now-pendingAt_>=15000){
             auto route=sessions_.snapshot(scope_->continuityKey());
             if(route&&route->activeTransport.value==pendingAttempt_&&pendingAttempt_){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);
@@ -193,10 +195,10 @@ public:
         }else state_="Archive route unavailable";
         return close;
     }
-    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t attempt){
+    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t attempt,bool allowDeferred=false){
         require(attempt&&currentSessionAuthorization(policy_,scope));
         if(!running_||!scope_||sessionBinding(*scope_).data!=sessionBinding(scope).data||reader_->snapshot().pending)return {};
-        auto bytes=reader_->nextRequest();pendingAt_=now;pendingAttempt_=bytes.empty()?0:attempt;return bytes;
+        auto bytes=reader_->nextRequest(allowDeferred);pendingAt_=now;pendingAttempt_=bytes.empty()?0:attempt;return bytes;
     }
     Blob control(const session::ReliableAuthorization& scope,const Blob& bytes,std::uint64_t utc,std::uint64_t now){
         require(currentSessionAuthorization(policy_,scope));
@@ -211,7 +213,7 @@ public:
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{
             reader_->accept(bytes);pendingAttempt_=0;
-            if(reader_->snapshot().complete){
+            if(reader_->snapshot().complete&&!reader_->snapshot().deferred){
                 require(utc<=INT64_MAX);protocol::Writer w(LocalFormat);w.string("PeerChat/ArchivePresentation/v1");w.number(policy_.account());w.string(local_.peerId);w.number(utc);
                 storage_.saveArchiveSyncState(presentationContext_,savedPresentation_,w.data);savedPresentation_=std::move(w.data);lastSuccessful_=utc;
             }

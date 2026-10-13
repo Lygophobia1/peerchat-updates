@@ -397,6 +397,11 @@ Blob Storage::archiveHistoryProof(const std::string& id){
 Blob Storage::archiveSyncState(const std::string& context){
     require(identifier(context),"Invalid archive sync context");return impl_->get("archive-sync/"+context);
 }
+std::uint64_t Storage::archiveHistoryCount(const std::string& conversation,std::uint64_t after,std::uint64_t through){
+    require(identifier(conversation)&&after<=through&&through<=static_cast<std::uint64_t>(archiveHistoryWatermark()),"Invalid archive count window");
+    Statement query(impl_->sql,"SELECT COUNT(*) FROM message_archive_index i JOIN messages m ON m.id=i.message_id WHERE m.peer=? AND i.sequence>? AND i.sequence<=?");
+    query.text(1,conversation);query.number(2,after);query.number(3,through);require(query.row(),"Archive count unavailable");return static_cast<std::uint64_t>(query.number(0));
+}
 Blob Storage::transferJournal(const std::string& device){require(identifier(device),"Invalid transfer device");return impl_->get("transfer-journal/v1/"+device);}
 void Storage::saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next){
     require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid transfer journal");

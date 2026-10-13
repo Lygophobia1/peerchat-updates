@@ -14,10 +14,11 @@ data class ArchiveDeviceSnapshot(val peerId:String,val local:Boolean,val approve
 }
 data class ArchiveEnrollmentSnapshot(val accountId:Long,val authenticationGeneration:Long,val localPeerId:String,val devices:List<ArchiveDeviceSnapshot>,val historySyncEnabled:Boolean=true)
 enum class ArchiveDeviceAction { TrustAuthorizer, Authorize, Revoke, DisableAuthorizer, SetUp, ApproveIssuer }
-data class ArchiveSyncProgress(val state:String="Not started",val processed:Long=0,val conversations:Long=0,val complete:Boolean=false,val running:Boolean=false,val source:String="",val attachments:Long=0,val received:Long=0,val historyRevision:Long=0,val lastSuccessful:Long=0,val scanGeneration:Long=0,val enabled:Boolean=true,val authenticationGeneration:Long=0){
+data class ArchiveSyncProgress(val state:String="Not started",val processed:Long=0,val conversations:Long=0,val complete:Boolean=false,val running:Boolean=false,val source:String="",val attachments:Long=0,val received:Long=0,val historyRevision:Long=0,val lastSuccessful:Long=0,val scanGeneration:Long=0,val enabled:Boolean=true,val authenticationGeneration:Long=0,val deferred:Long=0,val rejectedBatches:Long=0){
     val displayState:String get(){
         val value=state.lowercase()
         return when {
+            value.startsWith("partial history")->"Partial"
             "failed" in value||"rejected" in value->"Error"
             "off" in value||"paused" in value->"Paused"
             complete->"Complete"

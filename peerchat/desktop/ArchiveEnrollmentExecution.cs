@@ -89,8 +89,10 @@ internal sealed class ArchiveEnrollmentExecution {
     public void IncomingArchive(long account,long generation,ArchiveRelayScope scope){native(15,Command(15,w=>{w.Write(account);w.Write(generation);WriteBytes(w,scope.Binding());}));}
     public sealed class SyncProgress {
         public string State,Source;public long Processed,Conversations,Attachments,Received,HistoryRevision,LastSuccessful,ScanGeneration;public bool Complete,Running,Enabled;
+        public long Deferred,RejectedBatches;
         public string DisplayState {get {
             string value=(State??"").ToLowerInvariant();
+            if(value.StartsWith("partial history",StringComparison.Ordinal))return "Partial";
             if(value.Contains("failed")||value.Contains("rejected"))return "Error";
             if(value.Contains("off")||value.Contains("paused"))return "Paused";
             if(!Running&&(Complete||value=="history synchronized"))return "Complete";
@@ -113,6 +115,7 @@ internal sealed class ArchiveEnrollmentExecution {
             var result=new SyncProgress{State=text(),Processed=r.ReadInt64(),Conversations=r.ReadInt64()};long complete=r.ReadInt64(),running=r.ReadInt64();result.Source=text();result.Attachments=r.ReadInt64();
             result.Received=r.ReadInt64();result.HistoryRevision=r.ReadInt64();result.LastSuccessful=r.ReadInt64();result.ScanGeneration=r.ReadInt64();
             long enabled=r.ReadInt64();Check(enabled==0||enabled==1);result.Enabled=enabled==1;
+            if(stream.Position<stream.Length){Check(text()=="PeerChat/ArchiveScanAccounting/v1");result.Deferred=r.ReadInt64();result.RejectedBatches=r.ReadInt64();Check(result.Deferred>=0&&result.RejectedBatches>=0);}
             Check(result.Received>=0&&result.HistoryRevision>=0&&result.LastSuccessful>=0&&result.LastSuccessful<=253402300799999L&&result.ScanGeneration>=0);
             Check(result.Processed>=0&&result.Conversations>=0&&result.Attachments>=0&&(complete==0||complete==1)&&(running==0||running==1)&&stream.Position==stream.Length);result.Complete=complete==1;result.Running=running==1;return result;
         }

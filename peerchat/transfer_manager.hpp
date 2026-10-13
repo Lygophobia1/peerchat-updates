@@ -62,6 +62,11 @@ public:
     virtual std::unique_ptr<Sink> sink(const DurableState&)=0;
 };
 struct PersistenceError:std::runtime_error{explicit PersistenceError(const std::string& reason):std::runtime_error("Protected transfer journal unavailable: "+reason){}};
+struct CapacityError:std::runtime_error {
+    std::string id;
+    CapacityError(const std::string& message,const std::string& transferId={}):std::runtime_error(message),id(transferId){}
+    Blob cancellation()const{protocol::check(protocol::id(id,32));protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(static_cast<unsigned>(Kind::Cancel));w.string(id);return w.data;}
+};
 // Platform finalizers supply only controlled stage names + numeric errno,
 // never a path, filename, payload or arbitrary provider exception text.
 struct CompletionError:std::runtime_error {
@@ -127,11 +132,11 @@ class TransferManager {
     void room(){
         size_t active=0;for(auto& p:entries_)if(!terminal(p.second.state))++active;
         for(auto& p:entries_)if(p.second.state==State::Suspended)++active;
-        if(active>=MaxTransfers)throw std::runtime_error("File transfer limit reached");
+        if(active>=MaxTransfers)throw CapacityError("File transfer limit reached");
         if(entries_.size()>=MaxRecords){
             auto oldest=entries_.end();
             for(auto i=entries_.begin();i!=entries_.end();++i)if(terminal(i->second.state)&&i->second.state!=State::Suspended&&(oldest==entries_.end()||i->second.lastActivity<oldest->second.lastActivity))oldest=i;
-            if(oldest==entries_.end())throw std::runtime_error("File transfer record limit reached");
+            if(oldest==entries_.end())throw CapacityError("File transfer record limit reached");
             entries_.erase(oldest);
         }
     }
@@ -320,7 +325,7 @@ public:
                 else if(terminal(e.state))e.reply=packet(Kind::Cancel,id).data;
                 return;
             }
-            protocol::check(protocol::id(peer));room();Entry e;e.metadata=m;e.peer=peer;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;touch(e);entries_.emplace(id,std::move(e));return;
+            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id);}Entry e;e.metadata=m;e.peer=peer;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;touch(e);entries_.emplace(id,std::move(e));return;
         }
         if(kind==Kind::Cancel&&i==entries_.end()){r.end();return;} // Cancellation can race an unobserved offer.
         protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;

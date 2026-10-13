@@ -34,6 +34,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     val progress=state.archiveProgress
     Text("Phase: "+progress.displayState+" · Source: "+if(progress.source.isEmpty())"No source selected" else "Device "+progress.source.take(12)+"…")
     Text("${progress.received} new messages received this session · ${progress.conversations} conversations completed",style=MaterialTheme.typography.bodySmall)
+    if(progress.deferred>0||progress.rejectedBatches>0)Text("${progress.deferred} unresolved/deferred records · ${progress.rejectedBatches} rejected batches",style=MaterialTheme.typography.bodySmall)
     Text("Last successful sync: "+if(progress.lastSuccessful==0L)"Not recorded" else java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT,java.text.DateFormat.SHORT).format(java.util.Date(progress.lastSuccessful)),style=MaterialTheme.typography.bodySmall)
     if(progress.running)LinearProgressIndicator(Modifier.fillMaxWidth()) // Native has no reliable total.
     if(state.archiveBusy)Text("Verifying device metadata…")

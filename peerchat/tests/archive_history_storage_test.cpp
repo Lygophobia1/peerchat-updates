@@ -232,6 +232,31 @@ int main(){try{
     }
     check(a.message(siblingSent.id)&&a.message(siblingSent.id)->sender==pb.peerId&&a.message(siblingSent.id)->text==siblingSent.text);
     check(a.pending(pc.peerId).empty()&&a.pendingMailboxUploads().empty());
+    // Negotiated partial scans import verified conversations independently.
+    // A blocked conversation keeps its history cursor and all original rows.
+    const std::string unresolvedPeer(64,'d');std::vector<std::string> unresolvedIds;
+    for(unsigned n=0;n<3;++n){auto m=newer;m.id=Storage::newMessageId();m.sender=unresolvedPeer;m.text=L"Preserved unresolved fixture";check(a.append(unresolvedPeer,m));unresolvedIds.push_back(m.id);}
+    auto freshKnown=newer;freshKnown.id=Storage::newMessageId();freshKnown.text=L"Verified after unresolved conversation";check(a.append(pc.peerId,freshKnown));
+    ar::SyncReader partial(b,pb,reader,deliveries,scope,directory);
+    auto drainPartial=[&](ar::SyncReader& job){unsigned steps=0;while(!job.snapshot().complete){auto q=job.nextRequest(true);auto reply=ar::serveSyncControl(a,pa,source,sourceScope,q,directory,600);job.accept(reply);check(++steps<200);}};
+    drainPartial(partial);partial.rescan();drainPartial(partial);
+    check(partial.snapshot().deferred==3&&b.message(freshKnown.id)&&b.history(unresolvedPeer).empty()&&a.history(unresolvedPeer).size()==3);
+    ar::HistoryReader retainedCursor(b,pb,reader,deliveries,scope,unresolvedPeer,directory);
+    check(retainedCursor.snapshot().cursor==0); // Accounting never advances the import cursor.
+    auto legacyRequest=retainedCursor.nextRequest();
+    rejects([&]{ar::serveHistoryPage(a,pa,source,sourceScope,legacyRequest,directory,600);});
+    retainedCursor.disconnected();auto negotiated=retainedCursor.nextRequest(true);
+    auto deferred=ar::serveHistoryPage(a,pa,source,sourceScope,negotiated,directory,600);ar::validateHistoryControl(deferred);
+    auto wrong=ar::decodeDeferredConversation(deferred);wrong.request.id=Storage::newMessageId();
+    rejects([&]{retainedCursor.defer(ar::encodeDeferredConversation(wrong));});check(retainedCursor.snapshot().cursor==0);
+    check(retainedCursor.defer(deferred)==3&&retainedCursor.snapshot().cursor==0);
+    {ar::SyncReader reopened(b,pb,reader,deliveries,scope,directory);check(reopened.snapshot().complete&&reopened.snapshot().deferred==3);reopened.rescan();drainPartial(reopened);check(reopened.snapshot().deferred==3&&b.history(unresolvedPeer).empty());}
+    // Simulate newly authenticated evidence ONLY in this isolated directory.
+    // Retrying imports preserved records through normal verification, once.
+    historicalPeers.insert(unresolvedPeer);
+    {ar::SyncReader resolved(b,pb,reader,deliveries,scope,directory);resolved.rescan();drainPartial(resolved);check(resolved.snapshot().deferred==0&&b.history(unresolvedPeer).size()==3);resolved.rescan();drainPartial(resolved);check(b.history(unresolvedPeer).size()==3);}
+    for(const auto& id:unresolvedIds)check(a.message(id)&&b.message(id)&&a.message(id)->text==b.message(id)->text);
+    std::cout<<"PASS: negotiated partial imports, durable unresolved accounting, unchanged blocked cursor, old-peer fail-closed behavior, bound refusal and verified recovery without duplicates\n";
     a.eraseHistory(pc.peerId);check(a.archiveHistoryWatermark()>watermark);
     newer.id=Storage::newMessageId();check(a.append(pc.peerId,newer));
     check(a.archiveHistoryWatermark()>watermark+1); // Deleted positions cannot be reused.

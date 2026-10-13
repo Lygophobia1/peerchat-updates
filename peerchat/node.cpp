@@ -198,7 +198,7 @@ struct Node::Impl {
                     if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);c->relayPipe->output.clear();c->relayPipe->queued=0;}
                 }else if(c->online&&c->archiveBound&&c->output.size()-c->sent<MaxQueue/4){
                     auto request=archiveTransfers?archiveTransfers->request(c->authorization,c->attemptId):Blob{};
-                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds(),c->attemptId);
+                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds(),c->attemptId,(c->remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0);
                     if(!request.empty())packet(*c,request);
                 }
             }catch(const std::exception&){c->closeReason=L"Archive synchronization failed closed";c->dead=true;}
@@ -999,6 +999,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             protocol::check(transferConnection(c.peerId)==&c);
             auto before=transfers->snapshots().size();
             try{transfers->receive(c.peerId,frame,nowMilliseconds());}
+            catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(c,refusal);return;}
             catch(const transfer::PersistenceError&){transferPersistenceFailure();return;}
             if(transfers->snapshots().size()>before){NodeEvent event;event.kind=NodeEvent::Kind::FileTransfer;event.peerId=c.peerId;event.text=L"Incoming file offer";emit(std::move(event));}
             return;
@@ -1162,7 +1163,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         // Voice capability describes authenticated call control. The media
         // path remains independent ICE/DTLS-SRTP and is never put on relay.
         capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
-        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
+        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
         if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
         if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
         bool live=c.reliable::SharedPeerRuntime::receive(*c.tls,encrypted,profile,capabilities,profile.listenPort,

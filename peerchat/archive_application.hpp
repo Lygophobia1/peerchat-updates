@@ -46,9 +46,9 @@ inline Blob executeSyncOperation(Enrollment& enrollment,Execution& execution,uns
     if(operation==15){auto binding=r.bytes();require(binding.size()<=1024);r.end();
         auto scope=decodeSessionBinding(binding,enrollment.policy().localDevice());require(scope.archive.account==account);execution.incoming(scope,now,network);}
     if(operation==13||operation==23){r.end();reconcileInitialSync(enrollment,execution,now);execution.tick(now,network);auto snapshot=execution.snapshot();result.string(execution.state());result.number(snapshot.processed);
-        result.number(snapshot.conversations);result.number(snapshot.complete);result.number(execution.running());
+        result.number(snapshot.conversations);result.number(snapshot.complete&&!snapshot.deferred);result.number(execution.running());
         result.string(execution.scope()?execution.scope()->archive.source:std::string{});result.number(snapshot.attachments);
-        if(operation==23){result.number(execution.received());result.number(execution.historyRevision());result.number(execution.lastSuccessful());result.number(execution.scanGeneration());result.number(enrollment.policy().historySyncEnabled());}}
+        if(operation==23){result.number(execution.received());result.number(execution.historyRevision());result.number(execution.lastSuccessful());result.number(execution.scanGeneration());result.number(enrollment.policy().historySyncEnabled());result.string("PeerChat/ArchiveScanAccounting/v1");result.number(snapshot.deferred);result.number(execution.rejectedBatches());}}
     return result.data;
 }
 inline Blob executeEnrollmentOperation(Enrollment& enrollment,unsigned operation,const Blob& bytes,std::uint64_t utc){

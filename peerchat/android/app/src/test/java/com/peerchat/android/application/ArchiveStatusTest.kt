@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ArchiveStatusTest {
+    @Test fun partialAccountingDoesNotClaimFullCompletion(){
+        val native:(Int,ByteArray)->ByteArray={op,_->NativeRecordWriter(31).also{w->
+            w.text("PeerChat/ArchiveApplication/v1");w.number(1);w.number(op.toLong());w.text("Partial history: 3 unresolved records");w.number(25);w.number(1);w.number(0);w.number(0);w.text("a".repeat(64));w.number(0)
+            w.number(25);w.number(25);w.number(0);w.number(1);w.number(1);w.text("PeerChat/ArchiveScanAccounting/v1");w.number(3);w.number(0)
+        }.bytes()}
+        val p=ArchiveEnrollmentExecution(native){_,_->error("No presentation RPC")}.progress(8,1)
+        assertEquals("Partial",p.displayState);assertFalse(p.complete);assertFalse(p.running);assertEquals(25L,p.received);assertEquals(3L,p.deferred);assertEquals(0L,p.rejectedBatches);assertEquals(0L,p.lastSuccessful)
+    }
     @Test fun presentationSnapshotUsesCommittedCountsAndPreservesRawPermissionsWhileOff(){
         val source="a".repeat(64)
         val native:(Int,ByteArray)->ByteArray={op,_->NativeRecordWriter(31).also{w->

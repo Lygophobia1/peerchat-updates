@@ -12,6 +12,9 @@ int main(int argc,char** argv){try{
         StoredMessage message{Storage::newMessageId(),n%2?a.peerId:contact,n%2?contact:a.peerId,L"Packaged archive text",100+n,Delivery::Delivered,0,n+1};
         protocol::check(source.append(contact,message));
     }
+    // Preserve three source records with deliberately absent authenticated
+    // device mappings; real packaged workers must still import the valid 25.
+    for(unsigned n=0;n<3;++n){StoredMessage unresolved{Storage::newMessageId(),std::string(64,'d'),a.peerId,L"Unresolved fixture",200+n,Delivery::Delivered,0,26+n};protocol::check(source.append(unresolved.sender,unresolved));}
     auto path=root/L"source-file.bin";Blob bytes(100000);for(size_t n=0;n<bytes.size();++n)bytes[n]=static_cast<unsigned char>(n*17);
     {std::ofstream file(path,std::ios::binary);file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());protocol::check(bool(file));}
     transfer::windows::Sha256 hash;for(size_t n=0;n<bytes.size();n+=transfer::ChunkBytes)hash.update(bytes.data()+n,std::min(transfer::ChunkBytes,bytes.size()-n));
