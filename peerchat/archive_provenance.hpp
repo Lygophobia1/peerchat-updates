@@ -82,10 +82,13 @@ public:
     }
     Assertion attest(const OriginalRecord& record,const std::string& issuer,std::uint64_t now)const{
         validateContext(record);
+        stage_="record_source_storage_match";
         auto stored=storage_.message(record.message.id);
         require(stored&&recordPayload(OriginalRecord{*stored,record.senderAccount,record.recipientAccount})==recordPayload(record));
+        stage_="record_source_permission";
         require(authorization_.permits(issuer,local_.peerId,ServeHistory));Assertion a;a.original=record;a.account=account_;a.issuer=issuer;
         a.archiveDevice=local_.peerId;a.grantGeneration=authorization_.grant(issuer,local_.peerId).generation;a.archived=now;
+        stage_="record_source_attestation_signing";
         a.digest=digestDevicePayload(recordPayload(record));a.signature=signDevicePayload(assertionPayload(a),local_);return a;
     }
     Provenance verify(const Assertion& a)const{

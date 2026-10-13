@@ -70,6 +70,11 @@ int main(){try{
         a.rememberAuthenticatedDeviceAccount(source.peerId,8);a.rememberAuthenticatedDeviceAccount(contact.peerId,9);
         b.rememberAuthenticatedDeviceAccount(source.peerId,8);b.rememberAuthenticatedDeviceAccount(reader.peerId,8);b.rememberAuthenticatedDeviceAccount(contact.peerId,9);
         archive::Execution sourceWork(a,source,serving,ad,as),readerWork(b,reader,reading,bd,bs);
+        const char* sourceStage="none";
+        auto unmapped=archive::encodeHistoryRequest({Storage::newMessageId(),{},contact.peerId,0,0});
+        rejects([&]{archive::serveHistoryPage(a,source,serving,scopedA.scope,unmapped,
+            [](const std::string&)->std::optional<std::uint64_t>{return {};},300, &sourceStage);});
+        check(std::string(sourceStage)=="source_record_device_mapping"&&a.history(contact.peerId,100).size()==25);
         for(unsigned n=0;n<20;++n)sourceWork.recordTransport(n,scopedA.scope,"peer_tls_receive");
         sourceWork.recordTransport(999,scopedA.scope,"not a safe diagnostic label");
         auto evidence=sourceWork.diagnostics();unsigned evidenceCount=0;

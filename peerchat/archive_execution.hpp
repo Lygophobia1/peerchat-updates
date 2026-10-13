@@ -17,6 +17,7 @@ class Execution {
     bool completedIntent_=false;
     std::string lastIncoming_="none";
     std::string rejectedStage_="none";
+    const char* sourceRejectedStage_="none";
     std::vector<std::string> transportEvidence_;
     std::uint64_t received_=0,lastSuccessful_=0,scanGeneration_=0;
     std::string presentationContext_;Blob savedPresentation_;
@@ -113,6 +114,7 @@ public:
             }else out<<"\narchive_route=not_requested";
         }else out<<"\nactive_scope=none";
         out<<"\nlast_incoming_archive="<<lastIncoming_<<"\ndata_rejection_stage="<<rejectedStage_<<"\n";
+        out<<"last_source_rejection_stage="<<sourceRejectedStage_<<'\n';
         for(const auto& line:transportEvidence_)out<<line<<'\n';
         return out.str();
     }
@@ -197,10 +199,12 @@ public:
     Blob control(const session::ReliableAuthorization& scope,const Blob& bytes,std::uint64_t utc,std::uint64_t now){
         require(currentSessionAuthorization(policy_,scope));
         if(scope.archive.source==local_.peerId){
-            auto found=serving_.find(scope.continuityKey());require(found!=serving_.end()&&now<found->second.second&&
+            const char* stage="source_serving_lease";
+            try{auto found=serving_.find(scope.continuityKey());require(found!=serving_.end()&&now<found->second.second&&
                 sessionBinding(found->second.first).data==sessionBinding(scope).data);
-            auto response=serveSyncControl(storage_,local_,policy_,scope,bytes,directory(),utc);
+            auto response=serveSyncControl(storage_,local_,policy_,scope,bytes,directory(),utc,&stage);
             require(now<=UINT64_MAX-30000);found->second.second=now+30000;return response;
+            }catch(...){sourceRejectedStage_=stage;recordTransport(0,scope,stage);throw;}
         }
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{

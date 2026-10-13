@@ -81,11 +81,12 @@ public:
     Snapshot snapshot()const{auto media=attachments_->snapshot();return {processed_,conversations_,complete_&&media.complete,complete_?media.pending:pending_,cancelled_,media.processed};}
 };
 inline Blob serveSyncControl(Storage& storage,const Profile& local,Authorization& authorization,
-    const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now){
+    const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now,const char** stage=nullptr){
+    if(stage)*stage="source_control_decode";
     validateHistoryControl(request);protocol::Reader r(request);require(r.type()==protocol::ArchiveControl);auto domain=r.string();
-    if(domain==AttachmentDomain)return serveAttachmentPage(storage,local,authorization,scope,request,directory);
+    if(domain==AttachmentDomain){if(stage)*stage="source_attachment_catalog";return serveAttachmentPage(storage,local,authorization,scope,request,directory);}
     r.number();auto kind=r.number();
-    if(kind==4)return serveManifestPage(storage,local,authorization,scope,request);
-    require(kind==2);return serveHistoryPage(storage,local,authorization,scope,request,std::move(directory),now);
+    if(kind==4){if(stage)*stage="source_history_manifest";return serveManifestPage(storage,local,authorization,scope,request);}
+    require(kind==2);return serveHistoryPage(storage,local,authorization,scope,request,std::move(directory),now,stage);
 }
 }

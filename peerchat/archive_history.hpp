@@ -138,27 +138,32 @@ inline Blob serveManifestPage(Storage& storage,const Profile& local,Authorizatio
     require(currentSessionAuthorization(authorization,scope));return encodeManifestPage(page);
 }
 inline Blob serveHistoryPage(Storage& storage,const Profile& local,Authorization& authorization,
-        const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now){
+        const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now,const char** stage=nullptr){
+    if(stage)*stage="source_history_authorization";
     require(bool(directory)&&scope.archive.source==local.peerId&&currentSessionAuthorization(authorization,scope));
     auto q=decodeHistoryRequest(request);auto store=storage.archiveStoreId();
     require(q.store.empty()||q.store==store);q.store=store;
     if(!q.through)q.through=static_cast<std::uint64_t>(storage.archiveHistoryWatermark());
     require(q.through>=q.after);
+    if(stage)*stage="source_history_storage";
     auto candidates=storage.archiveHistoryPage(q.conversation,static_cast<std::int64_t>(q.after),
         static_cast<std::int64_t>(q.through),HistoryPageRecords,128*1024);
     require(candidates.cursors.size()==candidates.messages.size());
     ProvenanceVerifier verifier(authorization,storage,local,scope.archive.account,directory);
     HistoryPage page;page.request=q;page.next=q.after;size_t bytes=1024; // Conservative bounded header allowance.
     for(size_t i=0;i<candidates.messages.size();++i){
+        if(stage)*stage="source_record_device_mapping";
         const auto& m=candidates.messages[i];auto sender=directory(m.sender),recipient=directory(m.recipient);
         require(sender&&recipient);
-        auto assertion=verifier.attest({m,*sender,*recipient},scope.archive.issuer,now);
+        Assertion assertion;try{assertion=verifier.attest({m,*sender,*recipient},scope.archive.issuer,now);}
+        catch(...){if(stage)*stage=verifier.stage();throw;}
         auto size=encodeAssertion(assertion).size()+16;
         if(size>protocol::MaxPacket-bytes){require(!page.records.empty());break;}
         bytes+=size;page.next=static_cast<std::uint64_t>(candidates.cursors[i]);page.records.push_back({page.next,std::move(assertion)});
     }
     page.complete=candidates.complete&&page.records.size()==candidates.messages.size();
     if(page.complete)page.next=q.through;
+    if(stage)*stage="source_history_encode";
     require(currentSessionAuthorization(authorization,scope));return encodeHistoryPage(page);
 }
 
