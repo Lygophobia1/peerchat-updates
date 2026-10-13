@@ -69,3 +69,19 @@ b593398e0b79384d1832f97c54f18030f800b3bbfa2be0e5eb080debfd78747f
 Android unsigned release APK SHA-256:
 2c6c2814b04c66b40237e925055256974de3cb0879c448491a12829257b9f02e
 Unsigned Development artifacts only. No physical group acceptance claimed.
+
+## Additional production transport regression at dev.124
+
+tests/test-group-ciphertext-fanout.ps1 now exercises the public
+GetGroupDeviceRecovery method over actual pinned TLS to the isolated production
+DiscoveryServer, with three authenticated live event-channel device sessions.
+The current cursor returns an empty complete page; ordinary membership epochs
+without signed device-transition evidence return signed_ledger_gap without
+advancing the cursor. Wrong-account device, future cursor and unrelated-group
+requests are rejected. Existing three-client ciphertext fanout, receipts,
+duplicate suppression, offline exclusion, reconnect and removal checks passed.
+Evidence: build/tests/group-fanout-e9dd598afca14236b5e676c18eb37438.
+
+This test-only checkpoint does not change the dev.124 runtime/package, install
+anything on the phone, activate enrollment or treat a TLS-authenticated roster
+as cryptographic approval. Native root/transition verification remains required.

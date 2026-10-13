@@ -43,6 +43,20 @@ internal static class GroupCiphertextFanoutTest {
                 client.StartEventChannel(devices[i],e=>{lock(gate)events[index].Add(e);if(e.Event=="group_message")client.QueueGroupAck(e.GroupId,e.MessageId,"accepted");});
             }
             Wait(()=>clients.All(c=>c.EventChannelConnected),"Three authenticated existing event channels did not connect.");
+            // Exercise the production pinned-TLS request and typed projection,
+            // not reflection-only dispatch. Ordinary membership epochs have no
+            // signed device-transition proof: recovery must expose the gap.
+            var current=clients[0].GetGroupDeviceRecovery(group,generation,owner);
+            Require(current.Complete&&current.Reason=="none"&&current.Steps.Count==0&&current.NextGeneration==generation,"Current authenticated recovery cursor failed.");
+            var gap=clients[0].GetGroupDeviceRecovery(group,1,owner);
+            Require(!gap.Complete&&gap.Reason=="signed_ledger_gap"&&gap.Steps.Count==0&&gap.NextGeneration==1&&gap.CurrentGeneration==generation,"Unsigned membership epochs were fabricated as device recovery evidence.");
+            bool wrongDevice=false;try{clients[0].GetGroupDeviceRecovery(group,generation,member);}catch(DiscoveryRequestException){wrongDevice=true;}
+            Require(wrongDevice,"An account session retrieved evidence under another account's device.");
+            bool future=false;try{clients[0].GetGroupDeviceRecovery(group,generation+1,owner);}catch(DiscoveryRequestException){future=true;}
+            Require(future,"A future recovery cursor was accepted.");
+            bool wrongGroup=false;try{clients[0].GetGroupDeviceRecovery(new string('9',32),generation,owner);}catch(DiscoveryRequestException){wrongGroup=true;}
+            Require(wrongGroup,"A non-member recovered unrelated group evidence.");
+            Console.WriteLine("PASS: actual pinned-TLS recovery, current cursor, unsigned epoch gap, wrong device, future cursor and unrelated group rejection.");
             string message=Encoding.ASCII.GetString(wire,54,32);
             Require(clients[0].QueueGroupMessage(group,message,generation,Convert.ToBase64String(wire)),"Existing event channel rejected send.");
             Wait(()=>{lock(gate)return events[1].Any(e=>e.Event=="group_message")&&events[2].Any(e=>e.Event=="group_message")&&events[0].Any(e=>e.State=="recipient_acknowledged"&&e.AcceptedCount==2);},"Three-client online fanout / recipient receipts did not complete.");
