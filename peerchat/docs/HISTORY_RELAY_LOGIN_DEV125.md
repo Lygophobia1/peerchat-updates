@@ -92,3 +92,51 @@ test, corrected by waiting for actual listener readiness (not a production
 timeout change). The first combined ARM32 parity run stalled on group receipts;
 the isolated real three-client fanout rerun passed unchanged. The full ARM32
 parity rerun is required before deployment and remains separately recorded.
+
+## Actual Pi deployment result — 2026-10-13
+
+Deployed dev.46 -> dev.125 to the existing ARM32 Pi with the same public/LAN
+endpoint (173.225.14.37:7443 / 192.168.1.6:7443). Actual process PID 24620;
+coturn remained PID 2718. No firewall, TURN, OS, systemd or certificate change.
+Port 17443 is not listening. Certificate SHA-256 remains:
+62A181282FE940F03F6A35541220A05F9ED2CB85A41F6DE3B0DF111286BA17E3.
+
+The first preservation gate detected an additive empty group_rosters.creation_proof
+column. Automatic binary rollback to dev.46 succeeded using the CURRENT database;
+no old database was restored. Private comparison proved every original account,
+device, remembered credential, descriptor and grant column/row unchanged. The
+updater now compares exact original columns (and rejects missing columns/tables)
+instead of conflating an additive column with changed user data. Verified
+immutable staging was reused; prior evidence remains preserved.
+
+Final rollback directory:
+/opt/peerchat-test/rollback/pre-4.0.2-dev.125-20261013T052808Z
+Contains verified dev.46 runtime/config copies and coherent online/stopped SQLite
+backups, both integrity_check=ok. Both DB backup SHA-256:
+4e505198b96a7a3d973e5cdd2f1a92ca5b444f96fd85ffede00c8003748b61ee.
+The earlier rollback directory ending 20261013T052612Z is retained too.
+
+Final server:
+/opt/peerchat-test/server/4.0.2-dev.125/PeerChat.Server
+Config:
+/opt/peerchat-test/config/4.0.2-dev.125/server-config.json
+Configuration bytes are identical to dev.46, including existing DB, certificate,
+password-file, FCM and TURN references. DB remains:
+/opt/peerchat-test/data/4.0.2-dev.33/physical-client.db.
+No user records, keys, credentials or private material were printed or exported.
+
+Passed on actual ARM32: full portable server parity rerun, signed archive relay
+both directions/cancel/duplicate-preserved winner/real supersession, existing
+test-account authentication/discovery over unchanged pinned TLS, real FCM OAuth
+and cache reuse (no push sent), current DB integrity and backup integrity.
+Isolated evidence under:
+/opt/peerchat-test/validation/dev125-7fdb5ac548644a4392570b80750f4513
+(parity-retest.log, archive-relay-retry.log, group-fanout-retry.log).
+The first combined fanout stall is retained as non-reproduced test evidence,
+not silently claimed fixed; subsequent isolated and complete reruns passed.
+
+ARM32 server ZIP SHA-256:
+792adb034f0ac94d1ab7cdfa8b6047eb761586c815b7f7f2bcfa72590dd2043c.
+Android debug candidate SHA-256:
+408055be5678f4487ec6f005bc7d978c15d2f4c276ae8ca80b275a3c5e27f6bb.
+No APK was installed; physical Android History Sync acceptance remains pending.
