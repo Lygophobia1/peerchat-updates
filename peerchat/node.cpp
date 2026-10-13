@@ -198,7 +198,7 @@ struct Node::Impl {
                     if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);c->relayPipe->output.clear();c->relayPipe->queued=0;}
                 }else if(c->online&&c->archiveBound&&c->output.size()-c->sent<MaxQueue/4){
                     auto request=archiveTransfers?archiveTransfers->request(c->authorization,c->attemptId):Blob{};
-                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds());
+                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds(),c->attemptId);
                     if(!request.empty())packet(*c,request);
                 }
             }catch(const std::exception&){c->closeReason=L"Archive synchronization failed closed";c->dead=true;}
@@ -1530,7 +1530,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 connection.online?(connection.archiveBound?"route_closed_after_binding":"route_closed_before_binding"):
                 connection.hello?"route_closed_after_hello":connection.tls&&connection.tls->ready()?"route_closed_after_tls":"route_closed_before_tls");
             std::string groupScopeKey=groupControl?connection.authorization.continuityKey():std::string{};
-            if(connection.authorization.permitsArchiveControl()&&archiveExecution)archiveExecution->disconnected(connection.authorization);
+            if(connection.authorization.permitsArchiveControl()&&archiveExecution)archiveExecution->disconnected(connection.authorization,connection.attemptId);
             std::wstring host=connection.host,source=connection.source,route=connection.route;std::uint16_t port=connection.port;
             std::wstring reason=mismatch?L"peer identity mismatch; automatic retry paused":connection.closeReason.empty()?L"connection closed without a recorded origin":connection.closeReason;
             if(connection.directTransport)connection.directTransport->closed(utf8(reason),!connection.online);

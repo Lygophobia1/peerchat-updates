@@ -1,5 +1,6 @@
 #include "../storage.cpp"
 #include "../archive_application.hpp"
+#include "../direct_transport_adapter.hpp"
 #include <iostream>
 using namespace peerchat;
 namespace ar=peerchat::archive;
@@ -80,13 +81,45 @@ int main(){try{
     ar::reconcileInitialSync(reader,execution);check(execution.running()&&execution.scope()->archive.source==pa.peerId);
     check(source.pendingPublications().empty()&&reader.pendingPublications().empty()); // Starting cannot create a grant.
     auto drain=[&]{unsigned steps=0;while(!execution.snapshot().complete){
-        auto request=execution.request(*execution.scope(),1000);check(!request.empty());
+        auto request=execution.request(*execution.scope(),1000,7);check(!request.empty());
+        // A late cleanup callback from a retired attempt has the same scope
+        // as the new winner. It must not clear that winner's in-flight page.
+        execution.disconnected(*execution.scope(),6);
+        if(!execution.snapshot().pending)throw std::runtime_error("Retired archive attempt cleared the winner's pending request");
+        check(execution.request(*execution.scope(),1001,7).empty());
+        if(steps==0){
+            execution.disconnected(*execution.scope(),7);check(!execution.snapshot().pending);
+            auto replacement=execution.request(*execution.scope(),1002,8);check(!replacement.empty()&&replacement!=request);request=std::move(replacement);
+            execution.disconnected(*execution.scope(),7);check(execution.snapshot().pending);
+        }
         auto sourceScope=ar::sessionAuthorization(source.policy(),pa.peerId,pa.peerId,pb.peerId);
         auto response=ar::serveSyncControl(a,pa,source.policy(),sourceScope,request,
             [&](const std::string& peer){return a.historicalDeviceAccount(peer);},100);
         execution.control(*execution.scope(),response,100,1000);check(++steps<100);
     }execution.tick(1001,1);check(!execution.running());};
     drain();check(execution.snapshot().complete);
+    // The response deadline belongs to its request's transport too. A delayed
+    // cleanup of old attempt 70 must not make the timer close replacement 71.
+    execution.start(pa.peerId,pa.peerId,true);
+    check(!execution.request(*execution.scope(),1000,70).empty());
+    session::RouteObservation relay{{71},"relay:deadline","server","test",false,0,session::TransportKind::Relay,session::RouteClass::ServerRelay};
+    check(sessions.registerArchiveControlAttempt({1},{71},*execution.scope(),relay,1001));
+    session::DirectTransportAdapter replacement({1},{71},relay,pa.peerId);
+    check(sessions.observeTransport(replacement.identityPresented(pa.peerId,0),1002));
+    check(sessions.markLocallyTrusted({1},{71})&&sessions.markRemoteAccepted({1},{71}));
+    check(sessions.arbitrateWinner({1},{71},1003).activated());
+    const auto expired=execution.tick(16000,0);
+    if(!expired.empty()||!sessions.snapshot(execution.scope()->continuityKey())->connected)
+        throw std::runtime_error("Old archive request deadline retired the replacement winner");
+    check(!execution.snapshot().pending);
+    // A deadline on the actual owner still closes it and schedules bounded
+    // retry. Protecting replacements must not disable legitimate timeouts.
+    check(!execution.request(*execution.scope(),16001,71).empty());
+    const auto ownedDeadline=execution.tick(31001,0);
+    check(ownedDeadline.size()==1&&ownedDeadline.front().value==71&&!execution.snapshot().pending);
+    check(!sessions.snapshot(execution.scope()->continuityKey())->connected&&
+        sessions.snapshot(execution.scope()->continuityKey())->retryScheduled);
+    drain();
     ar::reconcileInitialSync(reader,execution,59999);check(!execution.running());
     Storage contact((root/L"contact").wstring());auto pc=contact.profile();
     a.rememberAuthenticatedDeviceAccount(pc.peerId,9);b.rememberAuthenticatedDeviceAccount(pc.peerId,9);
@@ -213,7 +246,7 @@ int main(){try{
     auto policyBefore=splitB.archiveAuthorizationState();
     {ar::Execution restored(splitB,sb,re.policy(),splitDelivery,splitSessions);ar::reconcileInitialSync(re,restored);check(restored.running()&&restored.scope()->archive.issuer==sb.peerId&&restored.scope()->archive.source==sa.peerId);
         auto providerScope=ar::sessionAuthorization(se.policy(),sb.peerId,sa.peerId,sb.peerId);unsigned steps=0;
-        while(!restored.snapshot().complete){auto request=restored.request(*restored.scope(),100);check(!request.empty());auto response=ar::serveSyncControl(splitA,sa,se.policy(),providerScope,request,[&](const std::string& peer){return splitA.historicalDeviceAccount(peer);},201);restored.control(*restored.scope(),response,201,100);check(++steps<100);}
+        while(!restored.snapshot().complete){auto request=restored.request(*restored.scope(),100,1);check(!request.empty());auto response=ar::serveSyncControl(splitA,sa,se.policy(),providerScope,request,[&](const std::string& peer){return splitA.historicalDeviceAccount(peer);},201);restored.control(*restored.scope(),response,201,100);check(++steps<100);}
         restored.tick(101,1);check(splitB.message(recovered.id)&&splitB.message(recovered.id)->text==recovered.text&&splitB.history(pc.peerId).size()==1);
     }
     {ar::Execution reopened(splitB,sb,re.policy(),splitDelivery,splitSessions);check(reopened.needsAutomaticSync(0)&&reopened.lastAutomaticSource()==sa.peerId);}

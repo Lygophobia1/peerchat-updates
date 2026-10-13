@@ -14,6 +14,7 @@ class Execution {
     bool running_=false;std::string state_="Not started";
     std::string intentContext_,intentIssuer_,intentSource_;Blob savedIntent_;bool restore_=false;
     std::uint64_t pendingAt_=0,nextAutomaticAt_=0;
+    std::uint64_t pendingAttempt_=0;
     bool completedIntent_=false;
     std::string lastIncoming_="none";
     std::string rejectedStage_="none";
@@ -102,7 +103,7 @@ public:
         std::ostringstream out;
         out<<"\n=== History Sync execution ===\nstate="<<state_<<" running="<<running_<<" restore_pending="<<restore_<<" completed_intent="<<completedIntent_
            <<"\nintent_issuer="<<intentIssuer_<<" intent_source="<<intentSource_;
-        auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<progress.complete<<" page_pending="<<progress.pending;
+        auto progress=snapshot();out<<"\nmessages_processed="<<progress.processed<<" conversations_completed="<<progress.conversations<<" scan_complete="<<progress.complete<<" page_pending="<<progress.pending<<" pending_request_attempt="<<pendingAttempt_;
         if(scope_){const auto& a=scope_->archive;
             out<<"\nactive_scope_issuer="<<a.issuer<<" source="<<a.source<<" reader="<<a.reader<<" source_generation="<<a.sourceGeneration<<" reader_generation="<<a.readerGeneration
                <<" source_grant_id="<<a.sourceGrantId<<" reader_grant_id="<<a.readerGrantId<<" scope_current="<<currentSessionAuthorization(policy_,*scope_);
@@ -120,11 +121,11 @@ public:
     }
     // A corrupt checkpoint/page stops only archive work, never the profile's
     // ordinary messaging worker. The protected record is not overwritten.
-    void failed(){restore_=false;running_=false;if(reader_)reader_->cancel();state_="Archive synchronization failed closed";}
+    void failed(){restore_=false;running_=false;pendingAttempt_=0;if(reader_)reader_->cancel();state_="Archive synchronization failed closed";}
     SyncReader::Snapshot snapshot()const{return reader_?reader_->snapshot():SyncReader::Snapshot{0,0,false,false,false};}
     std::vector<session::TransportInstanceId> stop(){
         if(!intentIssuer_.empty())intent(intentIssuer_,intentSource_,false);
-        running_=false;state_="Paused";if(reader_)reader_->cancel();
+        running_=false;pendingAttempt_=0;state_="Paused";if(reader_)reader_->cancel();
         return scope_?sessions_.finishArchiveRoute(*scope_):std::vector<session::TransportInstanceId>{};
     }
     void start(const std::string& issuer,const std::string& source,bool newScan){
@@ -133,7 +134,7 @@ public:
         auto reader=std::make_unique<SyncReader>(storage_,local_,policy_,deliveries_,scope,directory(),[this]{require(received_<INT64_MAX);++received_;});
         if(newScan&&reader->snapshot().complete)reader->rescan();
         intent(issuer,source,reader->snapshot().complete?2:1);
-        scope_=std::move(scope);reader_=std::move(reader);running_=!reader_->snapshot().complete;
+        scope_=std::move(scope);reader_=std::move(reader);pendingAttempt_=0;running_=!reader_->snapshot().complete;
         require(scanGeneration_<INT64_MAX);++scanGeneration_;received_=0;rejectedStage_="none";
         state_=running_?"Connecting to archive":"History synchronized";
     }
@@ -174,15 +175,16 @@ public:
         }
         if(!running_||!scope_){if(scope_&&!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(!currentSessionAuthorization(policy_,*scope_)){
-            reader_->disconnected();state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
+            reader_->disconnected();pendingAttempt_=0;state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
             retire(*scope_);return close;
         }
         if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_="History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(reader_->snapshot().pending&&now>=pendingAt_&&now-pendingAt_>=15000){
             auto route=sessions_.snapshot(scope_->continuityKey());
-            if(route&&route->activeTransport.value){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);
+            if(route&&route->activeTransport.value==pendingAttempt_&&pendingAttempt_){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);
                 sessions_.scheduleRelayRetry(scope_->continuityKey(),now,static_cast<std::uint32_t>(now));}
-            reader_->disconnected();state_="Archive source response timed out";
+            else recordTransport(pendingAttempt_,*scope_,"stale_deadline_ignored");
+            reader_->disconnected();pendingAttempt_=0;state_="Archive source response timed out";
         }
         require(now<=UINT64_MAX-30000);
         if(sessions_.demandArchiveRoute(*scope_,now+30000,network,now)){
@@ -191,10 +193,10 @@ public:
         }else state_="Archive route unavailable";
         return close;
     }
-    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now){
-        require(currentSessionAuthorization(policy_,scope));
+    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t attempt){
+        require(attempt&&currentSessionAuthorization(policy_,scope));
         if(!running_||!scope_||sessionBinding(*scope_).data!=sessionBinding(scope).data||reader_->snapshot().pending)return {};
-        auto bytes=reader_->nextRequest();pendingAt_=now;return bytes;
+        auto bytes=reader_->nextRequest();pendingAt_=now;pendingAttempt_=bytes.empty()?0:attempt;return bytes;
     }
     Blob control(const session::ReliableAuthorization& scope,const Blob& bytes,std::uint64_t utc,std::uint64_t now){
         require(currentSessionAuthorization(policy_,scope));
@@ -208,17 +210,23 @@ public:
         }
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{
-            reader_->accept(bytes);
+            reader_->accept(bytes);pendingAttempt_=0;
             if(reader_->snapshot().complete){
                 require(utc<=INT64_MAX);protocol::Writer w(LocalFormat);w.string("PeerChat/ArchivePresentation/v1");w.number(policy_.account());w.string(local_.peerId);w.number(utc);
                 storage_.saveArchiveSyncState(presentationContext_,savedPresentation_,w.data);savedPresentation_=std::move(w.data);lastSuccessful_=utc;
             }
             return {};
         }
-        catch(...){rejectedStage_=reader_->acceptStage();intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
+        catch(...){rejectedStage_=reader_->acceptStage();intent(scope_->archive.issuer,scope_->archive.source,false);running_=false;pendingAttempt_=0;reader_->cancel();state_="Archive data rejected; synchronization stopped";throw;}
     }
-    void disconnected(const session::ReliableAuthorization& scope){
-        if(scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data&&reader_)reader_->disconnected();
+    void disconnected(const session::ReliableAuthorization& scope,std::uint64_t attempt){
+        if(scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data&&reader_&&pendingAttempt_){
+            // Scope identifies the job, not the socket that owns its in-flight
+            // request. Late loser/old-winner cleanup must not release a new
+            // winner's backpressure or replace its response correlation ID.
+            if(attempt!=pendingAttempt_){recordTransport(attempt,scope,"stale_cleanup_ignored");return;}
+            reader_->disconnected();pendingAttempt_=0;
+        }
     }
 };
 }

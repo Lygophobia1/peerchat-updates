@@ -89,7 +89,12 @@ int main(){try{
         ReliableEndpoint receiver(reader,b,bs,bd,bf,{1},{91},std::make_unique<TlsSession>(bc,true),source.peerId,route(91),++now,scopedB);
         sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
         unsigned pages=0;
-        do{readerWork.tick(now,0);receiver.sendArchiveControl(readerWork.request(scopedB.scope,now));exchange(receiver,sender);++pages;}while(!readerWork.snapshot().complete);
+        do{
+            readerWork.tick(now,0);auto request=readerWork.request(scopedB.scope,now,91);
+            readerWork.disconnected(scopedB.scope,89); // Late old-attempt cleanup while winner 91 owns this page.
+            check(readerWork.snapshot().pending&&readerWork.request(scopedB.scope,now,91).empty());
+            receiver.sendArchiveControl(request);exchange(receiver,sender);++pages;
+        }while(!readerWork.snapshot().complete);
         check(pages==6&&readerWork.snapshot().conversations==1&&readerWork.snapshot().processed==25&&b.history(contact.peerId,100).size()==25&&b.pending(contact.peerId).empty());
         readerWork.tick(now,0);check(!readerWork.running()&&readerWork.state()=="History synchronized");
         archive::Execution reopened(b,reader,reading,bd,bs);reopened.start(source.peerId,source.peerId,false);check(reopened.snapshot().complete&&!reopened.running());
@@ -98,13 +103,13 @@ int main(){try{
         // command. OFF retains intent/history but never creates route demand.
         {
             archive::Execution interrupted(b,reader,reading,bd,bs);interrupted.start(source.peerId,source.peerId,false);
-            auto request=interrupted.request(scopedB.scope,now);check(!request.empty()&&interrupted.snapshot().pending);
+            auto request=interrupted.request(scopedB.scope,now,91);check(!request.empty()&&interrupted.snapshot().pending);
         }
         reading.setHistorySyncEnabled(false);
         archive::Execution resumed(b,reader,reading,bd,bs);resumed.tick(now,0);
         check(!resumed.running()&&resumed.state()=="History synchronization is off"&&b.history(contact.peerId,100).size()==25);
         reading.setHistorySyncEnabled(true);resumed.tick(now,0);check(resumed.running()&&!resumed.snapshot().pending);
-        auto request=resumed.request(scopedB.scope,now);check(!request.empty());
+        auto request=resumed.request(scopedB.scope,now,91);check(!request.empty());
         resumed.tick(now+15001,0);check(!resumed.snapshot().pending);
         resumed.stop();archive::Execution paused(b,reader,reading,bd,bs);paused.tick(now,0);check(!paused.running());
         check(a.contacts().empty()&&b.contacts().empty());

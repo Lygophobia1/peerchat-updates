@@ -441,14 +441,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                         !instance->sessions.attachablePeer({1},{peer.first})?"manager_retired":"authentication_deadline");
                 peer.second->close(true);
                 if(auto scope=peer.second->archiveScope()){
-                    if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope);
+                    if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope,peer.first);
                     instance->sessions.scheduleRelayRetry(scope->continuityKey(),now,static_cast<std::uint32_t>(now));
                 }else if(instance->friends.contains(peer.second->expected())&&!instance->sessions.hasActiveWinner(peer.second->expected()))
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
             }
             else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
-                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now);if(!request.empty())peer.second->sendArchiveControl(request);}
-                catch(...){instance->archiveExecution->disconnected(*scope);peer.second->close(false);}
+                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first);if(!request.empty())peer.second->sendArchiveControl(request);}
+                catch(...){instance->archiveExecution->disconnected(*scope,peer.first);peer.second->close(false);}
             }
         }
         for(auto it=instance->peers.begin();it!=instance->peers.end();){
@@ -531,7 +531,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_close
         auto expected=found->second->expected();std::optional<peerchat::session::ReliableAuthorization> scope;
         if(auto archive=found->second->archiveScope())scope=*archive;
         found->second->close(recoverable==JNI_TRUE);instance->peers.erase(found);
-        if(scope){if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope);
+        if(scope){if(instance->archiveExecution)instance->archiveExecution->disconnected(*scope,static_cast<std::uint64_t>(token));
             if(recoverable==JNI_TRUE)instance->sessions.scheduleRelayRetry(scope->continuityKey(),now,static_cast<std::uint32_t>(now));}
         else if(recoverable==JNI_TRUE&&instance->friends.contains(expected)&&!instance->sessions.hasActiveWinner(expected))
             instance->sessions.scheduleRelayRetry(expected,now,static_cast<std::uint32_t>(now));
