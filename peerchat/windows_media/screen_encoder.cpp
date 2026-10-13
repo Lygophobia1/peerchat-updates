@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include "../media_performance.hpp"
+#include "../screen_capture_cadence.hpp"
 #include <thread>
 #include <utility>
 #include <vector>
@@ -43,6 +44,7 @@ struct EncodedFrame {
     std::vector<uint8_t> bytes;
     pc_screen_encoded_frame info{};
     bool bootstrap = false;
+    uint64_t queuedUs = 0;
 };
 
 bool h264_nals(const std::vector<uint8_t>& bytes,uint64_t& sps,uint64_t& pps,uint64_t& idr,uint64_t& nonIdr) {
@@ -123,6 +125,9 @@ public:
         *metadata = next.info;
         if (!output || capacity < next.bytes.size()) return -1;
         std::memcpy(output, next.bytes.data(), next.bytes.size());
+        performance_.observe(peerchat::MediaPerformance::ScreenEncodedWait,
+            peerchat::MediaPerformance::nowUs()-next.queuedUs,
+            1000000/std::max<uint32_t>(1,options_.frames_per_second),unsigned(output_.size()));
         output_.pop_front();
         return 1;
     }
@@ -440,13 +445,10 @@ private:
             const auto now = std::chrono::steady_clock::now();
             {
                 std::lock_guard lock(mutex_);
-                if (lastCapture_ != std::chrono::steady_clock::time_point{} &&
-                    now - lastCapture_ < std::chrono::nanoseconds(
-                        1000000000ull / options_.frames_per_second)) {
+                if (!captureCadence_.admit(now)) {
                     setCaptureStage(PC_SCREEN_CAPTURE_IDLE);
                     return;
                 }
-                lastCapture_ = now;
             }
             setCaptureStage(PC_SCREEN_CAPTURE_QUEUE);
             {
@@ -464,6 +466,10 @@ private:
     }
 
     bool submit(CapturedFrame frame) {
+        performance_.observe(peerchat::MediaPerformance::ScreenCaptureWait,
+            static_cast<uint64_t>(std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now()-frame.arrival).count())),
+            1000000/std::max<uint32_t>(1,options_.frames_per_second));
         peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenInput,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         auto access = frame.frame.Surface().as<
             ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
@@ -709,6 +715,7 @@ private:
                     ++droppedEncodedQueue_;
                 }
             }
+            frame.queuedUs = peerchat::MediaPerformance::nowUs();
             output_.push_back(std::move(frame));
         }
         return true;
@@ -804,7 +811,7 @@ private:
     std::condition_variable condition_;
     bool initialized_ = false, failed_ = false, inputReady_ = false;
     bool mediaFoundationStarted_ = false;
-    std::chrono::steady_clock::time_point lastCapture_{};
+    peerchat::screen::CaptureCadence captureCadence_{options_.frames_per_second};
     CapturedFrame pending_;
     std::deque<MediaEventType> mediaEvents_;
     std::deque<EncodedFrame> output_;

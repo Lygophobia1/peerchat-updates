@@ -10,6 +10,10 @@ int main(){
     std::array<std::thread,4> workers;for(auto& t:workers)t=std::thread([&]{for(int i=0;i<10000;++i)p.observe(MediaPerformance::ScreenDecode,50000,33000,8);});for(auto& t:workers)t.join();
     check(p.value(MediaPerformance::ScreenDecode).count==40000);auto text=p.text();unsigned events=0;std::size_t at=0;while((at=text.find(L"\nmedia_anomaly=",at))!=std::wstring::npos){++events;++at;}check(events>0&&events<=16&&text.size()<4096);
     p.reset();check(p.value(MediaPerformance::ScreenDecode).count==0&&p.text().find(L"\nmedia_anomaly=")==std::wstring::npos);
+    p.observe(MediaPerformance::ScreenCaptureWait,100,33333);
+    p.observe(MediaPerformance::ScreenEncodedWait,60000,33333,2);
+    check(p.value(MediaPerformance::ScreenCaptureWait).misses==0&&p.value(MediaPerformance::ScreenEncodedWait).misses==1);
+    check(p.text().find(L"perf_screen_encoded_wait=")!=std::wstring::npos);
     peerchat::MediaRtpObservation r;
     r.packet(65534,0xfffff000,1000000,100);r.packet(65535,0xfffff3c0,1020000,100);
     r.packet(1,0xfffffb40,1060000,100);check(r.gapPackets==1);
