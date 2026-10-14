@@ -42,8 +42,8 @@ public partial class DesktopApplication {
         var row=new WrapPanel{Margin=new Thickness(0,2,0,0)};shell.Children.Add(row);
         diagnosticExamples=new ComboBox{MinWidth=145,Margin=new Thickness(0,0,10,6),ToolTip="Sample layout state (never changes the real operation)"};foreach(var state in Enum.GetValues(typeof(DiagnosticExampleState)))diagnosticExamples.Items.Add(state);diagnosticExamples.SelectedIndex=0;row.Children.Add(diagnosticExamples);
         BuildConnectionPreviewSelector(row);
-        var compact=new CheckBox{Content="Compact cards",IsChecked=diagnosticCompact,Margin=new Thickness(0,4,12,6)};compact.Checked+=(s,e)=>{diagnosticCompact=true;RefreshDiagnosticLayout();};compact.Unchecked+=(s,e)=>{diagnosticCompact=false;RefreshDiagnosticLayout();};row.Children.Add(compact);
-        row.Children.Add(new TextBlock{Text="Text size",Margin=new Thickness(0,4,8,6),Foreground=Brush("#A8B9C8")});var size=new Slider{Minimum=12,Maximum=18,Value=diagnosticTextSize,Width=100,ToolTip="Display text size",Margin=new Thickness(0,3,0,6)};size.ValueChanged+=(s,e)=>{diagnosticTextSize=e.NewValue;RefreshDiagnosticLayout();};row.Children.Add(size);
+        var compact=new CheckBox{Content="Compact cards",VerticalAlignment=VerticalAlignment.Center,IsChecked=diagnosticCompact,Margin=new Thickness(0,4,12,6)};compact.Checked+=(s,e)=>{diagnosticCompact=true;RefreshDiagnosticLayout();};compact.Unchecked+=(s,e)=>{diagnosticCompact=false;RefreshDiagnosticLayout();};row.Children.Add(compact);
+        row.Children.Add(new TextBlock{Text="Text size",VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,4,8,6),Foreground=Brush("#A8B9C8")});var size=new Slider{Minimum=12,Maximum=18,VerticalAlignment=VerticalAlignment.Center,Value=diagnosticTextSize,Width=100,ToolTip="Display text size",Margin=new Thickness(0,3,0,6)};size.ValueChanged+=(s,e)=>{diagnosticTextSize=e.NewValue;RefreshDiagnosticLayout();};row.Children.Add(size);
         diagnosticBanner=new TextBlock{TextWrapping=TextWrapping.Wrap,Foreground=Brush("#83CCFC"),Margin=new Thickness(0,4,0,0)};shell.Children.Add(diagnosticBanner);
         diagnosticNavigation.SelectionChanged+=(s,e)=>{var section=(DiagnosticSection)diagnosticNavigation.SelectedIndex;if(section!=diagnosticContext.Section)diagnosticContext=new DiagnosticContext(section,"");RefreshDiagnosticLayout();};
         diagnosticExamples.SelectionChanged+=(s,e)=>{diagnosticExampleState=(DiagnosticExampleState)diagnosticExamples.SelectedItem;RefreshDiagnosticLayout();};
@@ -52,10 +52,21 @@ public partial class DesktopApplication {
         diagnosticContext=new DiagnosticContext(section,stableId);if(groupDiagnosticWindow==null)OpenGroupDiagnostics();
         diagnosticNavigation.SelectedIndex=(int)section;RefreshDiagnosticLayout();groupDiagnosticWindow.Activate();
     }
+    void RefreshDiagnosticFooter(){
+        if(groupDiagnosticWindow==null||groupDiagnosticWindow.Content==null)return;
+        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;
+        bool active=live&&(groupTelemetry.ScreenActive||groupTelemetry.VoiceActive);
+        bool graphAvailable=active&&(graphsPaused||groupSamples.Any(p=>p.EncodedFps.HasValue||p.UploadMbps.HasValue||p.DownloadMbps.HasValue));
+        foreach(var button in ((DockPanel)groupDiagnosticWindow.Content).Children.OfType<WrapPanel>().SelectMany(p=>p.Children.OfType<Button>())){
+            if(Object.Equals(button.Tag,"Copy Diagnostics"))button.Content=live?"Copy Diagnostics":"Copy sample preview";
+            if(Object.Equals(button.Tag,"Export…"))button.Content=live?"Export…":"Export sample preview…";
+            if(Object.Equals(button.Tag,"Pause graphs")){button.IsEnabled=graphAvailable;button.Content=graphsPaused?"Resume graphs":"Pause graphs";button.ToolTip=!live?"No live graphs in sample-preview sections.":!active?"No active live Group Calls graphs.":graphAvailable?"Pause or resume existing live graph samples.":"Live graph measurements are not available yet.";ToolTipService.SetShowOnDisabled(button,true);}
+        }
+    }
     void RefreshDiagnosticLayout(){
         if(groupDiagnosticTabs==null||diagnosticNavigation==null||diagnosticNavigation.SelectedIndex<0)return;
-        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=live||connections?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections?Visibility.Visible:Visibility.Collapsed;
-        foreach(var button in ((DockPanel)groupDiagnosticWindow.Content).Children.OfType<WrapPanel>().SelectMany(p=>p.Children.OfType<Button>())){if(Object.Equals(button.Tag,"Copy Diagnostics"))button.Content=connections?"Copy sample preview":"Copy Diagnostics";if(Object.Equals(button.Tag,"Export…"))button.Content=connections?"Export sample preview…":"Export…";}
+        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=live||connections?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections?Visibility.Visible:Visibility.Collapsed;connectionPreviewStatePanel.Visibility=connections?Visibility.Visible:Visibility.Collapsed;
+        RefreshDiagnosticFooter();
         diagnosticBanner.Text=live?"LIVE GROUP TELEMETRY · existing native counters · unavailable measurements are N/A":"SAMPLE / LAYOUT PREVIEW · not live measurements";
         if(!String.IsNullOrEmpty(diagnosticContext.StableId))diagnosticBanner.Text+="\nSelected context: "+diagnosticContext.StableId;
         groupDiagnosticWindow.Title="PeerChat — "+DiagnosticNavigation.Label(diagnosticContext.Section)+" Diagnostics";
