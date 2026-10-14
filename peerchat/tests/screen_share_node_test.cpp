@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -39,6 +40,7 @@ int main(){
     std::array<std::uint32_t,2> printedState{},printedRoute{},printedWidth{},printedHeight{};
     std::array<std::uint64_t,2> printedGeneration{};
     int deliveredText=0;
+    unsigned reliableDisconnects=0;
     HWND source=nullptr,viewer=nullptr,content=nullptr;
     auto seed=Storage::newMessageId();
     auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/
@@ -53,6 +55,7 @@ int main(){
             if(event.kind==NodeEvent::Kind::Ready){peers[i]=event.peerId;ready[i]=true;}
             else if(event.kind==NodeEvent::Kind::TrustRequired)nodes[i].approve(event.peerId,true);
             else if(event.kind==NodeEvent::Kind::Connected)connected[i]=true;
+            else if(event.kind==NodeEvent::Kind::Disconnected){connected[i]=false;++reliableDisconnects;}
             else if(event.kind==NodeEvent::Kind::ScreenShare){shareState[i]=event.shareState;shareGeneration[i]=event.shareGeneration;shareRoute[i]=event.screenRoute;shareWidth[i]=event.screenWidth;shareHeight[i]=event.screenHeight;shareId[i].assign(event.detail.begin(),event.detail.end());shareSummary[i]=event.screenSummary;if(printedState[i]!=event.shareState||printedGeneration[i]!=event.shareGeneration||printedRoute[i]!=event.screenRoute||printedWidth[i]!=event.screenWidth||printedHeight[i]!=event.screenHeight){std::wcerr<<L"screen peer "<<i<<L" state="<<event.shareState<<L" generation="<<event.shareGeneration<<L" route="<<event.screenRoute<<L" surface="<<event.screenWidth<<L'x'<<event.screenHeight<<L" "<<event.text<<L'\n';printedState[i]=event.shareState;printedGeneration[i]=event.shareGeneration;printedRoute[i]=event.screenRoute;printedWidth[i]=event.screenWidth;printedHeight[i]=event.screenHeight;}}
             else if(event.kind==NodeEvent::Kind::Message)deliveredText+=static_cast<int>(event.messages.size());
             else if(event.kind==NodeEvent::Kind::Error)std::wcerr<<L"screen peer "<<i<<L" error="<<event.text<<L'\n';
@@ -112,6 +115,8 @@ int main(){
             nodes[i].start(path,static_cast<unsigned short>(base+i));
         }
         wait([&]{return ready[0]&&ready[1];},"Screen peers did not start");
+        nodes[0].replaceAuthenticatedFriends(71,1,{{72,peers[1],{peers[1]}}});
+        nodes[1].replaceAuthenticatedFriends(72,1,{{71,peers[0],{peers[0]}}});
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
         nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
@@ -225,9 +230,28 @@ int main(){
         require(!nodes[0].send(peers[1],L"Text during screen sharing").empty(),
             "Text send failed during screen sharing");
         wait([&]{return deliveredText>0;},"Text delivery stopped during screen sharing");
+        // Existing authenticated peer TLS carries the file independently of
+        // H.264 DTLS-SRTP. Stop media while a verified durable prefix is active.
+        Blob fileBytes(10*1024*1024);for(size_t n=0;n<fileBytes.size();++n)fileBytes[n]=static_cast<unsigned char>(n*19);
+        auto fileSource=root/L"concurrent-media.bin",fileDestination=root/L"concurrent-download";
+        std::filesystem::create_directory(fileDestination);
+        {std::ofstream file(fileSource,std::ios::binary);file.write(reinterpret_cast<const char*>(fileBytes.data()),fileBytes.size());require(bool(file),"fixture source write failed");}
+        auto fileId=nodes[0].fileTransfer(1,peers[1],"",fileSource.wstring());
+        std::string fileKey(fileId.begin(),fileId.end());
+        wait([&]{return nodes[1].fileTransfer(0).find(fileId)!=std::wstring::npos;},"file offer during media missing");
+        nodes[1].fileTransfer(2,"",fileKey,fileDestination.wstring());
+        wait([&]{auto rows=nodes[1].fileTransfer(0);return rows.find(L"\"state\":3")!=std::wstring::npos&&rows.find(L"\"done\":0,")==std::wstring::npos;},"concurrent transfer did not establish durable payload",30);
+        auto disconnectsBeforeStop=reliableDisconnects;
+        bool mailboxRejected=false;try{nodes[0].mailbox(1,{1});}catch(...){mailboxRejected=true;}
+        require(mailboxRejected,"invalid local mailbox operation did not fail closed");
         require(nodes[0].endScreenShare(id),"Sender could not stop the screen share");
         wait([&]{return shareState[0]==0&&shareState[1]==0;},
             "Both peers did not return to idle after screen share");
+        wait([&]{return nodes[0].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&nodes[1].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"media-stop concurrent file did not complete",60);
+        std::ifstream received(fileDestination/(fileId+L"-concurrent-media.bin"),std::ios::binary);
+        Blob actual(std::istreambuf_iterator<char>(received),{});
+        require(actual==fileBytes&&connected[0]&&connected[1]&&reliableDisconnects==disconnectsBeforeStop,"media stop invalidated reliable transport or corrupted active file");
+        std::cout<<"PASS: 10 MiB durable verified transfer across actual screen-media stop and local mailbox rejection; reliable route retained. HOST DIRECT TLS / WEBRTC UDP ONLY\n";
         require(nodes[0].screenShareDiagnostics().find(L"screen_stop_stage=10")!=std::wstring::npos,
             "Completed sender teardown did not expose its stop stage");
         auto repeated=nodes[0].startScreenShare(peers[1],captureKind,

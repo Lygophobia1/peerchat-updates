@@ -17,6 +17,7 @@ std::uint64_t processCpuUs(){FILETIME created{},exited{},kernel{},user{};require
 std::uint64_t processPeakBytes(){PROCESS_MEMORY_COUNTERS counters{};counters.cb=sizeof(counters);require(GetProcessMemoryInfo(GetCurrentProcess(),&counters,sizeof(counters))!=0,"process memory measurement failed");return counters.PeakWorkingSetSize;}
 int main(int argc,char** argv){
     Node left,right;std::string a,b;std::uint64_t la=0,ra=0;bool readyLeft=false,readyRight=false;
+    unsigned mailboxFailures=0;
     auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/("file-session-"+Storage::newMessageId());
     try{
         left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
@@ -27,7 +28,7 @@ int main(int argc,char** argv){
                 if(e.kind==NodeEvent::Kind::TrustRequired)require(left.pinInitialAuthenticatedFriendIdentity(e.peerId,e.attemptId,1),"left constrained identity pin rejected");
                 if(e.kind==NodeEvent::Kind::Connected)readyLeft=true;
                 if(e.kind==NodeEvent::Kind::Disconnected)readyLeft=false;
-                if(e.kind==NodeEvent::Kind::Error)std::wcerr<<L"left: "<<e.text<<L"\n";
+                if(e.kind==NodeEvent::Kind::Error){if(e.peerId=="mailbox-control:operation"&&e.attemptId==0)++mailboxFailures;std::wcerr<<L"left: "<<e.text<<L"\n";}
             }
             for(auto& e:right.poll()){
                 if(e.kind==NodeEvent::Kind::Ready)b=e.peerId;
@@ -132,6 +133,11 @@ int main(int argc,char** argv){
         right.fileTransfer(2,"",narrow,destination.wstring());
         wait([&]{return right.fileTransfer(0).find(L"\"done\":32768")!=std::wstring::npos||right.fileTransfer(0).find(L"\"done\":65536")!=std::wstring::npos;},"first bounded chunks did not arrive");
         auto originalA=a,originalB=b;
+        const auto originalLa=la,originalRa=ra;
+        bool mailboxRejected=false;try{left.mailbox(1,{1});}catch(...){mailboxRejected=true;}
+        require(mailboxRejected,"malformed mailbox command was accepted");
+        wait([&]{return mailboxFailures==1;},"mailbox failure not scoped to local operation");
+        require(readyLeft&&readyRight&&la==originalLa&&ra==originalRa,"mailbox validation failure replaced reliable route during file transfer");
         left.stop();right.stop();la=ra=0;readyLeft=readyRight=false;a.clear();b.clear();
         require(std::filesystem::exists(destination/(id+L".peerchat-part")),"shutdown deleted resumable partial");
         left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);

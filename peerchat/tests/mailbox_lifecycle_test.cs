@@ -16,6 +16,9 @@ internal static class MailboxLifecycleTest {
         Check(MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=17,connected=false}));
         Check(!MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=17,connected=true}));
         Check(!MailboxExecution.RouteNeedsReevaluation(new CoreEvent{kind=14,connected=false}));
+        Check(MailboxExecution.IsOperationFailure(new CoreEvent{kind=8,peer="mailbox-control:operation",attempt=0}));
+        Check(!MailboxExecution.IsOperationFailure(new CoreEvent{kind=8,peer="peer",attempt=0}));
+        Check(!MailboxExecution.IsOperationFailure(new CoreEvent{kind=8,peer="mailbox-control:operation",attempt=7}));
         foreach(bool policy in new[]{false,true}){
             var execution=new MailboxExecution((op,bytes,id,allowed)=>{Check(op==2&&allowed==policy);return new byte[]{1};});
             Check(execution.PendingUploads(policy).SequenceEqual(new byte[]{1}));

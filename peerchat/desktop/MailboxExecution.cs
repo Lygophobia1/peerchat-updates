@@ -16,6 +16,7 @@ internal sealed class MailboxExecution {
         return !stopping&&account>0&&account==publishedAccount;
     }
     internal static bool RouteNeedsReevaluation(CoreEvent value){return value.kind==17&&!value.connected;}
+    internal static bool IsOperationFailure(CoreEvent value){return value.kind==8&&(value.peer??"")=="mailbox-control:operation"&&value.attempt==0;}
     byte[] Native(uint operation,byte[] input=null,string id="",bool allowed=false){
         lifetime.Token.ThrowIfCancellationRequested();
         return invoke(operation,input,id,allowed);

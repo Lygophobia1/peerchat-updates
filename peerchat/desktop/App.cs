@@ -587,6 +587,13 @@ public partial class DesktopApplication {
             var pollTimer=Stopwatch.StartNew();var events=core.Poll();var pollMs=pollTimer.ElapsedMilliseconds;if(pollMs>20)TraceUi("native core poll took "+pollMs+" ms and returned "+events.Length+" event(s)");RefreshVoiceTelemetry();if(events.Length==0)return;
             bool scroll=false,incomingNotification=false;
             foreach(var e in events){
+                if(MailboxExecution.IsOperationFailure(e)){
+                    // A failed local mailbox command is not a TCP/TLS lifecycle
+                    // event and must not be attributed to the selected friend.
+                    TraceUi("mailbox operation rejected · "+(e.text??"Validation failed"));
+                    RetainFailure("Offline message operation rejected","Mailbox","","mailbox_operation",e.text??"Validation failed","native mailbox command",0,null);
+                    continue;
+                }
                 if(e.kind==22){_ = RefreshChatAttachments();continue;}
                 if(e.kind==20){
                     if(discovery==null||!discovery.QueueGroupMessage(e.expected,e.text,e.attempt,e.detail))core.GroupMessageStatus(e.expected,e.text,"Not sent: authenticated server channel unavailable");
