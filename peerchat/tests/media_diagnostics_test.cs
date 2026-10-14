@@ -84,7 +84,7 @@ class MediaDiagnosticsTest {
                 if(section==DiagnosticSection.FileTransfers){tabs.SelectedIndex=2;graphWindow.UpdateLayout();Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");typeof(DesktopApplication).GetMethod("RefreshDiagnosticLayout",flags).Invoke(desktop,null);Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");}
             }
             Check(model.VoiceCallId==originalCall);graphWindow.Close();
-            Check(ConnectionPreviewUiTest.Run(desktop,args[0]));
+            Check(ConnectionPreviewUiTest.Run(desktop,args[0]));await ConnectionsLiveTest.Run(desktop,args[0]);
             var attachment=new AttachmentCard{Transfer=new CoreAdapter.FileTransferData{id="stable-transfer-id",name="fixture.bin",size=1048576,state=3}};AttachmentActionEventArgs selectedTransfer=null;attachment.AddHandler(AttachmentCard.ActionEvent,new RoutedEventHandler((sender,eventArgs)=>selectedTransfer=(AttachmentActionEventArgs)eventArgs));var entry=attachment.Children.OfType<WrapPanel>().Single().Children.OfType<Button>().Single(b=>Object.Equals(b.Content,"Open Diagnostics"));entry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(selectedTransfer!=null&&selectedTransfer.Action=="diagnostics"&&selectedTransfer.Transfer.id=="stable-transfer-id");
             typeof(DesktopApplication).GetMethod("ShowDiagnosticsWindow",flags).Invoke(desktop,new object[]{null});
             var diagnostics=app.Windows.Cast<Window>().Single(w=>w.Title=="Connection & Diagnostics");

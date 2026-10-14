@@ -6,7 +6,7 @@ namespace PeerChatDesktop {
 // Layout fixtures only: no connection collectors, retained diagnostics or profile storage.
 public enum ConnectionPreviewState { Connected, Connecting, Disconnected, AuthenticationFailed, RelayFailed, Reconnecting, Recovered, HistoricalCompleted, Empty, Loading, Unavailable }
 public enum ConnectionPreviewSeverity { Info, Warning, Error }
-public enum ConnectionPreviewEventType { Discovery, Authentication, TLS, RouteSelection, Connect, Disconnect, Retry }
+public enum ConnectionPreviewEventType { Discovery, Authentication, TLS, RouteSelection, Connect, Disconnect, Retry, Lifecycle }
 public static class ConnectionPreviewDisplay {
     public static string Id(string value){return String.IsNullOrEmpty(value)?"N/A":value.Length<=16?value:value.Substring(0,8)+"…"+value.Substring(value.Length-6);}
     public static string Compact(string value,int limit=180){return String.IsNullOrEmpty(value)?"N/A":value.Length<=limit?value:value.Substring(0,limit)+"…";}
@@ -15,25 +15,30 @@ public static class ConnectionPreviewDisplay {
     public static string Local(DateTime utc){return Local(utc,TimeZoneInfo.Local);}
 }
 public sealed class ConnectionPreviewSession {
+    public bool Sample=true,StartKnown=true;public string Extra="";
     public string Id,Label,Target,Kind,Route,Outcome,CorrelationId;public DateTime StartedUtc;public TimeSpan? Duration;
-    public string UtcTimestamp {get{return "UTC: "+ConnectionPreviewDisplay.Utc(StartedUtc);}}
-    public string Summary {get{return ConnectionPreviewDisplay.Compact(Label,60)+" · "+ConnectionPreviewDisplay.Compact(Target,60)+" · "+ConnectionPreviewDisplay.Compact(Outcome,60)+"\n"+ConnectionPreviewDisplay.Local(StartedUtc)+" · "+ConnectionPreviewDisplay.Id(Id);}}
-    public string DetailsUtc {get{return "SAMPLE · "+Label+"\nContact / group: "+Target+"\nType: "+Kind+"\nSession ID: "+Id+"\nStart UTC: "+ConnectionPreviewDisplay.Utc(StartedUtc)+"\nDuration: "+(Duration.HasValue?Duration.Value.ToString():"N/A")+"\nOutcome: "+Outcome+"\nRoute: "+Route+"\nAttempt correlation: "+CorrelationId;}}
+    public string UtcTimestamp {get{return StartKnown?"UTC: "+ConnectionPreviewDisplay.Utc(StartedUtc):"Start time: Not retained";}}
+    public string Summary {get{return ConnectionPreviewDisplay.Compact(Label,60)+" · "+ConnectionPreviewDisplay.Compact(Target,60)+" · "+ConnectionPreviewDisplay.Compact(Outcome,60)+"\n"+(StartKnown?ConnectionPreviewDisplay.Local(StartedUtc):"Start / duration: Not retained")+" · "+ConnectionPreviewDisplay.Id(Id);}}
+    public string DetailsUtc {get{return (Sample?"SAMPLE · ":"")+Label+"\nContact / group: "+Target+"\nType: "+Kind+"\nSession ID: "+Id+"\nStart UTC: "+(StartKnown?ConnectionPreviewDisplay.Utc(StartedUtc):"Not retained")+"\nDuration: "+(Duration.HasValue?Duration.Value.ToString():"Not retained")+"\nOutcome: "+Outcome+"\nRoute: "+Route+"\nCorrelation: "+CorrelationId+"\n"+Extra;}}
 }
 public sealed class ConnectionPreviewFailure {
+    public bool Sample=true,TimeKnown=true;public string Extra="";
     public string Id,SessionId,Target,Reason,Stage,Recovery;public DateTime TimestampUtc;
-    public string UtcTimestamp {get{return "UTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc);}}
-    public string Summary {get{return ConnectionPreviewDisplay.Compact(Target,60)+" · "+ConnectionPreviewDisplay.Compact(Reason)+"\n"+ConnectionPreviewDisplay.Local(TimestampUtc)+" · "+ConnectionPreviewDisplay.Id(SessionId);}}
-    public string DetailsUtc {get{return "SAMPLE failure: "+Id+"\nReason: "+Reason+"\nStage: "+Stage+"\nAssociated contact / group: "+Target+"\nTime UTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc)+"\nSession / attempt: "+SessionId+"\nRecovery: "+Recovery;}}
+    public string UtcTimestamp {get{return TimeKnown?"UTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc):"Timestamp: Not retained";}}
+    public string Summary {get{return ConnectionPreviewDisplay.Compact(Target,60)+" · "+ConnectionPreviewDisplay.Compact(Reason)+"\n"+(TimeKnown?ConnectionPreviewDisplay.Local(TimestampUtc):"Timestamp: Not retained")+" · "+ConnectionPreviewDisplay.Id(SessionId);}}
+    public string DetailsUtc {get{return (Sample?"SAMPLE failure: ":"Failure: ")+Id+"\nReason: "+Reason+"\nStage: "+Stage+"\nAssociated contact / group: "+Target+"\nTime UTC: "+(TimeKnown?ConnectionPreviewDisplay.Utc(TimestampUtc):"Not retained")+"\nSession / attempt: "+SessionId+"\nRecovery: "+Recovery+"\n"+Extra;}}
 }
 public sealed class ConnectionPreviewEvent {
+    public bool Sample=true;public string Extra="";
     public string SessionId,AttemptId,CorrelationId,Description;public DateTime TimestampUtc;public ConnectionPreviewSeverity Severity;public ConnectionPreviewEventType Type;
     public string UtcTimestamp {get{return "UTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc);}}
     public string Summary {get{return ConnectionPreviewDisplay.Compact(Description)+"\n"+ConnectionPreviewDisplay.Local(TimestampUtc)+" · "+Severity+" · "+Type+"\nSession "+ConnectionPreviewDisplay.Id(SessionId)+" · Attempt "+ConnectionPreviewDisplay.Id(AttemptId)+" · Correlation "+ConnectionPreviewDisplay.Id(CorrelationId);}}
-    public string DetailsUtc {get{return (String.IsNullOrEmpty(Description)||!Description.StartsWith("[SAMPLE]",StringComparison.Ordinal)?"[SAMPLE] ":"")+Description+"\nUTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc)+"\nSeverity: "+Severity+" · Type: "+Type+"\nSession ID: "+SessionId+"\nAttempt ID: "+AttemptId+"\nCorrelation ID: "+CorrelationId;}}
+    public string DetailsUtc {get{return (Sample&&(String.IsNullOrEmpty(Description)||!Description.StartsWith("[SAMPLE]",StringComparison.Ordinal))?"[SAMPLE] ":"")+Description+"\nUTC: "+ConnectionPreviewDisplay.Utc(TimestampUtc)+"\nSeverity: "+Severity+" · Type: "+Type+"\nSession ID: "+SessionId+"\nAttempt ID: "+AttemptId+"\nCorrelation ID: "+CorrelationId+"\n"+Extra;}}
 }
 public sealed class ConnectionPreviewSnapshot {
     public const string SampleBanner="SAMPLE CONNECTIONS PREVIEW — isolated layout fixtures, not current or retained connection reports. N/A = unavailable instrumentation.";
+    public bool Sample=true;public string Context="",Profile="";
+    public string Banner {get{return Sample?SampleBanner:"LIVE CONNECTIONS · existing current observations and profile-retained metadata. Missing native historical IDs and completed sessions are Not retained.";}}
     public ConnectionPreviewState State;public DiagnosticPanel[] Overview,Network;
     public ConnectionPreviewSession[] Sessions=new ConnectionPreviewSession[0];public ConnectionPreviewFailure[] Failures=new ConnectionPreviewFailure[0];public ConnectionPreviewEvent[] Events=new ConnectionPreviewEvent[0];
     public string RawText="";
@@ -64,8 +69,8 @@ public sealed class SampleConnectionPreviewProvider:IConnectionPreviewProvider {
     }
 }
 public static class ConnectionPreviewQuery {
-    public static ConnectionPreviewEvent[] Filter(ConnectionPreviewSnapshot snapshot,string severity,string type,string session){return snapshot.Events.Where(e=>(severity=="All"||e.Severity.ToString()==severity)&&(type=="All"||e.Type.ToString()==type)&&(session=="All"||e.SessionId==session)).OrderBy(e=>e.TimestampUtc).ToArray();}
-    public static string Logs(ConnectionPreviewSnapshot snapshot,string query,bool structured){string text=structured?String.Join("\n",snapshot.Events.Select(e=>"[SAMPLE] utc="+e.TimestampUtc.ToString("o")+" severity="+e.Severity+" type="+e.Type+" session="+e.SessionId+" attempt="+e.AttemptId+" correlation="+e.CorrelationId+" description="+e.Description)):snapshot.RawText;var lines=text.Split(new[]{'\n'},StringSplitOptions.None);return ConnectionPreviewSnapshot.SampleBanner+"\nSensitive values: [REDACTED] · sample text only\n"+String.Join("\n",lines.Where(l=>String.IsNullOrEmpty(query)||l.IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0));}
-    public static string Export(ConnectionPreviewSnapshot snapshot){return ConnectionPreviewSnapshot.SampleBanner+"\nState: "+SampleConnectionPreviewProvider.Label(snapshot.State)+"\n\n"+String.Join("\n",snapshot.Overview.Concat(snapshot.Network).Select(p=>p.Title+"\n"+String.Join("\n",p.Metrics.Select(m=>m.Label+": "+m.Value))))+"\n\nSAMPLE sessions:\n"+String.Join("\n",snapshot.Sessions.Select(s=>s.DetailsUtc))+"\n\nSAMPLE failures:\n"+String.Join("\n",snapshot.Failures.Select(f=>f.DetailsUtc))+"\n\n"+snapshot.RawText;}
+    public static ConnectionPreviewEvent[] Filter(ConnectionPreviewSnapshot snapshot,string severity,string type,string session){return snapshot.Events.Where(e=>(severity=="All"||e.Severity.ToString()==severity)&&(type=="All"||e.Type.ToString()==type)&&(session=="All"||e.SessionId==session||e.CorrelationId==session)).OrderBy(e=>e.TimestampUtc).ToArray();}
+    public static string Logs(ConnectionPreviewSnapshot snapshot,string query,bool structured){string text=structured?String.Join("\n",snapshot.Events.Select(e=>(snapshot.Sample?"[SAMPLE] utc=":"utc=")+e.TimestampUtc.ToString("o")+" severity="+e.Severity+" type="+e.Type+" session="+e.SessionId+" attempt="+e.AttemptId+" correlation="+e.CorrelationId+" description="+e.Description)):snapshot.RawText;var lines=text.Split(new[]{'\n'},StringSplitOptions.None);return snapshot.Banner+"\nSensitive values: [REDACTED] · diagnostic metadata only\n"+String.Join("\n",lines.Where(l=>String.IsNullOrEmpty(query)||l.IndexOf(query,StringComparison.OrdinalIgnoreCase)>=0));}
+    public static string Export(ConnectionPreviewSnapshot snapshot){return snapshot.Banner+"\n"+(snapshot.Sample?"Preview State: "+SampleConnectionPreviewProvider.Label(snapshot.State):"Profile: "+snapshot.Profile+" · context: "+snapshot.Context)+"\n\n"+String.Join("\n",snapshot.Overview.Concat(snapshot.Network).Select(p=>p.Title+"\n"+String.Join("\n",p.Metrics.Select(m=>m.Label+": "+m.Value))))+"\n\nSessions / runtime attempts:\n"+String.Join("\n",snapshot.Sessions.Select(s=>s.DetailsUtc))+"\n\nRetained failures:\n"+String.Join("\n",snapshot.Failures.Select(f=>f.DetailsUtc))+"\n\n"+snapshot.RawText;}
 }
 }
