@@ -8,7 +8,23 @@ using System.Text;
 using System.Web.Script.Serialization;
 
 namespace PeerChat.ServerShared {
+// Supplemental cache configuration only. No endpoint or storage is enabled by
+// configuring these values; production exposure remains separately gated.
+public class AttachmentCacheConfiguration {
+ public long MaximumBytes=10L*1024*1024*1024,RetentionSeconds=48L*60*60,PartialIdleSeconds=6L*60*60;
+ public long MinimumFreeBytes=2L*1024*1024*1024;
+ public int MinimumFreePercent=20;
+ public string Directory="",ExpectedFilesystem="",ExpectedMountPoint="",InstanceId="";
+ static bool Absolute(string path){return Path.IsPathRooted(path)&&(Path.DirectorySeparatorChar!='\\'||path.StartsWith("\\\\",StringComparison.Ordinal)||(path.Length>=3&&path[1]==':'&&(path[2]=='\\'||path[2]=='/')));}
+ public void Validate(){
+  if(MaximumBytes<1||MinimumFreeBytes<2L*1024*1024*1024||MinimumFreePercent<20||MinimumFreePercent>95||RetentionSeconds<1||PartialIdleSeconds<1||RetentionSeconds>253402300799L||PartialIdleSeconds>253402300799L)throw new InvalidOperationException("Invalid encrypted cache capacity, retention or free-space reserve.");
+  foreach(var value in new[]{Directory,ExpectedFilesystem,ExpectedMountPoint,InstanceId})if(value==null||value.Length>4096||value.Any(Char.IsControl))throw new InvalidOperationException("Invalid encrypted cache storage binding.");
+  if(Directory.Length>0&&!Absolute(Directory)||ExpectedMountPoint.Length>0&&!Absolute(ExpectedMountPoint))throw new InvalidOperationException("Cache directory and mount point must be absolute paths.");
+  if(InstanceId.Length>0&&(InstanceId.Length!=32||InstanceId.Any(c=>!((c>='0'&&c<='9')||(c>='a'&&c<='f')))))throw new InvalidOperationException("Invalid encrypted cache instance identifier.");
+ }
+}
 public sealed class ServerConfiguration {
+ public AttachmentCacheConfiguration AttachmentCache=new AttachmentCacheConfiguration();
  // PublicHostname identifies the discovery service. SelfHostedPublicP2PHost is an optional
  // address for a P2P listener on this host; its port always comes from client presence.
  public string DataDirectory,ListenAddress="0.0.0.0",PublicHostname="localhost",SelfHostedPublicP2PHost="",DatabasePath,LogDirectory,CertificateThumbprint="",CertificatePath="",CertificatePassword="",ManagementPipe="";
@@ -54,7 +70,7 @@ public sealed class ServerConfiguration {
 #if PEERCHAT_PORTABLE
  if(!OperatingSystem.IsWindows()&&(String.IsNullOrWhiteSpace(DataDirectory)||!Path.IsPathRooted(DataDirectory)))throw new InvalidOperationException("Linux requires an explicit absolute data directory.");
 #endif
-if(String.IsNullOrWhiteSpace(DataDirectory))DataDirectory=DefaultDataDirectory;if(String.IsNullOrWhiteSpace(DatabasePath))DatabasePath=Path.Combine(DataDirectory,"Data","peerchat-server.db");if(String.IsNullOrWhiteSpace(LogDirectory))LogDirectory=Path.Combine(DataDirectory,"Logs");if(String.IsNullOrWhiteSpace(SelfHostedPublicP2PHost)&&!String.Equals(PublicHostname,"localhost",StringComparison.OrdinalIgnoreCase))SelfHostedPublicP2PHost=PublicHostname;LoadTurnRestSharedSecret();}
+if(String.IsNullOrWhiteSpace(DataDirectory))DataDirectory=DefaultDataDirectory;if(String.IsNullOrWhiteSpace(DatabasePath))DatabasePath=Path.Combine(DataDirectory,"Data","peerchat-server.db");if(String.IsNullOrWhiteSpace(LogDirectory))LogDirectory=Path.Combine(DataDirectory,"Logs");if(String.IsNullOrWhiteSpace(SelfHostedPublicP2PHost)&&!String.Equals(PublicHostname,"localhost",StringComparison.OrdinalIgnoreCase))SelfHostedPublicP2PHost=PublicHostname;if(AttachmentCache==null)throw new InvalidOperationException("Cache configuration is missing.");AttachmentCache.Validate();LoadTurnRestSharedSecret();}
  public void Validate(){
 #if PEERCHAT_PORTABLE
  if(!OperatingSystem.IsWindows()){
@@ -65,6 +81,6 @@ if(String.IsNullOrWhiteSpace(DataDirectory))DataDirectory=DefaultDataDirectory;i
  }
 #endif
 Normalize();if(Port<1||Port>65535)throw new InvalidOperationException("TLS port must be 1 through 65535.");if(String.IsNullOrWhiteSpace(CertificateThumbprint)&&String.IsNullOrWhiteSpace(CertificatePath))throw new InvalidOperationException("A TLS certificate must be configured.");if(!TurnEnabled)return;if(String.IsNullOrWhiteSpace(TurnPublicHost)||TurnPublicHost.Length>253||TurnPublicHost.IndexOfAny(new[]{' ', '\t', '\r', '\n', '/', '@'})>=0)throw new InvalidOperationException("TURN public host is invalid.");if(TurnUdpPort<1||TurnUdpPort>65535)throw new InvalidOperationException("TURN UDP port must be 1 through 65535.");if(TurnCredentialTtlSeconds<120||TurnCredentialTtlSeconds>3600)throw new InvalidOperationException("TURN credential TTL must be between 120 and 3600 seconds.");if(String.IsNullOrWhiteSpace(TurnRealm)||TurnRealm.Length>128||TurnRealm.Any(c=>Char.IsControl(c)))throw new InvalidOperationException("TURN realm is invalid.");if(String.IsNullOrWhiteSpace(TurnRestSharedSecret)||TurnRestSharedSecret.Length<16)throw new InvalidOperationException("TURN is enabled but its REST shared secret is missing or too short.");}
- public void Save(string path){Normalize();Directory.CreateDirectory(Path.GetDirectoryName(path));Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath));Directory.CreateDirectory(LogDirectory);File.WriteAllText(path,new JavaScriptSerializer().Serialize(this));}
+ public void Save(string path){Normalize();if(AttachmentCache==null)throw new InvalidOperationException("Cache configuration is missing.");AttachmentCache.Validate();Directory.CreateDirectory(Path.GetDirectoryName(path));Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath));Directory.CreateDirectory(LogDirectory);File.WriteAllText(path,new JavaScriptSerializer().Serialize(this));}
 }
 }
