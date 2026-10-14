@@ -2949,7 +2949,7 @@ public partial class DesktopApplication {
 		});
 		Action<string> showSettingsPage = null;
 		Dictionary<string, Button> settingsNavigation = new Dictionary<string, Button>(StringComparer.Ordinal);
-		string[] array = new string[8] { "General", "Privacy & Security", "Voice", "Video", "Screen Sharing", "Network", "Updates", "Advanced" };
+		string[] array = new string[9] { "General", "Privacy & Security", "Voice", "Video", "Screen Sharing", "File Transfers", "Network", "Updates", "Advanced" };
 		foreach (string text in array)
 		{
 			Button navigationButton = new Button
@@ -3320,6 +3320,7 @@ public partial class DesktopApplication {
 		screenBackend.SelectionChanged+=delegate{saveScreenSettings();};screenFps.SelectionChanged+=delegate{saveScreenSettings();};screenBitrate.SelectionChanged+=delegate{saveScreenSettings();};screenCursor.Checked+=delegate{saveScreenSettings();};screenCursor.Unchecked+=delegate{saveScreenSettings();};
 		screenSettings.Children.Add(SettingsCard("Capture quality", "Native Windows uses hardware H.264; WebRTC Compatibility uses software H.264 on the existing WebRTC-compatible media track. Settings take effect on the next share.",screenControls));
 		settingsPages.Add("Screen Sharing",screenSettings);
+        var transferPage=createInfoPage("File Transfers","Profile-wide defaults and one shared aggregate upload ceiling. Existing transfers retain their negotiated chunk framing until reconnect.");var transferSettingsButton=new Button{Content="Configure file transfers…",Padding=new Thickness(12,8,12,8),HorizontalAlignment=HorizontalAlignment.Left};transferSettingsButton.Click+=(s,e)=>ShowTransferSettings();transferPage.Children.Add(transferSettingsButton);settingsPages.Add("File Transfers",transferPage);
 		var networkSettings=new StackPanel();networkSettings.Children.Add(new TextBlock{Text="Reliable connection",FontSize=24,FontWeight=FontWeights.SemiBold});networkSettings.Children.Add(new TextBlock{Text="Server Relay — default\nPeerChat uses the server relay for reliable messaging and control. Voice and screen sharing may still use their existing ICE media paths.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,18)});var allowP2p=new CheckBox{Content="Allow direct P2P connections",IsChecked=connectionPreferences.AllowDirectP2p,Foreground=Brush("#EDF1F5")};allowP2p.Checked+=(s,e)=>{connectionPreferences.AllowDirectP2p=true;connectionPreferenceStore.Save(connectionPreferences);};allowP2p.Unchecked+=(s,e)=>{connectionPreferences.AllowDirectP2p=false;connectionPreferenceStore.Save(connectionPreferences);ClearScopedP2p(true);};networkSettings.Children.Add(allowP2p);networkSettings.Children.Add(new TextBlock{Text="Direct P2P can reduce server usage and latency, but it may reveal your IP address to the other person. It is off by default and requires mutual consent for each friend.",Foreground=Brush("#A1AEBB"),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,8,0,0)});settingsPages.Add("Network",networkSettings);
 		showSettingsPage = delegate(string page)
 		{

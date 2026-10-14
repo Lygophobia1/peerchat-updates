@@ -188,7 +188,9 @@ int main(int argc,char** argv){
             check(sends==0&&std::filesystem::exists(h.destination/(h.id+".peerchat-part")));
             fault.broken=false;
             for(int n=0;n<20;++n)restored.tick(h.now+251+n,[](const std::string&){return 1;},[&](const std::string&,const Blob&){++sends;return true;});
-            check(sends>0&&restored.snapshots()[0].state==State::Transferring);
+            check(sends==0&&restored.snapshots()[0].state==State::Transferring); // Rebind before replying on a new route.
+            auto m=restored.snapshots()[0].metadata;protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(Kind::Offer));offer.string(m.id);offer.string(m.name);offer.number(m.size);offer.bytes(Blob(m.digest.begin(),m.digest.end()));
+            restored.receive(h.a,offer.data,h.now+280);restored.tick(h.now+281,[](const std::string&){return 1;},[&](const std::string&,const Blob&){++sends;return true;});check(sends==1);
         }
         {
             Harness h(root/L"preparation-journal-backoff");write(h.source,bytes(100001));
@@ -199,6 +201,18 @@ int main(int argc,char** argv){
             check(sends==0&&!manager.hasPreparationWork(h.now+249)&&manager.hasPreparationWork(h.now+250));
             fault.broken=false;manager.tick(h.now+250,[](const std::string&){return 1;},[](const std::string&,const Blob&){return true;});
             check(manager.hasPreparationWork(h.now+250));manager.cancel(h.id);check(!manager.hasPreparationWork(h.now+250));
+        }
+        {
+            Harness h(root/L"pipeline-tuning-restart");h.sender->configure("",{65536,8,4000000});h.offer(bytes(1048577));h.sender->configure(h.id,{65536,4,3000000});
+            h.sender->capability(h.b,h.route,true);h.receiver->capability(h.a,h.route,true);
+            for(int n=0;n<500&&(!h.accepted||h.receiver->snapshots()[0].done<65536);++n)h.pump();
+            check(h.receiver->snapshots()[0].done>=65536);h.restart();
+            check(h.sender->options().bitsPerSecond==4000000&&h.sender->options(h.id).chunkBytes==65536&&h.sender->options(h.id).window==4&&h.sender->options(h.id).bitsPerSecond==3000000);
+            h.sender->capability(h.b,h.route,true);h.receiver->capability(h.a,h.route,true);h.finish();check(h.result()==bytes(1048577));
+        }
+        {
+            Harness h(root/L"default-snapshot-restart");h.sender->configure("",{65536,8,0});h.offer(bytes(100001));h.sender->configure("",{32768,1,1000000});h.restart();
+            check(h.sender->options().window==1&&h.sender->options(h.id).window==8&&h.sender->options(h.id).chunkBytes==65536);h.sender->capability(h.b,h.route,true);h.receiver->capability(h.a,h.route,true);h.finish();check(h.result()==bytes(100001));
         }
         std::filesystem::remove_all(root);
         std::cout<<"Durable transfer restart: resumed prefix, duplicate, source change, uncommitted tail, missing partial, rename crash, DPAPI tamper, cancellation, profile/device binding PASS\n";

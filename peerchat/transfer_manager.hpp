@@ -7,11 +7,18 @@
 #include <map>
 #include <memory>
 #include <chrono>
+#include <deque>
 
 namespace peerchat::transfer {
 // Logical bulk-transfer mechanics only. The caller supplies an authenticated,
 // winning reliable route; this class never opens sockets or schedules reconnects.
 constexpr size_t ChunkBytes=32768, MaxTransfers=4, MaxRecords=64;
+constexpr size_t ExtendedChunkBytes=65536;
+struct Options {
+    size_t chunkBytes=ChunkBytes,window=1;
+    std::uint64_t bitsPerSecond=0; // zero means no individual limit
+    bool valid()const{return (chunkBytes==ChunkBytes||chunkBytes==ExtendedChunkBytes)&&(window==1||window==4||window==8||window==16)&&bitsPerSecond<=10000000000ull;}
+};
 constexpr std::uint64_t MaxFileBytes=256ull*1024*1024, IdleMilliseconds=15*60*1000;
 using Digest=std::array<unsigned char,32>;
 class Hash {
@@ -40,6 +47,7 @@ public:
 };
 enum class State { Preparing, Offered, AwaitingAcceptance, Transferring, Complete, Cancelled, Failed, Recovering, Suspended };
 enum class Kind:std::uint64_t { Offer=1, Resume=2, Chunk=3, Finish=4, Complete=5, Cancel=6 };
+inline std::string packetId(const Blob& bytes){protocol::check(bytes.size()<=protocol::MaxPacket);protocol::Reader r(bytes);protocol::check(r.type()==protocol::FileTransfer);auto version=r.number(),kind=r.number();auto id=r.string();protocol::check((version==1||version==2)&&kind>=1&&kind<=6&&protocol::id(id,32));if(version==2)protocol::check(r.number()!=0);return id;}
 struct Metadata {
     std::string id,name;
     std::uint64_t size=0;
@@ -63,6 +71,9 @@ public:
     virtual void save(const std::vector<DurableState>&)=0;
     virtual std::unique_ptr<Source> source(const DurableState&)=0;
     virtual std::unique_ptr<Sink> sink(const DurableState&)=0;
+    // Optional profile-local tuning sidecar; never part of durable ACK authority.
+    virtual std::map<std::string,Options> loadOptions(){return {};}
+    virtual void saveOptions(const std::map<std::string,Options>&){}
 };
 struct PersistenceError:std::runtime_error{explicit PersistenceError(const std::string& reason):std::runtime_error("Protected transfer journal unavailable: "+reason){}};
 class StatisticsStateStore {
@@ -73,8 +84,9 @@ public:
 };
 struct CapacityError:std::runtime_error {
     std::string id;
-    CapacityError(const std::string& message,const std::string& transferId={}):std::runtime_error(message),id(transferId){}
-    Blob cancellation()const{protocol::check(protocol::id(id,32));protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(static_cast<unsigned>(Kind::Cancel));w.string(id);return w.data;}
+    std::uint64_t version=1,negotiation=0;
+    CapacityError(const std::string& message,const std::string& transferId={},std::uint64_t v=1,std::uint64_t n=0):std::runtime_error(message),id(transferId),version(v),negotiation(n){}
+    Blob cancellation()const{protocol::check(protocol::id(id,32));protocol::Writer w(protocol::FileTransfer);w.number(version);w.number(static_cast<unsigned>(Kind::Cancel));w.string(id);if(version==2)w.number(negotiation);return w.data;}
 };
 // Platform finalizers supply only controlled stage names + numeric errno,
 // never a path, filename, payload or arbitrary provider exception text.
@@ -108,6 +120,11 @@ class TransferManager {
         std::unique_ptr<Hash> hash;
         std::uint64_t prepared=0,lastActivity=0,route=0,sentUntil=0,highWaterSent=0;
         bool ready=false,finishSent=false;
+        Options requested,effective;unsigned version=1;std::uint64_t negotiation=0;
+        std::deque<std::uint64_t> outstanding;
+        bool blocked=false;
+        bool offerSeen=true;
+        double tokens=ExtendedChunkBytes;std::uint64_t tokenAt=0;
         std::optional<Blob> reply;
         Blob location;
         std::uint64_t updated=0,expires=0;
@@ -122,6 +139,14 @@ class TransferManager {
     StatisticsStateStore* statistics_=nullptr;
     std::uint64_t persistenceRetryAt_=0;
     std::uint64_t journalUs_=0;
+    struct Capability {std::uint64_t route=0;bool pipeline=false;};
+    std::map<std::string,Capability> capabilities_;
+    std::uint64_t nextNegotiation_=1;
+    std::map<std::string,Options> options_;
+    std::uint64_t aggregateBits_=0,aggregateAt_=0;double aggregateTokens_=ExtendedChunkBytes;
+    size_t turn_=0;bool mediaActive_=false,optionsUnavailable_=false;
+    static void refill(double& tokens,std::uint64_t& at,std::uint64_t bits,std::uint64_t now){if(!at){at=now;return;}if(now>=at){tokens=std::min<double>(ExtendedChunkBytes,tokens+double(now-at)*bits/8000.0);at=now;}}
+    bool budget(Entry& e,size_t count,std::uint64_t now){refill(aggregateTokens_,aggregateAt_,aggregateBits_,now);refill(e.tokens,e.tokenAt,e.requested.bitsPerSecond,now);return (!aggregateBits_||aggregateTokens_>=count)&&(!e.requested.bitsPerSecond||e.tokens>=count);}
     static bool terminal(State s){return s==State::Complete||s==State::Cancelled||s==State::Failed||s==State::Suspended;}
     void save(){
         if(!store_&&!statistics_)return;
@@ -154,7 +179,8 @@ class TransferManager {
     void touch(Entry& e){if(store_){e.updated=store_->wallTime();if(!e.created){e.created=e.updated;e.expires=e.created+RetentionMilliseconds;}}}
     void suspend(Entry& e,const std::string& reason){e.state=State::Suspended;e.error="Retained for restart: "+reason.substr(0,160);e.reply.reset();e.ready=false;}
     static protocol::Writer packet(Kind kind,const std::string& id){protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(static_cast<std::uint64_t>(kind));w.string(id);return w;}
-    static Blob offsetPacket(Kind kind,const Entry& e){auto w=packet(kind,e.metadata.id);w.number(e.done);return w.data;}
+    static protocol::Writer packet(Kind kind,const Entry& e){protocol::Writer w(protocol::FileTransfer);w.number(e.version);w.number(static_cast<std::uint64_t>(kind));w.string(e.metadata.id);if(e.version==2)w.number(e.negotiation);return w;}
+    static Blob offsetPacket(Kind kind,const Entry& e){auto w=packet(kind,e);w.number(e.done);return w.data;}
     void room(){
         size_t active=0;for(auto& p:entries_)if(!terminal(p.second.state))++active;
         for(auto& p:entries_)if(p.second.state==State::Suspended)++active;
@@ -170,12 +196,20 @@ class TransferManager {
         e.state=State::Failed;e.error=error;
         try{if(e.sink)e.sink->discard();}catch(...){e.error="Owned partial cleanup failed; manual attention required";}
         e.sink.reset();e.source.reset();e.hash.reset();
-        e.reply=packet(Kind::Cancel,e.metadata.id).data;
+        e.reply=packet(Kind::Cancel,e).data;
     }
 public:
     explicit TransferManager(std::function<std::unique_ptr<Hash>()> hash,StateStore* store=nullptr,StatisticsStateStore* statistics=nullptr):hash_(std::move(hash)),store_(store),statistics_(statistics){if(!hash_)throw std::runtime_error("Hash provider unavailable");}
+    // Adapter supplies only current authenticated winner capabilities. Never
+    // infer support from a transfer packet or a persistent peer preference.
+    void capability(const std::string& peer,std::uint64_t route,bool pipeline){if(!protocol::id(peer))throw std::runtime_error("Invalid transfer peer");if(!capabilities_.count(peer)&&capabilities_.size()>=128){auto old=std::find_if(capabilities_.begin(),capabilities_.end(),[&](const auto& cap){return std::none_of(entries_.begin(),entries_.end(),[&](const auto& row){return row.second.peer==cap.first&&(!terminal(row.second.state)||row.second.reply);});});if(old!=capabilities_.end())capabilities_.erase(old);else throw std::runtime_error("Transfer capability bound");}capabilities_[peer]={route,pipeline};}
+    void configure(const std::string& id,Options value){auto i=entries_.find(id);if(!value.valid()||(!id.empty()&&(i==entries_.end()||!i->second.sending)))throw std::runtime_error("Invalid transfer settings");auto next=options_;for(auto p=next.begin();p!=next.end();)if(!p->first.empty()&&!entries_.count(p->first))p=next.erase(p);else ++p;next[id]=value;if(next.size()>MaxRecords+1)throw std::runtime_error("Transfer settings bound");if(store_)store_->saveOptions(next);options_=std::move(next);optionsUnavailable_=false;if(!id.empty())i->second.requested=value;else{aggregateBits_=value.bitsPerSecond;aggregateTokens_=0;aggregateAt_=0;}}
+    Options options(const std::string& id={})const{if(optionsUnavailable_)throw std::runtime_error("Protected transfer settings unavailable; payload submission paused");auto i=options_.find(id);if(i!=options_.end())return i->second;auto e=entries_.find(id);return e==entries_.end()?Options{}:e->second.requested;}
+    void mediaActive(bool value){mediaActive_=value;}
+    bool hasTransmissionWork()const{if(optionsUnavailable_)return false;for(const auto& p:entries_){const auto& e=p.second;if(e.sending&&e.state==State::Transferring&&e.ready&&e.route&&!e.blocked&&e.sentUntil<e.metadata.size&&e.outstanding.size()<(mediaActive_?1:e.effective.window))return true;}return false;}
     void restore(std::uint64_t now){
         if(!store_||!entries_.empty())throw std::runtime_error("Invalid transfer restore");
+        try{options_=store_->loadOptions();if(options_.size()>MaxRecords+1)throw std::runtime_error("Transfer settings bound");for(const auto& p:options_)if((!p.first.empty()&&!protocol::id(p.first,32))||!p.second.valid())throw std::runtime_error("Invalid transfer settings");aggregateBits_=options().bitsPerSecond;}catch(...){options_.clear();aggregateBits_=0;optionsUnavailable_=true;}
         auto records=store_->load();if(records.size()>MaxRecords)throw std::runtime_error("Transfer journal limit");
         if(statistics_)try{statistics_->load(records);}catch(...){for(auto& d:records)d.statisticsKnown=false;}
         size_t active=0;
@@ -184,6 +218,8 @@ public:
                 d.done>d.metadata.size||d.highWaterSent>d.metadata.size||d.state>State::Suspended||!d.created||d.updated<d.created||
                 d.expires<d.created||d.expires-d.created>RetentionMilliseconds||entries_.count(d.metadata.id))throw std::runtime_error("Invalid protected transfer state");
             Entry e;static_cast<Snapshot&>(e)=d;e.location=d.location;e.highWaterSent=d.highWaterSent;
+            e.offerSeen=false;
+            e.requested=options_.count(d.metadata.id)?options(d.metadata.id):options();if(!options_.count(d.metadata.id))e.requested.bitsPerSecond=0;
             e.created=d.created;e.updated=d.updated;e.expires=d.expires;e.digestReady=d.digestReady;e.lastActivity=now;
             e.statisticsBytes=std::max(e.statisticsBytes,e.done);e.rateMeter.baseline(e.statisticsBytes,now);e.statisticsInitialized=true;e.statisticsFinished=d.state==State::Complete||d.state==State::Cancelled||d.state==State::Failed;
             bool resumable=!terminal(d.state)||d.state==State::Suspended;
@@ -215,6 +251,7 @@ public:
                 " write_us="+std::to_string(e.writeUs)+" flush_us="+std::to_string(e.flushUs)+" commit_us="+std::to_string(e.commitUs)+
                 " route_changes="+std::to_string(e.routeChanges)+" backpressure="+std::to_string(e.backpressure)+
                 " ack_wait_ticks="+std::to_string(e.ackWaitTicks)+" journal_all_transfers_us="+std::to_string(journalUs_));
+            rows.back()+=" protocol_version="+std::to_string(e.version)+" effective_chunk_bytes="+std::to_string(e.effective.chunkBytes)+" effective_window="+std::to_string(e.effective.window)+" outstanding_chunks="+std::to_string(e.outstanding.size())+" aggregate_cap_bps="+std::to_string(aggregateBits_)+" individual_cap_bps="+std::to_string(e.requested.bitsPerSecond)+" settings_unavailable="+std::to_string(optionsUnavailable_);
         }return rows;
     }
     bool hasPendingControl(const std::string& id)const{auto found=entries_.find(id);return found!=entries_.end()&&found->second.reply.has_value();}
@@ -238,6 +275,11 @@ public:
         if(!protocol::id(peer)||!protocol::id(id,32)||!source||!safeName(source->name())||source->size()>MaxFileBytes||entries_.count(id))throw std::runtime_error("Invalid file offer");
         room();Entry e;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();
         if(expectedDigest){e.metadata.digest=*expectedDigest;e.digestReady=true;}
+        e.requested=options();e.requested.bitsPerSecond=0;
+        // Snapshot this file's request, so changing defaults does not silently
+        // change its framing after restart. The aggregate cap remains global.
+        auto tuning=options_;for(auto p=tuning.begin();p!=tuning.end();)if(!p->first.empty()&&!entries_.count(p->first))p=tuning.erase(p);else ++p;
+        tuning[id]=e.requested;if(store_)store_->saveOptions(tuning);options_=std::move(tuning);
         e.sending=true;e.statisticsKnown=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
     }
     void accept(const std::string& id,std::unique_ptr<Sink> sink,std::uint64_t now){
@@ -246,10 +288,10 @@ public:
     }
     void cancel(const std::string& id){
         auto i=entries_.find(id);if(i==entries_.end()||(terminal(i->second.state)&&i->second.state!=State::Suspended))return;
-        auto& e=i->second;e.state=State::Cancelled;if(e.sink)e.sink->discard();e.sink.reset();e.source.reset();e.hash.reset();e.reply=packet(Kind::Cancel,id).data;touch(e);save();
+        auto& e=i->second;e.state=State::Cancelled;if(e.sink)e.sink->discard();e.sink.reset();e.source.reset();e.hash.reset();e.reply=packet(Kind::Cancel,e).data;touch(e);save();
     }
     bool hasPreparationWork(std::uint64_t now)const{
-        if(now<persistenceRetryAt_)return false;
+        if(optionsUnavailable_||now<persistenceRetryAt_)return false;
         return std::any_of(entries_.begin(),entries_.end(),[](const auto& row){return row.second.state==State::Preparing||row.second.state==State::Recovering;});
     }
     void unsupportedPeer(const std::string& peer){
@@ -263,7 +305,7 @@ public:
     // Execution adapters choose the authorized route for this exact transfer.
     // Shared preparation, journal, deadlines and completion ownership are unchanged.
     void tickScoped(std::uint64_t now,const std::function<std::uint64_t(const Snapshot&)>& route,const std::function<bool(const Snapshot&,const Blob&)>& send){
-        if(now<persistenceRetryAt_)return;
+        if(optionsUnavailable_||now<persistenceRetryAt_)return;
         try{tickImplScoped(now,route,send);persistenceRetryAt_=0;}
         catch(const PersistenceError&){persistenceRetryAt_=now+250;throw;}
     }
@@ -271,8 +313,10 @@ public:
         // Every acknowledgement/offer is gated by durable metadata. A failed
         // journal write propagates to the adapter; never ACK uncommitted progress.
         auto durableSend=[&](const Snapshot& entry,const Blob& frame){save();return send(entry,frame);};
-        for(auto& p:entries_){
-            auto& e=p.second;
+        std::vector<Entry*> ordered;for(auto& p:entries_)ordered.push_back(&p.second);
+        if(!ordered.empty()){std::rotate(ordered.begin(),ordered.begin()+(turn_++%ordered.size()),ordered.end());}
+        for(auto entry:ordered){
+            auto& e=*entry;e.blocked=false;
             if(!e.observedAt)e.observedAt=now;
             if(store_){
                 if(e.state!=State::Complete&&e.state!=State::Cancelled&&e.state!=State::Failed&&store_->wallTime()>=e.expires)fail(e,"Retained transfer expired");
@@ -297,7 +341,7 @@ public:
                         if(e.hash->finish()!=e.metadata.digest){fail(e,"File integrity verification failed after restart");continue;}
                         {Timer timer(e.commitUs);e.sink->commit();}
                         e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply.reset();
-                    }else{e.state=State::Transferring;e.reply=offsetPacket(Kind::Resume,e);}
+                    }else{e.state=State::Transferring;if(e.offerSeen)e.reply=offsetPacket(Kind::Resume,e);}
                     e.error.clear();touch(e);
                 }
                 if(e.state==State::Preparing){
@@ -312,21 +356,29 @@ public:
                 }
                 auto current=route(e);if(!current){e.route=0;e.ready=false;continue;}
                 if(!e.routeAt)e.routeAt=now;
+                // Never send a pending ACK from an old negotiation onto a new
+                // route before its authenticated Offer establishes the scope.
+                if(!e.sending&&e.version==2){auto cap=capabilities_.find(e.peer);if(cap==capabilities_.end()||cap->second.route!=e.route)continue;}
                 if(e.reply){if(durableSend(e,*e.reply))e.reply.reset();continue;}
                 if(terminal(e.state)||!e.sending)continue;
                 if(e.route!=current){
-                    auto w=packet(Kind::Offer,e.metadata.id);w.string(e.metadata.name);w.number(e.metadata.size);w.bytes(Blob(e.metadata.digest.begin(),e.metadata.digest.end()));
+                    auto cap=capabilities_.find(e.peer);bool extended=cap!=capabilities_.end()&&cap->second.route==current&&cap->second.pipeline;
+                    e.version=extended&&(e.requested.chunkBytes!=ChunkBytes||e.requested.window!=1)?2:1;e.effective=e.version==2?e.requested:Options{};
+                    e.negotiation=e.version==2?nextNegotiation_++:0;e.outstanding.clear();
+                    auto w=packet(Kind::Offer,e);w.string(e.metadata.name);w.number(e.metadata.size);w.bytes(Blob(e.metadata.digest.begin(),e.metadata.digest.end()));
+                    if(e.version==2){w.number(e.effective.chunkBytes);w.number(e.effective.window);}
                     if(durableSend(e,w.data)){++e.routeChanges;e.route=current;e.ready=false;e.finishSent=false;e.sentUntil=e.done;}
                     continue;
                 }
-                if(!e.ready||e.sentUntil!=e.done){++e.ackWaitTicks;continue;}
-                if(e.done<e.metadata.size){
-                    Blob b;{Timer timer(e.readUs);b=e.source->read(e.done,static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,e.metadata.size-e.done)));}
-                    if(b.empty()||b.size()>ChunkBytes||b.size()>e.metadata.size-e.done)throw std::runtime_error("Source changed or unreadable");
-                    auto w=packet(Kind::Chunk,e.metadata.id);w.number(e.done);w.bytes(b);
-                    e.highWaterSent=std::max(e.highWaterSent,e.done+b.size());touch(e);
-                    if(durableSend(e,w.data)){e.sentUntil=e.done+b.size();e.payloadBytes+=b.size();if(!e.firstPayloadAt)e.firstPayloadAt=now;}else ++e.backpressure;
-                }else if(!e.finishSent){auto w=packet(Kind::Finish,e.metadata.id);if(durableSend(e,w.data))e.finishSent=true;}
+                if(!e.ready||e.outstanding.size()>=(mediaActive_?1:e.effective.window)){++e.ackWaitTicks;continue;}
+                if(e.sentUntil<e.metadata.size){
+                    auto planned=static_cast<size_t>(std::min<std::uint64_t>(e.effective.chunkBytes,e.metadata.size-e.sentUntil));
+                    if(!budget(e,planned,now)){e.blocked=true;continue;}
+                    Blob b;{Timer timer(e.readUs);auto count=std::min<std::uint64_t>(e.effective.chunkBytes,e.metadata.size-e.sentUntil);for(std::uint64_t n=0;n<count;){auto limit=static_cast<size_t>(std::min<std::uint64_t>(ChunkBytes,count-n));auto part=e.source->read(e.sentUntil+n,limit);if(part.size()!=limit)throw std::runtime_error("Source changed or unreadable");b.insert(b.end(),part.begin(),part.end());n+=limit;}}
+                    auto w=packet(Kind::Chunk,e);w.number(e.sentUntil);w.bytes(b);
+                    e.highWaterSent=std::max(e.highWaterSent,e.sentUntil+b.size());touch(e);
+                    if(durableSend(e,w.data)){if(aggregateBits_)aggregateTokens_-=b.size();if(e.requested.bitsPerSecond)e.tokens-=b.size();e.sentUntil+=b.size();e.outstanding.push_back(e.sentUntil);e.payloadBytes+=b.size();if(!e.firstPayloadAt)e.firstPayloadAt=now;}else {++e.backpressure;e.blocked=true;}
+                }else if(e.done==e.metadata.size&&!e.finishSent){auto w=packet(Kind::Finish,e);if(durableSend(e,w.data))e.finishSent=true;}
             }catch(const PersistenceError&){throw;} // Retry persistence on the existing next tick; never ACK it early.
             catch(const std::exception& error){if(store_)suspend(e,error.what());else fail(e,"Local file I/O or hash failure");}
         }
@@ -337,60 +389,66 @@ public:
     // BEFORE dispatch. Peer ID is never obtained from the transfer payload.
     void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveImpl(peer,frame,now);for(auto& item:entries_)statistics(item.second,now);save();}
     void receiveImpl(const std::string& peer,const Blob& frame,std::uint64_t now){
-        protocol::Reader r(frame);protocol::check(r.type()==protocol::FileTransfer&&r.number()==1);
-        auto kind=static_cast<Kind>(r.number());auto id=r.string();protocol::check(protocol::id(id,32));
+        protocol::Reader r(frame);protocol::check(r.type()==protocol::FileTransfer);auto version=r.number();protocol::check(version==1||version==2);
+        auto kind=static_cast<Kind>(r.number());auto id=r.string();protocol::check(protocol::id(id,32));auto negotiation=version==2?r.number():0;
+        auto cap=capabilities_.find(peer);if(version==2)protocol::check(cap!=capabilities_.end()&&cap->second.pipeline&&cap->second.route&&negotiation);
         auto i=entries_.find(id);
         if(kind==Kind::Offer){
-            Metadata m;m.id=id;m.name=r.string();m.size=r.number();auto digest=r.bytes();r.end();
+            Metadata m;m.id=id;m.name=r.string();m.size=r.number();auto digest=r.bytes();Options options;if(version==2){options.chunkBytes=r.number();options.window=r.number();}r.end();protocol::check(options.valid());
             protocol::check(safeName(m.name)&&m.size<=MaxFileBytes&&digest.size()==32);
             std::copy(digest.begin(),digest.end(),m.digest.begin());
             if(i!=entries_.end()){
                 auto& e=i->second;protocol::check(e.peer==peer&&!e.sending&&e.metadata==m);
+                e.offerSeen=true;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;
                 e.lastActivity=now;
                 // A restarted sender must first learn the durable full offset,
                 // then send Finish before receiving Complete. Do not bypass
                 // its existing completion ordering with an unsolicited ACK.
                 if(e.state==State::Complete)e.reply=offsetPacket(Kind::Resume,e);
                 else if(e.state==State::Transferring)e.reply=offsetPacket(Kind::Resume,e);
-                else if(terminal(e.state))e.reply=packet(Kind::Cancel,id).data;
+                else if(terminal(e.state))e.reply=packet(Kind::Cancel,e).data;
                 return;
             }
-            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id);}Entry e;e.metadata=m;e.peer=peer;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
+            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id,version,negotiation);}Entry e;e.metadata=m;e.peer=peer;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
         }
         if(kind==Kind::Cancel&&i==entries_.end()){r.end();return;} // Cancellation can race an unobserved offer.
         protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;
+        if(version==2&&(e.version!=version||e.negotiation!=negotiation))return; // superseded authenticated negotiation
+        protocol::check(e.version==version||kind==Kind::Cancel);
         if(kind==Kind::Resume){
             auto offset=r.number();r.end();protocol::check(e.sending&&offset<=e.metadata.size&&offset<=e.highWaterSent);
             if(e.state==State::Recovering)return; // No peer event may bypass full source revalidation.
             if(terminal(e.state))return;
-            e.done=offset;e.sentUntil=offset;e.ready=true;e.finishSent=false;e.state=State::Transferring;e.lastActivity=now;e.lastAckAt=now;return;
+            if(e.ready){if(offset<=e.done)return;protocol::check(offset<=e.sentUntil&&std::find(e.outstanding.begin(),e.outstanding.end(),offset)!=e.outstanding.end());}
+            else {e.sentUntil=offset;e.outstanding.clear();}
+            e.done=offset;while(!e.outstanding.empty()&&e.outstanding.front()<=offset)e.outstanding.pop_front();e.ready=true;e.finishSent=false;e.state=State::Transferring;e.lastActivity=now;e.lastAckAt=now;return;
         }
         if(kind==Kind::Cancel){r.end();if(!terminal(e.state)||e.state==State::Suspended){e.state=State::Cancelled;try{if(e.sink)e.sink->discard();}catch(...){e.error="Owned partial cleanup failed; manual attention required";}e.sink.reset();e.source.reset();e.hash.reset();}e.reply.reset();return;}
         if(kind==Kind::Complete){r.end();protocol::check(e.sending&&e.done==e.metadata.size&&e.finishSent);e.state=State::Complete;e.source.reset();return;}
         protocol::check(!e.sending);
         if(kind==Kind::Chunk){
-            auto offset=r.number();auto b=r.bytes();r.end();protocol::check(!b.empty()&&b.size()<=ChunkBytes&&offset<=e.metadata.size&&b.size()<=e.metadata.size-offset);
-            if(e.state==State::Complete){e.reply=packet(Kind::Complete,id).data;return;}
-            if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,id).data;return;}
+            auto offset=r.number();auto b=r.bytes();r.end();protocol::check(!b.empty()&&b.size()<=e.effective.chunkBytes&&offset<=e.metadata.size&&b.size()<=e.metadata.size-offset);
+            if(e.state==State::Complete){e.reply=packet(Kind::Complete,e).data;return;}
+            if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,e).data;return;}
             protocol::check(e.state==State::Transferring&&e.sink&&e.hash);
             if(offset<e.done){protocol::check(offset+b.size()<=e.done);e.reply=offsetPacket(Kind::Resume,e);return;}
             protocol::check(offset==e.done);
             try{
-                {Timer timer(e.writeUs);e.sink->append(b);}
+                {Timer timer(e.writeUs);for(size_t n=0;n<b.size();n+=ChunkBytes)e.sink->append(Blob(b.begin()+n,b.begin()+std::min(b.size(),n+ChunkBytes)));}
                 {Timer timer(e.flushUs);e.sink->flush();}
-                {Timer timer(e.hashUs);e.hash->update(b.data(),b.size());}
+                {Timer timer(e.hashUs);for(size_t n=0;n<b.size();n+=ChunkBytes)e.hash->update(b.data()+n,std::min(ChunkBytes,b.size()-n));}
                 e.payloadBytes+=b.size();if(!e.observedAt)e.observedAt=now;if(!e.firstPayloadAt)e.firstPayloadAt=now;
                 e.done+=b.size();e.lastActivity=now;touch(e);e.reply=offsetPacket(Kind::Resume,e);
             }catch(...){if(store_)suspend(e,"receive disk or hash failure");else fail(e,"Receive disk or hash failure");}
             return;
         }
         if(kind==Kind::Finish){
-            r.end();if(e.state==State::Complete){e.reply=packet(Kind::Complete,id).data;return;}
-            if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,id).data;return;}
+            r.end();if(e.state==State::Complete){e.reply=packet(Kind::Complete,e).data;return;}
+            if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,e).data;return;}
             protocol::check(e.state==State::Transferring&&e.done==e.metadata.size&&e.hash&&e.sink);
             try{
                 if(e.hash->finish()!=e.metadata.digest){fail(e,"File integrity verification failed");return;}
-                {Timer timer(e.commitUs);e.sink->commit();}e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply=packet(Kind::Complete,id).data;
+                {Timer timer(e.commitUs);e.sink->commit();}e.sink.reset();e.hash.reset();e.state=State::Complete;e.reply=packet(Kind::Complete,e).data;
             }catch(const CompletionError& error){if(store_)suspend(e,error.what());else fail(e,error.what());}
             catch(...){if(store_)suspend(e,"atomic file completion failed");else fail(e,"Atomic file completion failed");}
             return;

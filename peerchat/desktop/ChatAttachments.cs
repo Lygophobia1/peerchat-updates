@@ -157,6 +157,7 @@ public sealed class AttachmentCard:StackPanel {
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
         var actions=new WrapPanel();Children.Add(actions);actions.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
+        if(row.sending&&row.state!=4)actions.Children.Add(ActionButton("Transfer settings…",()=>Signal(row,"settings")));
         if(row.state==2&&!row.sending)actions.Children.Add(ActionButton("Download…",()=>Signal(row,"accept")));
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
         if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
@@ -203,6 +204,7 @@ public partial class DesktopApplication {
                 catch{if(!closing&&card!=null&&!full)card.ProtectedPreview(row.id,"","Protected source unavailable or changed");else if(!closing)Notify("Protected source unavailable or changed; no insecure fallback was used.");}
                 finally{SafeAttachmentPreview.EndNativeRead();}return;
             }
+            if(action.Action=="settings"){ShowTransferSettings(row.id);return;}
             if(action.Action=="cancel"){await FileOperation(3,"",row.id,"");return;}
             if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Download to folder (unique ID filename)",OverwritePrompt=false};if(choose.ShowDialog(window)==true)await FileOperation(2,"",row.id,Path.GetDirectoryName(choose.FileName));return;}
             if(action.Action=="folder"){try{System.Diagnostics.Process.Start("explorer.exe","/select,\""+row.path+"\"");}catch{}return;}
@@ -240,7 +242,8 @@ public partial class DesktopApplication {
         if(closing||chatAttachmentRefreshing||fileTransferOperating||!model.Listening)return;chatAttachmentRefreshing=true;
         try{
             var owner=discovery;ulong profileGeneration=profileSessionGeneration;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;
-            var sample=await Task.Run(()=>new{Rows=core.FileTransfers(),Diagnostics=core.FileTransfer(11)});if(closing||profileGeneration!=profileSessionGeneration||owner!=discovery||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration)return;var rows=sample.Rows;CacheTransferDiagnostics(rows,sample.Diagnostics);attachmentTelemetry=sample.Diagnostics;attachmentTelemetryAccount=account;attachmentTelemetryGeneration=generation;
+            bool groupMedia=(groupVoice!=null&&groupVoice.Snapshot().Joined)||(groupScreen!=null&&groupScreen.AnyActive);
+            var sample=await Task.Run(()=>{core.FileTransfer(14,path:groupMedia?"1":"0");return new{Rows=core.FileTransfers(),Diagnostics=core.FileTransfer(11)};});if(closing||profileGeneration!=profileSessionGeneration||owner!=discovery||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration)return;var rows=sample.Rows;CacheTransferDiagnostics(rows,sample.Diagnostics);attachmentTelemetry=sample.Diagnostics;attachmentTelemetryAccount=account;attachmentTelemetryGeneration=generation;
             if(DateTime.UtcNow-chatCatalogAt>TimeSpan.FromSeconds(5)){
                 var page=await Task.Run(()=>core.ArchiveAttachments(chatAttachmentCursor));if(closing)return;
                 foreach(var item in page.records??new CoreAdapter.ArchiveAttachment[0]){

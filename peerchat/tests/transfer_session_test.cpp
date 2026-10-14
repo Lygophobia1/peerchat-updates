@@ -56,6 +56,7 @@ int main(int argc,char** argv){
             const auto delayText=std::getenv("PEERCHAT_TEST_RELAY_DELAY_MS");
             const int relayDelay=delayText?std::stoi(delayText):0;require(relayDelay>=0&&relayDelay<=100,"invalid fixture delay");
             const bool observeDiagnostics=std::getenv("PEERCHAT_TEST_TRANSFER_DIAGNOSTICS")!=nullptr;
+            if(auto tuning=std::getenv("PEERCHAT_TEST_TRANSFER_TUNING"))left.fileTransfer(13,"","",unicode::decode(tuning));
             // Blocking relay writers model production independently of UI polling.
             // Do not quantize every payload/ACK through the test observer's sleep.
             std::atomic<bool> forwarding{true},forwardFailed{false};

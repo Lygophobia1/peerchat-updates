@@ -243,6 +243,7 @@ int main(){
         auto fileSource=root/L"concurrent-media.bin",fileDestination=root/L"concurrent-download";
         std::filesystem::create_directory(fileDestination);
         {std::ofstream file(fileSource,std::ios::binary);file.write(reinterpret_cast<const char*>(fileBytes.data()),fileBytes.size());require(bool(file),"fixture source write failed");}
+        if(auto tuning=std::getenv("PEERCHAT_TEST_TRANSFER_TUNING"))nodes[0].fileTransfer(13,"","",unicode::decode(tuning));
         auto fileId=nodes[0].fileTransfer(1,peers[1],"",fileSource.wstring());
         std::string fileKey(fileId.begin(),fileId.end());
         wait([&]{return nodes[1].fileTransfer(0).find(fileId)!=std::wstring::npos;},"file offer during media missing");

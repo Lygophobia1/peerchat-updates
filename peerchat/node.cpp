@@ -126,6 +126,7 @@ struct Node::Impl {
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
     std::unique_ptr<transfer::ProtectedStatisticsStore> transferStatistics;
     bool transferPersistenceReported=false;
+    bool groupBulkMediaActive=false;
     std::set<std::string> cataloguedTransfers;
     std::uint64_t attachmentCatalogAt=0;
     void retainCompletedAttachments(){
@@ -164,6 +165,8 @@ struct Node::Impl {
     transfer::windows::TransferTiming transferTiming;
     void serviceTransfers(){
         if(!transfers)return;
+        transfers->mediaActive(groupBulkMediaActive||calls.active()||screenShares.active()!=nullptr);
+        for(auto& peer:transfers->demandedPeers()){auto c=transferConnection(peer);transfers->capability(peer,c?c->attemptId:0,c&&!c->authorization.permitsArchiveControl()&&(c->remoteCapabilities&protocol::CapabilityTransferPipeline));}
         for(auto& peer:transfers->demandedPeers()){
             auto state=sessionTransports->snapshot(peer);if(!state||!state->connected)continue;
             for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->online&&!c->dead&&!(c->remoteCapabilities&protocol::CapabilityFileTransfer))transfers->unsupportedPeer(peer);
@@ -173,7 +176,7 @@ struct Node::Impl {
                 auto c=transferConnection(peer);if(!c||c->output.size()-c->sent>MaxQueue/4)return false;
                 // A revoked archive transfer may never escape its purpose by
                 // falling through to a coincident ordinary friend route.
-                if(archiveTransfers&&archiveTransfers->wasArchiveTransfer(archive::transferPacketId(bytes))&&!c->authorization.permitsArchiveControl())return false;
+                if(archiveTransfers&&archiveTransfers->wasArchiveTransfer(transfer::packetId(bytes))&&!c->authorization.permitsArchiveControl())return false;
                 if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
                 try{auto began=transfer::windows::TransferTiming::now();packet(*c,c->authorization.permitsArchiveControl()?archiveTransfers->outgoing(c->authorization,bytes):bytes);transferTiming.sent(bytes,c->attemptId,began,transfer::windows::TransferTiming::now());return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
@@ -214,6 +217,12 @@ struct Node::Impl {
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
         if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds())){auto id=row.substr(9,32);result+=widenUtf8(row+transferTiming.diagnostics(id)+(transferJournal?transferJournal->diagnostics(id):std::string{}))+L"\n";}return result;}
+        if(command.sourceKind==12||command.sourceKind==13){
+            protocol::check(command.id.empty()||protocol::id(command.id,32));
+            if(command.sourceKind==13){protocol::check(command.text.size()<=100);std::wistringstream input(command.text);transfer::Options value;wchar_t a=0,b=0;input>>value.chunkBytes>>a>>value.window>>b>>value.bitsPerSecond;protocol::check(input&&input.eof()&&a==L','&&b==L','&&value.valid());transfers->configure(command.id,value);}
+            auto value=transfers->options(command.id);return L"{\"chunkBytes\":"+std::to_wstring(value.chunkBytes)+L",\"window\":"+std::to_wstring(value.window)+L",\"bitsPerSecond\":"+std::to_wstring(value.bitsPerSecond)+L"}";
+        }
+        if(command.sourceKind==14){protocol::check(command.text==L"0"||command.text==L"1");groupBulkMediaActive=command.text==L"1";return L"ok";}
         if(command.sourceKind==1||command.sourceKind==7){
             auto contact=contacts.find(command.peer);
             if(!protocol::id(command.peer)||contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify the recipient device before sending a file");
@@ -1003,7 +1012,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(!transfers)return; // Local journal failure must not retire messaging.
             protocol::check(transferConnection(c.peerId)==&c);
             auto before=transfers->snapshots().size();
-            try{auto began=transfer::windows::TransferTiming::now();transfers->receive(c.peerId,frame,nowMilliseconds());transferTiming.received(frame,c.attemptId,began,transfer::windows::TransferTiming::now());}
+            try{auto began=transfer::windows::TransferTiming::now();transfers->capability(c.peerId,c.attemptId,(c.remoteCapabilities&protocol::CapabilityTransferPipeline)!=0);transfers->receive(c.peerId,frame,nowMilliseconds());transferTiming.received(frame,c.attemptId,began,transfer::windows::TransferTiming::now());}
             catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(c,refusal);return;}
             catch(const transfer::PersistenceError&){transferPersistenceFailure();return;}
             if(transfers->snapshots().size()>before){NodeEvent event;event.kind=NodeEvent::Kind::FileTransfer;event.peerId=c.peerId;event.text=L"Incoming file offer";emit(std::move(event));}
@@ -1168,7 +1177,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         // Voice capability describes authenticated call control. The media
         // path remains independent ICE/DTLS-SRTP and is never put on relay.
         capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
-        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred;if(transfers)capabilities|=protocol::CapabilityFileTransfer;
+        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred;if(transfers)capabilities|=protocol::CapabilityFileTransfer|protocol::CapabilityTransferPipeline;
         if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
         if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
         bool live=c.reliable::SharedPeerRuntime::receive(*c.tls,encrypted,profile,capabilities,profile.listenPort,
@@ -1657,7 +1666,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(!hasDirectSocket){
                     // Hash/revalidate one bounded chunk per pass, servicing
                     // commands/timers between passes instead of sleeping per chunk.
-                    if(transfers&&transfers->hasPreparationWork(nowMilliseconds()))continue;
+                    if(transfers&&(transfers->hasPreparationWork(nowMilliseconds())||transfers->hasTransmissionWork()))continue;
                     // Preserve the idle/timer budget, but received relay bytes
                     // and commands must not incur another fixed polling delay.
                     std::unique_lock<std::mutex> lock(commandMutex);
@@ -1666,7 +1675,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 fd_set reads,writes,errors;FD_ZERO(&reads);FD_ZERO(&writes);FD_ZERO(&errors);if(listener!=INVALID_SOCKET)FD_SET(listener,&reads);
                 for(auto& c:connections)if(!c->dead&&!c->relay){if(!c->connecting)FD_SET(c->socket,&reads);if(c->connecting||c->sent<c->output.size())FD_SET(c->socket,&writes);FD_SET(c->socket,&errors);}
-                timeval timeout{0,transfers&&transfers->hasPreparationWork(nowMilliseconds())?0:20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
+                timeval timeout{0,transfers&&(transfers->hasPreparationWork(nowMilliseconds())||transfers->hasTransmissionWork())?0:20000};if(select(0,&reads,&writes,&errors,&timeout)==SOCKET_ERROR)throw std::runtime_error("Network polling failed");
                 if(listener!=INVALID_SOCKET&&FD_ISSET(listener,&reads))for(int i=0;i<8;i++){SOCKET socket=accept(listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;if(connections.size()>=MaxConnections){closesocket(socket);continue;}auto c=std::make_unique<Connection>();c->socket=socket;c->incoming=true;c->attemptId=nextAttemptId++;c->source=L"Inbound direct connection";c->route=L"incoming authenticated route";attachDirectTransport(*c);nonblocking(socket);c->tls=std::make_unique<TlsSession>(*credentials,true);connections.push_back(std::move(c));}
                 for(auto& c:connections)if(!c->dead&&!c->relay)try{
                     if(FD_ISSET(c->socket,&errors)){int error=0,length=sizeof(error);getsockopt(c->socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length);error=error?error:WSAECONNRESET;tcpFailure(*c,error);c->closeReason=L"socket error "+std::to_wstring(error);c->dead=true;}

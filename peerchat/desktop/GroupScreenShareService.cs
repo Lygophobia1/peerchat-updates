@@ -50,6 +50,7 @@ public sealed class GroupScreenShareService:IDisposable {
     public GroupScreenRoomStatus Snapshot(string group,string room){GroupScreenRoomStatus status;return published.Status.TryGetValue(Key(group,room),out status)?status:new GroupScreenRoomStatus(group,room,"Inactive","",false,false,false,0);}
     public string Diagnostics(string group){string details;return published.Details.TryGetValue(group,out details)?details:"Local screen participation: Inactive";}
     public string[] Metrics(string group){string[] rows;return published.Metrics.TryGetValue(group,out rows)?rows.ToArray():new string[0];}
+    public bool AnyActive {get{return published.Status.Values.Any(s=>s.Active);}}
     public Task<bool> StartSharing(string group,string room,ScreenSource source,ScreenSharePreferenceData preferences){return Select(group,room,true,source,0,preferences);}
     public Task<bool> Watch(string group,string room,ulong window,ScreenSharePreferenceData preferences){return Select(group,room,false,null,window,preferences);}
     Task<bool> Select(string group,string room,bool sender,ScreenSource source,ulong window,ScreenSharePreferenceData preferences){

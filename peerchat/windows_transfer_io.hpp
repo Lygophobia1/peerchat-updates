@@ -288,6 +288,22 @@ public:
     DurableJournal(const DurableJournal&)=delete;
     DurableJournal& operator=(const DurableJournal&)=delete;
     std::uint64_t wallTime()const override{return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
+    std::map<std::string,Options> loadOptions()override{
+        auto encrypted=readFile(root_/L"tuning.protected");if(encrypted.empty())return {};
+        platform::WindowsRecordProtector protector;auto plain=protector.unprotect(encrypted,context_+"/Tuning/v1");protocol::Reader r(plain);
+        require(r.type()==protocol::FileTransfer&&r.number()==1);auto count=r.number();require(count<=MaxRecords+1);std::map<std::string,Options> result;
+        while(count--){auto id=r.string();Options value;value.chunkBytes=r.number();value.window=r.number();value.bitsPerSecond=r.number();require((id.empty()||protocol::id(id,32))&&value.valid()&&!result.count(id));result[id]=value;}r.end();return result;
+    }
+    void saveOptions(const std::map<std::string,Options>& rows)override{
+        require(rows.size()<=MaxRecords+1);protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(rows.size());for(const auto& row:rows){require((row.first.empty()||protocol::id(row.first,32))&&row.second.valid());w.string(row.first);w.number(row.second.chunkBytes);w.number(row.second.window);w.number(row.second.bitsPerSecond);}
+        auto path=root_/L"tuning.protected";platform::WindowsRecordProtector protector;
+        auto existing=readFile(path);if(!existing.empty()&&protector.unprotect(existing,context_+"/Tuning/v1")==w.data)return;
+        auto sealed=protector.protect(w.data,context_+"/Tuning/v1");auto temp=root_/(L"tuning-"+std::to_wstring(++serial_)+L".next");
+        HANDLE file=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);require(file!=INVALID_HANDLE_VALUE);DWORD wrote=0;
+        bool ok=WriteFile(file,sealed.data(),static_cast<DWORD>(sealed.size()),&wrote,nullptr)&&wrote==sealed.size()&&FlushFileBuffers(file);CloseHandle(file);
+        if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+        if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit protected transfer settings");}
+    }
     std::vector<DurableState> load()override{
         auto encrypted=readFile(path_);if(encrypted.empty())return {};
         platform::WindowsRecordProtector protector;auto plain=protector.unprotect(encrypted,context_);protocol::Reader r(plain);
