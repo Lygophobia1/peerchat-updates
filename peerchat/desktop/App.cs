@@ -4217,7 +4217,7 @@ public partial class DesktopApplication {
         var header=Find<Border>("VoiceCard").Parent as StackPanel;if(header!=null)header.Children.Add(screenStrip);
         screenConnectionPanel=new StackPanel{Visibility=Visibility.Collapsed};
         screenConnectionPanel.Children.Add(new Border{Height=1,Background=Brush("#28343F"),Margin=new Thickness(0,14,0,12)});
-        screenConnectionPanel.Children.Add(new TextBlock{Text="Screen Media",FontSize=12,FontWeight=FontWeights.SemiBold});
+        screenConnectionPanel.Children.Add(new TextBlock{Text="Screen Media",FontSize=12,FontWeight=FontWeights.SemiBold});AddDiagnosticEntry(screenConnectionPanel,DiagnosticSection.DirectMessageCalls,()=>"share:"+activeScreenId);
         screenMethodText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,0)};
         screenQualityText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,3,0,0)};
         screenControlText=new TextBlock{Foreground=Brush("#A1AEBB"),FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,3,0,0)};
