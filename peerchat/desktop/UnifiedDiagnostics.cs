@@ -54,18 +54,18 @@ public partial class DesktopApplication {
     }
     void RefreshDiagnosticFooter(){
         if(groupDiagnosticWindow==null||groupDiagnosticWindow.Content==null)return;
-        bool group=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool live=group||diagnosticContext.Section==DiagnosticSection.Connections&&!connectionsDeveloperPreview;
+        bool group=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool file=diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview;bool live=group||file||diagnosticContext.Section==DiagnosticSection.Connections&&!connectionsDeveloperPreview;
         bool active=group&&(groupTelemetry.ScreenActive||groupTelemetry.VoiceActive);
-        bool graphAvailable=active&&(graphsPaused||groupSamples.Any(p=>p.EncodedFps.HasValue||p.UploadMbps.HasValue||p.DownloadMbps.HasValue));
+        bool graphAvailable=file?transferDiagnosticHistory.Samples.Count>1:active&&(graphsPaused||groupSamples.Any(p=>p.EncodedFps.HasValue||p.UploadMbps.HasValue||p.DownloadMbps.HasValue));
         foreach(var button in ((DockPanel)groupDiagnosticWindow.Content).Children.OfType<WrapPanel>().SelectMany(p=>p.Children.OfType<Button>())){
             if(Object.Equals(button.Tag,"Copy Diagnostics"))button.Content=live?"Copy Diagnostics":"Copy sample preview";
             if(Object.Equals(button.Tag,"Export…"))button.Content=live?"Export…":"Export sample preview…";
-            if(Object.Equals(button.Tag,"Pause graphs")){button.IsEnabled=graphAvailable;button.Content=graphsPaused?"Resume graphs":"Pause graphs";button.ToolTip=!group?(live?"N/A — Connections graph measurements are not instrumented.":"No live graphs in sample-preview sections."):!active?"No active live Group Calls graphs.":graphAvailable?"Pause or resume existing live graph samples.":"Live graph measurements are not available yet.";ToolTipService.SetShowOnDisabled(button,true);}
+            if(Object.Equals(button.Tag,"Pause graphs")){button.IsEnabled=graphAvailable;button.Content=(file?transferDiagnosticHistory.Paused:graphsPaused)?"Resume graphs":"Pause graphs";button.ToolTip=file?"Pause only observed transfer graph samples; the transfer continues.":!group?(live?"N/A — Connections graph measurements are not instrumented.":"No live graphs in sample-preview sections."):!active?"No active live Group Calls graphs.":graphAvailable?"Pause or resume existing live graph samples.":"Live graph measurements are not available yet.";ToolTipService.SetShowOnDisabled(button,true);}
         }
     }
     void RefreshDiagnosticLayout(){
         if(groupDiagnosticTabs==null||diagnosticNavigation==null||diagnosticNavigation.SelectedIndex<0)return;
-        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=live||connections?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;connectionPreviewStatePanel.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;
+        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=live||connections||diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;connectionPreviewStatePanel.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;
         RefreshDiagnosticFooter();
         diagnosticBanner.Text=live?"LIVE GROUP TELEMETRY · existing native counters · unavailable measurements are N/A":"SAMPLE / LAYOUT PREVIEW · not live measurements";
         if(!String.IsNullOrEmpty(diagnosticContext.StableId))diagnosticBanner.Text+="\nSelected context: "+diagnosticContext.StableId;
@@ -74,6 +74,7 @@ public partial class DesktopApplication {
         groupDiagnosticTabs.Items.Clear();foreach(string tab in DiagnosticNavigation.Tabs(diagnosticContext.Section)){var item=new TabItem{Header=tab};groupDiagnosticTabs.Items.Add(item);if(tab==selectedName)groupDiagnosticTabs.SelectedItem=item;}if(groupDiagnosticTabs.SelectedIndex<0)groupDiagnosticTabs.SelectedIndex=0;
         if(live){UpdateGroupDiagnosticWindow();return;}
         if(connections){RenderConnectionPreview();return;}
+        if(diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview){RenderTransferDiagnostics();return;}
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);diagnosticBanner.Text=snapshot.Banner+(String.IsNullOrEmpty(diagnosticContext.StableId)?"":"\nSelected context: "+diagnosticContext.StableId);
         for(int i=0;i<snapshot.Pages.Length;i++){
             var content=new StackPanel{Margin=new Thickness(8)};
@@ -95,6 +96,7 @@ public partial class DesktopApplication {
     string CurrentDiagnosticExport(){
         if(diagnosticContext.Section==DiagnosticSection.GroupCalls)return GroupDiagnosticExport();
         if(diagnosticContext.Section==DiagnosticSection.Connections)return ConnectionPreviewQuery.Export(ReadConnectionsView());
+        if(diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview)return TransferDiagnosticProjection.Export(ReadTransferDiagnostics());
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);
         return snapshot.Banner+"\nSection: "+DiagnosticNavigation.Label(diagnosticContext.Section)+"\nContext: "+diagnosticContext.StableId+"\n"+String.Join("\n",snapshot.Pages.SelectMany(p=>p.Panels.Select(panel=>p.Tab+" / "+panel.Title+"\n"+String.Join("\n",panel.Metrics.Select(m=>m.Label+": "+m.Value)))));
     }

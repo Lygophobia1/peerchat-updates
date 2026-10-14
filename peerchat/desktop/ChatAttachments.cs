@@ -192,7 +192,7 @@ public partial class DesktopApplication {
         var refresh=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};refresh.Tick+=async(s,e)=>await RefreshChatAttachments();refresh.Start();window.Closed+=(s,e)=>{refresh.Stop();chatCatalog.Clear();};
         Find<Button>("Attachment").ToolTip="Attach file to this conversation";
         window.AddHandler(AttachmentCard.ActionEvent,new RoutedEventHandler(async(s,e)=>{
-            var action=(AttachmentActionEventArgs)e;var row=action.Transfer;e.Handled=true;if(action.Action=="diagnostics"){OpenContextDiagnostics(DiagnosticSection.FileTransfers,row.id);return;}
+            var action=(AttachmentActionEventArgs)e;var row=action.Transfer;e.Handled=true;if(action.Action=="diagnostics"){OpenTransferDiagnostics(row);return;}
             if(action.Action=="preview-snippet"||action.Action=="full-snippet"){
                 var card=action.OriginalSource as AttachmentCard;bool full=action.Action=="full-snippet";
                 if(!SafeAttachmentPreview.TryNativeRead()){if(card!=null&&!full)card.ProtectedPreview(row.id,"","Preview busy — try again");return;}
@@ -236,8 +236,8 @@ public partial class DesktopApplication {
     async Task RefreshChatAttachments(){
         if(closing||chatAttachmentRefreshing||fileTransferOperating||!model.Listening)return;chatAttachmentRefreshing=true;
         try{
-            var owner=discovery;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;
-            var sample=await Task.Run(()=>new{Rows=core.FileTransfers(),Diagnostics=core.FileTransfer(11)});if(closing||owner!=discovery||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration)return;var rows=sample.Rows;attachmentTelemetry=sample.Diagnostics;attachmentTelemetryAccount=account;attachmentTelemetryGeneration=generation;
+            var owner=discovery;ulong profileGeneration=profileSessionGeneration;long account=owner==null?0:owner.AccountId;ulong generation=authenticatedFriendSnapshotGeneration;
+            var sample=await Task.Run(()=>new{Rows=core.FileTransfers(),Diagnostics=core.FileTransfer(11)});if(closing||profileGeneration!=profileSessionGeneration||owner!=discovery||account!=(discovery==null?0:discovery.AccountId)||generation!=authenticatedFriendSnapshotGeneration)return;var rows=sample.Rows;CacheTransferDiagnostics(rows,sample.Diagnostics);attachmentTelemetry=sample.Diagnostics;attachmentTelemetryAccount=account;attachmentTelemetryGeneration=generation;
             if(DateTime.UtcNow-chatCatalogAt>TimeSpan.FromSeconds(5)){
                 var page=await Task.Run(()=>core.ArchiveAttachments(chatAttachmentCursor));if(closing)return;
                 foreach(var item in page.records??new CoreAdapter.ArchiveAttachment[0]){

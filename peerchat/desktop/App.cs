@@ -374,7 +374,7 @@ public partial class DesktopApplication {
         if(closing||fileTransferOperating)return;
         fileTransferOperating=true;
         try{await Task.Run(()=>core.FileTransfer(operation,peer,id,path));}
-        catch(Exception error){if(!closing)MessageBox.Show(fileTransferWindow??window,error.Message,"File transfer",MessageBoxButton.OK,MessageBoxImage.Warning);}
+        catch(Exception error){if(!closing)MessageBox.Show(fileTransferWindow??window,error.Message,error is FileTooLargeException?FileTooLargeException.Title:"File transfer",MessageBoxButton.OK,MessageBoxImage.Warning);}
         finally{fileTransferOperating=false;await RefreshFileTransfers();await RefreshChatAttachments();}
     }
     async Task RefreshFileTransfers(){

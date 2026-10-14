@@ -8,6 +8,19 @@ using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 
 namespace PeerChatDesktop {
+public sealed class FileTooLargeException : InvalidOperationException {
+    public const string Title="File Too Large";
+    public const string Explanation="This file exceeds PeerChat's current maximum transfer size of 256 MiB (approximately 268 MB). Please select a smaller file.";
+    public FileTooLargeException():base(Explanation){}
+}
+public static class SelectedTransferFile {
+    // Presentation preflight only. Native validation remains authoritative, including file-change races.
+    public const long MaximumBytes=256L*1024*1024;
+    public static void ValidateSize(string path){
+        long length;try{if(!File.Exists(path))return;length=new FileInfo(path).Length;}catch(IOException){return;}catch(UnauthorizedAccessException){return;}catch(ArgumentException){return;}
+        if(length>MaximumBytes)throw new FileTooLargeException();
+    }
+}
 // This is the only managed/native boundary. Returned strings belong to the DLL
 // and are copied before another native call. Never pass C++ objects across ABI.
 public sealed class CoreAdapter : IDisposable {
@@ -15,7 +28,7 @@ public sealed class CoreAdapter : IDisposable {
     readonly object mailboxGate=new object();
     public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr handle,uint operation,string peer,string id,string path);
-    public string FileTransfer(uint operation,string peer="",string id="",string path=""){lock(mailboxGate){
+    public string FileTransfer(uint operation,string peer="",string id="",string path=""){if(operation==1)SelectedTransferFile.ValidateSize(path);lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
         var result=ui_file_transfer(handle,operation,peer,id,path);
         if(result==IntPtr.Zero)throw new InvalidOperationException("File operation failed. Check that the recipient is verified, the offer is current, and the selected file/folder is accessible.");
