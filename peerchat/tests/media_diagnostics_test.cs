@@ -33,7 +33,7 @@ class MediaDiagnosticsTest {
         Check(DiagnosticsService.FormatFull(DiagnosticsService.ProjectGroup(DiagnosticsService.RefreshGroupView(next,null,DateTime.UtcNow),"group-a","Voice")).Contains("unavailable"));
         var samples=new SampleDiagnosticLayoutProvider();
         foreach(DiagnosticSection section in Enum.GetValues(typeof(DiagnosticSection)))foreach(DiagnosticExampleState state in Enum.GetValues(typeof(DiagnosticExampleState))){
-            if(section==DiagnosticSection.GroupCalls||section==DiagnosticSection.Connections)continue;
+            if(section==DiagnosticSection.GroupCalls||section==DiagnosticSection.Connections||section==DiagnosticSection.LogsCrashReports)continue;
             var sample=samples.Read(new DiagnosticContext(section,"stable-test-id"),state);Check(sample.Sample&&sample.Banner.Contains("SAMPLE")&&sample.Context.StableId=="stable-test-id");Check(sample.Pages.Select(p=>p.Tab).SequenceEqual(DiagnosticNavigation.Tabs(section)));
             if(state==DiagnosticExampleState.Unavailable||state==DiagnosticExampleState.Disconnected)Check(sample.Pages.SelectMany(p=>p.Panels).All(p=>p.Samples.Length==0));
         }

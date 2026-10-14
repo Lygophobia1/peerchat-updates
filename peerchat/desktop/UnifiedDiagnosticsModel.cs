@@ -3,7 +3,7 @@ using System.Linq;
 using System.Collections.Generic;
 namespace PeerChatDesktop {
 // UI contracts only. Providers cannot mutate calls, transfers, authentication or history.
-public enum DiagnosticSection { FileTransfers, DirectMessageCalls, GroupCalls, HistorySync, Connections }
+public enum DiagnosticSection { FileTransfers, DirectMessageCalls, GroupCalls, HistorySync, Connections, LogsCrashReports }
 public enum DiagnosticExampleState { Active, Completed, Stalled, Failed, Disconnected, Unavailable }
 public sealed class DiagnosticContext {
     public readonly DiagnosticSection Section; public readonly string StableId;
@@ -24,18 +24,19 @@ public sealed class DiagnosticUiSnapshot {
 }
 public interface IDiagnosticLayoutProvider { DiagnosticUiSnapshot Read(DiagnosticContext context,DiagnosticExampleState state); }
 public static class DiagnosticNavigation {
-    public static string Label(DiagnosticSection section){return new[]{"File Transfers","Direct Message Calls","Group Calls","History Sync","Connections"}[(int)section];}
+    public static string Label(DiagnosticSection section){return new[]{"File Transfers","Direct Message Calls","Group Calls","History Sync","Connections","Logs / Crash Reports"}[(int)section];}
     public static string[] Tabs(DiagnosticSection section){switch(section){
         case DiagnosticSection.FileTransfers:return new[]{"Overview","Network","Pipeline","Receiver","Pi Relay","Events","Settings"};
         case DiagnosticSection.DirectMessageCalls:return new[]{"Overview","Voice","Screen Share","Network","Events","Settings"};
         case DiagnosticSection.GroupCalls:return new[]{"Overview","Screen Share","Voice","Participants","Network","Events","Export"};
         case DiagnosticSection.Connections:return new[]{"Overview","Sessions","Network","Failures","Events","Raw Logs"};
+        case DiagnosticSection.LogsCrashReports:return new[]{"Overview","Application Logs","Failures","Crash Reports","Exports"};
         default:return new[]{"Overview","Connections","Records","Events"};}}
 }
 public sealed class SampleDiagnosticLayoutProvider:IDiagnosticLayoutProvider {
     static DiagnosticPanel Panel(string title,params string[] labels){return new DiagnosticPanel{Title=title,Metrics=labels.Select(l=>new DiagnosticMetric(l,"N/A","Not connected to a measurement provider in this layout milestone.")).ToArray()};}
     public DiagnosticUiSnapshot Read(DiagnosticContext context,DiagnosticExampleState state){
-        if(context.Section==DiagnosticSection.GroupCalls||context.Section==DiagnosticSection.Connections)throw new InvalidOperationException("This section has a dedicated provider.");
+        if(context.Section==DiagnosticSection.GroupCalls||context.Section==DiagnosticSection.Connections||context.Section==DiagnosticSection.LogsCrashReports)throw new InvalidOperationException("This section has a dedicated provider.");
         var pages=DiagnosticNavigation.Tabs(context.Section).Select(t=>new DiagnosticPage{Tab=t}).ToArray();
         Action<string,DiagnosticPanel[]> set=(tab,panels)=>pages.Single(p=>p.Tab==tab).Panels=panels;
         if(context.Section==DiagnosticSection.FileTransfers){

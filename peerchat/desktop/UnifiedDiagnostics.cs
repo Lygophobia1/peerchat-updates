@@ -49,12 +49,12 @@ public partial class DesktopApplication {
         diagnosticExamples.SelectionChanged+=(s,e)=>{diagnosticExampleState=(DiagnosticExampleState)diagnosticExamples.SelectedItem;RefreshDiagnosticLayout();};
     }
     void OpenContextDiagnostics(DiagnosticSection section,string stableId){
-        if(section==DiagnosticSection.HistorySync)SelectHistoryDiagnosticScope();if(section==DiagnosticSection.GroupCalls)SelectGroupDiagnosticIdentity(stableId);if(section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview)SelectDmDiagnosticIdentity(stableId);diagnosticContext=new DiagnosticContext(section,stableId);if(groupDiagnosticWindow==null)OpenGroupDiagnostics();
+        if(section==DiagnosticSection.LogsCrashReports)SelectLogsDiagnosticScope();if(section==DiagnosticSection.HistorySync)SelectHistoryDiagnosticScope();if(section==DiagnosticSection.GroupCalls)SelectGroupDiagnosticIdentity(stableId);if(section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview)SelectDmDiagnosticIdentity(stableId);diagnosticContext=new DiagnosticContext(section,stableId);if(groupDiagnosticWindow==null)OpenGroupDiagnostics();
         diagnosticNavigation.SelectedIndex=(int)section;RefreshDiagnosticLayout();if(section==DiagnosticSection.GroupCalls){nextGroupTelemetry=DateTime.MinValue;RefreshGroupTelemetry();}groupDiagnosticWindow.Activate();
     }
     void RefreshDiagnosticFooter(){
         if(groupDiagnosticWindow==null||groupDiagnosticWindow.Content==null)return;
-        bool group=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool file=diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview;bool dm=diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview;bool live=group||file||dm||diagnosticContext.Section==DiagnosticSection.HistorySync||diagnosticContext.Section==DiagnosticSection.Connections&&!connectionsDeveloperPreview;
+        bool group=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool file=diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview;bool dm=diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview;bool live=group||file||dm||diagnosticContext.Section==DiagnosticSection.HistorySync||diagnosticContext.Section==DiagnosticSection.LogsCrashReports||diagnosticContext.Section==DiagnosticSection.Connections&&!connectionsDeveloperPreview;
         bool active=group&&(groupTelemetry.ScreenActive||groupTelemetry.VoiceActive);
         bool graphAvailable=dm?dmHistory.Points.Count>1&&dmHistory.Points.Any(p=>p.VoiceEncoded.HasValue||p.VoiceRtp.HasValue||p.CaptureFps.HasValue||p.PresentedFps.HasValue):file?transferDiagnosticHistory.Samples.Count>1:active&&(graphsPaused||groupSamples.Any(p=>p.EncodedFps.HasValue||p.UploadMbps.HasValue||p.DownloadMbps.HasValue));
         foreach(var button in ((DockPanel)groupDiagnosticWindow.Content).Children.OfType<WrapPanel>().SelectMany(p=>p.Children.OfType<Button>())){
@@ -65,7 +65,7 @@ public partial class DesktopApplication {
     }
     void RefreshDiagnosticLayout(){
         if(groupDiagnosticTabs==null||diagnosticNavigation==null||diagnosticNavigation.SelectedIndex<0)return;
-        bool history=diagnosticContext.Section==DiagnosticSection.HistorySync;bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=history||live||connections||diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview||diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;connectionPreviewStatePanel.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;
+        bool logs=diagnosticContext.Section==DiagnosticSection.LogsCrashReports;bool history=diagnosticContext.Section==DiagnosticSection.HistorySync;bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=logs||history||live||connections||diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview||diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;connectionPreviewStatePanel.Visibility=connections&&connectionsDeveloperPreview?Visibility.Visible:Visibility.Collapsed;
         RefreshDiagnosticFooter();
         diagnosticBanner.Text=live?"LIVE GROUP TELEMETRY · existing native counters · unavailable measurements are N/A":"SAMPLE / LAYOUT PREVIEW · not live measurements";
         if(!String.IsNullOrEmpty(diagnosticContext.StableId))diagnosticBanner.Text+="\nSelected context: "+diagnosticContext.StableId;
@@ -74,6 +74,7 @@ public partial class DesktopApplication {
         groupDiagnosticTabs.Items.Clear();foreach(string tab in DiagnosticNavigation.Tabs(diagnosticContext.Section)){var item=new TabItem{Header=tab};groupDiagnosticTabs.Items.Add(item);if(tab==selectedName)groupDiagnosticTabs.SelectedItem=item;}if(groupDiagnosticTabs.SelectedIndex<0)groupDiagnosticTabs.SelectedIndex=0;
         if(live){UpdateGroupDiagnosticWindow();return;}
         if(history){RenderHistoryDiagnostics();return;}
+        if(logs){RenderLogsDiagnostics();return;}
         if(connections){RenderConnectionPreview();return;}
         if(diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview){RenderTransferDiagnostics();return;}
         if(diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview){RenderDmDiagnostics();return;}
@@ -99,6 +100,7 @@ public partial class DesktopApplication {
         if(diagnosticContext.Section==DiagnosticSection.GroupCalls)return GroupDiagnosticExport();
         if(diagnosticContext.Section==DiagnosticSection.Connections)return ConnectionPreviewQuery.Export(ReadConnectionsView());
         if(diagnosticContext.Section==DiagnosticSection.HistorySync){UpdateHistoryDiagnosticSnapshot();return HistoryDiagnosticProjection.Export(historyDiagnosticView);}
+        if(diagnosticContext.Section==DiagnosticSection.LogsCrashReports){UpdateLogsDiagnosticSnapshot();return LogsDiagnosticProjection.Export(logsDiagnosticView,logsExportSelection);}
         if(diagnosticContext.Section==DiagnosticSection.FileTransfers&&!transfersDeveloperPreview)return TransferDiagnosticProjection.Export(ReadTransferDiagnostics());
         if(diagnosticContext.Section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview){dmDiagnosticInput=CaptureDmDiagnosticInput();return DmDiagnosticProjection.Export(ReadDmDiagnostics());}
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);
