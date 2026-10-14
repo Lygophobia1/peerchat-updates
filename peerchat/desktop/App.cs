@@ -460,6 +460,8 @@ public partial class DesktopApplication {
         ArrangeHeaderActions();
         BuildGroupSurface();
         Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
+        Find<Button>("Emoji").Click+=(s,e)=>OpenEmojiPicker();
+        Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if((Keyboard.Modifiers&(ModifierKeys.Control|ModifierKeys.Alt))==0&&(e.Key==Key.Back||e.Key==Key.Delete))e.Handled=EmojiComposer.Delete(Find<TextBox>("Composer"),e.Key==Key.Back);};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
         Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ServerGroupRoster selectedRoster;if(discovery!=null&&serverGroupRosters.TryGetValue(selectedGroup.Id,out selectedRoster))discovery.QueueGroupRoom(selectedRoster.GroupId,"snapshot");ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
@@ -1416,6 +1418,7 @@ public partial class DesktopApplication {
         ServerGroupRoster sendRoster;
         bool flag5=flag2&&!model.SelectedGroup.Invited&&!busy&&discovery!=null&&discovery.EventChannelConnected&&serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out sendRoster)&&sendRoster.Members.Any(m=>m.State=="member"&&m.AccountId==discovery.AccountId&&m.PeerId==model.OwnId);
 		Find<Button>("Send").IsEnabled = flag4 || flag5;
+        Find<Button>("Emoji").IsEnabled = flag4 || flag5;
 		TextBox textBox = Find<TextBox>("Composer");
 		textBox.IsEnabled = flag4 || flag5;
 		textBox.IsReadOnly = false;

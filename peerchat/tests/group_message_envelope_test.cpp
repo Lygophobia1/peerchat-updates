@@ -197,11 +197,11 @@ int main(int argc,char** argv){
             expect(receiver.receive(local,state,sent.wire),Result::DuplicateMessage);
             require(memberStore.authenticatedGroupMessage(server,sent.envelope.messageId).plaintext==plain,"Authenticated local history missing");
         }
-        auto original=sender.create(local,state,body("private-message-marker-DO-NOT-OUTPUT"));require(original.result==Result::Accepted,"Normal creation failed");
+        auto original=sender.create(local,state,body(u8"private-message-marker-DO-NOT-OUTPUT 😀 👩🏽‍💻 👨‍👩‍👧‍👦 🇺🇸 1️⃣ ❤️\n日本語"));require(original.result==Result::Accepted,"Normal creation failed");
         require(ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Recipient accepted",2),"Recipient receipt persistence failed");
         require(!ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Server accepted",1)&&!ownerStore.setGroupMessageStatus(server,original.envelope.messageId,"Unknown after disconnect",0),"Late admission/disconnect overwrote a recipient receipt");
         require(ownerStore.authenticatedGroupMessage(server,original.envelope.messageId).status=="Recipient accepted","Protected receipt did not survive readback");
-        auto marker=body("private-message-marker-DO-NOT-OUTPUT");
+        auto marker=body(u8"private-message-marker-DO-NOT-OUTPUT 😀 👩🏽‍💻 👨‍👩‍👧‍👦 🇺🇸 1️⃣ ❤️\n日本語");
         require(std::search(original.wire.begin(),original.wire.end(),marker.begin(),marker.end())==original.wire.end(),"Server-facing representation contains plaintext");
         auto test=[&](Envelope e,Result status){expect(receiver.receive(local,state,serialize(e)),status);};
         auto e=original.envelope;e.ciphertext[0]^=1;test(e,Result::SignatureFailed);resign(e,owner);test(e,Result::AeadAuthFailed);
