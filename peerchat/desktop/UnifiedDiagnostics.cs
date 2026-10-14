@@ -8,13 +8,38 @@ public partial class DesktopApplication {
     IDiagnosticLayoutProvider diagnosticLayoutProvider=new SampleDiagnosticLayoutProvider();
     DiagnosticContext diagnosticContext=new DiagnosticContext(DiagnosticSection.GroupCalls,"");
     DiagnosticExampleState diagnosticExampleState=DiagnosticExampleState.Active;
-    ComboBox diagnosticNavigation,diagnosticExamples;TextBlock diagnosticBanner;bool diagnosticCompact;double diagnosticTextSize=13;
+    TabControl diagnosticNavigation;ComboBox diagnosticExamples;Style diagnosticSecondaryTabs;TextBlock diagnosticBanner;bool diagnosticCompact;double diagnosticTextSize=13;
+    // Window-local styles: do not change tabs or dropdowns elsewhere in PeerChat.
+    static Style DiagnosticTabStyle(bool primary){
+        string xaml=@"<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='TabItem'>
+          <Setter Property='Foreground' Value='#B7C9D9'/><Setter Property='Background' Value='#13222F'/><Setter Property='BorderBrush' Value='#263B4D'/>
+          <Setter Property='FontSize' Value='SIZE'/><Setter Property='FontWeight' Value='SemiBold'/><Setter Property='Padding' Value='PAD'/><Setter Property='MinHeight' Value='HEIGHT'/><Setter Property='Margin' Value='0,0,8,8'/>
+          <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='TabItem'>
+            <Border x:Name='Pill' CornerRadius='RADIUS' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' Padding='{TemplateBinding Padding}'>
+              <ContentPresenter ContentSource='Header' VerticalAlignment='Center' HorizontalAlignment='Center' RecognizesAccessKey='True' TextElement.Foreground='{TemplateBinding Foreground}'/>
+            </Border><ControlTemplate.Triggers>
+              <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='Pill' Property='Background' Value='#243E53'/><Setter Property='Foreground' Value='#FFFFFF'/></Trigger>
+              <Trigger Property='IsSelected' Value='True'><Setter TargetName='Pill' Property='Background' Value='ACTIVE'/><Setter TargetName='Pill' Property='BorderBrush' Value='#68ABEF'/><Setter Property='Foreground' Value='#FFFFFF'/></Trigger>
+              <Trigger Property='IsKeyboardFocused' Value='True'><Setter TargetName='Pill' Property='BorderBrush' Value='#CEE8FF'/></Trigger>
+              <Trigger Property='IsEnabled' Value='False'><Setter Property='Opacity' Value='0.45'/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate></Setter.Value></Setter>
+        </Style>";
+        return (Style)System.Windows.Markup.XamlReader.Parse(xaml.Replace("SIZE",primary?"14":"13").Replace("PAD",primary?"18,10":"15,8").Replace("HEIGHT",primary?"44":"38").Replace("RADIUS",primary?"12":"9").Replace("ACTIVE",primary?"#245DA8":"#23445F"));
+    }
+    static ControlTemplate DiagnosticTabContainer(bool primary){
+        string xaml=primary?@"<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='TabControl'><ItemsPresenter/></ControlTemplate>":@"<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='TabControl'><DockPanel LastChildFill='True'><ItemsPresenter DockPanel.Dock='Top'/><ContentPresenter x:Name='PART_SelectedContentHost' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' ContentSource='SelectedContent' Margin='0,4,0,0'/></DockPanel></ControlTemplate>";
+        return (ControlTemplate)System.Windows.Markup.XamlReader.Parse(xaml);
+    }
+    static ItemsPanelTemplate DiagnosticTabPanel(){return (ItemsPanelTemplate)System.Windows.Markup.XamlReader.Parse("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><WrapPanel IsItemsHost='True'/></ItemsPanelTemplate>");}
     void AddDiagnosticEntry(StackPanel panel,DiagnosticSection section,Func<string> identity){var button=new Button{Content="Open Diagnostics",Margin=new Thickness(0,6,0,6),Padding=new Thickness(10,6,10,6),HorizontalAlignment=HorizontalAlignment.Left};button.Click+=(s,e)=>OpenContextDiagnostics(section,identity());panel.Children.Add(button);}
     void BuildDiagnosticNavigation(DockPanel root){
         root.Background=Brush("#0D1720");var shell=new StackPanel{Margin=new Thickness(0,0,0,12)};DockPanel.SetDock(shell,Dock.Top);root.Children.Add(shell);
         shell.Children.Add(new TextBlock{Text="Diagnostics & Graphs",FontSize=22,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,10)});
-        var row=new WrapPanel();shell.Children.Add(row);
-        diagnosticNavigation=new ComboBox{MinWidth=225,Foreground=Brush("#EDF1F5"),Background=Brush("#172A38"),Margin=new Thickness(0,0,10,6),ToolTip="Diagnostics section"};foreach(DiagnosticSection section in Enum.GetValues(typeof(DiagnosticSection)))diagnosticNavigation.Items.Add(new ComboBoxItem{Content=new TextBlock{Text=DiagnosticNavigation.Label(section),Foreground=Brush("#EDF1F5")},Foreground=Brush("#EDF1F5"),Background=Brush("#172A38")});row.Children.Add(diagnosticNavigation);
+        diagnosticSecondaryTabs=DiagnosticTabStyle(false);
+        diagnosticNavigation=new TabControl{Focusable=true,ItemContainerStyle=DiagnosticTabStyle(true),Template=DiagnosticTabContainer(true),ItemsPanel=DiagnosticTabPanel(),ToolTip="Diagnostics context"};foreach(DiagnosticSection section in Enum.GetValues(typeof(DiagnosticSection)))diagnosticNavigation.Items.Add(new TabItem{Header=DiagnosticNavigation.Label(section)});shell.Children.Add(diagnosticNavigation);
+        System.Windows.Automation.AutomationProperties.SetName(diagnosticNavigation,"Diagnostics context tabs");
+        var row=new WrapPanel{Margin=new Thickness(0,2,0,0)};shell.Children.Add(row);
         diagnosticExamples=new ComboBox{MinWidth=145,Margin=new Thickness(0,0,10,6),ToolTip="Sample layout state (never changes the real operation)"};foreach(var state in Enum.GetValues(typeof(DiagnosticExampleState)))diagnosticExamples.Items.Add(state);diagnosticExamples.SelectedIndex=0;row.Children.Add(diagnosticExamples);
         var compact=new CheckBox{Content="Compact cards",IsChecked=diagnosticCompact,Margin=new Thickness(0,4,12,6)};compact.Checked+=(s,e)=>{diagnosticCompact=true;RefreshDiagnosticLayout();};compact.Unchecked+=(s,e)=>{diagnosticCompact=false;RefreshDiagnosticLayout();};row.Children.Add(compact);
         row.Children.Add(new TextBlock{Text="Text size",Margin=new Thickness(0,4,8,6),Foreground=Brush("#A8B9C8")});var size=new Slider{Minimum=12,Maximum=18,Value=diagnosticTextSize,Width=100,ToolTip="Display text size",Margin=new Thickness(0,3,0,6)};size.ValueChanged+=(s,e)=>{diagnosticTextSize=e.NewValue;RefreshDiagnosticLayout();};row.Children.Add(size);
@@ -33,7 +58,7 @@ public partial class DesktopApplication {
         if(!String.IsNullOrEmpty(diagnosticContext.StableId))diagnosticBanner.Text+="\nSelected context: "+diagnosticContext.StableId;
         groupDiagnosticWindow.Title="PeerChat — "+DiagnosticNavigation.Label(diagnosticContext.Section)+" Diagnostics";
         var selected=groupDiagnosticTabs.SelectedItem as TabItem;string selectedName=selected==null?"Overview":Convert.ToString(selected.Header);
-        groupDiagnosticTabs.Items.Clear();foreach(string tab in DiagnosticNavigation.Tabs(diagnosticContext.Section)){var item=new TabItem{Header=tab,Background=Brush("#14222E"),Foreground=Brush("#83CCFC")};groupDiagnosticTabs.Items.Add(item);if(tab==selectedName)groupDiagnosticTabs.SelectedItem=item;}if(groupDiagnosticTabs.SelectedIndex<0)groupDiagnosticTabs.SelectedIndex=0;
+        groupDiagnosticTabs.Items.Clear();foreach(string tab in DiagnosticNavigation.Tabs(diagnosticContext.Section)){var item=new TabItem{Header=tab};groupDiagnosticTabs.Items.Add(item);if(tab==selectedName)groupDiagnosticTabs.SelectedItem=item;}if(groupDiagnosticTabs.SelectedIndex<0)groupDiagnosticTabs.SelectedIndex=0;
         if(live){UpdateGroupDiagnosticWindow();return;}
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);diagnosticBanner.Text=snapshot.Banner+(String.IsNullOrEmpty(diagnosticContext.StableId)?"":"\nSelected context: "+diagnosticContext.StableId);
         for(int i=0;i<snapshot.Pages.Length;i++){

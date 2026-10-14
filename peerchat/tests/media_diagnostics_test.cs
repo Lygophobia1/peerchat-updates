@@ -69,13 +69,18 @@ class MediaDiagnosticsTest {
                 tabs=(TabControl)typeof(DesktopApplication).GetField("groupDiagnosticTabs",flags).GetValue(desktop);Check(tabs.Items.Count==DiagnosticNavigation.Tabs(section).Length);
                 foreach(TabItem tab in tabs.Items){tabs.SelectedItem=tab;graphWindow.UpdateLayout();Check(tab.Content!=null);}
                 graphWindow.Width=540;graphWindow.Height=420;graphWindow.UpdateLayout();Check(tabs.ActualWidth>0);graphWindow.Width=1400;graphWindow.Height=900;graphWindow.UpdateLayout();
-                var nav=(ComboBox)typeof(DesktopApplication).GetField("diagnosticNavigation",flags).GetValue(desktop);Check(nav.Items.Count==4&&nav.SelectedIndex==(int)section&&nav.Focusable);
+                var nav=(TabControl)typeof(DesktopApplication).GetField("diagnosticNavigation",flags).GetValue(desktop);Check(nav.Items.Count==4&&nav.SelectedIndex==(int)section&&nav.Focusable&&nav.ItemContainerStyle!=null&&tabs.ItemContainerStyle!=null);
                 var selector=(ComboBox)typeof(DesktopApplication).GetField("diagnosticExamples",flags).GetValue(desktop);Check((selector.Visibility==Visibility.Collapsed)==(section==DiagnosticSection.GroupCalls));
                 if(section!=DiagnosticSection.GroupCalls)foreach(DiagnosticExampleState state in Enum.GetValues(typeof(DiagnosticExampleState))){selector.SelectedItem=state;graphWindow.UpdateLayout();Check(((string)typeof(DesktopApplication).GetMethod("CurrentDiagnosticExport",flags).Invoke(desktop,null)).Contains("SAMPLE"));}
                 if(section!=DiagnosticSection.GroupCalls)selector.SelectedItem=DiagnosticExampleState.Active;
                 tabs.SelectedIndex=0;graphWindow.UpdateLayout();var surface=(FrameworkElement)graphWindow.Content;var picture=new System.Windows.Media.Imaging.RenderTargetBitmap((int)surface.ActualWidth,(int)surface.ActualHeight,96,96,System.Windows.Media.PixelFormats.Pbgra32);picture.Render(surface);var encoding=new System.Windows.Media.Imaging.PngBitmapEncoder();encoding.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(picture));using(var file=System.IO.File.Create(System.IO.Path.Combine(args[0],section+".png")))encoding.Save(file);
                 foreach(double scale in new[]{1.25,1.5,2.0}){graphWindow.Width=960;graphWindow.Height=720;surface.LayoutTransform=new System.Windows.Media.ScaleTransform(scale,scale);graphWindow.UpdateLayout();Check(tabs.ActualWidth>0&&surface.ActualHeight>0);}surface.LayoutTransform=System.Windows.Media.Transform.Identity;graphWindow.UpdateLayout();
-                Check(nav.Focus());Check(nav.MoveFocus(new System.Windows.Input.TraversalRequest(System.Windows.Input.FocusNavigationDirection.Next)));nav.IsDropDownOpen=true;Check(nav.IsDropDownOpen);nav.IsDropDownOpen=false;
+                var primary=(TabItem)nav.SelectedItem;Check(primary.Focus());
+                Check(primary.ActualHeight>=44);
+                Check(primary.MoveFocus(new System.Windows.Input.TraversalRequest(System.Windows.Input.FocusNavigationDirection.Next)));
+                // Keyboard traversal can select the adjacent context tab; restore this fixture's section.
+                nav.SelectedIndex=(int)section;graphWindow.UpdateLayout();
+                foreach(TabItem item in tabs.Items){tabs.SelectedItem=item;graphWindow.UpdateLayout();Check(item.ActualHeight>=38);}tabs.SelectedIndex=0;
                 if(section==DiagnosticSection.FileTransfers){tabs.SelectedIndex=2;graphWindow.UpdateLayout();Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");typeof(DesktopApplication).GetMethod("RefreshDiagnosticLayout",flags).Invoke(desktop,null);Check(((TabItem)tabs.SelectedItem).Header.ToString()=="Pipeline");}
             }
             Check(model.VoiceCallId==originalCall);graphWindow.Close();
