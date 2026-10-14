@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include "../media_performance.hpp"
+#include "../screen_frame_timing.hpp"
 #include <thread>
 #include <utility>
 #include <vector>
@@ -66,6 +67,7 @@ public:
         queue_.push_back({std::vector<uint8_t>(data, data + length), timestamp,peerchat::MediaPerformance::nowUs()});
         largestAccessUnitBytes_ = std::max(largestAccessUnitBytes_, length);
         ++accepted_;
+        arrivalTiming_.observe(peerchat::MediaPerformance::nowUs(),1000000/std::max<uint32_t>(1,options_.frames_per_second));
         condition_.notify_one();
         return 1;
     }
@@ -84,7 +86,10 @@ public:
             streamChangeCount_, needMoreInputCount_, outputSuccessCount_,
             d3d11MultithreadProtected_ ? 1u : 0u, lastCompletedStage_.load(),
             lastPresentationHresult_.load(), lastDecodedTimestamp_, lastDecodedTimestampValid_ ? 1u : 0u};
-        wcsncpy_s(value->performance,performance_.text().c_str(),_TRUNCATE);
+        auto timing=arrivalTiming_.text(L"screen_au_arrival_gap")+decodedTiming_.text(L"screen_decode_output_gap")+presentTiming_.text(L"screen_present_return_gap");
+        timing+=L"\nscreen_gap_semantics=local steady-clock; includes idle; Present return is not physical scanout; p95 last 120 gaps";
+        timing+=L"\ndecoder_low_latency_applied="+std::to_wstring(decoderLowLatencyApplied_?1:0);
+        wcsncpy_s(value->performance,(timing+performance_.text()).c_str(),_TRUNCATE);
         value->oldest_queue_age_ms=queue_.empty()?0:(peerchat::MediaPerformance::nowUs()-queue_.front().queuedUs)/1000;
         return 1;
     }
@@ -138,6 +143,9 @@ private:
             FAILED(attributes->GetUINT32(MF_SA_D3D11_AWARE, &aware)) || !aware ||
             FAILED(decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                 reinterpret_cast<ULONG_PTR>(deviceManager_.Get())))) return false;
+        // Real-time screen content, not buffered movie playback. Optional:
+        // unsupported transforms keep their prior behavior and report it.
+        decoderLowLatencyApplied_=SUCCEEDED(attributes->SetUINT32(MF_LOW_LATENCY,TRUE));
         ComPtr<IMFMediaType> inputType;
         if (FAILED(MFCreateMediaType(&inputType)) ||
             FAILED(inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
@@ -202,6 +210,7 @@ private:
 
     bool present(IMFSample* sample) {
         peerchat::MediaPerformance::Span timing(performance_,peerchat::MediaPerformance::ScreenPresent,1000000/std::max<uint32_t>(1,options_.frames_per_second));
+        const auto setupStart=peerchat::MediaPerformance::nowUs();
         setStage(PC_SCREEN_DECODER_PRESENT_SETUP);
         ComPtr<IMFMediaBuffer> buffer;
         ComPtr<IMFDXGIBuffer> surface;
@@ -264,7 +273,10 @@ private:
         if (FAILED(blt)) return false;
         completeStage(PC_SCREEN_DECODER_PRESENT_BLT);
         setStage(PC_SCREEN_DECODER_PRESENT_SWAP);
+        performance_.observe(peerchat::MediaPerformance::ScreenPresentSetup,peerchat::MediaPerformance::nowUs()-setupStart,1000000/std::max<uint32_t>(1,options_.frames_per_second));
+        const auto swapStart=peerchat::MediaPerformance::nowUs();
         const HRESULT presentResult = swap_->Present(1, 0);
+        performance_.observe(peerchat::MediaPerformance::ScreenSwap,peerchat::MediaPerformance::nowUs()-swapStart,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         lastPresentationHresult_ = presentResult;
         const bool displayed = SUCCEEDED(presentResult);
         if (displayed) completeStage(PC_SCREEN_DECODER_PRESENT_RETURNED);
@@ -277,7 +289,9 @@ private:
             setStage(PC_SCREEN_DECODER_PROCESS_OUTPUT);
             MFT_OUTPUT_DATA_BUFFER result{};
             DWORD status = 0;
+            const auto outputStart=peerchat::MediaPerformance::nowUs();
             const HRESULT produced = decoder_->ProcessOutput(0, 1, &result, &status);
+            performance_.observe(peerchat::MediaPerformance::ScreenMftOutput,peerchat::MediaPerformance::nowUs()-outputStart,1000000/std::max<uint32_t>(1,options_.frames_per_second));
             {std::lock_guard lock(mutex_);lastProcessOutput_=static_cast<int32_t>(produced);if(FAILED(produced)&&produced!=MF_E_TRANSFORM_NEED_MORE_INPUT&&produced!=MF_E_TRANSFORM_STREAM_CHANGE)++processOutputFailures_;}
             if (produced == MF_E_TRANSFORM_NEED_MORE_INPUT) {
                 std::lock_guard lock(mutex_);
@@ -314,6 +328,7 @@ private:
             {
                 std::lock_guard lock(mutex_);
                 ++decoded_;
+                decodedTiming_.observe(peerchat::MediaPerformance::nowUs(),1000000/std::max<uint32_t>(1,options_.frames_per_second));
                 ++outputSuccessCount_;
                 lastDecodedTimestamp_ = static_cast<uint64_t>(outputTimestamp);
                 lastDecodedTimestampValid_ = timestampValid;
@@ -322,6 +337,7 @@ private:
             {
                 std::lock_guard lock(mutex_);
                 ++presented_;
+                presentTiming_.observe(peerchat::MediaPerformance::nowUs(),1000000/std::max<uint32_t>(1,options_.frames_per_second));
             }
             // The sample and its DXGI surface remain owned until this scope ends.
             sample.Reset();
@@ -347,7 +363,9 @@ private:
         // the decoder prioritize the independently decodable IDR bootstrap.
         if (containsIdr(frame.bytes)) sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
         sample->SetSampleDuration(10000000ll / std::max<uint32_t>(1, options_.frames_per_second));
+        const auto inputStart=peerchat::MediaPerformance::nowUs();
         const HRESULT accepted=decoder_->ProcessInput(0, sample.Get(), 0);
+        performance_.observe(peerchat::MediaPerformance::ScreenMftInput,peerchat::MediaPerformance::nowUs()-inputStart,1000000/std::max<uint32_t>(1,options_.frames_per_second));
         {std::lock_guard lock(mutex_);lastProcessInput_=static_cast<int32_t>(accepted);if(FAILED(accepted))++processInputFailures_;}
         return SUCCEEDED(accepted) && drain();
     }
@@ -412,6 +430,7 @@ private:
 
     pc_screen_decoder_options options_{};
     peerchat::MediaPerformance performance_;
+    peerchat::screen::FrameTiming arrivalTiming_,decodedTiming_,presentTiming_;
     std::thread worker_;
     std::atomic<bool> running_{true};
     std::mutex mutex_;
@@ -426,6 +445,7 @@ private:
     uint64_t processInputFailures_ = 0, processOutputFailures_ = 0;
     uint64_t streamChangeCount_ = 0, needMoreInputCount_ = 0, outputSuccessCount_ = 0;
     bool d3d11MultithreadProtected_ = false;
+    bool decoderLowLatencyApplied_ = false;
     std::atomic<uint32_t> lastCompletedStage_{0};
     std::atomic<int32_t> lastPresentationHresult_{0};
     uint64_t lastDecodedTimestamp_ = 0;

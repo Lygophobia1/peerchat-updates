@@ -101,7 +101,7 @@ public:
         std::uint64_t decoderStreamChanges = 0, decoderNeedMoreInput = 0, decoderOutputSuccesses = 0;
         std::uint64_t encodedBytesSubmitted = 0, mediaBytesReceived = 0;
         double captureFps = 0, encodeFps = 0, transmittedFps = 0;
-        double receivedFps = 0, renderedFps = 0, outgoingMbps = 0, incomingMbps = 0;
+        double receivedFps = 0, renderedFps = 0, decodedFps = 0, outgoingMbps = 0, incomingMbps = 0;
         double averageDecodeMs = 0;
         bool ratesAvailable = false, decodeLatencyAvailable = false;
         std::uint32_t width = 0, height = 0;
@@ -406,7 +406,7 @@ public:
         std::lock_guard sampleLock(sampleMutex_);
         if (samples_.empty() || now - samples_.back().time >= std::chrono::milliseconds(500)) {
             samples_.push_back({now, value.captured, value.encoded, value.encodedSubmitted,
-                value.accessUnitsDelivered, value.presented, value.encodedBytesSubmitted,
+                value.accessUnitsDelivered, value.presented, value.decoded, value.encodedBytesSubmitted,
                 value.mediaBytesReceived});
             while (samples_.size() > 2 && now - samples_.front().time > std::chrono::seconds(2))
                 samples_.pop_front();
@@ -422,6 +422,7 @@ public:
                 value.transmittedFps = double(last.submitted - first.submitted) / seconds;
                 value.receivedFps = double(last.received - first.received) / seconds;
                 value.renderedFps = double(last.presented - first.presented) / seconds;
+                value.decodedFps = double(last.decoded - first.decoded) / seconds;
                 value.outgoingMbps = double(last.sentBytes - first.sentBytes) * 8.0 / seconds / 1000000.0;
                 value.incomingMbps = double(last.receivedBytes - first.receivedBytes) * 8.0 / seconds / 1000000.0;
             }
@@ -583,6 +584,8 @@ public:
             << L"\ntransmitted_fps_send_api=" << (data.ratesAvailable && options_.sender ? std::to_wstring(data.transmittedFps) : L"Unavailable")
             << L"\nreceived_fps_access_units=" << (data.ratesAvailable && !options_.sender ? std::to_wstring(data.receivedFps) : L"Unavailable")
             << L"\nrendered_fps=" << (data.ratesAvailable && !options_.sender ? std::to_wstring(data.renderedFps) : L"Unavailable")
+            << L"\ndecoded_fps=" << (data.ratesAvailable && !options_.sender ? std::to_wstring(data.decodedFps) : L"Unavailable")
+            << L"\nscreen_fps_window=shared local steady-clock rolling sample window, approximately 0.5-2 seconds; idle included"
             << L"\neffective_encoded_mbps_send_api=" << (data.ratesAvailable && options_.sender ? std::to_wstring(data.outgoingMbps) : L"Unavailable")
             << L"\neffective_received_mbps_rtp_callback=" << (data.ratesAvailable && !options_.sender ? std::to_wstring(data.incomingMbps) : L"Unavailable")
             << L"\ndecode_latency_average_ms=" << (data.decodeLatencyAvailable ? std::to_wstring(data.averageDecodeMs) : L"Unavailable")
@@ -1013,7 +1016,7 @@ private:
     std::uint64_t nextSenderRecoveryRequestMs_ = 0;
     struct RateSample {
         std::chrono::steady_clock::time_point time;
-        std::uint64_t captured, encoded, submitted, received, presented, sentBytes, receivedBytes;
+        std::uint64_t captured, encoded, submitted, received, presented, decoded, sentBytes, receivedBytes;
     };
     mutable std::mutex sampleMutex_;
     mutable std::deque<RateSample> samples_;

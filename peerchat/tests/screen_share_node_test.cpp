@@ -23,6 +23,7 @@ std::uint64_t counter(const std::wstring& text,const std::wstring& name){
 int main(){
     using namespace peerchat;
     using Clock=std::chrono::steady_clock;
+    const bool relayFixture=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_RELAY",nullptr,0)>0;
     const auto backend=GetEnvironmentVariableW(L"PEERCHAT_SCREEN_TEST_BACKEND",nullptr,0)>0?
         screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
     const auto nextBackend=backend==screen::Backend::NativeWindows?
@@ -32,6 +33,7 @@ int main(){
     std::array<Node,2> nodes;
     std::array<std::string,2> peers;
     std::array<bool,2> ready{},connected{};
+    std::array<std::uint64_t,2> relayAttempts{};bool relayPaired=false;
     std::array<std::uint32_t,2> shareState{};
     std::array<std::uint64_t,2> shareGeneration{};
     std::array<std::uint32_t,2> shareRoute{},shareWidth{},shareHeight{};
@@ -53,12 +55,17 @@ int main(){
         }
         for(size_t i=0;i<2;++i)for(auto& event:nodes[i].poll()){
             if(event.kind==NodeEvent::Kind::Ready){peers[i]=event.peerId;ready[i]=true;}
-            else if(event.kind==NodeEvent::Kind::TrustRequired)nodes[i].approve(event.peerId,true);
+            else if(event.kind==NodeEvent::Kind::TrustRequired){if(relayFixture)require(nodes[i].pinInitialAuthenticatedFriendIdentity(event.peerId,event.attemptId,1),"constrained relay identity pin rejected");else nodes[i].approve(event.peerId,true);}
+            else if(event.kind==NodeEvent::Kind::RelayRequested)relayAttempts[i]=event.attemptId;
             else if(event.kind==NodeEvent::Kind::Connected)connected[i]=true;
             else if(event.kind==NodeEvent::Kind::Disconnected){connected[i]=false;++reliableDisconnects;}
             else if(event.kind==NodeEvent::Kind::ScreenShare){shareState[i]=event.shareState;shareGeneration[i]=event.shareGeneration;shareRoute[i]=event.screenRoute;shareWidth[i]=event.screenWidth;shareHeight[i]=event.screenHeight;shareId[i].assign(event.detail.begin(),event.detail.end());shareSummary[i]=event.screenSummary;if(printedState[i]!=event.shareState||printedGeneration[i]!=event.shareGeneration||printedRoute[i]!=event.screenRoute||printedWidth[i]!=event.screenWidth||printedHeight[i]!=event.screenHeight){std::wcerr<<L"screen peer "<<i<<L" state="<<event.shareState<<L" generation="<<event.shareGeneration<<L" route="<<event.screenRoute<<L" surface="<<event.screenWidth<<L'x'<<event.screenHeight<<L" "<<event.text<<L'\n';printedState[i]=event.shareState;printedGeneration[i]=event.shareGeneration;printedRoute[i]=event.screenRoute;printedWidth[i]=event.screenWidth;printedHeight[i]=event.screenHeight;}}
             else if(event.kind==NodeEvent::Kind::Message)deliveredText+=static_cast<int>(event.messages.size());
             else if(event.kind==NodeEvent::Kind::Error)std::wcerr<<L"screen peer "<<i<<L" error="<<event.text<<L'\n';
+        }
+        if(relayFixture&&relayAttempts[0]&&relayAttempts[1]){
+            if(!relayPaired){require(nodes[0].relayReady(relayAttempts[0],peers[0]>peers[1])&&nodes[1].relayReady(relayAttempts[1],peers[1]>peers[0]),"opaque relay roles rejected");relayPaired=true;}
+            unsigned char bytes[65536];for(unsigned side=0;side<2;++side)for(unsigned n=0;n<8;++n){int count=nodes[side].takeRelayOutput(relayAttempts[side],bytes,sizeof(bytes),0);if(count<=0)break;require(nodes[1-side].relayReceive(relayAttempts[1-side],bytes,count),"opaque relay bytes rejected");}
         }
     };
     auto wait=[&](auto predicate,const char* failure,int seconds=30){
@@ -112,13 +119,13 @@ int main(){
             {Storage storage(path);auto profile=storage.profile();profile.listenPort=static_cast<unsigned short>(base+i);storage.saveProfile(profile);}
             // This direct-only fixture uses explicit loopback ports. Production
             // relay-only startup still has no reliable direct listener.
-            nodes[i].start(path,static_cast<unsigned short>(base+i));
+            if(relayFixture)nodes[i].start(path,0,L"Relay media fixture",false);else nodes[i].start(path,static_cast<unsigned short>(base+i));
         }
         wait([&]{return ready[0]&&ready[1];},"Screen peers did not start");
         nodes[0].replaceAuthenticatedFriends(71,1,{{72,peers[1],{peers[1]}}});
         nodes[1].replaceAuthenticatedFriends(72,1,{{71,peers[0],{peers[0]}}});
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
-        nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
+        if(relayFixture){nodes[0].updateCandidates(peers[1],L"",0,L"",0,true,1,true);nodes[1].updateCandidates(peers[0],L"",0,L"",0,true,1,true);}else nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
         require(nodes[1].setScreenShareBackend(receiverRequirement),
             "Receiver backend requirement could not be configured");
@@ -213,7 +220,7 @@ int main(){
             counter(receiverTelemetry,L"media_rtp_bytes_received")>0&&
             receiverTelemetry.find(L"media_rtt_ms=Unavailable")!=std::wstring::npos,
             "Screen telemetry did not distinguish measured counters from unavailable ICE RTT");
-        nodes[1].setNetworkContext(2,L"new-network-b");
+        if(!relayFixture){nodes[1].setNetworkContext(2,L"new-network-b");
         wait([&]{return shareState[0]==static_cast<unsigned>(screen::State::Connected)&&
             shareState[1]==static_cast<unsigned>(screen::State::Connected)&&
             shareGeneration[0]>=2&&shareGeneration[1]==shareGeneration[0]&&
@@ -226,7 +233,7 @@ int main(){
         require(shareState[0]==static_cast<unsigned>(screen::State::Connected)&&
             shareState[1]==static_cast<unsigned>(screen::State::Connected)&&
             shareGeneration[1]==recoveredGeneration,
-            "An unchanged network fingerprint unnecessarily tore down the screen media");
+            "An unchanged network fingerprint unnecessarily tore down the screen media");}
         require(!nodes[0].send(peers[1],L"Text during screen sharing").empty(),
             "Text send failed during screen sharing");
         wait([&]{return deliveredText>0;},"Text delivery stopped during screen sharing");
@@ -247,11 +254,17 @@ int main(){
         require(nodes[0].endScreenShare(id),"Sender could not stop the screen share");
         wait([&]{return shareState[0]==0&&shareState[1]==0;},
             "Both peers did not return to idle after screen share");
+        require(connected[0]&&connected[1]&&reliableDisconnects==disconnectsBeforeStop,"media stop closed the reliable owner");
+        if(relayFixture){
+            const auto previous=relayAttempts;
+            nodes[0].relayClosed(relayAttempts[0],L"isolated fixture interruption");nodes[1].relayClosed(relayAttempts[1],L"isolated fixture interruption");relayPaired=false;relayAttempts={};connected={};
+            wait([&]{return relayPaired&&connected[0]&&connected[1]&&relayAttempts[0]!=previous[0]&&relayAttempts[1]!=previous[1];},"active file did not reestablish a fresh authenticated relay",30);
+        }
         wait([&]{return nodes[0].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&nodes[1].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"media-stop concurrent file did not complete",60);
         std::ifstream received(fileDestination/(fileId+L"-concurrent-media.bin"),std::ios::binary);
         Blob actual(std::istreambuf_iterator<char>(received),{});
-        require(actual==fileBytes&&connected[0]&&connected[1]&&reliableDisconnects==disconnectsBeforeStop,"media stop invalidated reliable transport or corrupted active file");
-        std::cout<<"PASS: 10 MiB durable verified transfer across actual screen-media stop and local mailbox rejection; reliable route retained. HOST DIRECT TLS / WEBRTC UDP ONLY\n";
+        require(actual==fileBytes&&connected[0]&&connected[1]&&(relayFixture||reliableDisconnects==disconnectsBeforeStop),"media stop invalidated reliable transport or corrupted active file");
+        std::cout<<"PASS: 10 MiB durable verified transfer across actual screen-media stop and local mailbox rejection; "<<(relayFixture?"fresh opaque relay pairing and confirmed-prefix recovery":"direct reliable route retained")<<". HOST PEER TLS / WEBRTC UDP ONLY; NO PI\n";
         require(nodes[0].screenShareDiagnostics().find(L"screen_stop_stage=10")!=std::wstring::npos,
             "Completed sender teardown did not expose its stop stage");
         auto repeated=nodes[0].startScreenShare(peers[1],captureKind,

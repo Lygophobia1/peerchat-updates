@@ -14,7 +14,8 @@ class MediaPerformance {
 public:
     enum Stage {CaptureInterval,PlaybackInterval,CaptureWork,ApmCapture,ApmRender,
         OpusEncode,ReceivePull,ScreenCapture,ScreenInput,ScreenOutput,
-        ScreenDecode,ScreenPresent,ScreenQueueAge,RtpArrival,ScreenCaptureWait,ScreenEncodedWait,Count};
+        ScreenDecode,ScreenPresent,ScreenQueueAge,RtpArrival,ScreenCaptureWait,ScreenEncodedWait,
+        ScreenMftInput,ScreenMftOutput,ScreenPresentSetup,ScreenSwap,Count};
     static std::uint64_t nowUs(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     struct Value {std::uint64_t count=0,total=0,last=0,maximum=0,misses=0;};
     struct Event {std::uint64_t time=0,duration=0,ordinal=0;unsigned stage=0,queue=0;};
@@ -30,7 +31,7 @@ public:
     Value value(Stage stage)const{const auto& m=metrics_[stage];return {m.count.load(),m.total.load(),m.last.load(),m.maximum.load(),m.misses.load()};}
     void reset(){for(auto& m:metrics_){m.count=0;m.total=0;m.last=0;m.maximum=0;m.misses=0;}std::lock_guard<std::mutex> lock(eventsMutex_);events_={};next_=0;eventsSkipped_=0;}
     std::wstring text()const{
-        static const wchar_t* names[]={L"capture_interval",L"playback_interval",L"capture_work",L"apm_capture",L"apm_render",L"opus_encode",L"receive_pull",L"screen_capture",L"screen_input",L"screen_output",L"screen_decode_and_present",L"screen_present",L"screen_queue_age",L"rtp_arrival_interval",L"screen_capture_wait",L"screen_encoded_wait"};
+        static const wchar_t* names[]={L"capture_interval",L"playback_interval",L"capture_work",L"apm_capture",L"apm_render",L"opus_encode",L"receive_pull",L"screen_capture",L"screen_input",L"screen_output",L"screen_decode_and_present",L"screen_present",L"screen_queue_age",L"rtp_arrival_interval",L"screen_capture_wait",L"screen_encoded_wait",L"screen_mft_input",L"screen_mft_output",L"screen_present_setup",L"screen_swap"};
         std::wostringstream out;
         for(unsigned i=0;i<Count;++i){auto v=value(static_cast<Stage>(i));if(v.count)out<<L"\nperf_"<<names[i]<<L"=count:"<<v.count<<L";last_us:"<<v.last<<L";max_us:"<<v.maximum<<L";mean_us:"<<v.total/v.count<<L";deadline_misses:"<<v.misses;}
         std::array<Event,16> copy;{std::lock_guard<std::mutex> lock(eventsMutex_);copy=events_;}

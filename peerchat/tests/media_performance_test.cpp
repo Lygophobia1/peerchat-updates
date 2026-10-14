@@ -1,10 +1,15 @@
 #include "media_performance.hpp"
+#include "screen_frame_timing.hpp"
 #include <thread>
 #include <iostream>
 #include <stdexcept>
 void check(bool b){if(!b)throw std::runtime_error("media observer assertion");}
 int main(){
     using peerchat::MediaPerformance;MediaPerformance p;
+    peerchat::screen::FrameTiming gaps;gaps.observe(1000,33333);gaps.observe(34333,33333);gaps.observe(226882,33333);
+    auto gapText=gaps.text(L"gap");check(gapText.find(L"samples:2")!=std::wstring::npos&&gapText.find(L"max_us:192549")!=std::wstring::npos&&gapText.find(L"over_1_5_period:1")!=std::wstring::npos);
+    for(unsigned n=1;n<=1000;++n)gaps.observe(226882+n*33333ull,33333);
+    check(gaps.text(L"gap").find(L"recent_p95_us:33333")!=std::wstring::npos&&gaps.text(L"gap").size()<256);
     p.observe(MediaPerformance::OpusEncode,1000,20000);p.observe(MediaPerformance::OpusEncode,30000,20000);
     auto v=p.value(MediaPerformance::OpusEncode);check(v.count==2&&v.total==31000&&v.maximum==30000&&v.misses==1);
     std::array<std::thread,4> workers;for(auto& t:workers)t=std::thread([&]{for(int i=0;i<10000;++i)p.observe(MediaPerformance::ScreenDecode,50000,33000,8);});for(auto& t:workers)t.join();
