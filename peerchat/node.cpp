@@ -15,6 +15,7 @@
 #include "archive_application.hpp"
 #include "archive_attachment_transfer.hpp"
 #include "windows_transfer_io.hpp"
+#include "windows_transfer_timing.hpp"
 #include "portable/transfer_statistics_storage.hpp"
 #include "windows_mailbox.hpp"
 #include "direct_transport_adapter.hpp"
@@ -160,6 +161,7 @@ struct Node::Impl {
         for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->peerId==peer&&c->online&&!c->dead&&c->approved&&c->authorization.permitsDirectMessage()&&(c->remoteCapabilities&protocol::CapabilityFileTransfer))return c.get();
         return nullptr;
     }
+    transfer::windows::TransferTiming transferTiming;
     void serviceTransfers(){
         if(!transfers)return;
         for(auto& peer:transfers->demandedPeers()){
@@ -173,7 +175,7 @@ struct Node::Impl {
                 // falling through to a coincident ordinary friend route.
                 if(archiveTransfers&&archiveTransfers->wasArchiveTransfer(archive::transferPacketId(bytes))&&!c->authorization.permitsArchiveControl())return false;
                 if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
-                try{packet(*c,c->authorization.permitsArchiveControl()?archiveTransfers->outgoing(c->authorization,bytes):bytes);return true;}
+                try{auto began=transfer::windows::TransferTiming::now();packet(*c,c->authorization.permitsArchiveControl()?archiveTransfers->outgoing(c->authorization,bytes):bytes);transferTiming.sent(bytes,c->attemptId,began,transfer::windows::TransferTiming::now());return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
             });retainCompletedAttachments();}catch(const transfer::PersistenceError&){transferPersistenceFailure();}
     }
@@ -211,7 +213,7 @@ struct Node::Impl {
     }
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
-        if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds()))result+=widenUtf8(row)+L"\n";return result;}
+        if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds())){auto id=row.substr(9,32);result+=widenUtf8(row+transferTiming.diagnostics(id)+(transferJournal?transferJournal->diagnostics(id):std::string{}))+L"\n";}return result;}
         if(command.sourceKind==1||command.sourceKind==7){
             auto contact=contacts.find(command.peer);
             if(!protocol::id(command.peer)||contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify the recipient device before sending a file");
@@ -1001,7 +1003,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(!transfers)return; // Local journal failure must not retire messaging.
             protocol::check(transferConnection(c.peerId)==&c);
             auto before=transfers->snapshots().size();
-            try{transfers->receive(c.peerId,frame,nowMilliseconds());}
+            try{auto began=transfer::windows::TransferTiming::now();transfers->receive(c.peerId,frame,nowMilliseconds());transferTiming.received(frame,c.attemptId,began,transfer::windows::TransferTiming::now());}
             catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(c,refusal);return;}
             catch(const transfer::PersistenceError&){transferPersistenceFailure();return;}
             if(transfers->snapshots().size()>before){NodeEvent event;event.kind=NodeEvent::Kind::FileTransfer;event.peerId=c.peerId;event.text=L"Incoming file offer";emit(std::move(event));}
@@ -1604,6 +1606,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // are identity data, not an authorization to probe. Server-first startup deliberately
             // seeds no direct retry; only relay policy or a fresh scoped P2P authorization can
             // create a new route attempt.
+            transferTiming.clear();
             while(running){
                 drain();
                 if(nowMilliseconds()>=demandCheckAt){

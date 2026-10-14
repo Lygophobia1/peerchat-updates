@@ -241,6 +241,25 @@ class DurableJournal final:public StateStore {
     std::filesystem::path root_,path_;
     std::string context_;
     Blob previous_;
+    std::vector<DurableState> committedRecords_;
+    struct JournalCost {std::uint64_t commits=0,microseconds=0,protectUs=0,commitUs=0;};
+    std::map<std::string,JournalCost> costs_;
+    std::uint64_t deferredAcknowledgements_=0;
+    DWORD lastCommitError_=0;
+    static bool sameStoredRecord(const DurableState& a,const DurableState& b){return a.metadata==b.metadata&&a.peer==b.peer&&a.state==b.state&&a.sending==b.sending&&a.digestReady==b.digestReady&&a.done==b.done&&a.highWaterSent==b.highWaterSent&&a.created==b.created&&a.updated==b.updated&&a.expires==b.expires&&a.location==b.location&&a.error==b.error;}
+    static std::uint64_t clockUs(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+    bool redundantSenderAcknowledgement(const std::vector<DurableState>& records)const{
+        if(records.size()!=committedRecords_.size())return false;
+        bool advanced=false;
+        for(size_t i=0;i<records.size();++i){const auto& a=committedRecords_[i];const auto& b=records[i];
+            if(!(a.metadata==b.metadata)||a.peer!=b.peer||a.state!=b.state||a.sending!=b.sending||a.digestReady!=b.digestReady||
+                a.highWaterSent!=b.highWaterSent||a.created!=b.created||a.updated!=b.updated||a.expires!=b.expires||a.location!=b.location||a.error!=b.error)return false;
+            if(a.done!=b.done){
+                if(!b.sending||b.state!=State::Transferring||b.done<a.done||b.done>b.highWaterSent)return false;
+                advanced=true;
+            }
+        }return advanced;
+    }
     HANDLE lock_=INVALID_HANDLE_VALUE;
     std::uint64_t serial_=GetTickCount64();
     static Blob readFile(const std::filesystem::path& path){
@@ -252,6 +271,10 @@ class DurableJournal final:public StateStore {
         Blob result(static_cast<size_t>(size.QuadPart));DWORD got=0;bool ok=ReadFile(file,result.data(),static_cast<DWORD>(result.size()),&got,nullptr)&&got==result.size();CloseHandle(file);require(ok);return result;
     }
 public:
+    std::string diagnostics(const std::string& id)const{
+        auto i=costs_.find(id);auto c=i==costs_.end()?JournalCost{}:i->second;
+        return " journal_selected_commits="+std::to_string(c.commits)+" journal_selected_us="+std::to_string(c.microseconds)+" journal_selected_protect_us="+std::to_string(c.protectUs)+" journal_selected_commit_us="+std::to_string(c.commitUs)+" journal_sender_ack_deferrals_all="+std::to_string(deferredAcknowledgements_)+" journal_last_win32_error="+std::to_string(lastCommitError_);
+    }
     DurableJournal(const std::wstring& profile,const std::string& device):root_(std::filesystem::absolute(profile)/L"transfer-resume"),path_(root_/L"state.protected"){
         require(protocol::id(device));std::filesystem::create_directory(root_);
         auto attributes=GetFileAttributesW(root_.c_str());require(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)&&!(attributes&FILE_ATTRIBUTE_REPARSE_POINT));
@@ -278,9 +301,23 @@ public:
             d.done=r.number();d.highWaterSent=r.number();d.created=r.number();d.updated=r.number();d.expires=r.number();d.location=r.bytes();d.error=r.string();
             require(d.location.size()<=32768&&d.error.size()<=256);result.push_back(std::move(d));
         }
-        r.end();previous_=plain;return result;
+        r.end();previous_=plain;
+        try{auto committed=result;committedRecords_.swap(committed);}catch(...){committedRecords_.clear();}
+        return result;
     }
     void save(const std::vector<DurableState>& records)override{
+        // A sender ACK confirms bytes already covered by its DURABLE high-water
+        // bound. The next chunk persists that ACK together with the next bound
+        // BEFORE transmission. On crash, the authenticated receiver's durable
+        // Resume supplies the authoritative offset after full source revalidation.
+        // Never defer receiver prefixes, rewinds below the durable cursor, state/identity/token changes,
+        // cancellation, completion or a new high-water authorization.
+#ifndef PEERCHAT_TEST_BASELINE_JOURNAL
+        if(redundantSenderAcknowledgement(records)){++deferredAcknowledgements_;return;}
+#endif
+        const auto began=clockUs();const std::string* changed=nullptr;size_t changes=0;
+        for(const auto& row:records){auto old=std::find_if(committedRecords_.begin(),committedRecords_.end(),[&](const auto& d){return d.metadata.id==row.metadata.id;});if(old==committedRecords_.end()||!sameStoredRecord(*old,row)){changed=&row.metadata.id;++changes;}}
+        for(const auto& row:committedRecords_)if(std::none_of(records.begin(),records.end(),[&](const auto& d){return d.metadata.id==row.metadata.id;}))++changes;
         require(records.size()<=MaxRecords);protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(ChunkBytes);w.number(records.size());
         for(auto& d:records){
             w.string(d.metadata.id);w.string(d.peer);w.string(d.metadata.name);w.number(d.metadata.size);w.bytes(Blob(d.metadata.digest.begin(),d.metadata.digest.end()));
@@ -288,12 +325,17 @@ public:
             w.number(d.created);w.number(d.updated);w.number(d.expires);w.bytes(d.location);w.string(d.error);
         }
         if(w.data==previous_)return;
-        require(w.data.size()<1024*1024);platform::WindowsRecordProtector protector;auto bytes=protector.protect(w.data,context_);
+        require(w.data.size()<1024*1024);platform::WindowsRecordProtector protector;const auto protectBegan=clockUs();auto bytes=protector.protect(w.data,context_);const auto protectEnded=clockUs();
         auto temp=root_/(L"state-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial_)+L".next");
         HANDLE file=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         require(file!=INVALID_HANDLE_VALUE);DWORD wrote=0;bool ok=WriteFile(file,bytes.data(),static_cast<DWORD>(bytes.size()),&wrote,nullptr)&&wrote==bytes.size()&&FlushFileBuffers(file);CloseHandle(file);
         if(ok)ok=MoveFileExW(temp.c_str(),path_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
-        if(!ok){auto error=GetLastError();DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit transfer journal (Win32 "+std::to_string(error)+")");}previous_=std::move(w.data);
+        if(!ok){auto error=GetLastError();lastCommitError_=error;DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit transfer journal (Win32 "+std::to_string(error)+")");}previous_=std::move(w.data);
+        const auto ended=clockUs();
+        // A cache/telemetry allocation failure must not turn an already durable
+        // commit into a transfer failure. Missing cache disables coalescing.
+        try{auto committed=records;committedRecords_.swap(committed);}catch(...){committedRecords_.clear();}
+        try{if(changes==1&&changed&&(costs_.count(*changed)||costs_.size()<MaxRecords)){auto& cost=costs_[*changed];++cost.commits;cost.microseconds+=ended-began;cost.protectUs+=protectEnded-protectBegan;cost.commitUs+=ended-protectEnded;}}catch(...){}
     }
     std::unique_ptr<Source> source(const DurableState& d)override{return reopenSource(d);}
     std::unique_ptr<Sink> sink(const DurableState& d)override{return FileSink::reopen(d);}

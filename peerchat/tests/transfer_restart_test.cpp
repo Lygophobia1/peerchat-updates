@@ -58,11 +58,33 @@ struct Harness {
 int main(int argc,char** argv){
     if(argc==3&&std::string(argv[1])=="--crash-fixture"){
         Harness h(std::filesystem::path(unicode::decode(argv[2])));h.offer(bytes(100001));h.partial();
+        while(h.sender->snapshots()[0].done<ChunkBytes)h.pump();
+        check(h.ja->load()[0].done==0&&h.ja->load()[0].highWaterSent==ChunkBytes);
         ExitProcess(0); // Deliberately bypass ALL destructors, like abrupt process death.
     }
     auto root=std::filesystem::temp_directory_path()/("peerchat-restart-"+std::to_string(GetCurrentProcessId()));
     try{
         check(std::filesystem::create_directory(root));
+        {
+            auto profile=root/L"journal-coalescing-gates";std::filesystem::create_directory(profile);
+            windows::DurableJournal journal(profile.wstring(),std::string(64,'a'));
+            DurableState row;row.metadata={std::string(32,'d'),"file.bin",65536,{}};row.peer=std::string(64,'b');row.sending=true;row.digestReady=true;row.state=State::Transferring;row.highWaterSent=ChunkBytes;
+            journal.save({row});row.done=ChunkBytes;journal.save({row});journal.save({row});
+            check(journal.load()[0].done==0); // No new transmission authorization was lost.
+            row.highWaterSent=65536;journal.save({row});check(journal.load()[0].done==ChunkBytes);
+            row.done=0;journal.save({row});check(journal.load()[0].done==0); // Rewinds are never deferred.
+            row.state=State::Cancelled;journal.save({row});check(journal.load()[0].state==State::Cancelled);
+            row.sending=false;row.state=State::Transferring;journal.save({row});row.done=ChunkBytes;journal.save({row});check(journal.load()[0].done==ChunkBytes);
+            row.done=65536;journal.save({row});row.state=State::Complete;journal.save({row});check(journal.load()[0].state==State::Complete);
+            check(journal.diagnostics(row.metadata.id).find("journal_selected_commits=8 ")!=std::string::npos);
+        }
+        {
+            Harness h(root/L"ack-only-crash-window");auto original=bytes(100001);h.offer(original);h.partial();
+            while(h.sender->snapshots()[0].done<ChunkBytes)h.pump();
+            auto durable=h.ja->load();check(durable.size()==1&&durable[0].done==0&&durable[0].highWaterSent==ChunkBytes);
+            check(h.jb->load()[0].done==ChunkBytes); // Receiver ACK is ALWAYS durable.
+            h.restart();h.finish();check(h.result()==original);
+        }
         {
             auto id=std::string(32,'e');auto path=root/(id+".snippet");std::string text="protected generated message\r\nUnicode \xe6\x97\xa5\xf0\x9f\x99\x82";Blob plain(text.begin(),text.end());
             auto source=windows::ProtectedSnippetSource::create(path.wstring(),plain);check(source->name()==windows::ProtectedSnippetSource::MessageName&&source->size()==plain.size()&&source->read(0,plain.size())==plain);
