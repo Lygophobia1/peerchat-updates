@@ -3,11 +3,12 @@
 #include "node.hpp"
 #include "share_id.hpp"
 #include "audio.hpp"
+#include "local_microphone_test.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <map>
 #define UI_API extern "C" __declspec(dllexport)
-struct UiBridge { peerchat::Node node; std::wstring output,screenDiagnosticsOutput,transferOutput; std::map<std::string,peerchat::Contact> contacts; };
+struct UiBridge { peerchat::Node node; peerchat::LocalMicrophoneTest microphone; std::wstring microphoneOutput,output,screenDiagnosticsOutput,transferOutput; std::map<std::string,peerchat::Contact> contacts; };
 static std::wstring widen(const std::string& value){return {value.begin(),value.end()};}
 static std::string identity(const wchar_t* value){std::wstring text=value?value:L"";std::string result;for(auto ch:text){if(ch>127)throw std::runtime_error("Invalid identity");result+=char(ch);}return result;}
 static std::wstring quote(const std::wstring& value){
@@ -27,6 +28,17 @@ UI_API int ui_mailbox(void* handle,unsigned operation,const unsigned char* bytes
 }catch(...){return -1;}}
 UI_API int ui_mailbox_supported(){
     return 1;
+}
+UI_API const wchar_t* ui_microphone_test(void* handle,int operation,int input,int output,int volume,int enabled,int ns,int agc,unsigned noise,unsigned gain){
+    if(!handle)return L"{\"error\":\"Local backend closed\"}";
+    auto& bridge=*static_cast<UiBridge*>(handle);
+    try{
+        if(operation==1){if(bridge.node.voiceTelemetry().active)throw std::runtime_error("Leave voice before local microphone testing");bridge.microphone.start(input,output,volume,enabled!=0,ns!=0,agc!=0,noise,gain);}
+        else if(operation==2)bridge.microphone.stopRecording();else if(operation==3||operation==4)bridge.microphone.listen(operation-2);else if(operation==5)bridge.microphone.clear();else if(operation!=0)throw std::runtime_error("Invalid local test operation");
+        const auto state=bridge.microphone.state();std::wostringstream out;out.imbue(std::locale::classic());
+        out<<L"{\"recording\":"<<(state.recording?L"true":L"false")<<L",\"available\":"<<(state.available?L"true":L"false")<<L",\"processing\":"<<(state.processing?L"true":L"false")<<L",\"frames\":"<<state.frames<<L",\"played\":"<<state.played<<L",\"playing\":"<<state.playing<<L",\"rawRms\":"<<state.rawRms<<L",\"processedRms\":"<<state.processedRms<<L",\"rawFullScale\":"<<state.rawFullScale<<L",\"processedFullScale\":"<<state.processedFullScale<<L",\"error\":"<<quote(state.error)<<L'}';bridge.microphoneOutput=out.str();
+    }catch(...){bridge.microphone.clear();bridge.microphoneOutput=L"{\"error\":\"Local microphone operation failed; preview cleared\"}";}
+    return bridge.microphoneOutput.c_str();
 }
 UI_API int ui_archive(void* handle,unsigned operation,const unsigned char* bytes,unsigned length,unsigned char* output,unsigned capacity){try{
     if(!handle||length>262144||(!bytes&&length)||!output||capacity<1||capacity>262144)return -1;
@@ -49,7 +61,7 @@ UI_API const wchar_t* ui_profile_peer_id(const wchar_t* directory){static thread
     if(!directory||!*directory){output.clear();return output.c_str();}
     peerchat::Storage store(directory);output=widen(store.profile().peerId);return output.c_str();
 }catch(...){output.clear();return output.c_str();}}
-UI_API int ui_start(void* handle,const wchar_t* directory,unsigned short port,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.start(directory,port,name?name:L"",false);return 1;}catch(...){return 0;}}
+UI_API int ui_start(void* handle,const wchar_t* directory,unsigned short port,const wchar_t* name){try{static_cast<UiBridge*>(handle)->microphone.clear();static_cast<UiBridge*>(handle)->node.start(directory,port,name?name:L"",false);return 1;}catch(...){return 0;}}
 UI_API int ui_connect(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer));return 1;}catch(...){return 0;}}
 UI_API int ui_connect_ex(void* handle,const wchar_t* host,unsigned short port,const wchar_t* peer,const wchar_t* source,const wchar_t* route,int force){try{static_cast<UiBridge*>(handle)->node.connect(host,port,identity(peer),source?source:L"Direct",route?route:L"manual",force!=0);return 1;}catch(...){return 0;}}
 UI_API int ui_invalidate_route(void* handle,const wchar_t* peer,const wchar_t* staleHost,unsigned short stalePort,int allRoutes){try{static_cast<UiBridge*>(handle)->node.invalidateRoute(identity(peer),staleHost?staleHost:L"",stalePort,allRoutes!=0);return 1;}catch(...){return 0;}}
@@ -131,14 +143,14 @@ UI_API int ui_group_ciphertext(void* handle,const unsigned char* data,unsigned s
 UI_API int ui_group_message_status(void* handle,const wchar_t* group,const wchar_t* message,const wchar_t* status,uint32_t stage){try{return static_cast<UiBridge*>(handle)->node.groupMessageStatus(identity(group),identity(message),status?status:L"",stage);}catch(...){return 0;}}
 UI_API int ui_groups(void* handle){try{static_cast<UiBridge*>(handle)->node.loadGroups();return 1;}catch(...){return 0;}}
 UI_API int ui_group_history(void* handle,const wchar_t* group,long long before){try{static_cast<UiBridge*>(handle)->node.loadGroupHistory(identity(group),before);return 1;}catch(...){return 0;}}
-UI_API const wchar_t* ui_voice_call(void* handle,const wchar_t* peer){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=widen(bridge.node.startVoiceCall(identity(peer)));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
+UI_API const wchar_t* ui_voice_call(void* handle,const wchar_t* peer){auto& bridge=*static_cast<UiBridge*>(handle);try{static_cast<UiBridge*>(handle)->microphone.clear();bridge.output=widen(bridge.node.startVoiceCall(identity(peer)));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API const wchar_t* ui_screen_start(void* handle,const wchar_t* peer,unsigned sourceKind,unsigned long long sourceHandle,unsigned fps,unsigned bitrate,int cursor,unsigned backend){auto& bridge=*static_cast<UiBridge*>(handle);try{if(backend>1)return L"";bridge.output=widen(bridge.node.startScreenShare(identity(peer),sourceKind,sourceHandle,fps,bitrate,cursor!=0,static_cast<peerchat::screen::Backend>(backend)));}catch(...){bridge.output.clear();}return bridge.output.c_str();}
 UI_API int ui_screen_backend(void* handle,unsigned backend){try{return backend<=1&&static_cast<UiBridge*>(handle)->node.setScreenShareBackend(static_cast<peerchat::screen::Backend>(backend));}catch(...){return 0;}}
 UI_API int ui_screen_answer(void* handle,const wchar_t* id,unsigned long long viewer,unsigned backend){try{return backend<=1&&static_cast<UiBridge*>(handle)->node.answerScreenShare(identity(id),viewer,static_cast<peerchat::screen::Backend>(backend));}catch(...){return 0;}}
 UI_API int ui_screen_decline(void* handle,const wchar_t* id){try{return static_cast<UiBridge*>(handle)->node.declineScreenShare(identity(id));}catch(...){return 0;}}
 UI_API int ui_screen_end(void* handle,const wchar_t* id){try{return static_cast<UiBridge*>(handle)->node.endScreenShare(identity(id));}catch(...){return 0;}}
 UI_API const wchar_t* ui_screen_diagnostics(void* handle){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.screenDiagnosticsOutput=bridge.node.screenShareDiagnostics();}catch(...){bridge.screenDiagnosticsOutput=L"screen_media_state=unavailable";}return bridge.screenDiagnosticsOutput.c_str();}
-UI_API int ui_voice_answer(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.answerVoiceCall(identity(call));}catch(...){return 0;}}
+UI_API int ui_voice_answer(void* handle,const wchar_t* call){try{static_cast<UiBridge*>(handle)->microphone.clear();return static_cast<UiBridge*>(handle)->node.answerVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API int ui_voice_decline(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.declineVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API int ui_voice_end(void* handle,const wchar_t* call){try{return static_cast<UiBridge*>(handle)->node.endVoiceCall(identity(call));}catch(...){return 0;}}
 UI_API int ui_voice_mute(void* handle,int muted){try{return static_cast<UiBridge*>(handle)->node.setVoiceMuted(muted!=0);}catch(...){return 0;}}

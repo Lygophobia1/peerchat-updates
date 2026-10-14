@@ -23,7 +23,7 @@ public static class SelectedTransferFile {
 }
 // This is the only managed/native boundary. Returned strings belong to the DLL
 // and are copied before another native call. Never pass C++ objects across ABI.
-public sealed class CoreAdapter : IDisposable {
+public sealed partial class CoreAdapter : IDisposable {
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
     public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable;}

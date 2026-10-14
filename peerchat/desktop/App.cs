@@ -822,7 +822,7 @@ public partial class DesktopApplication {
         groupVoice=new GroupVoiceService(()=>discovery,()=>model.OwnId,GroupMediaConfiguration,()=>new VoicePreferenceData{
             InputDeviceId=voicePreferences.InputDeviceId,OutputDeviceId=voicePreferences.OutputDeviceId,InputVolume=voicePreferences.InputVolume,OutputVolume=voicePreferences.OutputVolume,
             AudioProcessingEnabled=voicePreferences.AudioProcessingEnabled,NoiseSuppressionEnabled=voicePreferences.NoiseSuppressionEnabled,AutomaticGainEnabled=voicePreferences.AutomaticGainEnabled,
-            NoiseSuppressionStrength=voicePreferences.NoiseSuppressionStrength,AutomaticGainStrength=voicePreferences.AutomaticGainStrength,EchoCancellationEnabled=voicePreferences.EchoCancellationEnabled},()=>model.VoiceStateCode!=0,Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"PeerChat.AudioReceive.dll"));
+            NoiseSuppressionStrength=voicePreferences.NoiseSuppressionStrength,AutomaticGainStrength=voicePreferences.AutomaticGainStrength,EchoCancellationEnabled=voicePreferences.EchoCancellationEnabled},()=>model.VoiceStateCode!=0||localMicrophoneTestOpen,Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"PeerChat.AudioReceive.dll"));
         var scroll=Find<Border>("RightDetailsPane").Child as ScrollViewer;
         groupVoice.Failed+=failure=>window.Dispatcher.BeginInvoke((Action)(()=>RetainFailure("Group voice — "+failure.Reason,"GroupVoice",failure.RoomId,"group_voice",failure.Reason,failure.Stage,failure.Generation,failure.Details)));
         var container=new StackPanel();var existing=scroll.Content as StackPanel;scroll.Content=null;container.Children.Add(existing);
@@ -3295,6 +3295,7 @@ public partial class DesktopApplication {
 		updateProcessingControls();
 		processingPanel.Children.Add(processingEnabled);processingPanel.Children.Add(noiseSuppression);processingPanel.Children.Add(noiseStrength);processingPanel.Children.Add(automaticGain);processingPanel.Children.Add(gainStrength);processingPanel.Children.Add(echoCancellation);
 		voiceSettings.Children.Add(SettingsCard("Audio processing", "Changes apply to the next call or media generation. Echo cancellation uses the actual remote audio sent to your speakers.", processingPanel));
+        var microphoneTest=new Button{Content="Test microphone locally…",Padding=new Thickness(12,8,12,8),HorizontalAlignment=HorizontalAlignment.Left};microphoneTest.Click+=(s,e)=>ShowLocalMicrophoneTest();voiceSettings.Children.Add(SettingsCard("Microphone comparison","Compare raw and processed audio locally before changing presets. No recordings are saved or uploaded.",microphoneTest));
 		settingsPages.Add("Voice", voiceSettings);
 		settingsPages.Add("Video", createInfoPage("Video", "Video is not part of the current client baseline. Future preferences will appear here when that feature is introduced."));
 		StackPanel screenSettings=createInfoPage("Screen Sharing", "Profile-specific preferences for secure one-to-one screen sharing. Source selection remains per share; no source/window handle is saved.");
