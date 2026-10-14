@@ -49,8 +49,8 @@ public partial class DesktopApplication {
         diagnosticExamples.SelectionChanged+=(s,e)=>{diagnosticExampleState=(DiagnosticExampleState)diagnosticExamples.SelectedItem;RefreshDiagnosticLayout();};
     }
     void OpenContextDiagnostics(DiagnosticSection section,string stableId){
-        if(section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview)SelectDmDiagnosticIdentity(stableId);diagnosticContext=new DiagnosticContext(section,stableId);if(groupDiagnosticWindow==null)OpenGroupDiagnostics();
-        diagnosticNavigation.SelectedIndex=(int)section;RefreshDiagnosticLayout();groupDiagnosticWindow.Activate();
+        if(section==DiagnosticSection.GroupCalls)SelectGroupDiagnosticIdentity(stableId);if(section==DiagnosticSection.DirectMessageCalls&&!dmDeveloperPreview)SelectDmDiagnosticIdentity(stableId);diagnosticContext=new DiagnosticContext(section,stableId);if(groupDiagnosticWindow==null)OpenGroupDiagnostics();
+        diagnosticNavigation.SelectedIndex=(int)section;RefreshDiagnosticLayout();if(section==DiagnosticSection.GroupCalls){nextGroupTelemetry=DateTime.MinValue;RefreshGroupTelemetry();}groupDiagnosticWindow.Activate();
     }
     void RefreshDiagnosticFooter(){
         if(groupDiagnosticWindow==null||groupDiagnosticWindow.Content==null)return;

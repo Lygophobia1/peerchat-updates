@@ -879,6 +879,7 @@ public partial class DesktopApplication {
                     if(screen.Sharing||screen.Watching)text(screen.State+(String.IsNullOrEmpty(screen.Error)?"":" · "+screen.Error),false);
                 }
                 if(discovery!=null&&room.CreatorAccountId==discovery.AccountId){var close=new Button{Content="Close room",Padding=new Thickness(8,6,8,6),Margin=new Thickness(4,0,0,0)};close.Click+=(s,e)=>groupVoice.RoomAction(serverId,room.Id,"close");row.Children.Add(close);}
+                var diagnostics=new Button{Content="Open Diagnostics",Padding=new Thickness(8,6,8,6),Margin=new Thickness(4,3,0,3)};diagnostics.Click+=(s,e)=>OpenContextDiagnostics(DiagnosticSection.GroupCalls,id+"/room/"+room.Id);row.Children.Add(diagnostics);
                 sectionTarget=groupDetails;
             }
         }

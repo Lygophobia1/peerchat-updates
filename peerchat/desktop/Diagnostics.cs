@@ -329,6 +329,7 @@ namespace PeerChatDesktop {
 // counter deltas, persisted live samples or per-window statistics engines.
 public sealed class GroupTelemetryProjection {
     public bool VoiceActive,ScreenActive;public double? CapturedFps,EncodedFps,PresentedFps,UploadMbps,DownloadMbps;
+    public double? VoiceSendMbps,VoiceReceiveMbps,ScreenSendMbps,ScreenReceiveMbps,ReceivedFps,DecodedFps;
     public string Voice="Voice: Idle",Screen="Screen Share: Idle",Transport="N/A",Participants="",Health="",ScreenHealth="";
     public string Text {get{return Voice+"\n"+Screen+"\nTransport: "+Transport+"\nCaptured FPS: "+Metric(CapturedFps)+" · Encoded FPS: "+Metric(EncodedFps)+" · Presented FPS: "+Metric(PresentedFps)+"\nPayload submission upload (total): "+Metric(UploadMbps)+" Mbps · Payload received download (total): "+Metric(DownloadMbps)+" Mbps\nRTT / packet loss / end-to-end latency: N/A\n"+Health+"\n"+ScreenHealth+"\n"+Participants;}}
     public static string Metric(double? value){return value.HasValue?value.Value.ToString("0.00",System.Globalization.CultureInfo.InvariantCulture):"N/A";}

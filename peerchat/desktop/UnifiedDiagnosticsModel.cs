@@ -28,7 +28,7 @@ public static class DiagnosticNavigation {
     public static string[] Tabs(DiagnosticSection section){switch(section){
         case DiagnosticSection.FileTransfers:return new[]{"Overview","Network","Pipeline","Receiver","Pi Relay","Events","Settings"};
         case DiagnosticSection.DirectMessageCalls:return new[]{"Overview","Voice","Screen Share","Network","Events","Settings"};
-        case DiagnosticSection.GroupCalls:return new[]{"Overview","Screen Share","Voice","Participants","Events","Export"};
+        case DiagnosticSection.GroupCalls:return new[]{"Overview","Screen Share","Voice","Participants","Network","Events","Export"};
         case DiagnosticSection.Connections:return new[]{"Overview","Sessions","Network","Failures","Events","Raw Logs"};
         default:return new[]{"Overview","Connections","Records","Events"};}}
 }

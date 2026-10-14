@@ -35,13 +35,15 @@ public sealed class GroupScreenShareService:IDisposable {
         internal readonly Dictionary<string,GroupScreenRoomStatus> Status=new Dictionary<string,GroupScreenRoomStatus>(StringComparer.Ordinal);
         internal readonly Dictionary<string,string> Details=new Dictionary<string,string>(StringComparer.Ordinal);
         internal readonly Dictionary<string,string[]> Metrics=new Dictionary<string,string[]>(StringComparer.Ordinal);
+        internal GroupMediaObservation[] Observations=new GroupMediaObservation[0];
     }
     volatile PublishedState published=new PublishedState();
     // Called only under the worker gate. Published dictionaries are immutable
     // after replacement, so rendering never waits for native teardown/pumping.
     void Publish(){var next=new PublishedState();foreach(var s in sessions.Values)next.Status.Add(Key(s.Group,s.Room),s.Status);
         foreach(var group in sessions.Values.GroupBy(s=>s.Group))next.Details.Add(group.Key,String.Join("\n",group.Select(s=>"Room ID: "+s.Room+"\nShare generation: "+s.Share+"\nLocal role: "+(s.Sender?"Sharer":"Viewer")+"\nBackend: WebRTC Compatibility\nTopology: RelayMesh\nState: "+s.Status.State+"\n"+s.Diagnostics)));
-        foreach(var group in sessions.Values.GroupBy(s=>s.Group))next.Metrics.Add(group.Key,group.Where(s=>!s.Failed&&s.Handle!=IntPtr.Zero).Select(s=>s.Diagnostics).ToArray());published=next;}
+        foreach(var group in sessions.Values.GroupBy(s=>s.Group))next.Metrics.Add(group.Key,group.Where(s=>!s.Failed&&s.Handle!=IntPtr.Zero).Select(s=>s.Diagnostics).ToArray());next.Observations=sessions.Values.Where(s=>!s.Failed&&s.Handle!=IntPtr.Zero&&s.Observation!=null&&s.Observation.Generation==s.Generation).Select(s=>s.Observation).ToArray();published=next;}
+    public GroupMediaObservation[] DiagnosticObservations(string group){return published.Observations.Where(o=>o.Group==group).ToArray();}
     public event Action<GroupVoiceFailure> Failed;
     public GroupScreenShareService(Func<DiscoveryClient> discovery,Func<string> device,Func<Task<GroupVoiceMediaConfiguration>> configuration){this.discovery=discovery;this.device=device;this.configuration=configuration;}
     static string Key(string group,string room){return group+":"+room;}
@@ -57,7 +59,7 @@ public sealed class GroupScreenShareService:IDisposable {
             s.Status=new GroupScreenRoomStatus(group,room,sender?"Starting":"Joining","",sender,!sender,false,0);sessions.Add(Key(group,room),s);Publish();return true;}});
     }
     public Task<bool> Stop(string group,string room){return Task.Run(()=>{lock(gate){Session s;if(!sessions.TryGetValue(Key(group,room),out s))return true;var d=discovery();bool queued=d!=null&&d.QueueGroupRoom(group,s.Sender?"stop_share":"leave_viewer",room);Retire(s);sessions.Remove(Key(group,room));Publish();return queued;}});}
-    void Retire(Session s){if(s.Handle!=IntPtr.Zero){pc_group_screen_stop(s.Handle);pc_group_screen_destroy(s.Handle);s.Handle=IntPtr.Zero;}s.Pending.Clear();}
+    void Retire(Session s){if(s.Handle!=IntPtr.Zero){pc_group_screen_stop(s.Handle);pc_group_screen_destroy(s.Handle);s.Handle=IntPtr.Zero;}s.Observation=null;s.Pending.Clear();}
     void Fail(Session s,string reason,string stage){
         if(s.Handle!=IntPtr.Zero)s.Diagnostics=Marshal.PtrToStringUni(pc_group_screen_snapshot(s.Handle));
         var report=Failed;if(report!=null)report(new GroupVoiceFailure(s.Group,s.Room,reason,stage,s.Diagnostics,s.Generation));
@@ -89,7 +91,7 @@ public sealed class GroupScreenShareService:IDisposable {
                     if(disposed||s.Failed||!sessions.ContainsKey(Key(s.Group,s.Room))||d!=discovery()||state!=d.GroupRooms(s.Group))return;
                     if(start){Retire(s);if(cfg==null){Fail(s,"Screen media configuration unavailable","configuration");return;}s.Handle=pc_group_screen_create();s.Generation=++nextGeneration;var c=cfg.Credentials;
                         if(s.Handle==IntPtr.Zero||pc_group_screen_start(s.Handle,s.Group,s.Room,state.Epoch,(ulong)d.AccountId,localDevice,local.MediaGeneration,room.Sharer.MediaGeneration,(ulong)state.Revision,(ulong)state.RosterGeneration,s.Generation,s.Sender?1:0,s.Source==null?0:s.Source.kind,s.Source==null?0:s.Source.handle,s.Window,s.Fps,s.Bitrate,s.Cursor?1:0,c.Host,(ushort)c.Port,c.Username,c.Password,c.ExpiresUtc,cfg.ProfileGeneration,cfg.DiscoveryGeneration,cfg.ConfigurationGeneration)==0){Fail(s,"Screen media initialization failed","startup");return;}
-                        s.Bound=bound;s.Share=room.Sharer.MediaGeneration;
+                        s.Bound=bound;s.Share=room.Sharer.MediaGeneration;s.DiagnosticProfile=cfg.ProfileGeneration;s.DiagnosticDiscovery=cfg.DiscoveryGeneration;
                     }else if(cfg!=null){var c=cfg.Credentials;pc_group_screen_configure(s.Handle,c.Host,(ushort)c.Port,c.Username,c.Password,c.ExpiresUtc,cfg.ProfileGeneration,cfg.DiscoveryGeneration,cfg.ConfigurationGeneration);}
                     if(pc_group_screen_reconcile(s.Handle,(ulong)state.Revision,(ulong)state.RosterGeneration,rows)==0){Fail(s,"Screen authorization reconciliation failed","authorization");return;}s.Sources=rows;
                     GroupMediaSignal incoming;while((incoming=d.TakeGroupMediaSignal(s.Group,s.Room))!=null)if(incoming.Epoch==state.Epoch&&incoming.TargetGeneration==local.MediaGeneration)pc_group_screen_signal(s.Handle,incoming.SourceAccountId+":"+incoming.SourceDevice+":"+incoming.SourceGeneration,incoming.RouteId,(ulong)incoming.MediaGeneration,incoming.Kind,incoming.Data,incoming.Mid);
@@ -102,7 +104,7 @@ public sealed class GroupScreenShareService:IDisposable {
                         if(result=="Pending")continue;if(pending.Attempts>=4){s.Pending.Remove(pending);continue;}
                         pending.Request=d.QueueGroupMediaSignal(s.Group,s.Room,target.AccountId,target.PeerId,output.routeId,(long)output.generation,output.kind,output.data,output.mid);++pending.Attempts;
                     }
-                    s.Diagnostics=Marshal.PtrToStringUni(pc_group_screen_snapshot(s.Handle));var native=json.Deserialize<NativeState>(s.Diagnostics);
+                    s.Diagnostics=Marshal.PtrToStringUni(pc_group_screen_snapshot(s.Handle));s.Observation=new GroupMediaObservation(s.Group,s.Room,state.Epoch,d.AccountId,localDevice,local.MediaGeneration,s.Share,"screen_share",s.Generation,s.DiagnosticProfile,s.DiagnosticDiscovery,s.Sender,s.Diagnostics);var native=json.Deserialize<NativeState>(s.Diagnostics);
                     if(!native.active){Fail(s,String.IsNullOrEmpty(native.error)?"Screen media ended":native.error,"media");return;}
                     string status=s.Sender?"Sharing":native.routes.Any(r=>r.presented>0)?"Watching":native.routes.Any(r=>r.state=="Failed")?"Viewer media unavailable — stop and rejoin":"Connecting";
                     s.Status=new GroupScreenRoomStatus(s.Group,s.Room,status,native.error??"",s.Sender,!s.Sender,native.active,s.Generation);
@@ -113,7 +115,7 @@ public sealed class GroupScreenShareService:IDisposable {
         finally{await Task.Run(()=>{lock(gate){Publish();}});Interlocked.Exchange(ref pumping,0);}
     }
     public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var s in sessions.Values)Retire(s);sessions.Clear();Publish();}}
-    sealed class Session {public string Group,Room,Bound="",Share="",Sources="",Diagnostics="";public bool Sender,Cursor,Failed;public ScreenSource Source;public ulong Window,Generation;public uint Fps,Bitrate;public IntPtr Handle;public DateTime Expires;public GroupScreenRoomStatus Status;public readonly List<Pending> Pending=new List<Pending>();}
+    sealed class Session {public string Group,Room,Bound="",Share="",Sources="",Diagnostics="";public bool Sender,Cursor,Failed;public ScreenSource Source;public ulong Window,Generation,DiagnosticProfile,DiagnosticDiscovery;public GroupMediaObservation Observation;public uint Fps,Bitrate;public IntPtr Handle;public DateTime Expires;public GroupScreenRoomStatus Status;public readonly List<Pending> Pending=new List<Pending>();}
     sealed class Pending {public NativeSignal Signal;public string Request;public int Attempts;public DateTime Expires;}
     sealed class NativeSignal {public string sourceKey {get;set;}public string routeId {get;set;}public string kind {get;set;}public string data {get;set;}public string mid {get;set;}public ulong generation {get;set;}}
     sealed class NativeRoute {public string state {get;set;}public ulong presented {get;set;}}
