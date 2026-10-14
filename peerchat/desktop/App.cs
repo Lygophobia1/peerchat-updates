@@ -42,14 +42,14 @@ public class ChatText : ContentControl {
     static void Update(DependencyObject source,DependencyPropertyChangedEventArgs e){
         var view=(ChatText)source;string text=e.NewValue as string??"";view.ContextMenu=null;
         if(text.Length>InlinePreviewCharacters){view.Content=new BoundedTextView(text,false,"Long message");return;}
-        var block=new TextBlock{TextWrapping=TextWrapping.Wrap};int start=0;
+        var block=new TextBlock{TextWrapping=TextWrapping.Wrap};AutomationProperties.SetName(block,text);int start=0;
         foreach(Match match in Regex.Matches(text,@"https?://[^\s<>""\u0000-\u001f]+",RegexOptions.IgnoreCase)){
-            block.Inlines.Add(new Run(text.Substring(start,match.Index-start)));Uri uri;
+            EmojiColor.Append(block,text.Substring(start,match.Index-start));Uri uri;
             if(Uri.TryCreate(match.Value,UriKind.Absolute,out uri)&&(uri.Scheme=="http"||uri.Scheme=="https")){
                 var link=new Hyperlink(new Run(match.Value)){NavigateUri=uri,Foreground=new SolidColorBrush(Color.FromRgb(131,204,252))};
                 link.RequestNavigate+=(sender,args)=>{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(args.Uri.AbsoluteUri){UseShellExecute=true});}catch{}args.Handled=true;};block.Inlines.Add(link);
-            }else block.Inlines.Add(new Run(match.Value));start=match.Index+match.Length;
-        }block.Inlines.Add(new Run(text.Substring(start)));view.Content=block;
+            }else EmojiColor.Append(block,match.Value);start=match.Index+match.Length;
+        }EmojiColor.Append(block,text.Substring(start));view.Content=block;
         var menu=new ContextMenu();var copy=new MenuItem{Header="Copy message"};copy.Click+=(s,a)=>{try{Clipboard.SetText(text);}catch{}};menu.Items.Add(copy);view.ContextMenu=menu;
     }
 }
@@ -459,7 +459,8 @@ public partial class DesktopApplication {
         Click("ToggleRightPane",ToggleRightPane);
         ArrangeHeaderActions();
         BuildGroupSurface();
-        Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
+        Find<TextBox>("Composer").TextChanged+=(s,e)=>{Find<TextBlock>("ComposerHint").Visibility=String.IsNullOrEmpty(Find<TextBox>("Composer").Text)?Visibility.Visible:Visibility.Collapsed;EmojiColor.DraftPreview(Find<WrapPanel>("EmojiDraftPreview"),Find<TextBox>("Composer").Text);if(model.Groups&&model.SelectedGroup!=null)model.SelectedGroup.Draft=Find<TextBox>("Composer").Text;else if(!model.Groups&&model.Selected!=null)model.Selected.Draft=Find<TextBox>("Composer").Text;};
+        Find<Button>("Emoji").Content=EmojiColor.Glyph("😀",20);
         Find<Button>("Emoji").Click+=(s,e)=>OpenEmojiPicker();
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if((Keyboard.Modifiers&(ModifierKeys.Control|ModifierKeys.Alt))==0&&(e.Key==Key.Back||e.Key==Key.Delete))e.Handled=EmojiComposer.Delete(Find<TextBox>("Composer"),e.Key==Key.Back);};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};

@@ -124,8 +124,11 @@ public sealed class BoundedTextView:StackPanel {
     public BoundedTextView(string text,bool code,string title,Action copy=null,Action open=null){
         code=code||CodeLike(text);Children.Add(new TextBlock{Text=title,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,6)});
         Viewer=ReadOnly(text,code);Viewer.MaxHeight=160;Children.Add(Viewer);
+        ScrollViewer colorView=null;
+        if(!code){colorView=new ScrollViewer{Content=EmojiColor.Preview(text),MaxHeight=160,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};Children.Add(colorView);Viewer.Visibility=Visibility.Collapsed;
+            var selectText=new Button{Content="Select Unicode text / Color view",Padding=new Thickness(8,4,8,4),HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,4,0,0)};selectText.Click+=(s,e)=>{bool showText=Viewer.Visibility!=Visibility.Visible;Viewer.Visibility=showText?Visibility.Visible:Visibility.Collapsed;colorView.Visibility=showText?Visibility.Collapsed:Visibility.Visible;};Children.Add(selectText);}
         var actions=new WrapPanel{Margin=new Thickness(0,4,0,0)};Children.Add(actions);
-        Expand=new Button{Content="Expand",Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,0,6,0)};Expand.Click+=(s,e)=>{bool expanded=Viewer.MaxHeight>160;Viewer.MaxHeight=expanded?160:320;Expand.Content=expanded?"Expand":"Show less";};actions.Children.Add(Expand);
+        Expand=new Button{Content="Expand",Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,0,6,0)};Expand.Click+=(s,e)=>{bool expanded=Viewer.MaxHeight>160;Viewer.MaxHeight=expanded?160:320;if(colorView!=null)colorView.MaxHeight=Viewer.MaxHeight;Expand.Content=expanded?"Expand":"Show less";};actions.Children.Add(Expand);
         Copy=new Button{Content="Copy",Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,0,6,0)};Copy.Click+=(s,e)=>{if(copy!=null)copy();else try{Clipboard.SetText(text);}catch{}};actions.Children.Add(Copy);
         OpenFull=new Button{Content="Open full",Padding=new Thickness(8,4,8,4)};OpenFull.Click+=(s,e)=>{if(open!=null)open();else ShowFull(text,code,title);};actions.Children.Add(OpenFull);
     }

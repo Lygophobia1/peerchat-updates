@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try{
-    if(!$ClientDirectory){$ClientDirectory=Join-Path $root 'build\development\4.0.2-dev.149\Client'}
+    if(!$ClientDirectory){$ClientDirectory=Join-Path $root 'build\development\4.0.2-dev.150\Client'}
     $ClientDirectory=(Resolve-Path $ClientDirectory).Path
     $clientOut=$ClientDirectory;$updaterOut=Join-Path (Split-Path $clientOut -Parent) 'Updater';$generatedVersionSource=Join-Path (Split-Path $clientOut -Parent) 'VersionInfo.cs'
     $fx=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
