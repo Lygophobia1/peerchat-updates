@@ -16,7 +16,7 @@ try {
         $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
         $fx=Split-Path $csc -Parent
         $refs=@('System.dll','System.Core.dll','System.Xaml.dll','System.Web.Extensions.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object{'/reference:'+(Join-Path $fx $_)}
-        & $csc /nologo /target:exe "/out:$out\summary.exe" "/reference:$out\PeerChat.Desktop.exe" $refs "$PSScriptRoot\media_diagnostics_test.cs" "$PSScriptRoot\connection_preview_ui_test.cs" "$PSScriptRoot\connections_live_test.cs" "$PSScriptRoot\transfer_diagnostics_test.cs" "$PSScriptRoot\dm_diagnostics_test.cs" "$PSScriptRoot\group_calls_diagnostics_test.cs"
+        & $csc /nologo /target:exe "/out:$out\summary.exe" "/reference:$out\PeerChat.Desktop.exe" $refs "$PSScriptRoot\media_diagnostics_test.cs" "$PSScriptRoot\connection_preview_ui_test.cs" "$PSScriptRoot\connections_live_test.cs" "$PSScriptRoot\transfer_diagnostics_test.cs" "$PSScriptRoot\dm_diagnostics_test.cs" "$PSScriptRoot\group_calls_diagnostics_test.cs" "$PSScriptRoot\unified_completion_diagnostics_test.cs"
         if($LASTEXITCODE){throw 'Media summary compile failed'}; & "$out\summary.exe" (Join-Path $out 'profile')
         if($LASTEXITCODE){throw 'Media summary regression failed'}
     }
