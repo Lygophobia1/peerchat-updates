@@ -41,6 +41,7 @@ public partial class DesktopApplication {
         System.Windows.Automation.AutomationProperties.SetName(diagnosticNavigation,"Diagnostics context tabs");
         var row=new WrapPanel{Margin=new Thickness(0,2,0,0)};shell.Children.Add(row);
         diagnosticExamples=new ComboBox{MinWidth=145,Margin=new Thickness(0,0,10,6),ToolTip="Sample layout state (never changes the real operation)"};foreach(var state in Enum.GetValues(typeof(DiagnosticExampleState)))diagnosticExamples.Items.Add(state);diagnosticExamples.SelectedIndex=0;row.Children.Add(diagnosticExamples);
+        BuildConnectionPreviewSelector(row);
         var compact=new CheckBox{Content="Compact cards",IsChecked=diagnosticCompact,Margin=new Thickness(0,4,12,6)};compact.Checked+=(s,e)=>{diagnosticCompact=true;RefreshDiagnosticLayout();};compact.Unchecked+=(s,e)=>{diagnosticCompact=false;RefreshDiagnosticLayout();};row.Children.Add(compact);
         row.Children.Add(new TextBlock{Text="Text size",Margin=new Thickness(0,4,8,6),Foreground=Brush("#A8B9C8")});var size=new Slider{Minimum=12,Maximum=18,Value=diagnosticTextSize,Width=100,ToolTip="Display text size",Margin=new Thickness(0,3,0,6)};size.ValueChanged+=(s,e)=>{diagnosticTextSize=e.NewValue;RefreshDiagnosticLayout();};row.Children.Add(size);
         diagnosticBanner=new TextBlock{TextWrapping=TextWrapping.Wrap,Foreground=Brush("#83CCFC"),Margin=new Thickness(0,4,0,0)};shell.Children.Add(diagnosticBanner);
@@ -53,13 +54,15 @@ public partial class DesktopApplication {
     }
     void RefreshDiagnosticLayout(){
         if(groupDiagnosticTabs==null||diagnosticNavigation==null||diagnosticNavigation.SelectedIndex<0)return;
-        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;diagnosticExamples.Visibility=live?Visibility.Collapsed:Visibility.Visible;
+        bool live=diagnosticContext.Section==DiagnosticSection.GroupCalls;bool connections=diagnosticContext.Section==DiagnosticSection.Connections;diagnosticExamples.Visibility=live||connections?Visibility.Collapsed:Visibility.Visible;connectionPreviewExamples.Visibility=connections?Visibility.Visible:Visibility.Collapsed;
+        foreach(var button in ((DockPanel)groupDiagnosticWindow.Content).Children.OfType<WrapPanel>().SelectMany(p=>p.Children.OfType<Button>())){if(Object.Equals(button.Tag,"Copy Diagnostics"))button.Content=connections?"Copy sample preview":"Copy Diagnostics";if(Object.Equals(button.Tag,"Export…"))button.Content=connections?"Export sample preview…":"Export…";}
         diagnosticBanner.Text=live?"LIVE GROUP TELEMETRY · existing native counters · unavailable measurements are N/A":"SAMPLE / LAYOUT PREVIEW · not live measurements";
         if(!String.IsNullOrEmpty(diagnosticContext.StableId))diagnosticBanner.Text+="\nSelected context: "+diagnosticContext.StableId;
         groupDiagnosticWindow.Title="PeerChat — "+DiagnosticNavigation.Label(diagnosticContext.Section)+" Diagnostics";
         var selected=groupDiagnosticTabs.SelectedItem as TabItem;string selectedName=selected==null?"Overview":Convert.ToString(selected.Header);
         groupDiagnosticTabs.Items.Clear();foreach(string tab in DiagnosticNavigation.Tabs(diagnosticContext.Section)){var item=new TabItem{Header=tab};groupDiagnosticTabs.Items.Add(item);if(tab==selectedName)groupDiagnosticTabs.SelectedItem=item;}if(groupDiagnosticTabs.SelectedIndex<0)groupDiagnosticTabs.SelectedIndex=0;
         if(live){UpdateGroupDiagnosticWindow();return;}
+        if(connections){RenderConnectionPreview();return;}
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);diagnosticBanner.Text=snapshot.Banner+(String.IsNullOrEmpty(diagnosticContext.StableId)?"":"\nSelected context: "+diagnosticContext.StableId);
         for(int i=0;i<snapshot.Pages.Length;i++){
             var content=new StackPanel{Margin=new Thickness(8)};
@@ -80,6 +83,7 @@ public partial class DesktopApplication {
     }
     string CurrentDiagnosticExport(){
         if(diagnosticContext.Section==DiagnosticSection.GroupCalls)return GroupDiagnosticExport();
+        if(diagnosticContext.Section==DiagnosticSection.Connections)return ConnectionPreviewQuery.Export(connectionPreviewProvider.Read(connectionPreviewState));
         var snapshot=diagnosticLayoutProvider.Read(diagnosticContext,diagnosticExampleState);
         return snapshot.Banner+"\nSection: "+DiagnosticNavigation.Label(diagnosticContext.Section)+"\nContext: "+diagnosticContext.StableId+"\n"+String.Join("\n",snapshot.Pages.SelectMany(p=>p.Panels.Select(panel=>p.Tab+" / "+panel.Title+"\n"+String.Join("\n",panel.Metrics.Select(m=>m.Label+": "+m.Value)))));
     }

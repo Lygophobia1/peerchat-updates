@@ -1,0 +1,31 @@
+using System;
+using System.Linq;
+using System.Reflection;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using PeerChatDesktop;
+public static class ConnectionPreviewUiTest {
+    static readonly BindingFlags Flags=BindingFlags.Instance|BindingFlags.NonPublic;
+    static void Check(bool value,string reason){if(!value)throw new Exception("Connection preview: "+reason);}
+    static System.Collections.Generic.IEnumerable<DependencyObject> Walk(DependencyObject root){yield return root;for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++)foreach(var child in Walk(VisualTreeHelper.GetChild(root,i)))yield return child;}
+    static T Find<T>(Window window,string name)where T:FrameworkElement{return Walk(window).OfType<T>().Single(e=>e.Name==name);}
+    static void Select(ComboBox selector,string value){selector.SelectedItem=selector.Items.Cast<ComboBoxItem>().Single(i=>Convert.ToString(i.Tag)==value);}
+    public static bool Run(DesktopApplication desktop,string directory){
+        var provider=new SampleConnectionPreviewProvider();foreach(ConnectionPreviewState state in Enum.GetValues(typeof(ConnectionPreviewState))){var snap=provider.Read(state);Check(ConnectionPreviewQuery.Export(snap).StartsWith("SAMPLE"),"marked export");Check(snap.Sessions.Length<=3&&snap.Events.Length<=16,"bounded fixtures");Check(snap.Network.Last().Metrics.All(m=>m.Value=="N/A"),"unavailable measurements");if(state==ConnectionPreviewState.Empty||state==ConnectionPreviewState.Loading||state==ConnectionPreviewState.Unavailable)Check(snap.Sessions.Length==0&&snap.Failures.Length==0&&snap.Events.Length==0,"empty states");}
+        var active=provider.Read(ConnectionPreviewState.Connected);Check(ConnectionPreviewQuery.Filter(active,"Error","All","All").All(e=>e.Severity==ConnectionPreviewSeverity.Error),"severity filter");Check(ConnectionPreviewQuery.Filter(active,"All","TLS","All").All(e=>e.Type==ConnectionPreviewEventType.TLS),"type filter");Check(ConnectionPreviewQuery.Logs(active,"TLS",true).Contains("type=TLS"),"structured search");Check(ConnectionPreviewQuery.Logs(active,"TLS",false).StartsWith("SAMPLE"),"search sample marking");
+        typeof(DesktopApplication).GetMethod("OpenContextDiagnostics",Flags).Invoke(desktop,new object[]{DiagnosticSection.Connections,""});var window=(Window)typeof(DesktopApplication).GetField("groupDiagnosticWindow",Flags).GetValue(desktop);var tabs=(TabControl)typeof(DesktopApplication).GetField("groupDiagnosticTabs",Flags).GetValue(desktop);var statePicker=(ComboBox)typeof(DesktopApplication).GetField("connectionPreviewExamples",Flags).GetValue(desktop);Check(statePicker.Visibility==Visibility.Visible&&statePicker.Items.Count==11,"state picker");
+        foreach(ConnectionPreviewState state in Enum.GetValues(typeof(ConnectionPreviewState))){statePicker.SelectedIndex=(int)state;foreach(TabItem tab in tabs.Items){tabs.SelectedItem=tab;window.UpdateLayout();Check(tab.Content!=null,"state tab content");}Check(((string)typeof(DesktopApplication).GetMethod("CurrentDiagnosticExport",Flags).Invoke(desktop,null)).StartsWith("SAMPLE"),"shared export marking");}
+        statePicker.SelectedIndex=0;window.Width=1180;window.Height=800;
+        foreach(TabItem tab in tabs.Items){tabs.SelectedItem=tab;window.UpdateLayout();string name=Convert.ToString(tab.Header);
+            if(name=="Sessions"){var list=Find<ListBox>(window,"ConnectionSessions");list.SelectedIndex=2;window.UpdateLayout();Check(Walk(window).OfType<TextBlock>().Any(t=>t.Text.Contains("Historical group control session")&&t.Text.Contains("sample-session-001")),"session selection");}
+            if(name=="Failures"){var list=Find<ListBox>(window,"ConnectionFailures");list.SelectedIndex=1;window.UpdateLayout();var detail=Find<Expander>(window,"ConnectionFailureDetails");detail.IsExpanded=false;detail.IsExpanded=true;window.UpdateLayout();Check(((TextBlock)detail.Content).Text.Contains("sample-failure-001"),"failure selection and expansion");}
+            if(name=="Events"){Select(Find<ComboBox>(window,"EventSeverity"),"Error");window.UpdateLayout();Check(Find<ListBox>(window,"ConnectionEvents").Items.Count==1,"UI severity filter");Select(Find<ComboBox>(window,"EventSeverity"),"All");Select(Find<ComboBox>(window,"EventType"),"TLS");window.UpdateLayout();Check(Find<ListBox>(window,"ConnectionEvents").Items.Count>=1,"UI type filter");Select(Find<ComboBox>(window,"EventType"),"All");Select(Find<ComboBox>(window,"EventSession"),"sample-session-003");window.UpdateLayout();Check(Find<ListBox>(window,"ConnectionEvents").Items.Cast<ConnectionPreviewEvent>().All(e=>e.SessionId=="sample-session-003"),"UI session filter");Select(Find<ComboBox>(window,"EventSession"),"All");}
+            if(name=="Raw Logs"){var search=Find<TextBox>(window,"ConnectionLogSearch");search.Text="TLS";window.UpdateLayout();Check(Find<TextBox>(window,"ConnectionRawLogs").Text.Contains("TLS"),"UI search");Select(Find<ComboBox>(window,"ConnectionLogPresentation"),"Structured");window.UpdateLayout();Check(Find<TextBox>(window,"ConnectionRawLogs").Text.Contains("type=TLS"),"UI structured mode");search.Text="";}
+            window.UpdateLayout();
+            if(name=="Events")Check(Walk(Find<ListBox>(window,"ConnectionEvents")).OfType<TextBlock>().Any(t=>t.Text.Contains("lifecycle example")),"rendered event rows");
+            var surface=(FrameworkElement)window.Content;var bmp=new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(surface.ActualWidth),(int)Math.Ceiling(surface.ActualHeight),96,96,PixelFormats.Pbgra32);var drawing=new DrawingVisual();using(var context=drawing.RenderOpen())context.DrawRectangle(new VisualBrush(surface),null,new Rect(0,0,surface.ActualWidth,surface.ActualHeight));bmp.Render(drawing);var png=new System.Windows.Media.Imaging.PngBitmapEncoder();png.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));using(var file=System.IO.File.Create(System.IO.Path.Combine(directory,"Connections-"+name.Replace(" ","")+".png")))png.Save(file);
+        }
+        window.Close();Console.WriteLine("PASS: isolated Connections fixtures; eleven states; six tabs; session/failure selection, event filters, searched/structured redacted sample logs and exports.");return true;
+    }
+}
