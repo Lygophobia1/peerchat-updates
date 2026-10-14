@@ -318,6 +318,65 @@ struct Audio::Impl {
         }
     }
 
+    // Service ready speakers before and between bounded capture callbacks.
+    // One worker still owns both device rings and the exact render reference.
+    bool servicePlayback(std::unique_lock<std::mutex>& lock) {
+        unsigned playbackDone=0;for(const auto& b:outputBuffers)if(b.header.dwFlags&WHDR_DONE)++playbackDone;
+        if(output&&playbackDone==outputBuffers.size())++playbackStarvations;
+            for (std::size_t n = 0; n < outputBuffers.size(); ++n) {
+                auto& buffer = outputBuffers[nextOutput];
+                if (!(buffer.header.dwFlags & WHDR_DONE)) break;
+                const auto playbackUs=MediaPerformance::nowUs();
+                if(lastPlaybackUs)performance.observe(MediaPerformance::PlaybackInterval,playbackUs-lastPlaybackUs,35000,playbackDone);
+                lastPlaybackUs=playbackUs;
+                if(playoutHandler){
+                    std::array<std::int16_t,320> samples{};
+                    // Provider is immutable until stop has joined this worker.
+                    // It must be bounded and must not invoke UI/device lifecycle.
+                    lock.unlock();
+                    bool supplied=playoutHandler(samples.data(),samples.size());
+                    lock.lock();
+                    if(!started)return false;
+                    if(!supplied)samples.fill(0);
+                    for(std::size_t sample=0;sample<samples.size();++sample){auto bits=static_cast<std::uint16_t>(samples[sample]);buffer.data[2*sample]=bits&255;buffer.data[2*sample+1]=bits>>8;}
+                }else buffer.data = mixer.mix(audio_detail::Clock::now());
+                audio_detail::scalePcm(buffer.data, outputGain);
+                if(playoutHandler){
+                    const auto now=audio_detail::Clock::now();
+                    outputLevel=std::max(audio_detail::pcmLevel(buffer.data),audio_detail::decayedLevel(outputLevel,outputLevelUpdated,now));
+                    outputLevelUpdated=now;
+                }
+                const MMRESULT result = waveOutWrite(output, &buffer.header, sizeof(WAVEHDR));
+                if (result != MMSYSERR_NOERROR) {
+                    pendingError = audio_detail::deviceError(L"Voice playback stopped", result, false);
+                    closeInput();
+                    started = false;
+                    return false;
+                }
+                if(renderReference){
+                    std::array<std::int16_t,320> reference{};
+                    for(std::size_t i=0;i<reference.size();++i)
+                        reference[i]=static_cast<std::int16_t>(buffer.data[2*i]|(unsigned(buffer.data[2*i+1])<<8));
+                    unsigned queued=0;
+                    for(const auto& pending:outputBuffers)
+                        if((pending.header.dwFlags&WHDR_INQUEUE)&&!(pending.header.dwFlags&WHDR_DONE))++queued;
+                    // WinMM has no hardware presentation timestamp. Include
+                    // bounded queued playout plus one capture frame; capture
+                    // backlog contributes an additional 20 ms per completed buffer.
+                    unsigned captured=0;
+                    for(const auto& pending:inputBuffers)
+                        if(pending.header.dwFlags&WHDR_DONE)++captured;
+                    const unsigned delay=20*(queued+1+captured);
+                    lock.unlock();
+                    renderReference(reference.data(),reference.size(),delay);
+                    lock.lock();
+                    if(!started)return false;
+                }
+                nextOutput = (nextOutput + 1) % outputBuffers.size();
+            }
+        return true;
+    }
+
     void run() {
         const HANDLE events[] = {stopEvent, inputEvent, outputEvent};
         for (;;) {
@@ -333,11 +392,10 @@ struct Audio::Impl {
             }
             if (wait == WAIT_OBJECT_0 + 1) ++inputWakes;
             if (wait == WAIT_OBJECT_0 + 2) ++outputWakes;
-            unsigned captureBacklog=0,playbackDone=0;
+            unsigned captureBacklog=0;
             for(const auto& b:inputBuffers)if(b.header.dwFlags&WHDR_DONE)++captureBacklog;
-            for(const auto& b:outputBuffers)if(b.header.dwFlags&WHDR_DONE)++playbackDone;
             captureBacklogPeak=std::max(captureBacklogPeak,captureBacklog);
-            if(output&&playbackDone==outputBuffers.size())++playbackStarvations;
+            if(!servicePlayback(lock))return;
             // Consume ring buffers in submission order, including when several
             // finish between wakeups. Scanning from index zero would reorder PCM.
             for (std::size_t n = 0; input && n < inputBuffers.size(); ++n) {
@@ -369,6 +427,7 @@ struct Audio::Impl {
                     // Mute/reopen may run while the capture callback is outside
                     // the lock. Never requeue an old header on a new/closed device.
                     if (generation != inputGeneration) break;
+                    if(!servicePlayback(lock))return;
                 }
                 buffer.header.dwBytesRecorded = 0;
                 const MMRESULT result = waveInAddBuffer(input, &buffer.header, sizeof(WAVEHDR));
@@ -378,57 +437,6 @@ struct Audio::Impl {
                     break;
                 }
                 nextInput = (nextInput + 1) % inputBuffers.size();
-            }
-            for (std::size_t n = 0; n < outputBuffers.size(); ++n) {
-                auto& buffer = outputBuffers[nextOutput];
-                if (!(buffer.header.dwFlags & WHDR_DONE)) break;
-                const auto playbackUs=MediaPerformance::nowUs();
-                if(lastPlaybackUs)performance.observe(MediaPerformance::PlaybackInterval,playbackUs-lastPlaybackUs,35000,playbackDone);
-                lastPlaybackUs=playbackUs;
-                if(playoutHandler){
-                    std::array<std::int16_t,320> samples{};
-                    // Provider is immutable until stop has joined this worker.
-                    // It must be bounded and must not invoke UI/device lifecycle.
-                    lock.unlock();
-                    bool supplied=playoutHandler(samples.data(),samples.size());
-                    lock.lock();
-                    if(!started)return;
-                    if(!supplied)samples.fill(0);
-                    for(std::size_t sample=0;sample<samples.size();++sample){auto bits=static_cast<std::uint16_t>(samples[sample]);buffer.data[2*sample]=bits&255;buffer.data[2*sample+1]=bits>>8;}
-                }else buffer.data = mixer.mix(audio_detail::Clock::now());
-                audio_detail::scalePcm(buffer.data, outputGain);
-                if(playoutHandler){
-                    const auto now=audio_detail::Clock::now();
-                    outputLevel=std::max(audio_detail::pcmLevel(buffer.data),audio_detail::decayedLevel(outputLevel,outputLevelUpdated,now));
-                    outputLevelUpdated=now;
-                }
-                const MMRESULT result = waveOutWrite(output, &buffer.header, sizeof(WAVEHDR));
-                if (result != MMSYSERR_NOERROR) {
-                    pendingError = audio_detail::deviceError(L"Voice playback stopped", result, false);
-                    closeInput();
-                    started = false;
-                    return;
-                }
-                if(renderReference){
-                    std::array<std::int16_t,320> reference{};
-                    for(std::size_t i=0;i<reference.size();++i)
-                        reference[i]=static_cast<std::int16_t>(buffer.data[2*i]|(unsigned(buffer.data[2*i+1])<<8));
-                    unsigned queued=0;
-                    for(const auto& pending:outputBuffers)
-                        if((pending.header.dwFlags&WHDR_INQUEUE)&&!(pending.header.dwFlags&WHDR_DONE))++queued;
-                    // WinMM has no hardware presentation timestamp. Include
-                    // bounded queued playout plus one capture frame; capture
-                    // backlog contributes an additional 20 ms per completed buffer.
-                    unsigned captured=0;
-                    for(const auto& pending:inputBuffers)
-                        if(pending.header.dwFlags&WHDR_DONE)++captured;
-                    const unsigned delay=20*(queued+1+captured);
-                    lock.unlock();
-                    renderReference(reference.data(),reference.size(),delay);
-                    lock.lock();
-                    if(!started)return;
-                }
-                nextOutput = (nextOutput + 1) % outputBuffers.size();
             }
         }
     }
