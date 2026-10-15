@@ -52,17 +52,18 @@ int main(){const char* stage="setup";try{
     auto scopeA=archive::sessionAuthorization(authA,pa.peerId,pa.peerId,pb.peerId),scopeB=archive::sessionAuthorization(authB,pa.peerId,pa.peerId,pb.peerId);
     delivery::DeliveryManager da(a,pa.peerId),db(b,pb.peerId);auto directory=[](const std::string&)->std::optional<std::uint64_t>{return {};};
     stage="reader_construct";auto reader=std::make_unique<archive::SyncReader>(b,pb,authB,db,scopeB,directory,std::function<void()>{},&ab);
-    bool pageTampered=false;
+    bool pageTampered=false,referenceRestart=false;
     auto run=[&](bool restart){unsigned pages=0;while(!reader->snapshot().complete){need(++pages<200,"Unbounded history loop");stage="reader_request";auto request=reader->nextRequest(true,true);need(!request.empty(),"Missing request");stage="source_page";auto reply=archive::serveSyncControl(a,pa,authA,scopeA,request,directory,500,nullptr,&aa);
             protocol::Reader domain(reply);if(restart&&!pageTampered&&domain.string()==archive::GroupHistoryDomain){auto forged=archive::decodeGroupHistoryPage(reply);if(!forged.items.empty()&&!forged.items.back().wire.empty()){
                 auto before=b.groupArchiveWatermark();forged.items.back().wire.back()^=1;auto invalid=archive::encodeGroupHistoryPage(forged);denied([&]{reader->accept(invalid);});need(b.groupArchiveWatermark()==before,"Invalid whole page partially committed");
                 forged=archive::decodeGroupHistoryPage(reply);forged.request.id=Storage::newMessageId();invalid=archive::encodeGroupHistoryPage(forged);denied([&]{reader->accept(invalid);});pageTampered=true;
             }}
             stage="reader_accept";reader->accept(reply);
+            if(!referenceRestart&&b.groupReferenceWatermark()>0&&b.groupReferenceWatermark()<17){reader->disconnected();reader=std::make_unique<archive::SyncReader>(b,pb,authB,db,scopeB,directory,std::function<void()>{},&ab);referenceRestart=true;}
             if(restart&&pages==6){reader->disconnected();reader=std::make_unique<archive::SyncReader>(b,pb,authB,db,scopeB,directory,std::function<void()>{},&ab);}}
     };
     run(false);stage="missing_key_result";need(reader->snapshot().deferred==74&&b.groupArchiveWatermark()==0,"Missing historical key was not retained unresolved");
-    need(b.groupReferenceWatermark()==17&&b.groupHistoryReference(server,referenceId)==reference&&b.groupKey(local,1).empty(),"Reference granted a private key or failed durable import");
+    need(referenceRestart&&b.groupReferenceWatermark()==17&&b.groupHistoryReference(server,referenceId)==reference&&b.groupKey(local,1).empty(),"Reference partial-restart recovery granted a private key or failed durable import");
     {std::uint64_t after=0;size_t seen=0,pages=0;for(;;){auto page=ab.visibleReferences(server,after);need(page.records.size()<=8&&++pages<=3,"Reference projection exceeded page bound");seen+=page.records.size();after=page.next;if(page.complete)break;}need(seen==17&&pages==3,"Reference projection omitted bounded history");}
     denied([&]{reader->accept(archive::encodeGroupHistoryPage({{Storage::newMessageId(),a.archiveStoreId(),0,1,true},1,true,{{1,0,badReference}}}));});
     need(b.groupReferenceWatermark()==17,"Unrequested/replayed reference mutated durable storage");
