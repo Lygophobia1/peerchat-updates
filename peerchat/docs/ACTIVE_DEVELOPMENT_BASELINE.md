@@ -40,11 +40,21 @@ The voice-quality backlog also retains background fan-noise suppression and
 individual participant volume controls. These are deferred improvements, not
 reasons to reopen the accepted milestone or expand the current transfer/cache task.
 
-The user paused transfer/group-attachment/cache development on 2026-10-14 for
-an urgent Windows/Android messaging regression. Do not resume that milestone
-without new user authorization. Android messaging diagnosis and the smallest
-proven repair are now the only active development priority on this same branch.
-Live Pi changes still require explicit approval.
+The user initially paused transfer/group-attachment/cache development on
+2026-10-14 for an urgent Windows/Android messaging regression. The subsequent
+Autonomous Android Messaging Repair Then Resume File Transfers instruction
+authorizes independent transfer/cache work after the safe Android investigation
+and checkpoint, even while physical phone evidence remains pending. Preserve
+the unresolved Android investigation and do not claim a repair or acceptance.
+The phone must not be installed, launched or reset automatically; the live Pi
+must not be modified or restarted.
+
+The latest delivery policy supersedes the earlier deliver-to-both requirement:
+prefer Windows, fall back to Android after bounded failure, and reconcile other
+devices through History Sync. Exact cross-device delivery/notification ownership
+needs an approved design before extending the existing independent mailbox ACKs.
+See ANDROID_MESSAGING_REPAIR_DEV155.md. Cross-device media handoff remains future
+work, without enabling Android video or screen capture.
 
 The paused cache work includes a disabled durable SQLite ciphertext runtime,
 pinned storage adapter, signed descriptor parsing and initial roster admission.
