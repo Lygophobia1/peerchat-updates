@@ -1,3 +1,5 @@
+> Latest: `ANDROID_REPAIR_DEV160.md`. User confirms live DM both directions. Offline mailbox is blocked by existing binding validation; read-only inspection candidate, no accepted recovery.
+
 > Latest focused incoming investigation: see `ANDROID_REPAIR_DEV159.md`. User physically accepted dev.158 verification and outgoing messaging; incoming remains blocked. Dev.159 is diagnostic, not an accepted receiving repair.
 
 # Android checkpoint and remaining work audit

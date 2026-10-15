@@ -1,5 +1,10 @@
 # Android groups and voice integration manifest
 
+Latest read-only mailbox inspection: `ANDROID_REPAIR_DEV160.md`. Physical live DM
+works both directions; offline recovery remains blocked by retained binding validation.
+Shared coordinator/core diagnostics expand only; no wire/custody/trust change.
+Main manifest96de469 rechecked. No automatic metadata repair or key recovery.
+
 Latest focused checkpoint: `ANDROID_REPAIR_DEV159.md`, compiled code b73d035.
 Shared changes: optional KeyCoordinator diagnostic callback and Android core failure
 stages only. Platform facade adds beginMailboxRegistration()V; package Kotlin/JNI
