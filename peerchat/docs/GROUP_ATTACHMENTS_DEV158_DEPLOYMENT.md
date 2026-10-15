@@ -1,5 +1,10 @@
 # dev.158 encrypted-cache deployment and rollback plan
 
+> Subsequently approved and executed on 2026-10-15. See
+> [PI_DEV158_DEPLOYMENT_2026_10_15.md](PI_DEV158_DEPLOYMENT_2026_10_15.md)
+> for actual health, safety checks and rollback location. The original plan below
+> is retained as the pre-deployment record.
+
 PLAN ONLY — no live Pi installation, restart, cache initialization or migration
 has been performed. Obtain explicit approval before the controlled installation.
 
