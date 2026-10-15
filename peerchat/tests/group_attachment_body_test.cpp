@@ -45,5 +45,14 @@ int main(int argc,char** argv){try{
  for(size_t length=0;length<plain.bytes.size();++length){Blob shortBody(plain.bytes.begin(),plain.bytes.begin()+length);require(!group_attachments::validBody(shortBody,created.envelope),"Truncated body accepted");}
  Blob oversized(4097);require(!group_attachments::validBody(oversized,created.envelope),"Oversized body accepted");decoded.contentType="text/html";bool rejected=false;try{group_attachments::encodeBody(decoded);}catch(...){rejected=true;}require(rejected,"Unsupported presentation accepted");
  auto text=group_text::encode({1700000000001ull,2,L"ordinary text after unsupported attachment"});auto next=sender.create(local,state,text);expect(receiver.receive(local,state,next.wire,group_text::valid),Result::Accepted);
+ // Cached announcements do not bypass missing-key or historical-epoch gates.
+ // A still-eligible original device can be offline through an epoch rotation;
+ // current membership alone must not authorize replaying that old envelope.
+ {Storage offline((root/L"offline-keyless").wstring());group_keys::GroupKeyManager offlineKeys(offline,2,member.peerId);offlineKeys.apply(roster);MessageLayer offlineReceiver(offline,offlineKeys,member,2);
+  expect(offlineReceiver.receive(local,state,created.wire,validator),Result::MissingGroupKey);
+  require(offline.authenticatedGroupMessage(server,created.envelope.messageId).envelope.empty(),"Missing-key attachment committed history");}
+ auto rotated=roster;rotated.generation++;memberKeys.apply(rotated);ownerKeys.apply(rotated);
+ expect(receiver.receive(local,state,created.wire,validator),Result::StaleRosterGeneration);
+ require(!memberKeys.accept(offers[0],owner.peerId,state)&&!ownerKeys.maySend(offers[0],member.peerId),"Old full group-key handoff escaped current-epoch checks");
  std::cout<<"PASS bounded private attachment body through actual signed group E2EE/history/reopen/dedupe, exact key/content, envelope binding and legacy text isolation; production routing remains disabled\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

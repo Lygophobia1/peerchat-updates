@@ -414,6 +414,68 @@ An expired/evicted object reports unavailable; reconnect must not silently renew
 its lifetime. A deliberate resend creates a fresh logical attachment. Add the
 group bubble/clipboard entry points only after these production paths pass.
 
+### Offline attachment key delivery requires protocol review
+
+The attachment-body tests now reproduce two distinct fail-closed outcomes with
+the existing signed group implementation. An eligible member without the
+announcement epoch key gets `MissingGroupKey`, with no durable import. After
+the same original members move to a newer roster epoch, the old announcement
+gets `StaleRosterGeneration`, even if its recipient retained that older key.
+GroupKeyManager also refuses accepting or sending the stale full group-key
+handoff. These guards protect historical access and must remain intact.
+
+The cache can retain ciphertext and a signed PCGE announcement while its source
+is offline, but that alone does not deliver the private attachment manifest to
+an original recipient who missed the epoch key. The current mailbox recipient
+key lookup is friendship-specific and excludes same-account requests; it cannot
+be reused as group membership authorization. The production controller must not
+silently substitute a current group key, share an old full group key, or treat
+current server membership as signed historical authorization.
+
+The proposed extension is attachment-only per-device encrypted manifest/key
+envelopes using the existing verified HPKE recipient bindings and crypto provider.
+It would require a separate group-purpose authorization check, original/current
+device-incarnation intersection, and an authenticated historical context bound
+to attachment/group/message, ciphertext digest, sender, exact recipient key and
+generation, epoch and expiration. The Pi would retain only ciphertext and signed
+public routing metadata. Missing eligible recipient keys would be explicit, not
+automatically registered or trusted. Removed/rejoined or newly added devices
+would not gain older attachments. Existing group-key and ordinary mailbox rules
+would remain unchanged. Revocation cannot erase keys or files already received.
+
+This is a proposal, not an implemented or approved cryptographic format. It needs
+explicit approval and protocol/security review before client fanout integration.
+The production cache gate remains closed. Current-epoch fixtures do not prove
+complete offline group-attachment delivery.
+
+### Current validation and handoff
+
+Validated checkpoints include `446ab48` for bounded encryption preparation and
+`09edaaf` for protected staged-source recovery. The latter passed actual process
+exit before/after rename, exact decrypt, protected-key persistence, orphan cleanup,
+file substitution, wrong-device, length, header and corrupt-payload rejection.
+Legacy transfer/restart, cache-purpose isolation and the actual native peer-TLS
+session/reconnect fixture also passed. That fixture emits an existing Go-HPKE
+mailbox rejection; it proves the tested transfer path, not Android mailbox repair.
+The private group-body tests pass using both CNG and portable crypto, including
+the missing-key and stale-epoch rejection cases above.
+
+The full cache runtime/security/crash suite previously passed after `10be929`;
+these Windows source changes do not alter its server runtime. Isolated pinned-TLS
+tests completed a source-offline 3-MiB ciphertext download after real source
+logout. Timed upload tails of 3,081,748 bytes took approximately 1.10–1.23 seconds
+(about 20–22 Mbps) on one host through pinned TLS, JSON and durable SQLite writes.
+This excludes encryption, route setup, the first 64 KiB and physical networking;
+it is neither a phone result nor a LAN throughput claim.
+
+Android messaging remains unresolved pending diagnostic build dev.155 evidence;
+see ANDROID_MESSAGING_REPAIR_DEV155.md. Its APK and the dev.154 Windows pipeline
+package remain byte-identical to their recorded hashes. No new deployable group
+attachment Windows/Pi package is claimed: production client dispatch, protected
+transfer resume integration, receiver finalization, offline-key handling and UI
+still require completion. No phone installation, live Pi mutation, profile reset,
+identity/grant change, merge or publication occurred.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with
