@@ -38,8 +38,8 @@ message, merge or approval by the other task is claimed.
 
 ## Modified shared files and new contracts
 
-The following attachment-envelope changes are working changes until their
-individual checkpoint hashes are recorded below.
+The attachment codec is checkpointed at `1bea3e0`; its gated server adapter and
+durable-storage/security tests are checkpointed at `21403e4`.
 
 - `group_attachment_descriptor.hpp`: additive `PublicDescriptor` parsing and
   manifest matching. Existing signed upload descriptor bytes stay unchanged.
@@ -93,7 +93,19 @@ or marks a message delivered. Retirement allows an exact existing envelope to
 remain readable with its retained key; explicit revocation rejects it. Rejoin,
 new membership and key substitution do not regain older attachments.
 
+Recipient-binding discovery and envelope RPCs use canonical base64url. A binding
+is public signed key metadata, not a registration or group-approval operation.
+
 ## Compatibility and package requirements
+
+The next independent Windows adapter is protected preparation of an exact signed
+key envelope before its first RPC publication. It will use the existing file and
+record-protection adapters, reuse the attachment codec, and own no transfer,
+retry, session or group-message history. A profile/server-bound preparation file
+will retain identical ciphertext across restart; changed drafts, corrupt storage
+or revoked authority must not silently generate a replacement. This adapter
+requires no core C export/JNI or Android group interface change. Any later
+application/history bridge remains subject to the dependency checks above.
 
 Existing PCGE, DM/mailbox, archive and file-transfer wire formats are unchanged.
 No numeric peer-message type, existing C export or JNI signature is changed.
@@ -107,6 +119,15 @@ is not claimed or independently planned here. Later Android attachment support
 must use that branch's approved application boundary and existing opaque key
 provider. Missing historical evidence remains a recoverable authorization block,
 not permission to bypass group-message admission.
+
+Per-device key envelopes differ between recipients. They must NOT be inserted
+as if they were the identical PCGE wire in legacy group-message history: existing
+message-ID conflict checks intentionally reject different wires. The stable
+logical attachment identity is the signed descriptor's group/message/object
+binding. The eventual application owner must keep that canonical identity,
+protected private metadata and per-recipient transport evidence distinct. Agree
+its group UI/history projection with the parallel group-text interface before
+adding shared application APIs; do not bypass deduplication or archive validation.
 
 The parallel task attempted Android package number dev.156. Do not automatically
 reuse that number for a different unified Windows/cache candidate. Allocate and
@@ -125,9 +146,12 @@ allocated yet, and no live Pi installation is authorized by this manifest.
 - `09edaaf`: protected ciphertext recovery across process death and rename.
 - `e0940de`: reproduced missing-key/stale-epoch rejection and protocol-review
   boundary; common baseline of both active worktrees.
+- `72f9cc7`: initial parallel-interface inventory and integration boundary.
+- `1bea3e0`: attachment-only native HPKE codec and actual provider/registry tests.
+- `21403e4`: original/current group admission, immutable key-envelope persistence,
+  quota/revocation/restart tests and pinned-TLS cache RPC integration.
 
-The approved envelope implementation is not checkpointed yet. Current evidence
-includes actual shipping HPKE/CNG and protected-registry tests, native to managed
+Current evidence includes actual shipping HPKE/CNG and protected-registry tests, native to managed
 durable-cache to native decryption, authoritative key lookup/publication,
 rotation/revocation/rejoin, independent receipts, restart and corruption rejection.
 The full isolated cache quota/ownership/crash suite passes with the new table.
@@ -135,6 +159,15 @@ Pinned-TLS fixture operations publish keys, log the source out and allow an
 independently authenticated original recipient to retrieve/ACK them. Its managed
 server factory uses opaque signed payloads; actual HPKE is proved by the separate
 native round trip, not fabricated from that server fixture.
+
+Additional validation passed 16 concurrent metadata admissions under a reduced
+quota, clean metadata rejection preserving completed ciphertext, expired-key
+polling alongside valid envelopes, the existing server compatibility suite and
+portable group-body/current-epoch regressions. ARM32 Linux compilation passed;
+execution on a Pi is not claimed. An ARM32 assembly cannot be loaded into the
+Windows test process; the shipping-gate check instead passed against a separately
+built host-compatible shipping assembly, with no cache database created despite
+an enabled configuration.
 
 Component checkpoint hashes and any later interface dependencies must be added
 before a package is represented as integration-ready. Production client dispatch,

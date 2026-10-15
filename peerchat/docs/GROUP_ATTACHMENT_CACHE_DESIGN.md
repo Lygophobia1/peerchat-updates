@@ -414,7 +414,7 @@ An expired/evicted object reports unavailable; reconnect must not silently renew
 its lifetime. A deliberate resend creates a fresh logical attachment. Add the
 group bubble/clipboard entry points only after these production paths pass.
 
-### Offline attachment key delivery requires protocol review
+### Approved offline attachment key delivery
 
 The attachment-body tests now reproduce two distinct fail-closed outcomes with
 the existing signed group implementation. An eligible member without the
@@ -432,21 +432,30 @@ be reused as group membership authorization. The production controller must not
 silently substitute a current group key, share an old full group key, or treat
 current server membership as signed historical authorization.
 
-The proposed extension is attachment-only per-device encrypted manifest/key
+The approved extension is attachment-only per-device encrypted manifest/key
 envelopes using the existing verified HPKE recipient bindings and crypto provider.
-It would require a separate group-purpose authorization check, original/current
+It uses a separate group-purpose authorization check, original/current
 device-incarnation intersection, and an authenticated historical context bound
 to attachment/group/message, ciphertext digest, sender, exact recipient key and
-generation, epoch and expiration. The Pi would retain only ciphertext and signed
-public routing metadata. Missing eligible recipient keys would be explicit, not
+generation, epoch and expiration. The cache retains only ciphertext and signed
+public routing metadata. Missing eligible recipient keys remain explicit, not
 automatically registered or trusted. Removed/rejoined or newly added devices
-would not gain older attachments. Existing group-key and ordinary mailbox rules
-would remain unchanged. Revocation cannot erase keys or files already received.
+do not gain older attachments. Existing group-key and ordinary mailbox rules
+remain unchanged. Revocation cannot erase keys or files already received.
 
-This is a proposal, not an implemented or approved cryptographic format. It needs
-explicit approval and protocol/security review before client fanout integration.
-The production cache gate remains closed. Current-epoch fixtures do not prove
-complete offline group-attachment delivery.
+`1bea3e0` implements the bounded native codec using the actual HPKE provider and
+existing key-manager operation leases. `21403e4` adds gated authenticated server
+storage/discovery/publication and per-device receipts. Native-to-managed-cache
+restart-to-native decryption succeeds with no group key, including same-account
+devices and a newer roster epoch. Quota/concurrency, revocation/rejoin, retired-key
+retry, corruption and expiry tests pass. Existing PCGE/key-handoff checks remain
+unchanged. The production cache gate remains closed; these component tests do not
+establish complete packaged-client offline group delivery.
+
+See TRANSFER_CACHE_INTEGRATION_MANIFEST.md for the inspected parallel Android
+branch, shared-file inventory, protocol domains, compatibility and application
+interface dependencies. The per-device envelope must not be substituted for a
+canonical PCGE history wire. No conflicting group/JNI API has been introduced.
 
 ### Current validation and handoff
 
@@ -460,8 +469,8 @@ mailbox rejection; it proves the tested transfer path, not Android mailbox repai
 The private group-body tests pass using both CNG and portable crypto, including
 the missing-key and stale-epoch rejection cases above.
 
-The full cache runtime/security/crash suite previously passed after `10be929`;
-these Windows source changes do not alter its server runtime. Isolated pinned-TLS
+The full cache runtime/security/crash suite passes with the attachment-key table
+and admission checks. Isolated pinned-TLS
 tests completed a source-offline 3-MiB ciphertext download after real source
 logout. Timed upload tails of 3,081,748 bytes took approximately 1.10–1.23 seconds
 (about 20–22 Mbps) on one host through pinned TLS, JSON and durable SQLite writes.
