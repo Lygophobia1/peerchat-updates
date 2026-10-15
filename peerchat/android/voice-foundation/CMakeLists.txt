@@ -1,0 +1,31 @@
+cmake_minimum_required(VERSION 3.22)
+project(PeerChatAndroidVoiceFoundation LANGUAGES C CXX)
+if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR "This foundation proof requires Android ARM64")
+endif()
+if(NOT PEERCHAT_OPUS_SOURCE)
+    message(FATAL_ERROR "Provide the existing pinned Opus source; no download is performed")
+endif()
+execute_process(COMMAND git -c "safe.directory=${PEERCHAT_OPUS_SOURCE}" -C "${PEERCHAT_OPUS_SOURCE}" rev-parse HEAD
+    OUTPUT_VARIABLE revision OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE status)
+if(NOT status EQUAL 0 OR NOT revision STREQUAL "ddbe48383984d56acd9e1ab6a090c54ca6b735a6")
+    message(FATAL_ERROR "Opus source revision does not match PeerChat's existing pin")
+endif()
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory("${PEERCHAT_OPUS_SOURCE}" opus EXCLUDE_FROM_ALL)
+# Compile the existing device-free 16 kHz/20 ms voice codec regression for the
+# Android native runtime. This is a standalone ELF, never a call or APK
+# feature. It has no microphone, signaling, network, identity or profile access.
+add_executable(peerchat_android_opus_probe ../../tests/opus_voice_test.cpp)
+target_compile_features(peerchat_android_opus_probe PRIVATE cxx_std_17)
+target_compile_options(peerchat_android_opus_probe PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(peerchat_android_opus_probe PRIVATE opus)
+# Existing Windows headers use the installed <opus/opus.h> include layout.
+foreach(header opus.h opus_types.h opus_defines.h)
+    configure_file("${PEERCHAT_OPUS_SOURCE}/include/${header}" "include/opus/${header}" COPYONLY)
+endforeach()
+target_include_directories(peerchat_android_opus_probe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/include")
