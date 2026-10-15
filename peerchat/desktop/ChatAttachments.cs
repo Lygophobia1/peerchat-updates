@@ -207,7 +207,7 @@ public partial class DesktopApplication {
             }
             if(action.Action=="settings"){ShowTransferSettings(row.id);return;}
             if(action.Action=="cancel"){await FileOperation(3,"",row.id,"");return;}
-            if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Download to folder (unique ID filename)",OverwritePrompt=false};if(choose.ShowDialog(window)==true)await FileOperation(2,"",row.id,Path.GetDirectoryName(choose.FileName));return;}
+            if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Choose folder; original filename is kept",OverwritePrompt=false};if(choose.ShowDialog(window)==true)await FileOperation(2,"",row.id,Path.GetDirectoryName(choose.FileName));return;}
             if(action.Action=="folder"){try{System.Diagnostics.Process.Start("explorer.exe","/select,\""+row.path+"\"");}catch{}return;}
             if(action.Action=="save"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Save an attachment copy",OverwritePrompt=false};if(choose.ShowDialog(window)==true){if(!attachmentCopies.Wait(0)){Notify("Two file copies are already running; try again.");return;}string destination=choose.FileName;try{await Task.Run(()=>{if(row.protectedSource){core.FileTransfer(10,"",row.id,destination);return;}using(var input=new FileStream(row.path,FileMode.Open,FileAccess.Read,FileShare.Read))using(var output=new FileStream(destination,FileMode.CreateNew,FileAccess.Write,FileShare.None)){input.CopyTo(output,32768);output.Flush(true);}});}catch(Exception error){Notify("Copy failed: "+error.Message);}finally{attachmentCopies.Release();}}}
         }));

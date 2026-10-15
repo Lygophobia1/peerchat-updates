@@ -170,7 +170,7 @@ class FileSink final:public Sink {
     bool durable_=false;
     Blob token_;
 public:
-    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr,bool durable=false):durable_(durable){
+    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr,bool durable=false,bool originalName=false):durable_(durable){
         require(protocol::id(metadata.id,32)&&safeName(metadata.name));
         // Hold the destination directory without delete sharing. Reject junctions
         // and symlinks; never derive a destination directory from remote metadata.
@@ -181,14 +181,28 @@ public:
         // Unique names prevent collisions with existing files and two equal
         // remote basenames. Never use MOVEFILE_REPLACE_EXISTING.
         auto base=std::filesystem::path(directory);
-        final_=(base/(unicode::decode(metadata.id)+L"-"+unicode::decode(metadata.name))).wstring();
+        if(originalName){
+            // The transfer ID owns an exclusive child directory. Its file keeps
+            // the sender's exact basename without colliding with another offer.
+            base/=unicode::decode(metadata.id)+L".peerchat-received";
+            if(!CreateDirectoryW(base.c_str(),nullptr)){CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw std::runtime_error("Receive directory already exists");}
+            HANDLE child=CreateFileW(base.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+            BY_HANDLE_FILE_INFORMATION childInfo{};
+            if(child==INVALID_HANDLE_VALUE||!GetFileInformationByHandle(child,&childInfo)||!(childInfo.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||(childInfo.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){
+                if(child!=INVALID_HANDLE_VALUE)CloseHandle(child);
+                CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;
+                RemoveDirectoryW(base.c_str());throw std::runtime_error("Unsafe receive directory");
+            }
+            CloseHandle(directory_);directory_=child;
+        }
+        final_=(base/(originalName?unicode::decode(metadata.name):unicode::decode(metadata.id)+L"-"+unicode::decode(metadata.name))).wstring();
         partial_=(base/(unicode::decode(metadata.id)+L".peerchat-part")).wstring();
         handle_=CreateFileW(partial_.c_str(),GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-        if(handle_==INVALID_HANDLE_VALUE){if(!journal_.empty())DeleteFileW(journal_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw std::runtime_error("Cannot create partial file");}
+        if(handle_==INVALID_HANDLE_VALUE){if(!journal_.empty())DeleteFileW(journal_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;if(originalName)RemoveDirectoryW(base.c_str());throw std::runtime_error("Cannot create partial file");}
         try{if(journal)journal_=journal->record(metadata.id,partial_,handle_);
             protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(partial_).wstring());token.text(std::filesystem::absolute(final_).wstring());fileIdentity(token,handle_,false);token_=std::move(token.data);
         }
-        catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;DeleteFileW(partial_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw;}
+        catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;DeleteFileW(partial_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;if(originalName)RemoveDirectoryW(base.c_str());throw;}
     }
     ~FileSink(){
         if(handle_!=INVALID_HANDLE_VALUE)CloseHandle(handle_);
@@ -215,8 +229,10 @@ public:
         require(!immutableComplete||d.done==d.metadata.size);
         protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto partial=r.text(),final=r.text();
         auto p=std::filesystem::path(partial),f=std::filesystem::path(final);
-        require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part"&&
-            f.filename()==unicode::decode(d.metadata.id+"-"+d.metadata.name));
+        require(protocol::id(d.metadata.id,32)&&safeName(d.metadata.name));
+        bool legacy=f.filename()==unicode::decode(d.metadata.id+"-"+d.metadata.name);
+        bool original=p.parent_path().filename()==unicode::decode(d.metadata.id)+L".peerchat-received"&&f.filename()==unicode::decode(d.metadata.name);
+        require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part"&&(legacy||original));
         auto sink=std::unique_ptr<FileSink>(new FileSink());
         sink->durable_=true;sink->partial_=partial;sink->final_=final;sink->token_=d.location;
         sink->directory_=CreateFileW(p.parent_path().c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
