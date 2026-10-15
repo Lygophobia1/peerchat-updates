@@ -1807,8 +1807,9 @@ std::wstring Node::fileTransfer(unsigned operation,const std::string& peer,const
     response.reset();return result.get(); // Local bounded operation; desktop calls off its dispatcher.
 }
 std::wstring Node::groupAttachment(unsigned operation,const std::string& group,const std::string& id,const std::wstring& path){
-    protocol::check(operation<=7&&(group.empty()?operation==0:protocol::id(group,32)));
+    protocol::check(operation<=8&&(group.empty()?operation==0:protocol::id(group,32)));
     if(operation==7)protocol::check(transfer::safeName(id)&&path.size()<=((16*1024*1024+2)/3)*4);
+    else if(operation==8)protocol::check(id.size()<=19&&std::all_of(id.begin(),id.end(),[](char c){return c>='0'&&c<='9';})&&path.empty());
     else protocol::check((id.empty()||protocol::id(id,32))&&path.size()<=32768);
     auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();
     Impl::Command c{};c.action=Impl::Action::GroupAttachment;c.sourceKind=operation;c.group=group;c.id=id;c.text=path;c.response=response;
