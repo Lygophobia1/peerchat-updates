@@ -33,7 +33,13 @@ sealed partial class AccountDatabase {
 }
 internal sealed partial class AttachmentCacheRuntime {
  internal sealed class KeyEnvelope {internal string Id,Device,Digest;internal byte[] Wire;}
- void InitializeKeyEnvelopes(){Execute("CREATE TABLE IF NOT EXISTS attachment_key_envelopes(object_id TEXT NOT NULL REFERENCES objects(id),device TEXT NOT NULL,key_id TEXT NOT NULL,generation INTEGER NOT NULL,wire BLOB NOT NULL,digest TEXT NOT NULL,acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0,1)),PRIMARY KEY(object_id,device));CREATE INDEX IF NOT EXISTS attachment_keys_pending ON attachment_key_envelopes(device,object_id);");}
+ void InitializeKeyEnvelopes(){
+  Execute("CREATE TABLE IF NOT EXISTS attachment_key_envelopes(object_id TEXT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,device TEXT NOT NULL,key_id TEXT NOT NULL,generation INTEGER NOT NULL,wire BLOB NOT NULL,digest TEXT NOT NULL,acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0,1)),PRIMARY KEY(object_id,device));");
+  var foreign=Rows("PRAGMA foreign_key_list(attachment_key_envelopes)",8,8);Require(foreign.Count==1&&foreign[0][2]=="objects"&&foreign[0][3]=="object_id"&&foreign[0][4]=="id"&&foreign[0][6]=="CASCADE","cache_key_schema_review_required");
+  // Never rebuild an existing incompatible pre-release table. Validate before
+  // lease cleanup/ledger mutation or adding its index.
+  Execute("CREATE INDEX IF NOT EXISTS attachment_keys_pending ON attachment_key_envelopes(device,object_id);");
+ }
  void ReconcileKeyEnvelopes(){Require(Scalar("SELECT count(*) FROM attachment_key_envelopes k WHERE length(k.wire)>8192 OR length(k.wire)<128 OR length(k.digest)<>64 OR k.acked NOT IN (0,1) OR NOT EXISTS(SELECT 1 FROM recipients r WHERE r.object_id=k.object_id AND r.device=k.device)")==0,"cache_key_index_invalid");}
  internal List<CacheRecipient> OriginalRecipients(string id){lock(gate){Check();Descriptor(id);return Rows("SELECT account,device,membership FROM recipients WHERE object_id="+Quote(id)+" ORDER BY device LIMIT 64",64,3).Select(row=>new CacheRecipient(Number(row[0]),row[1],row[2])).ToList();}}
  internal bool ExistingKey(string id,string device,byte[] wire){lock(gate){Check();Descriptor(id);var prior=Binary("SELECT wire FROM attachment_key_envelopes WHERE object_id="+Quote(id)+" AND device="+Quote(device));if(prior==null)return false;Require(prior.SequenceEqual(wire),"cache_conflicting_key_envelope");return true;}}

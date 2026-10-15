@@ -329,7 +329,7 @@ partial class AttachmentCacheRuntimeTest {
  static long CacheSql(string path,string mutation,string query){
   Check(Path.IsPathRooted(path)&&Path.GetFileName(path)=="cache.sqlite","Isolated owned cache path required");IntPtr db=IntPtr.Zero,statement=IntPtr.Zero;
   try{Check(Sqlite.sqlite3_open16(path,out db)==0,"Fixture cache open");Check(SqliteNative.prepare(db,"PRAGMA application_id",out statement)==0&&SqliteNative.step(statement)==100&&SqliteNative.columnLong(statement,0)==1346585409,"Fixture database is not a cache");SqliteNative.finalize(statement);statement=IntPtr.Zero;
-   if(mutation!=null){IntPtr error;int result=Sqlite.sqlite3_exec(db,mutation,IntPtr.Zero,IntPtr.Zero,out error);if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error);Check(result==0,"Fixture cache mutation failed");}
+   if(mutation!=null){IntPtr error;int result=Sqlite.sqlite3_exec(db,mutation,IntPtr.Zero,IntPtr.Zero,out error);if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error);Check(result==0,"Fixture cache mutation failed (SQLite "+result+")");}
    Check(SqliteNative.prepare(db,query,out statement)==0&&SqliteNative.step(statement)==100,"Fixture cache query failed");return SqliteNative.columnLong(statement,0);
   }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);if(db!=IntPtr.Zero)Sqlite.sqlite3_close(db);}
  }
