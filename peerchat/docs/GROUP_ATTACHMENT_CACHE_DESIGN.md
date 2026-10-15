@@ -457,6 +457,13 @@ branch, shared-file inventory, protocol domains, compatibility and application
 interface dependencies. The per-device envelope must not be substituted for a
 canonical PCGE history wire. No conflicting group/JNI API has been introduced.
 
+`5a4c2d8` retains exact prepared packets in profile/server-bound protected files
+before RPC publication. Fresh-process recovery succeeds with HPKE disabled,
+proving reuse rather than accidental reencryption. Key rotation preserves the
+prior packet; modified drafts, copied/corrupt files and revoked/rejoined scope
+fail without replacement. Storage has one owner and a finite preparation bound.
+Verified cleanup and the production application bridge remain gates.
+
 ### Current validation and handoff
 
 Validated checkpoints include `446ab48` for bounded encryption preparation and

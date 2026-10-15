@@ -93,19 +93,32 @@ or marks a message delivered. Retirement allows an exact existing envelope to
 remain readable with its retained key; explicit revocation rejects it. Rejoin,
 new membership and key substitution do not regain older attachments.
 
+Key metadata follows its cache parent through `ON DELETE CASCADE`, including when
+older maintenance SQL deletes an already-expired/unleased object without knowing
+the new child table. This does not enable an older server's cache RPC support.
+An existing pre-release table without the required ownership relationship is
+rejected before lease/ledger cleanup, not automatically dropped or rebuilt.
+Production rollback still requires the cache disabled on an incompatible binary;
+never replace newer persistent data with an older backup merely to start it.
+
 Recipient-binding discovery and envelope RPCs use canonical base64url. A binding
 is public signed key metadata, not a registration or group-approval operation.
 
 ## Compatibility and package requirements
 
-The next independent Windows adapter is protected preparation of an exact signed
-key envelope before its first RPC publication. It will use the existing file and
-record-protection adapters, reuse the attachment codec, and own no transfer,
-retry, session or group-message history. A profile/server-bound preparation file
-will retain identical ciphertext across restart; changed drafts, corrupt storage
-or revoked authority must not silently generate a replacement. This adapter
-requires no core C export/JNI or Android group interface change. Any later
-application/history bridge remains subject to the dependency checks above.
+`5a4c2d8` adds `windows_group_attachment_keys.hpp`, a private Windows adapter for
+protected preparation of an exact signed envelope before its first publication.
+It reuses existing file/record protection and the attachment codec, and owns no
+transfer, retry, session or group-message history. Profile/server-bound files
+retain identical ciphertext across actual process restart, even when all HPKE
+operations are disabled for the recovery test. Key rotation does not silently
+replace an already prepared packet. Changed drafts, corrupt data, wrong-profile
+copies and revoked/rejoined authority fail without overwriting saved files.
+Its single file owner serializes preparation and its finite record limit bounds
+storage, including abandoned partials. Verified expiration cleanup remains a
+client-integration gate; reaching the bound must reject rather than fill disk.
+This adapter requires no core C export/JNI or Android group interface change.
+Any later application/history bridge remains subject to the checks above.
 
 Existing PCGE, DM/mailbox, archive and file-transfer wire formats are unchanged.
 No numeric peer-message type, existing C export or JNI signature is changed.
@@ -150,6 +163,9 @@ allocated yet, and no live Pi installation is authorized by this manifest.
 - `1bea3e0`: attachment-only native HPKE codec and actual provider/registry tests.
 - `21403e4`: original/current group admission, immutable key-envelope persistence,
   quota/revocation/restart tests and pinned-TLS cache RPC integration.
+- `3c4068e`: explicit canonical base64url discovery and actual TLS decode check.
+- `5a4c2d8`: protected exact packet preparation, fresh-process recovery without
+  crypto, key-rotation stability, single file owner and bounded storage.
 
 Current evidence includes actual shipping HPKE/CNG and protected-registry tests, native to managed
 durable-cache to native decryption, authoritative key lookup/publication,
