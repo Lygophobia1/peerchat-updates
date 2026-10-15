@@ -48,7 +48,7 @@ public:
   protocol::check(protocol::id(id,32));validate(target,approval);if(!entries_.count(id)){room();auto archived=decode(root_/(id+".protected"));if(!archived.empty()){protocol::check(archived.size()==1&&archived.count(id));entries_.emplace(id,std::move(archived.begin()->second));}}auto& row=entries_[id];protocol::check(row.state.empty()||row.state=="failed"||row.state=="complete");
   // A failed durable export must be resumed on its original target first;
   // changing paths cannot silently orphan its owned partial/backup.
-  if(!row.exportToken.empty()&&row.target==target&&row.approval==approval&&row.state!="complete"){} // Resume only exactly the previously confirmed operation.
+  if(!row.exportToken.empty()&&row.target==target&&row.state!="complete"&&(row.approval==approval||group_attachments::windows::publishedExportMatches(row.target,row.operation,row.approval,row.exportToken))){} // Resume the original operation; never substitute a new overwrite approval.
   else{if(!row.exportToken.empty()&&!row.cleaned){auto backup=std::filesystem::path(row.target).parent_path()/unicode::decode(row.operation+".peerchat-replaced");protocol::check(GetFileAttributesW(backup.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);clearActive();group_attachments::windows::cancelPendingExport(row.target,row.operation,row.approval,row.exportToken);}row.target=target;row.approval=approval;row.operation=Storage::newMessageId();row.exportToken.clear();}
   if(record){row.metadata=record->metadata;row.sourceLocation=record->location;row.sourceToken=sourceToken;}
   row.state="pending";row.cleaned=false;row.error.clear();save();clearActive();

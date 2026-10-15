@@ -60,6 +60,17 @@ inline void checkApproval(const Blob& approval,const std::wstring& target,HANDLE
 }
 inline Blob captureOverwriteTarget(const std::wstring& target){auto path=std::filesystem::path(target);protocol::check(path.is_absolute()&&path==path.lexically_normal()&&transfer::safeName(unicode::encode(path.filename().wstring())));output_detail::Directories held(path.parent_path());HANDLE file=CreateFileW(target.c_str(),GENERIC_READ|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);transfer::windows::require(file!=INVALID_HANDLE_VALUE);try{protocol::Writer writer(protocol::FileTransfer);writer.string("PeerChat/ExportOverwriteApproval/v1");writer.text(target);output_detail::identity(writer,file);CloseHandle(file);return std::move(writer.data);}catch(...){CloseHandle(file);throw;}}
 
+// Read-only evidence for cleanup of an ALREADY published replacement. This is
+// not overwrite authorization: both the new inode and old approved backup must
+// match, and OutputExport must rehash the published file before backup cleanup.
+inline bool publishedExportMatches(const std::wstring& target,const std::string& id,const Blob& approval,const Blob& token){
+ HANDLE current=INVALID_HANDLE_VALUE,old=INVALID_HANDLE_VALUE;
+ try{protocol::check(protocol::id(id,32)&&!approval.empty());auto parent=std::filesystem::path(target).parent_path();output_detail::Directories held(parent);auto part=(parent/unicode::decode(id+".peerchat-export-part")).wstring();auto backup=(parent/unicode::decode(id+".peerchat-replaced")).wstring();protocol::Reader r(token);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/OutputExport/v1"&&r.text()==part&&r.text()==target&&r.string()==id);auto volume=r.number(),high=r.number(),low=r.number();protocol::check(r.bytes()==approval);auto length=r.number();protocol::check(r.bytes().size()==32);r.end();protocol::check(GetFileAttributesW(part.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);
+  current=CreateFileW(target.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);transfer::windows::require(current!=INVALID_HANDLE_VALUE);protocol::Writer identity(protocol::FileTransfer);output_detail::identity(identity,current);protocol::Reader actual(identity.data);protocol::check(actual.number()==volume&&actual.number()==high&&actual.number()==low&&actual.number()==length);
+  old=CreateFileW(backup.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);transfer::windows::require(old!=INVALID_HANDLE_VALUE);output_detail::checkApproval(approval,target,old);CloseHandle(old);CloseHandle(current);return true;
+ }catch(...){if(old!=INVALID_HANDLE_VALUE)CloseHandle(old);if(current!=INVALID_HANDLE_VALUE)CloseHandle(current);return false;}
+}
+
 // A local bounded copy, not a transfer owner. The selected exact destination is
 // never replaced. A held verified input and second copy hash gate publication.
 class OutputExport {

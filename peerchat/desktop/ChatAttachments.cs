@@ -29,6 +29,11 @@ public static class ChatAttachmentProjection {
     public static string Status(CoreAdapter.FileTransferData row){
         string[] states={"Preparing / hashing","Waiting for recipient / route","Incoming attachment — Download to accept",row.sending?"Sending":"Receiving","Complete — SHA-256 verified","Canceled","Failed","Revalidating retained file","Paused — retained for restart","Archive metadata — file not local"};
         string label=row.state>=0&&row.state<states.Length?states[row.state]:"Unavailable";
+        if(row.state==4&&!row.sending){
+            if(row.saveState=="complete")label="Saved — SHA-256 verified";
+            else if(row.saveState=="pending"||row.saveState=="copying")label="Download verified — saving";
+            else label="Download verified — save needs attention";
+        }
         if(row.state==3&&row.size>0)label+=" · "+Math.Min(100,Math.Max(0,100.0*row.done/row.size)).ToString("0")+"%";
         return label;
     }

@@ -154,7 +154,7 @@ private:
  void selectExport(Job& j,const std::wstring& path,Blob approval={}){
   auto selected=std::filesystem::path(path);protocol::check(selected.is_absolute()&&selected==selected.lexically_normal()&&transfer::safeName(unicode::encode(selected.filename().wstring())));
   output_detail::Directories hold(selected.parent_path());if(!j.exportError.empty()&&j.error==j.exportError)j.error.clear();
-  if(!j.exportToken.empty()&&j.exportState!="complete"&&j.exportDestination==path&&j.exportApproval==approval){j.exportJob.reset();j.exportState="pending";j.exportError.clear();j.outputRequested=j.verified||j.sending;return;}
+  if(!j.exportToken.empty()&&j.exportState!="complete"&&j.exportDestination==path&&(j.exportApproval==approval||publishedExportMatches(j.exportDestination,j.exportId,j.exportApproval,j.exportToken))){j.exportJob.reset();j.exportState="pending";j.exportError.clear();j.outputRequested=j.verified||j.sending;return;}
   if(!j.exportToken.empty()&&!j.exportCleaned){auto backup=std::filesystem::path(j.exportDestination).parent_path()/unicode::decode(j.exportId+".peerchat-replaced");protocol::check(GetFileAttributesW(backup.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);j.exportJob.reset();cancelPendingExport(j.exportDestination,j.exportId,j.exportApproval,j.exportToken);}
   if(approval.empty()){auto attributes=GetFileAttributesW(path.c_str());protocol::check(attributes==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);}
   // Only local protected job state contains this choice. Authenticated metadata
