@@ -45,7 +45,7 @@ internal sealed class AttachmentCacheRequests {
     case "cache_publish":admission.Publish(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",87720),GroupCiphertextFanout.MaxEnvelope));break;
     case "cache_announcement":reply["announcement"]=Announcement(admission.Announcement(account,device,current,Id(request,"id")));break;
     case "cache_announcement_ack":reply["newAnnouncementReceipt"]=admission.AcknowledgeAnnouncement(account,device,current,Id(request,"id"),Text(request,"digest",64));break;
-    case "cache_recipient_keys":reply["recipients"]=admission.RecipientKeys(account,device,current,Id(request,"id"));break;
+    case "cache_recipient_keys":reply["recipients"]=admission.RecipientKeys(account,device,current,Id(request,"id"));reply["dataEncoding"]="base64url";break;
     case "cache_publish_key":reply["newKeyEnvelope"]=admission.PublishKey(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",10923),AttachmentKeyEnvelope.MaximumWire));break;
     case "cache_key":reply["keyEnvelope"]=Key(admission.Key(account,device,current,Id(request,"id")));break;
     case "cache_key_ack":reply["newKeyReceipt"]=admission.AcknowledgeKey(account,device,current,Id(request,"id"),Text(request,"digest",64));break;
