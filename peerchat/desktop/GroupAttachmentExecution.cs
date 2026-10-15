@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using System.Windows;
 
 namespace PeerChatDesktop {
 public sealed partial class CoreAdapter {
@@ -81,6 +82,81 @@ internal sealed class GroupAttachmentExecution {
     }
 }
 public partial class DesktopApplication {
+    DiscoveryClient groupAttachmentDeviceClient;
+    Task<DiscoveryClient> groupAttachmentDeviceTask;
+    Task groupAttachmentDeviceDrain=Task.FromResult(0);
+    long groupAttachmentDeviceLifetime;
+    bool groupAttachmentDeviceAttempted;
+    string groupAttachmentDeviceError="";
+    string groupAttachmentCapabilityDiagnostic="\ngroup_attachment_capability=not_observed";
+    void RecordAttachmentCapability(CoreAdapter.GroupAttachmentSnapshot value){
+        Func<string,string> safe=text=>text!=null&&text.Length<=64&&text.All(ch=>Char.IsLetterOrDigit(ch)||ch=='_')?text:"unavailable";
+        groupAttachmentCapabilityDiagnostic="\ngroup_attachment_capability_stage="+safe(value.capabilityStage)+"\ngroup_attachment_capability_code="+safe(value.capabilityCode)+"\ngroup_attachment_capability_generation="+value.capabilityGeneration+"\ngroup_attachment_capability_ready="+value.supported;
+    }
+    bool HasSavedAttachmentSession(DiscoveryClient owner){try{return AttachmentDeviceSession.HasCredential(owner,owner.AccountId,model.OwnId,directory);}catch(Exception error){groupAttachmentDeviceError=AttachmentDeviceSession.SafeFailure(error);return false;}}
+    bool AttachmentOwnerCurrent(DiscoveryClient owner,ulong profile,ulong session,string token,string device){return !closing&&discovery==owner&&profileSessionGeneration==profile&&discoverySessionGeneration==session&&owner.AccountId==mailboxContextAccount&&owner.SessionToken==token&&model.OwnId==device;}
+    async Task<bool> VerifyAttachmentDevice(bool allowEnrollment){
+        var owner=discovery;var profile=profileSessionGeneration;var session=discoverySessionGeneration;long lifetime=System.Threading.Interlocked.Read(ref groupAttachmentDeviceLifetime);string device=model.OwnId,token=owner==null?"":owner.SessionToken;
+        if(owner==null||owner.AccountId<=0||owner.AccountId!=mailboxContextAccount||String.IsNullOrEmpty(device)||String.IsNullOrEmpty(token))return false;
+        if(groupAttachmentDeviceClient!=null)return true;
+        if(groupAttachmentDeviceTask==null){
+            groupAttachmentDeviceAttempted=true;groupAttachmentDeviceError="";
+            groupAttachmentDeviceTask=Task.Run(()=>AttachmentDeviceSession.Open(owner,core,owner.AccountId,device,directory,allowEnrollment,()=>System.Threading.Interlocked.Read(ref groupAttachmentDeviceLifetime)==lifetime&&AttachmentOwnerCurrent(owner,profile,session,token,device)));
+        }
+        var pending=groupAttachmentDeviceTask;
+        try{
+            var verified=await pending;
+            if(!AttachmentOwnerCurrent(owner,profile,session,token,device)||groupAttachmentDeviceTask!=pending){if(groupAttachmentDeviceClient!=verified)verified.CloseRpc();return false;}
+            if(groupAttachmentDeviceClient==null){groupAttachmentDeviceClient=verified;groupAttachmentNetworkNext=DateTime.MinValue;
+                // A capability rejection belongs to the old session. Reset only
+                // this native cache route; normal messaging remains untouched.
+                if(groupAttachmentExecution!=null)groupAttachmentExecution.Stop();groupAttachmentExecution=null;
+                core.GroupAttachmentNetwork(0,AttachmentNetworkCodec.Session((ulong)owner.AccountId,++groupAttachmentNetworkGeneration,owner.CertificateSha256.ToLowerInvariant()));
+            }
+            return true;
+        }catch(Exception error){
+            if(AttachmentOwnerCurrent(owner,profile,session,token,device)&&groupAttachmentDeviceTask==pending){groupAttachmentDeviceTask=null;groupAttachmentDeviceError=AttachmentDeviceSession.SafeFailure(error);groupAttachmentState=new GroupAttachmentSnapshotState{Profile=profile,Owner=owner,Reason=groupAttachmentDeviceError};}
+            return false;
+        }
+    }
+    async Task<bool> EnsureGroupAttachmentReady(){
+        var owner=discovery;var profile=profileSessionGeneration;var session=discoverySessionGeneration;string token=owner==null?"":owner.SessionToken,device=model.OwnId;
+        if(owner==null||owner.AccountId<=0||owner.AccountId!=mailboxContextAccount){Notify("Wait for authenticated account and device information, then retry Attach.");return false;}
+        PumpGroupAttachmentNetwork();
+        bool existing=HasSavedAttachmentSession(owner);
+        if(!existing&&groupAttachmentDeviceClient==null&&groupAttachmentDeviceTask==null){
+            // Never replace an already device-bound main credential. Only the
+            // server's explicit device-session rejection permits enrollment.
+            var probe=System.Diagnostics.Stopwatch.StartNew();bool verificationRequired=false;
+            while(probe.ElapsedMilliseconds<5000&&AttachmentOwnerCurrent(owner,profile,session,token,device)){
+                PumpGroupAttachmentNetwork();var status=await Task.Run(()=>core.GroupAttachments(""));
+                if(!AttachmentOwnerCurrent(owner,profile,session,token,device))return false;
+                RecordAttachmentCapability(status);
+                groupAttachmentState=new GroupAttachmentSnapshotState{Supported=status.supported,Profile=profile,Owner=owner,Reason=status.reason};
+                if(status.supported)return true;
+                if(status.capabilityCode=="cache_device_session_required"){verificationRequired=true;break;}
+                if(status.capabilityStage=="rejected"||status.capabilityStage=="invalid_response"||status.capabilityStage=="network_unavailable")return false;
+                await Task.Delay(100);
+            }
+            if(!verificationRequired)return false;
+        }
+        if(groupAttachmentDeviceClient==null){
+            if(!existing&&groupAttachmentDeviceTask==null&&MessageBox.Show(window,"Verify this Windows device for encrypted group attachments using its existing identity? This registers a remembered credential for this device and may replace an older remembered sign-in for the same device. Messages, keys, grants and other device identities are unchanged.","Verify device",MessageBoxButton.OKCancel,MessageBoxImage.Information)!=MessageBoxResult.OK){groupAttachmentDeviceError="Device verification canceled. Your draft and existing data are unchanged; retry Attach when ready.";return false;}
+            if(!await VerifyAttachmentDevice(!existing))return false;
+        }
+        var wait=System.Diagnostics.Stopwatch.StartNew();
+        while(wait.ElapsedMilliseconds<5000&&AttachmentOwnerCurrent(owner,profile,session,token,device)){
+            PumpGroupAttachmentNetwork();
+            var snapshot=await Task.Run(()=>core.GroupAttachments(""));
+            if(!AttachmentOwnerCurrent(owner,profile,session,token,device))return false;
+            RecordAttachmentCapability(snapshot);
+            groupAttachmentState=new GroupAttachmentSnapshotState{Supported=snapshot.supported,Profile=profile,Owner=owner,Reason=snapshot.reason};
+            if(snapshot.supported)return true;
+            if(snapshot.capabilityStage=="rejected"||snapshot.capabilityStage=="device_verification_required")return false;
+            await Task.Delay(100);
+        }
+        return false;
+    }
     GroupAttachmentExecution groupAttachmentExecution;
     Task groupAttachmentNetworkTask=Task.FromResult(0);
     DiscoveryClient groupAttachmentNetworkOwner;
@@ -89,8 +165,13 @@ public partial class DesktopApplication {
     long groupAttachmentNetworkAccount;
     DateTime groupAttachmentNetworkNext=DateTime.MinValue;
     void StopGroupAttachmentNetwork(){
+        System.Threading.Interlocked.Increment(ref groupAttachmentDeviceLifetime);
+        groupAttachmentCapabilityDiagnostic="\ngroup_attachment_capability=retired";
         if(groupAttachmentExecution!=null)groupAttachmentExecution.Stop();
         groupAttachmentExecution=null;groupAttachmentNetworkOwner=null;groupAttachmentNetworkToken="";groupAttachmentNetworkAccount=0;
+        var cache=groupAttachmentDeviceClient;var pending=groupAttachmentDeviceTask;groupAttachmentDeviceClient=null;groupAttachmentDeviceTask=null;groupAttachmentDeviceAttempted=false;groupAttachmentDeviceError="";
+        if(pending!=null)groupAttachmentDeviceDrain=Task.WhenAll(groupAttachmentDeviceDrain,pending.ContinueWith(task=>{if(task.IsFaulted){var observed=task.Exception;}else if(task.Status==TaskStatus.RanToCompletion)task.Result.CloseRpc();}));
+        if(cache!=null)Task.Run(()=>cache.CloseRpc());
         try{core.GroupAttachmentNetwork(0,AttachmentNetworkCodec.Session(0,++groupAttachmentNetworkGeneration,""));}catch(EntryPointNotFoundException){}catch(ObjectDisposedException){}catch(InvalidOperationException){}
     }
     void PumpGroupAttachmentNetwork(){
@@ -98,8 +179,11 @@ public partial class DesktopApplication {
         var owner=discovery;
         bool ready=owner!=null&&owner.AccountId>0&&owner.AccountId==mailboxContextAccount&&!String.IsNullOrEmpty(owner.SessionToken)&&!String.IsNullOrEmpty(model.OwnId)&&owner.CertificateSha256!=null&&owner.CertificateSha256.Length==64;
         bool changed=!ready||owner!=groupAttachmentNetworkOwner||groupAttachmentNetworkProfile!=profileSessionGeneration||groupAttachmentNetworkSession!=discoverySessionGeneration||groupAttachmentNetworkAccount!=owner.AccountId||groupAttachmentNetworkToken!=owner.SessionToken||groupAttachmentNetworkServer!=owner.CertificateSha256.ToLowerInvariant()||groupAttachmentNetworkPeer!=model.OwnId;
-        if(changed&&groupAttachmentExecution!=null)StopGroupAttachmentNetwork();
+        if(changed&&(groupAttachmentExecution!=null||groupAttachmentDeviceClient!=null||groupAttachmentDeviceTask!=null))StopGroupAttachmentNetwork();
         if(!ready||!groupAttachmentNetworkTask.IsCompleted||DateTime.UtcNow<groupAttachmentNetworkNext)return;
+        if(groupAttachmentDeviceClient==null&&!groupAttachmentDeviceAttempted&&HasSavedAttachmentSession(owner)){
+            var ignored=VerifyAttachmentDevice(false);
+        }
         if(groupAttachmentExecution==null){
             try{
                 var generation=++groupAttachmentNetworkGeneration;
@@ -109,12 +193,15 @@ public partial class DesktopApplication {
             }catch{groupAttachmentNetworkNext=DateTime.UtcNow.AddSeconds(1);return;}
         }
         if(DateTime.UtcNow<groupAttachmentNetworkNext)return;
-        var execution=groupAttachmentExecution;string device=model.OwnId,token=groupAttachmentNetworkToken,certificate=groupAttachmentNetworkServer;long account=groupAttachmentNetworkAccount;ulong profile=profileSessionGeneration,session=discoverySessionGeneration;
+        if(groupAttachmentDeviceClient!=null&&!groupAttachmentDeviceClient.MatchesAttachmentDeviceSession(groupAttachmentNetworkAccount,model.OwnId)){
+            groupAttachmentDeviceError="Attachment device-session binding changed. Reconnect this profile before retrying.";return;
+        }
+        var execution=groupAttachmentExecution;var cacheOwner=groupAttachmentDeviceClient??owner;string device=model.OwnId,token=cacheOwner.SessionToken,certificate=groupAttachmentNetworkServer;long account=groupAttachmentNetworkAccount;ulong profile=profileSessionGeneration,session=discoverySessionGeneration;
         groupAttachmentNetworkNext=DateTime.UtcNow.AddSeconds(1);
         groupAttachmentNetworkTask=Task.Run(()=>{
             var budget=System.Diagnostics.Stopwatch.StartNew();bool active=false;
             for(int count=0;count<16;count++){
-                active=execution.Service(payload=>owner.AttachmentCache(device,payload,account,token,certificate));
+                active=execution.Service(payload=>cacheOwner.AttachmentCache(device,payload,account,token,certificate));
                 if(!active||budget.ElapsedMilliseconds>=20)break;
             }
             return active;

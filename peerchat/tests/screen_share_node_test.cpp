@@ -262,7 +262,9 @@ int main(){
             wait([&]{return relayPaired&&connected[0]&&connected[1]&&relayAttempts[0]!=previous[0]&&relayAttempts[1]!=previous[1];},"active file did not reestablish a fresh authenticated relay",30);
         }
         wait([&]{return nodes[0].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&nodes[1].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"media-stop concurrent file did not complete",60);
-        std::ifstream received(fileDestination/(fileId+L"-concurrent-media.bin"),std::ios::binary);
+        auto receivedPath=fileDestination/(fileId+L".peerchat-received")/L"concurrent-media.bin";
+        require(receivedPath.filename()==fileSource.filename(),"received original filename changed");
+        std::ifstream received(receivedPath,std::ios::binary);
         Blob actual(std::istreambuf_iterator<char>(received),{});
         require(actual==fileBytes&&connected[0]&&connected[1]&&(relayFixture||reliableDisconnects==disconnectsBeforeStop),"media stop invalidated reliable transport or corrupted active file");
         std::cout<<"PASS: 10 MiB durable verified transfer across actual screen-media stop and local mailbox rejection; "<<(relayFixture?"fresh opaque relay pairing and confirmed-prefix recovery":"direct reliable route retained")<<". HOST PEER TLS / WEBRTC UDP ONLY; NO PI\n";

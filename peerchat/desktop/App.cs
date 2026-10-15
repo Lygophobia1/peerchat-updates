@@ -351,7 +351,7 @@ public partial class DesktopApplication {
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
         profileManager=manager;localProfile=selectedProfile;
-        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Transfers=AttachmentDiagnostics,HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot(),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
+        diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Transfers=AttachmentDiagnostics,HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot()+groupAttachmentCapabilityDiagnostic,Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
         // Profile selection and any legacy migration finish before the native owner exists.
@@ -360,7 +360,7 @@ public partial class DesktopApplication {
         BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength,voicePreferences.EchoCancellationEnabled);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
         window.Loaded+=(s,e)=>{if(startupUncleanOperations.Count>0)window.Dispatcher.BeginInvoke((Action)(()=>ShowFailureNotification(startupUncleanOperations[0])));};
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;StopGroupAttachmentNetwork();await groupAttachmentNetworkTask;try{await startupTask;}catch{}if(mailboxExecution!=null)mailboxExecution.Stop();try{await mailboxTask;}catch(OperationCanceledException){}await Task.Run(()=>{if(discovery!=null)discovery.CloseRpc();if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;StopGroupAttachmentNetwork();await groupAttachmentNetworkTask;await groupAttachmentDeviceDrain;try{await startupTask;}catch{}if(mailboxExecution!=null)mailboxExecution.Stop();try{await mailboxTask;}catch(OperationCanceledException){}await Task.Run(()=>{if(discovery!=null)discovery.CloseRpc();if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -446,7 +446,7 @@ public partial class DesktopApplication {
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
-        Click("Attachment",ChooseChatFiles);BindChatAttachments();BindGroupAttachments();BindHistoryIndicator();
+        Click("Attachment",ChooseChatFiles);BindChatAttachments();BindGroupAttachments();BindClipboardAttachments();BindHistoryIndicator();
         Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",()=>SettingsPage());
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
@@ -1790,7 +1790,7 @@ public partial class DesktopApplication {
 		DiscoveryClient signedOut = discovery;
         mailboxContextAccount=0;
         StopGroupAttachmentNetwork();
-        await groupAttachmentNetworkTask;
+        await groupAttachmentNetworkTask;await groupAttachmentDeviceDrain;
         if(mailboxExecution!=null)mailboxExecution.Stop();
         try{await mailboxTask;}catch(OperationCanceledException){}
         mailboxExecution=null;mailboxService=null;
@@ -2792,7 +2792,7 @@ public partial class DesktopApplication {
 		{
             mailboxContextAccount=0;
             StopGroupAttachmentNetwork();
-            groupAttachmentNetworkTask.GetAwaiter().GetResult();
+            groupAttachmentNetworkTask.GetAwaiter().GetResult();groupAttachmentDeviceDrain.GetAwaiter().GetResult();
             if(mailboxExecution!=null)mailboxExecution.Stop();
             try{mailboxTask.GetAwaiter().GetResult();}catch(OperationCanceledException){}
             if(discovery!=null)discovery.CloseRpc();
@@ -4497,6 +4497,7 @@ public partial class DesktopApplication {
     async void Send(){
         if(!Find<Button>("Send").IsEnabled||directSendInFlight)return;
         if(await SendGroupImageDraft())return;
+        if(await SendDirectImageDraft())return;
         string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;
         if(ChatAttachmentProjection.RequiresSnippet(text)){directSendInFlight=true;try{await SendChatSnippet(text);}finally{directSendInFlight=false;}return;}
         if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}

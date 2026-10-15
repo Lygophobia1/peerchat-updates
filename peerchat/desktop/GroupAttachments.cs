@@ -21,7 +21,7 @@ public sealed partial class CoreAdapter {
         public bool sending,plaintextVerified,sourceVerified,canRetry,canCancel,canOpen,outputPending,preparationRequired;
         public GroupAttachmentRecipient[] recipients;
     }
-    public sealed class GroupAttachmentSnapshot {public bool supported;public string reason,historyCursor;public bool historyMore;public GroupAttachmentData[] items;}
+    public sealed class GroupAttachmentSnapshot {public bool supported;public string reason,historyCursor,capabilityStage,capabilityCode;public ulong capabilityGeneration;public bool historyMore;public GroupAttachmentData[] items;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)]
     static extern IntPtr ui_group_attachment(IntPtr handle,uint operation,string group,string id,string path);
     public string GroupAttachment(uint operation,string group="",string id="",string path=""){
@@ -132,11 +132,8 @@ public sealed class GroupImageDraft {
     public readonly string Group,Name,Base64;public readonly ulong ProfileGeneration;public readonly BitmapSource Preview;
     GroupImageDraft(string group,ulong profile,string name,string base64,BitmapSource preview){Group=group;ProfileGeneration=profile;Name=name;Base64=base64;Preview=preview;}
     public static GroupImageDraft Create(string group,ulong profile,BitmapSource image){
-        if(image==null||image.PixelWidth<=0||image.PixelHeight<=0||image.PixelWidth>16384||image.PixelHeight>16384||(long)image.PixelWidth*image.PixelHeight>16L*1024*1024)throw new InvalidOperationException("Clipboard images are limited to 16 million pixels.");
-        string encoded;var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));
-        using(var output=new MemoryStream()){encoder.Save(output);if(output.Length>MaximumEncodedBytes)throw new InvalidOperationException("Clipboard images are limited to 16 MiB. Save the image and attach the file instead.");encoded=Convert.ToBase64String(output.ToArray());}
-        double scale=Math.Min(1,Math.Min(320.0/image.PixelWidth,160.0/image.PixelHeight));
-        var preview=new TransformedBitmap(image,new ScaleTransform(scale,scale));preview.Freeze();
+        string encoded=Convert.ToBase64String(ClipboardAttachments.EncodePng(image));
+        var preview=ClipboardAttachments.Preview(image);
         return new GroupImageDraft(group,profile,"Clipboard-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".png",encoded,preview);
     }
     public bool Matches(string group,ulong profile){return Group==group&&ProfileGeneration==profile;}
@@ -211,35 +208,40 @@ public partial class DesktopApplication {
     }
     readonly Dictionary<string,PendingGroupAttachmentAction> pendingGroupAttachmentActions=new Dictionary<string,PendingGroupAttachmentAction>();
     bool GroupAttachmentsAvailable(){return groupAttachmentState.Supported&&groupAttachmentState.Profile==profileSessionGeneration&&groupAttachmentState.Owner==discovery;}
-    string GroupAttachmentUnavailable(){return groupAttachmentState.Profile==profileSessionGeneration&&groupAttachmentState.Owner==discovery?groupAttachmentState.Reason:"Group attachments are unavailable for this session.";}
+    string GroupAttachmentUnavailable(){if(!String.IsNullOrEmpty(groupAttachmentDeviceError))return groupAttachmentDeviceError;return groupAttachmentState.Profile==profileSessionGeneration&&groupAttachmentState.Owner==discovery?groupAttachmentState.Reason:"Group attachments are unavailable for this session.";}
     void BindGroupAttachments(){
         Find<Button>("OlderGroupAttachments").Click+=async(s,e)=>await LoadOlderGroupAttachments();
         window.AddHandler(GroupAttachmentCard.ActionEvent,new RoutedEventHandler(async(s,e)=>{var action=(GroupAttachmentActionEventArgs)e;e.Handled=true;await GroupAttachmentAction(action);}));
-        DataObject.AddPastingHandler(Find<TextBox>("Composer"),async(s,e)=>{
-            if(!model.Groups||model.SelectedGroup==null||!e.DataObject.GetDataPresent(DataFormats.Bitmap))return;
-            e.CancelCommand();
+        Find<Button>("RemoveGroupImageDraft").Click+=(s,e)=>{if(!groupAttachmentOperating&&!groupImageDraftPreparing&&!directImageDraftPreparing&&!directImageDraftSending){if(model.Groups){groupImageDraft=null;groupFileDraft=null;groupFileDraftNext=0;}else directImageDraft=null;RefreshGroupImageDraft();}};
+        window.Closed+=(s,e)=>{groupImageDraft=null;groupFileDraft=null;pendingGroupAttachmentActions.Clear();groupAttachmentHistory.Clear();};
+    }
+    async Task PrepareGroupClipboardImage(IDataObject data){
+            if(model.SelectedGroup==null||model.SelectedGroup.Invited){Notify("Select a group you have joined to paste an image.");return;}
+            string group=model.SelectedGroup.Id;ulong profile=profileSessionGeneration;var owner=discovery;
             if(groupAttachmentOperating||groupImageDraftPreparing){Notify("Please wait for the current attachment operation.");return;}
-            if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return;}
-            if(groupFileDraft!=null){Notify("A file draft is waiting. Send or remove it before pasting an image.");return;}
-            if(groupImageDraft!=null&&!groupImageDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration)){Notify("An image draft is waiting in another group. Send or remove that draft before pasting another image.");return;}
-            string group=model.SelectedGroup.Id;ulong profile=profileSessionGeneration;var owner=discovery;groupImageDraftPreparing=true;RefreshGroupImageDraft();
-            try{var image=e.DataObject.GetData(DataFormats.Bitmap) as BitmapSource;if(image==null)throw new InvalidDataException("Clipboard bitmap unavailable.");image=image.Clone();image.Freeze();var draft=await Task.Run(()=>GroupImageDraft.Create(group,profile,image));if(!closing&&profile==profileSessionGeneration&&owner==discovery){groupImageDraft=draft;RefreshGroupImageDraft();}}
+            groupImageDraftPreparing=true;RefreshGroupImageDraft();
+            try{
+                var image=ClipboardAttachments.ReadImage(data);
+                if(!await EnsureGroupAttachmentReady()){Notify(GroupAttachmentUnavailable());return;}
+                if(closing||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=group||model.SelectedGroup.Invited||profile!=profileSessionGeneration||owner!=discovery)return;
+                if(groupFileDraft!=null){Notify("A file draft is waiting. Send or remove it before pasting an image.");return;}
+                if(groupImageDraft!=null&&!groupImageDraft.Matches(group,profile)){Notify("An image draft is waiting in another group. Send or remove that draft before pasting another image.");return;}
+                var draft=await Task.Run(()=>GroupImageDraft.Create(group,profile,image));if(!closing&&profile==profileSessionGeneration&&owner==discovery){groupImageDraft=draft;RefreshGroupImageDraft();}
+            }
             catch(Exception error){if(!closing&&profile==profileSessionGeneration&&owner==discovery)Notify("Image draft could not be prepared: "+error.Message);}
             finally{groupImageDraftPreparing=false;if(!closing)RefreshGroupImageDraft();}
-        });
-        Find<Button>("RemoveGroupImageDraft").Click+=(s,e)=>{if(!groupAttachmentOperating&&!groupImageDraftPreparing){groupImageDraft=null;groupFileDraft=null;groupFileDraftNext=0;RefreshGroupImageDraft();}};
-        window.Closed+=(s,e)=>{groupImageDraft=null;groupFileDraft=null;pendingGroupAttachmentActions.Clear();groupAttachmentHistory.Clear();};
     }
     void RefreshGroupImageDraft(){
         if(groupImageDraft!=null&&groupImageDraft.ProfileGeneration!=profileSessionGeneration)groupImageDraft=null;
         if(groupFileDraft!=null&&groupFileDraft.ProfileGeneration!=profileSessionGeneration){groupFileDraft=null;groupFileDraftNext=0;}
+        if(directImageDraft!=null&&(directImageDraft.Profile!=profileSessionGeneration||directImageDraft.Owner!=discovery))directImageDraft=null;
         bool imageVisible=groupImageDraft!=null&&model.Groups&&model.SelectedGroup!=null&&groupImageDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration);
         bool fileVisible=groupFileDraft!=null&&model.Groups&&model.SelectedGroup!=null&&groupFileDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration);
-        bool visible=imageVisible||fileVisible;
+        bool directVisible=DirectDraftVisible();bool visible=imageVisible||fileVisible||directVisible;
         Find<Border>("GroupImageDraft").Visibility=visible?Visibility.Visible:Visibility.Collapsed;
-        Find<Image>("GroupImageDraftPreview").Source=imageVisible?groupImageDraft.Preview:fileVisible?groupFileDraft.Preview:null;
-        Find<TextBlock>("GroupImageDraftName").Text=imageVisible?groupImageDraft.Name+" · Image draft — Send to share":fileVisible?String.Join("\n",groupFileDraft.Files.Skip(groupFileDraftNext).Select(file=>file.Name+" · "+file.Size.ToString("N0")+" bytes"))+"\nFile draft — Send to share":"";
-        Find<Button>("RemoveGroupImageDraft").IsEnabled=!groupAttachmentOperating&&!groupImageDraftPreparing;
+        Find<Image>("GroupImageDraftPreview").Source=imageVisible?groupImageDraft.Preview:fileVisible?groupFileDraft.Preview:directVisible?directImageDraft.Preview:null;
+        Find<TextBlock>("GroupImageDraftName").Text=imageVisible?groupImageDraft.Name+" · Image draft — Send to share":fileVisible?String.Join("\n",groupFileDraft.Files.Skip(groupFileDraftNext).Select(file=>file.Name+" · "+file.Size.ToString("N0")+" bytes"))+"\nFile draft — Send to share":directVisible?directImageDraft.Name+" · Image draft — Send to share":"";
+        Find<Button>("RemoveGroupImageDraft").IsEnabled=!groupAttachmentOperating&&!groupImageDraftPreparing&&!directImageDraftPreparing&&!directImageDraftSending;
     }
     async Task<bool> SendGroupImageDraft(){
         if(model.Groups&&groupImageDraftPreparing)return true;
@@ -263,25 +265,28 @@ public partial class DesktopApplication {
     }
     async Task<bool> GroupAttachmentOperation(uint operation,string group,string id="",string path="",Action<string> accepted=null){
         if(groupAttachmentOperating){Notify("Please wait for the current attachment operation.");return false;}
-        if(operation==1||operation==7){if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return false;}}
-        groupAttachmentOperating=true;var generation=profileSessionGeneration;var owner=discovery;
-        try{string result=await Task.Run(()=>core.GroupAttachment(operation,group,id,path));if(accepted!=null)accepted(result);return !closing&&generation==profileSessionGeneration&&owner==discovery;}
+        ulong generation=profileSessionGeneration;var owner=discovery;
+        groupAttachmentOperating=true;
+        try{if(operation==1||operation==7){if(!await EnsureGroupAttachmentReady()){Notify(GroupAttachmentUnavailable());return false;}if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=group)return false;}string result=await Task.Run(()=>core.GroupAttachment(operation,group,id,path));if(accepted!=null)accepted(result);return !closing&&generation==profileSessionGeneration&&owner==discovery;}
         catch(FileTooLargeException){Notify(FileTooLargeException.Explanation);return false;}
         catch(Exception error){if(!closing&&generation==profileSessionGeneration&&owner==discovery)Notify(error.Message);return false;}
         finally{groupAttachmentOperating=false;if(!closing){RefreshGroupImageDraft();await RefreshGroupAttachments();}}
     }
     async Task ChooseGroupFiles(){
         var group=model.SelectedGroup;if(group==null||group.Invited){Notify("Select a group you have joined.");return;}
-        if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return;}
-        ulong generation=profileSessionGeneration;var choose=new Microsoft.Win32.OpenFileDialog{Title="Attach files to "+group.Name,CheckFileExists=true,Multiselect=true};
+        ulong generation=profileSessionGeneration;var owner=discovery;
+        if(!await EnsureGroupAttachmentReady()){Notify(GroupAttachmentUnavailable());return;}
+        if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup!=group)return;
+        var choose=new Microsoft.Win32.OpenFileDialog{Title="Attach files to "+group.Name,CheckFileExists=true,Multiselect=true};
         if(choose.ShowDialog(window)==true&&generation==profileSessionGeneration&&model.Groups&&model.SelectedGroup==group)await SendGroupFiles(group,choose.FileNames);
     }
     async Task SendGroupFiles(GroupModel group,string[] files){
         if(group==null||group.Invited||files==null||files.Length==0||files.Length>4){Notify("Choose up to four regular files for a group you have joined.");return;}
+        ulong generation=profileSessionGeneration;var owner=discovery;
         if(groupAttachmentOperating||groupImageDraftPreparing){Notify("Please wait for the current attachment operation.");return;}
         if(groupFileDraft!=null||groupImageDraft!=null){Notify("An attachment draft is waiting. Send or remove it before selecting another file.");return;}
-        if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return;}
-        ulong generation=profileSessionGeneration;var owner=discovery;
+        if(!await EnsureGroupAttachmentReady()){Notify(GroupAttachmentUnavailable());return;}
+        if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup!=group)return;
         try{
             var draft=GroupFileDraft.Create(group.Id,generation,files);
             if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup!=group)return;
@@ -375,6 +380,7 @@ public partial class DesktopApplication {
         try{
             string selected=model.Groups&&model.SelectedGroup!=null?model.SelectedGroup.Id:"";
             var snapshot=await Task.Run(()=>core.GroupAttachments(selected));if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
+            RecordAttachmentCapability(snapshot);
             if(!String.IsNullOrEmpty(selected)){
                 var history=AttachmentHistoryState(selected);
                 if(history.Cursor==null){

@@ -97,7 +97,7 @@ int main(int argc,char** argv){
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 }
                 require(finished,"benchmark did not complete");const auto cpuUs=processCpuUs()-cpuStart;
-                auto final=destination/(id+L"-"+source.filename().wstring());std::ifstream f(final,std::ios::binary);Blob actual(std::istreambuf_iterator<char>(f),{});require(actual==expected,"benchmark final integrity failed");
+                auto final=destination/(id+L".peerchat-received")/source.filename();std::ifstream f(final,std::ios::binary);Blob actual(std::istreambuf_iterator<char>(f),{});require(actual==expected,"benchmark final integrity failed");
                 auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(clock()-start).count();auto payloadMs=std::chrono::duration_cast<std::chrono::milliseconds>(clock()-payload).count();
                 std::cout<<"HOST_NATIVE_TLS_RELAY fixture_one_way_delay_ms="<<relayDelay<<" diagnostics="<<observeDiagnostics<<" bytes="<<size<<" total_ms="<<elapsed<<" accepted_to_complete_ms="<<payloadMs<<" payload_MiB_per_s="<<(size/1048576.0)/(payloadMs/1000.0)<<" process_cpu_us="<<cpuUs<<" process_peak_working_set_bytes="<<processPeakBytes()<<"\n";
                 std::cout<<unicode::encode(left.fileTransfer(11))<<unicode::encode(right.fileTransfer(11));
@@ -121,7 +121,7 @@ int main(int argc,char** argv){
                 require(!forwardFailed,"concurrent relay failure");std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
             require(allComplete,"concurrent transfers did not finish fairly");
-            for(const auto& id:ids){std::ifstream file(concurrentDestination/(id+L"-concurrent.bin"),std::ios::binary);Blob actual(std::istreambuf_iterator<char>(file),{});require(actual==concurrentBytes,"concurrent integrity failure");}
+            for(const auto& id:ids){std::ifstream file(concurrentDestination/(id+L".peerchat-received")/L"concurrent.bin",std::ios::binary);Blob actual(std::istreambuf_iterator<char>(file),{});require(actual==concurrentBytes,"concurrent integrity failure");}
             std::cout<<"HOST_CONCURRENT_TLS_RELAY files=2 bytes=2097152 total_ms="<<std::chrono::duration_cast<std::chrono::milliseconds>(clock()-concurrentStart).count()<<" exact_integrity=1\n";
             return 0; // Join writers before Node destruction, including exceptions.
         }
@@ -140,7 +140,7 @@ int main(int argc,char** argv){
         wait([&]{return mailboxFailures==1;},"mailbox failure not scoped to local operation");
         require(readyLeft&&readyRight&&la==originalLa&&ra==originalRa,"mailbox validation failure replaced reliable route during file transfer");
         left.stop();right.stop();la=ra=0;readyLeft=readyRight=false;a.clear();b.clear();
-        require(std::filesystem::exists(destination/(id+L".peerchat-part")),"shutdown deleted resumable partial");
+        require(std::filesystem::exists(destination/(id+L".peerchat-received")/(id+L".peerchat-part")),"shutdown deleted resumable partial");
         left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
         wait([&]{return !a.empty()&&!b.empty();},"nodes did not reopen");
         require(a==originalA&&b==originalB,"restart changed device identity");
@@ -158,9 +158,9 @@ int main(int argc,char** argv){
         wait([&]{return readyLeft&&readyRight;},"replacement TLS did not establish");
         try{wait([&]{return left.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&right.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"file did not resume and complete",30);}
         catch(...){std::cerr<<"sender "<<unicode::encode(left.fileTransfer(0))<<"\nreceiver "<<unicode::encode(right.fileTransfer(0))<<"\n";throw;}
-        auto final=destination/(id+L"-"+name);std::ifstream file(final,std::ios::binary);std::vector<char> actual((std::istreambuf_iterator<char>(file)),{});
+        auto final=destination/(id+L".peerchat-received")/name;std::ifstream file(final,std::ios::binary);std::vector<char> actual((std::istreambuf_iterator<char>(file)),{});
         require(actual==bytes,"completed file bytes mismatch");
-        require(!std::filesystem::exists(destination/(id+L".peerchat-part")),"partial leaked after completion");
+        require(!std::filesystem::exists(destination/(id+L".peerchat-received")/(id+L".peerchat-part")),"partial leaked after completion");
         auto message=left.send(b,L"Messaging survives file completion");require(!message.empty(),"text enqueue failed");
         bool delivered=false;
         auto end=std::chrono::steady_clock::now()+std::chrono::seconds(5);
@@ -177,7 +177,7 @@ int main(int argc,char** argv){
         auto snippetId=left.fileTransfer(7,b,"",snippet);std::string snippetNarrow(snippetId.begin(),snippetId.end());
         wait([&]{return right.fileTransfer(0).find(snippetId)!=std::wstring::npos;},"snippet offer missing");
         right.fileTransfer(2,"",snippetNarrow,destination.wstring());
-        auto snippetPath=destination/(snippetId+L"-message.peerchat-text");
+        auto snippetPath=destination/(snippetId+L".peerchat-received")/L"message.peerchat-text";
         wait([&]{return std::filesystem::exists(snippetPath);},"snippet not completed");
         std::ifstream snippetFile(snippetPath,std::ios::binary);std::string snippetBytes((std::istreambuf_iterator<char>(snippetFile)),{});
         require(snippetBytes==unicode::encode(snippet),"snippet content normalized or truncated");
