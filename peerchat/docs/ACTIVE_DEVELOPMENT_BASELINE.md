@@ -60,5 +60,11 @@ The paused cache work includes a disabled durable SQLite ciphertext runtime,
 pinned storage adapter, signed descriptor parsing and initial roster admission.
 Isolated storage tests passed up to 10 MiB, independent recipient progress,
 incomplete/corrupt rejection and actual process termination before upload and
-cleanup commits. Admission and client integration are unfinished and unvalidated;
-no cache endpoints are enabled and no live server data has been changed.
+cleanup commits. Authoritative admission and isolated pinned-TLS cache requests
+are now tested, including distinct same-account devices, revocation/rejoin,
+concurrent quota reservations and actual crash recovery. Shipping cache
+transport stays gated closed even if staged configuration requests enablement.
+Protected immutable client staging and an explicit TransferManager ciphertext
+purpose are tested; the production client adapter, offline announcements and
+group UI remain unfinished. No cache endpoints are enabled and no live server
+data has changed.

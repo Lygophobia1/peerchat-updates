@@ -291,6 +291,14 @@ encrypted-object round trip uses the same TransferManager hash/credit/ACK and
 completion paths, followed by separate exact plaintext verification. Existing
 legacy restart, all eight pipeline combinations and bandwidth-budget tests pass.
 
+The native public descriptor serializer now matches managed verification:
+native device signing, managed signature/digest checks, FULL cache upload,
+server-storage restart and read, then native decryption with the original
+protected key all pass for a nonempty fixture. Descriptor tampering is rejected.
+The public descriptor excludes the filename, plaintext digest, key and nonce
+prefix. This storage/codec test is distinct from the authenticated TLS/roster
+fixture; it is not a claim that the client upload/fanout adapter is connected.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with
