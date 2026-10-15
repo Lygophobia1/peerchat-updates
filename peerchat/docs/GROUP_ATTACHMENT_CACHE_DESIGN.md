@@ -217,6 +217,54 @@ supported group attachments before those paths and the client adapter pass.
 
 ## Current validation checkpoint (2026-10-14)
 
+### Resumed cache runtime and authenticated request validation
+
+The runtime now stores ciphertext chunks and durable offsets in the same FULL
+SQLite transaction, with anchored directory handles, reserved capacity, bounded
+leases, expiration, pressure eviction and restart recovery. Signed admission
+uses the authoritative group roster and freezes membership incarnations;
+revocation and rejoining cannot recover an old object's eligibility. Actual
+process termination before upload and cleanup commits preserves the previous
+durable state. Sixteen concurrent admissions under a 20-MiB fixture quota accept
+four and reject twelve without exceeding the reservation ledger.
+
+Pressure cleanup previously tested whether the existing cache fit, rather than
+whether the incoming reservation would fit. It now reclaims enough eligible
+completed data for that reservation while preserving active transfer leases.
+This is a demonstrated admission defect, not a physical throughput claim.
+
+The new bounded cache request adapter uses existing authenticated RPC and
+requires its existing device-proof-bound session. Account-password-only tokens
+cannot use cached historical access merely by naming another owned device.
+The normal mailbox, relay and authentication behavior remains unchanged.
+Canonical unpadded base64url keeps worst-case 64-KiB ciphertext chunks within
+the existing 100000-byte JSON frame limit; standard base64 could exceed that
+bound after JSON HTML escaping. Padded, noncanonical and oversized encodings
+are rejected without advancing durable progress. Cache response version is 1.
+
+Isolated real pinned-TLS tests pass a signed 3-MiB upload, reconnect after a
+durable prefix, completion and exact ciphertext reads. Distinct same-account
+devices without group authorization, mismatched session devices and legacy
+unbound tokens are rejected. The observed 1130-ms append interval covers
+3,081,748 ciphertext bytes after reconnect, including JSON and FULL SQLite
+commits, but excludes encryption, the first chunk, connection establishment
+and any physical network. It is not a Windows/Android or Pi throughput result.
+
+Both shipping server builds include the adapter, but production readiness is a
+separate compile-time closed gate. Configuration defaults to `Enabled=false`;
+even explicitly enabling it in a shipping build returns `cache_feature_gated`
+without creating cache storage. The independently compiled shipping assembly
+passes that test over real TLS. Test-only builds exercise the open path. The
+existing presence worker performs bounded periodic cleanup; no new worker or
+retry owner is introduced. Storage closes after server workers drain.
+
+Client TransferManager integration, protected immutable staging/manifest
+recovery, offline announcements, group attachment UI and plaintext completion
+receipts remain required before opening this gate. The earlier dev.154 results
+below remain the negotiated DM pipeline baseline, not group feature acceptance.
+
+### Earlier DM pipeline baseline
+
 The bounded DM pipeline is implemented in the existing TransferManager, with
 protected profile/per-file settings and truthful effective framing diagnostics.
 Legacy 32 KiB x 1 remains the default and older/Android peers retain v1. Eight

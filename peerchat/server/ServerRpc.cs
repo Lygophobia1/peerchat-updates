@@ -7,6 +7,9 @@ using System.Text;
 
 namespace PeerChat.Server {
 sealed partial class DiscoveryServer {
+    partial void ProcessAttachmentCacheRequest(long account,string device,Func<bool> current,Dictionary<string,object> request,ref Dictionary<string,object> reply);
+    partial void MaintainAttachmentCache();
+    partial void CloseAttachmentCache();
     // Serialized ordinary application RPC only. Events, relay and peer TLS
     // remain separate. No delivery retry or background connection owner.
     void ServeRpc(SslStream tls,Dictionary<string,object> hello,string observedHost){
@@ -26,7 +29,15 @@ sealed partial class DiscoveryServer {
             if(type=="events"||type=="relay_attach"||type=="rpc_open"||type=="mailbox_rpc"||
                 type=="login"||type=="register"||type==null||type.StartsWith("remember_",StringComparison.Ordinal))return;
             Dictionary<string,object> body;
-            if(type.StartsWith("mailbox_",StringComparison.Ordinal))body=ProcessMailboxRequest(account,device,request,current);
+            if(type.StartsWith("cache_",StringComparison.Ordinal)){
+                // A legacy account-password token can name any owned device.
+                // New cached historical access requires the existing device-
+                // proof-bound session; do not weaken ordinary client compatibility.
+                Func<bool> cacheCurrent=()=>current()&&accounts.SessionDevice(hash)==device;
+                body=new Dictionary<string,object>{{"state",cacheCurrent()?"cache_disabled":"cache_device_session_required"}};
+                if(cacheCurrent())ProcessAttachmentCacheRequest(account,device,cacheCurrent,request,ref body);
+            }
+            else if(type.StartsWith("mailbox_",StringComparison.Ordinal))body=ProcessMailboxRequest(account,device,request,current);
             else {if(bytes.Length>4096)throw new InvalidDataException("Ordinary RPC exceeds bound");body=Handle(request,observedHost,0);}
             bool more=count<63&&age.ElapsedMilliseconds<110000&&type!="logout"&&current();
             var reply=new Dictionary<string,object>{{"type","rpc_result"},{"rpcRequestId",id},{"operation",type},{"body",body},{"more",more}};

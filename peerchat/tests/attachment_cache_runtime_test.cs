@@ -141,18 +141,20 @@ class AttachmentCacheRuntimeTest {
    Rpc(rpc,1,actor,"cache_admit","accepted","descriptor",Convert.ToBase64String(rpcDescriptor.Wire));
    string rpcUpload=Convert.ToString(Rpc(rpc,1,actor,"cache_acquire","accepted","id",rpcDescriptor.Id,"upload",true)["lease"]);
    Rpc(rpc,1,actor,"cache_complete","cache_upload_incomplete","lease",rpcUpload);
-   string firstChunk=Convert.ToBase64String(data.Take(65536).ToArray());
+   string firstChunk=AttachmentCacheRequests.Encode(data.Take(65536).ToArray());
    Check(Convert.ToInt64(Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",0L,"data",firstChunk)["durableOffset"])==65536,"RPC durable prefix");
    Check(Convert.ToInt64(Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",0L,"data",firstChunk)["durableOffset"])==65536,"RPC duplicate inflation");
    Rpc(rpc,1,actor,"cache_append","cache_malformed_request","lease",rpcUpload,"offset",-1L,"data",firstChunk);
    Rpc(rpc,1,actor,"cache_append","cache_malformed_request","lease",rpcUpload,"offset",65536L,"data","not base64");
-   Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",65536L,"data",Convert.ToBase64String(data.Skip(65536).ToArray()));
+   foreach(var invalid in new[]{"AA==","AB","A","++//",new string('A',87383)})Rpc(rpc,1,actor,"cache_append","cache_malformed_request","lease",rpcUpload,"offset",65536L,"data",invalid);
+   Check(cache.Inspect(rpcDescriptor.Id).Offset==65536,"Malformed encoding advanced durable offset");
+   Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",65536L,"data",AttachmentCacheRequests.Encode(data.Skip(65536).ToArray()));
    var completed=Rpc(rpc,1,actor,"cache_complete","accepted","lease",rpcUpload);Check((bool)completed["ciphertextComplete"]&&!completed.ContainsKey("plaintextVerified"),"Ciphertext commit claimed plaintext verification");
    Rpc(rpc,1,actor,"cache_release","accepted","lease",rpcUpload,"upload",true);
    string rpcDownload=Convert.ToString(Rpc(rpc,2,reader,"cache_acquire","accepted","id",rpcDescriptor.Id,"upload",false)["lease"]);
    Rpc(rpc,1,actor,"cache_read","cache_lease_device_mismatch","lease",rpcDownload,"offset",0L,"maximum",65536L);
    Rpc(rpc,2,reader,"cache_read","cache_malformed_request","lease",rpcDownload,"offset",0L,"maximum",65537L);
-   var received=Rpc(rpc,2,reader,"cache_read","accepted","lease",rpcDownload,"offset",0L,"maximum",65536L);Check(Convert.FromBase64String((string)received["data"]).SequenceEqual(data.Take(65536)),"RPC ciphertext integrity");
+   var received=Rpc(rpc,2,reader,"cache_read","accepted","lease",rpcDownload,"offset",0L,"maximum",65536L);Check(AttachmentCacheRequests.Decode((string)received["data"]).SequenceEqual(data.Take(65536)),"RPC ciphertext integrity");
    Rpc(rpc,2,reader,"cache_progress","accepted","lease",rpcDownload,"offset",65536L);
    Rpc(rpc,2,reader,"cache_release","accepted","lease",rpcDownload,"upload",false);
    Rpc(rpc,2,reader,"cache_status","accepted","id",rpcDescriptor.Id);
@@ -175,5 +177,75 @@ class AttachmentCacheRuntimeTest {
   using(var cache=new AttachmentCacheRuntime(options,()=>now))Check(cache.ChargedBytes<=options.MaximumBytes,"Restart lost reservations");
   Console.WriteLine("PASS 16 concurrent admissions preserve a single bounded reservation ledger across restart; accepted="+accepted+" rejected="+rejected);
  }}
- static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--admission"){Admission(Path.GetFullPath(args[1]));ConcurrentReservations(Path.GetFullPath(args[1]));return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Admission(root);ConcurrentReservations(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime and authoritative admission; network endpoint/client integration remain gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
+ sealed class RpcClient:IDisposable {
+  readonly System.Net.Sockets.TcpClient tcp=new System.Net.Sockets.TcpClient();readonly System.Net.Security.SslStream tls;readonly string token,device;
+  readonly System.Web.Script.Serialization.JavaScriptSerializer json=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=100000};
+  internal RpcClient(int port,string pin,string token,string device){this.token=token;this.device=device;tcp.NoDelay=true;tcp.ReceiveTimeout=5000;tcp.SendTimeout=5000;tcp.Connect("localhost",port);tls=new System.Net.Security.SslStream(tcp.GetStream(),false,(sender,certificate,chain,errors)=>certificate!=null&&MailboxProtocol.Digest(certificate.GetRawCertData())==pin);try{tls.AuthenticateAsClient("localhost");Write(new Dictionary<string,object>{{"version",1},{"type","rpc_open"},{"sessionToken",token},{"publicIdentity",device}});var ready=Read();Check(ready.ContainsKey("ok")&&(bool)ready["ok"],"RPC session/device admission");}catch{Dispose();throw;}}
+  void Write(Dictionary<string,object> value){var bytes=Encoding.UTF8.GetBytes(json.Serialize(value));Check(bytes.Length<=100000,"Request too large");tls.Write(new[]{(byte)(bytes.Length>>24),(byte)(bytes.Length>>16),(byte)(bytes.Length>>8),(byte)bytes.Length},0,4);tls.Write(bytes,0,bytes.Length);tls.Flush();}
+  byte[] Exact(int count){var bytes=new byte[count];int offset=0;while(offset<count){int read=tls.Read(bytes,offset,count-offset);if(read==0)throw new EndOfStreamException();offset+=read;}return bytes;}
+  Dictionary<string,object> Read(){var header=Exact(4);int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];Check(length>0&&length<=100000,"Response bound");return json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(Exact(length)));}
+  internal Dictionary<string,object> Request(string operation,string expected,params object[] fields){string id=Guid.NewGuid().ToString("N");var request=new Dictionary<string,object>{{"version",1},{"type",operation},{"rpcRequestId",id},{"requestId",id},{"sessionToken",token},{"publicIdentity",device}};for(int n=0;n<fields.Length;n+=2)request[(string)fields[n]]=fields[n+1];Write(request);var response=Read();Check((string)response["type"]=="rpc_result"&&(string)response["operation"]==operation&&(string)response["rpcRequestId"]==id,"RPC correlation");var body=(Dictionary<string,object>)response["body"];Check(Convert.ToString(body["state"])==expected,"Network "+operation+" "+Convert.ToString(body["state"]));return body;}
+  public void Dispose(){if(tls!=null)tls.Dispose();tcp.Dispose();}
+ }
+ static void Network(string root,bool enabled,string shippingAssembly=null){Directory.CreateDirectory(root);using(var signer=new ECDsaCng(256)){
+  var options=Options(Fixture(root,"network-cache"));options.Enabled=enabled;
+  var proof=GroupRosterProof.Parse(Convert.ToBase64String(GroupRosterProofTest.CreateProof(signer,new string('1',32),4)));string actor=proof.OwnerIdentity,unapproved=new string('e',64);
+  string token=Guid.NewGuid().ToString("N"),otherToken=Guid.NewGuid().ToString("N"),legacyToken=Guid.NewGuid().ToString("N"),database=Path.Combine(root,"network-accounts.sqlite");
+  using(var db=new AccountDatabase(database)){
+   for(int n=1;n<4;n++)Check(db.CreateAccountWithDevice("unused-"+n,new byte[16],new byte[32],new string((char)('a'+n),64))==n,"Network account fixture");
+   Check(db.CreateAccountWithDevice("owner",new byte[16],new byte[32],actor)==4&&db.AddDevice(4,unapproved),"Same account distinct device fixture");
+   Check(db.RegisterGroup(4,actor,proof)!=null,"Network signed roster");
+   foreach(var session in new[]{new[]{token,actor},new[]{otherToken,unapproved}}){string hash=MailboxProtocol.Digest(Encoding.UTF8.GetBytes(session[0])),credential=Guid.NewGuid().ToString("N");db.RememberDevice(4,session[1],credential);db.CreateDeviceSession(hash,4,session[1],DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds(),credential);Check(db.Authenticate(hash)==4&&db.SessionDevice(hash)==session[1],"Bound fixture session");}
+   db.CreateSession(MailboxProtocol.Digest(Encoding.UTF8.GetBytes(legacyToken)),4,DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds());
+  }
+  string certificatePath=Path.Combine(root,"test-server.pfx"),pin;
+  using(var key=System.Security.Cryptography.RSA.Create(2048)){
+   var request=new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=localhost",key,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+   using(var certificate=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1),DateTimeOffset.UtcNow.AddHours(1))){File.WriteAllBytes(certificatePath,certificate.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx,"test-only"));pin=MailboxProtocol.Digest(certificate.RawData);}
+  }
+  var reservation=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);reservation.Start();int port=((System.Net.IPEndPoint)reservation.LocalEndpoint).Port;reservation.Stop();
+  var config=new ServerConfiguration{DataDirectory=root,DatabasePath=database,LogDirectory=Path.Combine(root,"logs"),Port=port,CertificatePath=certificatePath,CertificatePassword="test-only",ManagementPipe="",AttachmentCache=options};config.Validate();
+  Action run,stop;
+  if(shippingAssembly==null){var server=new DiscoveryServer(config);run=server.Run;stop=server.RequestStop;}
+  else{
+   // Load the independently built shipping assembly: its production readiness
+   // constant must remain closed even when configuration explicitly opts in.
+   var assembly=System.Reflection.Assembly.LoadFrom(Path.GetFullPath(shippingAssembly));var configType=assembly.GetType("PeerChat.ServerShared.ServerConfiguration",true);var shippingConfig=Activator.CreateInstance(configType);
+   foreach(var field in config.GetType().GetFields()){
+    var target=configType.GetField(field.Name);if(target==null)continue;var value=field.GetValue(config);
+    if(field.Name=="AttachmentCache"){var nested=Activator.CreateInstance(target.FieldType);foreach(var setting in options.GetType().GetFields())target.FieldType.GetField(setting.Name).SetValue(nested,setting.GetValue(options));target.SetValue(shippingConfig,nested);}
+    else if(value==null||target.FieldType.IsAssignableFrom(value.GetType()))target.SetValue(shippingConfig,value);
+   }
+   var serverType=assembly.GetType("PeerChat.Server.DiscoveryServer",true);var server=Activator.CreateInstance(serverType,new object[]{shippingConfig,null});
+   run=()=>serverType.GetMethod("Run").Invoke(server,null);stop=()=>serverType.GetMethod("RequestStop",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(server,null);
+  }
+  Exception failure=null;var worker=new Thread(()=>{try{run();}catch(Exception error){failure=error;}}){IsBackground=true};worker.Start();
+  try{
+   var until=Stopwatch.StartNew();bool ready=false;while(until.ElapsedMilliseconds<10000&&!ready){try{using(var probe=new System.Net.Sockets.TcpClient()){probe.Connect("localhost",port);ready=true;}}catch(System.Net.Sockets.SocketException){Thread.Sleep(20);}}Check(ready,"Network server startup");
+   using(var client=new RpcClient(port,pin,token,actor)){
+    if(!enabled||shippingAssembly!=null){client.Request("cache_status",enabled?"cache_feature_gated":"cache_disabled","id",new string('1',32));Check(!File.Exists(Path.Combine(options.Directory,"cache.sqlite")),"Disabled cache created storage");}
+    else{
+     var bytes=Payload(3*1024*1024);for(int n=0;n<65536;n++)bytes[n]=251;var descriptor=Descriptor(signer,3*1024*1024,bytes,group:proof.ServerGroupId,epoch:1,account:4);
+     client.Request("cache_admit","accepted","descriptor",Convert.ToBase64String(descriptor.Wire));string lease=(string)client.Request("cache_acquire","accepted","id",descriptor.Id,"upload",true)["lease"];
+     // Stop the first RPC owner mid-upload; a fresh authenticated stream must
+     // recover exactly the durably committed offset, without replacing session.
+     Check(Convert.ToInt64(client.Request("cache_append","accepted","lease",lease,"offset",0L,"data",AttachmentCacheRequests.Encode(bytes.Take(65536).ToArray()))["durableOffset"])==65536,"Network first offset");
+     client.Dispose();using(var resumed=new RpcClient(port,pin,token,actor)){
+      Check(Convert.ToInt64(resumed.Request("cache_status","accepted","id",descriptor.Id)["durableOffset"])==65536,"Network reconnect lost prefix");
+      var started=Stopwatch.StartNew();long offset=65536;
+      while(offset<bytes.Length){int count=(int)Math.Min(65536,bytes.Length-offset);offset=Convert.ToInt64(resumed.Request("cache_append","accepted","lease",lease,"offset",offset,"data",AttachmentCacheRequests.Encode(bytes.Skip((int)offset).Take(count).ToArray()))["durableOffset"]);}
+      resumed.Request("cache_complete","accepted","lease",lease);resumed.Request("cache_release","accepted","lease",lease,"upload",true);
+      Console.WriteLine("MEASURE host loopback pinned-TLS cache RPC ciphertext_bytes="+(bytes.Length-65536)+" elapsed_ms="+started.ElapsedMilliseconds+"; includes JSON/FULL SQLite, excludes source encryption and physical network");
+      using(var other=new RpcClient(port,pin,otherToken,unapproved))other.Request("cache_acquire","cache_group_not_authorized","id",descriptor.Id,"upload",false);
+      string download=(string)resumed.Request("cache_acquire","accepted","id",descriptor.Id,"upload",false)["lease"];
+      var read=resumed.Request("cache_read","accepted","lease",download,"offset",0L,"maximum",65536L);Check(AttachmentCacheRequests.Decode((string)read["data"]).SequenceEqual(bytes.Take(65536)),"Network ciphertext changed");resumed.Request("cache_release","accepted","lease",download,"upload",false);
+     }
+    }
+   }
+   using(var legacy=new RpcClient(port,pin,legacyToken,actor))legacy.Request("cache_status","cache_device_session_required","id",new string('1',32));
+   bool rejected=false;try{using(var wrong=new RpcClient(port,pin,token,unapproved)){}}catch(Exception){rejected=true;}Check(rejected,"Bound session used another same-account device");
+  }finally{stop();Check(worker.Join(12000),"Network cache shutdown blocked");if(failure!=null)throw failure;File.Delete(certificatePath);}
+  Console.WriteLine("PASS real pinned-TLS authenticated cache RPC enabled="+enabled+"; distinct same-account device rejection and controlled shutdown; test-only server, production gate remains closed");
+ }}
+ static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==3&&args[0]=="--production-gate"){Network(args[1],true,args[2]);return 0;}if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--admission"){Admission(Path.GetFullPath(args[1]));ConcurrentReservations(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--network"){Network(Path.Combine(args[1],"disabled"),false);Network(Path.Combine(args[1],"enabled"),true);return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Admission(root);ConcurrentReservations(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime and authoritative admission; client integration remains gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }

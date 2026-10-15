@@ -11,6 +11,7 @@ namespace PeerChat.ServerShared {
 // Supplemental cache configuration only. No endpoint or storage is enabled by
 // configuring these values; production exposure remains separately gated.
 public class AttachmentCacheConfiguration {
+ public bool Enabled=false; // Staged opt-in; production readiness is separately gated.
  public long MaximumBytes=10L*1024*1024*1024,RetentionSeconds=48L*60*60,PartialIdleSeconds=6L*60*60;
  public long MinimumFreeBytes=2L*1024*1024*1024;
  public int MinimumFreePercent=20;
@@ -21,6 +22,7 @@ public class AttachmentCacheConfiguration {
   foreach(var value in new[]{Directory,ExpectedFilesystem,ExpectedMountPoint,InstanceId})if(value==null||value.Length>4096||value.Any(Char.IsControl))throw new InvalidOperationException("Invalid encrypted cache storage binding.");
   if(Directory.Length>0&&!Absolute(Directory)||ExpectedMountPoint.Length>0&&!Absolute(ExpectedMountPoint))throw new InvalidOperationException("Cache directory and mount point must be absolute paths.");
   if(InstanceId.Length>0&&(InstanceId.Length!=32||InstanceId.Any(c=>!((c>='0'&&c<='9')||(c>='a'&&c<='f')))))throw new InvalidOperationException("Invalid encrypted cache instance identifier.");
+  if(Enabled&&(Directory.Length==0||ExpectedFilesystem.Length==0||ExpectedMountPoint.Length==0||InstanceId.Length==0))throw new InvalidOperationException("Enabled cache requires an explicit verified storage binding.");
  }
 }
 public sealed class ServerConfiguration {

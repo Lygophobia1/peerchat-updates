@@ -13,6 +13,7 @@
     <DebugType>none</DebugType>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../AttachmentCache*.cs" />
     <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../ArchiveAuthorization.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;../../shared/VersionInfo.cs;PortableJson.cs;PortablePlatform.cs" />
   </ItemGroup>
 </Project>

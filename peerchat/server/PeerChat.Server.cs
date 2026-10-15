@@ -651,7 +651,7 @@ namespace PeerChat.Server {
                 if(left<=0)throw new TimeoutException("Server workers did not drain; database deliberately left open for process termination.");Monitor.Wait(workerGate,left);}}
             if(!pushWakes.Drain(10000))throw new TimeoutException("Push workers did not drain; database deliberately left open.");
             lock(eventGate){eventClients.Clear();onlineAccounts.Clear();}
-            accounts.Dispose();certificate.Dispose();Log("INFO","Server shutdown complete; workers drained and SQLite closed.");
+            CloseAttachmentCache();accounts.Dispose();certificate.Dispose();Log("INFO","Server shutdown complete; workers drained and SQLite closed.");
         }
         public void Run(){
             startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);
@@ -788,7 +788,7 @@ namespace PeerChat.Server {
             }}catch{EndEventSubscription(subscription);throw;}
         }
         void RetireEventSession(string tokenHash){List<EventClient> removed;lock(eventGate){removed=eventClients.Where(value=>value.SessionTokenHash==tokenHash).ToList();foreach(var value in removed)eventClients.Remove(value);}foreach(var value in removed){accounts.ClearPresence(value.AccountId,value.PublicIdentity,value.Binding);EndEventSubscription(value);BroadcastPresence(value.AccountId,value.PublicIdentity,"",0,"",0,false);}}
-        void PresenceMonitor(){while(!stopping){Thread.Sleep(1000);if(stopping)break;foreach(var device in accounts.Live.Expire((account,identity)=>{var current=accounts.Live.Get(identity);return accounts.OwnsDevice(account,identity)&&(current==null||accounts.Authenticate(current.Session)==account);}))BroadcastPresence(device.Account,device.Identity,"",0,"",0,false);}}
+        void PresenceMonitor(){while(!stopping){Thread.Sleep(1000);if(stopping)break;MaintainAttachmentCache();foreach(var device in accounts.Live.Expire((account,identity)=>{var current=accounts.Live.Get(identity);return accounts.OwnsDevice(account,identity)&&(current==null||accounts.Authenticate(current.Session)==account);}))BroadcastPresence(device.Account,device.Identity,"",0,"",0,false);}}
         // Consent is account/device-bound and endpoint-free. A candidate is retained only until
         // both exact participants submit after acceptance; no database or presence row is used.
         Dictionary<string,object> DirectProbeRequest(long account,string device,long target,string targetDevice){PurgeDirectProbes();if(account==target||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.OwnsDevice(account,device)||!accounts.OwnsDevice(target,targetDevice)||!accounts.Friends(account,target))return Error("p2p_not_authorized");var probe=new DirectProbe{Id=RandomToken(),Initiator=account,InitiatorDevice=device,Recipient=target,RecipientDevice=targetDevice,Expires=DateTimeOffset.UtcNow.AddSeconds(DirectProbeLifetimeSeconds).ToUnixTimeSeconds()};lock(directProbeGate){foreach(var id in directProbes.Where(x=>x.Value.Initiator==account&&x.Value.Recipient==target&&x.Value.InitiatorDevice==device&&x.Value.RecipientDevice==targetDevice).Select(x=>x.Key).ToArray())directProbes.Remove(id);directProbes[probe.Id]=probe;}Notify(target,new Dictionary<string,object>{{"event","p2p_request"},{"requestId",probe.Id},{"accountId",account},{"publicIdentity",device},{"targetPublicIdentity",targetDevice},{"expiresUtc",probe.Expires}});return Ok(new Dictionary<string,object>{{"requestId",probe.Id},{"expiresUtc",probe.Expires},{"state","pending"}});}
