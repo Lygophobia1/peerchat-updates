@@ -5,6 +5,33 @@ Attachment-only per-device HPKE envelopes are user-approved. Shipping cache
 transport remains disabled; successful component tests do not establish packaged
 group delivery or physical acceptance.
 
+## Development freeze and recovered handoff
+
+Development stopped at the user's request on 2026-10-15. The complete recovery,
+file inventory, validation evidence, package status, known failures and resume
+sequence are in [GROUP_ATTACHMENTS_HANDOFF_2026_10_15.md](GROUP_ATTACHMENTS_HANDOFF_2026_10_15.md).
+
+The completion matrix and planned interfaces below describe the earlier plan.
+The following frozen state supersedes their pending/implemented status:
+
+- `96cf7aa`: validated server context and signed recipient verification receipts.
+- `18b6082`: focused-test-validated protected transfer/history, RPC codec and
+  bounded verified access/export helpers.
+- `3908e76`: explicitly unfinished Windows Application, Node, managed UI/RPC
+  integration and actual-server harness. Full production integration has not
+  passed; the cache shipping gate remains closed.
+
+The additive Windows exports `ui_group_attachment` and
+`ui_group_attachment_network` are implemented in that WIP. Server operations
+`cache_context`, `cache_verified` and `cache_receipts` are implemented. The
+handoff records exact local domains, operation semantics, encoding and Android
+ownership dependencies. There is no new portable/JNI API or PCGE format change.
+
+No new versioned Windows/Pi group-attachment package is ready. The harness still
+needs its capability-handshake and asynchronous-output sequencing updated before
+the first complete Application test can pass. All saved integration work is
+preserved, and development must remain stopped until the user resumes it.
+
 ## Branches and inspected interfaces
 
 Current branch: `codex/native-unicode-emoji`, worktree
@@ -45,6 +72,34 @@ message, merge or approval by the other task is claimed.
 | Windows Node/application transfer owner | Client integration is still pending. Reuse the existing TransferManager; do not create another chunk, journal, ACK or retry engine. |
 
 ## Modified shared files and new contracts
+
+### Completion pass, 2026-10-15
+
+| Area | Established baseline | Remaining production work |
+| --- | --- | --- |
+| Transfer engine | Negotiated chunks/windows, durable ACKs and explicit ciphertext purpose tested | Bind the same manager to cache RPCs and supplemental restart records |
+| Encryption | Immutable blob, signed descriptor, HPKE packets and exact preparation recovery tested | Schedule bounded preparation and recipient finalization in Node |
+| Server | Quota, expiry, leases, original/current admission and per-device packets tested | Return frozen authenticated roster context; exercise the complete client pathway |
+| Windows UI | DM attachment cards and compact emoji composer accepted | Group draft, clipboard, one logical bubble, independent progress and controls |
+| Recovery | Staging and isolated transfer recovery tested | Application jobs, durable imports, late-response rejection and end-to-end restart |
+| Security | No old group-key release; revocation and missing evidence fail closed | Require verified historical ledger context for every incoming key packet |
+
+The Android branch now has uncommitted additive GroupBridge/GroupApplication
+work in portable core, reliable endpoint, relay requests, session transport and
+group_text.hpp. Its manifest was re-read before this pass. This branch leaves
+those owners untouched. Windows attachment controls use additive ui_bridge/Node
+entry points; their local command records are not peer message formats.
+
+Planned Windows-only exports are ui_group_attachment (UI actions/snapshot) and
+ui_group_attachment_network (bounded authenticated RPC handoff). Managed code
+retains existing pinned discovery TLS; Node retains attachment state and the
+existing TransferManager. Replies carry the exact request and session generation.
+The new cache_context RPC returns the original frozen roster plus current roster,
+membership incarnations and immutable expiry. It never establishes signed-ledger
+trust by itself. A recipient lacking verified historical evidence stays blocked.
+Canonical attachment history is supplemental protected application metadata keyed
+by signed descriptor/message identity, separate from per-device envelope bytes;
+legacy PCGE history/deduplication and group text wire remain unchanged.
 
 The attachment codec is checkpointed at `1bea3e0`; its gated server adapter and
 durable-storage/security tests are checkpointed at `21403e4`.
