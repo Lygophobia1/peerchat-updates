@@ -66,21 +66,31 @@ class GroupAttachmentUiTest {
         var verified=new GroupAttachmentCard{Attachment=complete};Check(Actions(verified).Contains("Open")&&Actions(verified).Contains("Save As…"),"verified actions absent");
         complete.sending=true;Check(!GroupAttachmentProjection.CanOpen(complete),"recipient verification authorized sender source");complete.sourceVerified=true;Check(GroupAttachmentProjection.CanOpen(complete),"verified source unavailable");
         complete.state="expired";complete.canRetry=true;var expired=new GroupAttachmentCard{Attachment=complete};Check(!Actions(expired).Contains("Retry")&&Actions(expired).Contains("Open"),"expiration renewed cache or hid verified local copy");
+        var prepareAgain=new CoreAdapter.GroupAttachmentData{id="source",group=group.Id,name="original.png",size=12,state="failed",sending=true,canRetry=true,preparationRequired=true};
+        Check(Actions(new GroupAttachmentCard{Attachment=prepareAgain}).Contains("Prepare again…"),"failed unsealed preparation did not request original file");
         complete.group="another";Check(!GroupAttachmentProjection.Apply(group,complete),"wrong group projection");complete.group=group.Id;
+        Check(GroupAttachmentHistoryCursor.Valid("100")&&!GroupAttachmentHistoryCursor.Valid("0")&&!GroupAttachmentHistoryCursor.Valid("01")&&!GroupAttachmentHistoryCursor.Valid("9223372036854775808")&&!GroupAttachmentHistoryCursor.Valid("12x"),"history cursor bounds");
+        Check(GroupAttachmentHistoryCursor.Advances("100","64")&&!GroupAttachmentHistoryCursor.Advances("100","100")&&!GroupAttachmentHistoryCursor.Advances("100","101"),"history cursor did not advance monotonically");
         var dm=new ConversationModel{Contact=new ContactData{peer="peer",name="DM"}};ChatAttachmentProjection.Apply(dm,new CoreAdapter.FileTransferData{id="dm",state=4,name="original.txt"});Check(dm.Messages.Single().Attachment.name=="original.txt"&&dm.Messages.Single().GroupAttachment==null,"DM attachment changed");
         var image=BitmapSource.Create(800,600,96,96,PixelFormats.Bgr32,null,new byte[800*600*4],800*4);image.Freeze();
         var draft=GroupImageDraft.Create(group.Id,9,image);Check(draft.Matches(group.Id,9)&&!draft.Matches(group.Id,10)&&!draft.Matches("other",9),"draft crossed group/profile");
         Check(draft.Preview.IsFrozen&&draft.Preview.PixelWidth<=320&&draft.Preview.PixelHeight<=160&&draft.Name.EndsWith(".png")&&Convert.FromBase64String(draft.Base64).Take(8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"clipboard draft format/bounds");
         string file=Path.Combine(args[0],"drop.txt");File.WriteAllText(file,"drop");
+        var selected=GroupFileDraft.Create(group.Id,9,new[]{file});Check(selected.Matches(group.Id,9)&&!selected.Matches("another",9)&&selected.Files.Length==1&&selected.Files[0].Name=="drop.txt"&&selected.Files[0].Size==4&&selected.Files[0].Unchanged(),"selected file draft metadata/scope");
+        Rejected(()=>GroupFileDraft.Create(group.Id,9,new[]{file,file}),"duplicate file draft accepted");
+        File.AppendAllText(file," changed");Check(!selected.Files[0].Unchanged(),"changed file draft could be sent without reselection");
+        string pngFile=Path.Combine(args[0],"draft-preview.png");File.WriteAllBytes(pngFile,Convert.FromBase64String(draft.Base64));
+        var pngDraft=GroupFileDraft.Create(group.Id,9,new[]{pngFile});Check(pngDraft.Files[0].Unchanged()&&SafeAttachmentPreview.Read(pngFile,pngDraft.Files[0].Size).Image!=null,"selected PNG preview unavailable");
         Check(GroupAttachmentProjection.ValidDrop("group:one","group:one",true,new[]{file}),"compatible group drop rejected");Check(!GroupAttachmentProjection.ValidDrop("group:one","group:two",true,new[]{file})&&!GroupAttachmentProjection.ValidDrop("group:one","group:one",false,new[]{file}),"drop changed target or bypassed capability");
         using(var resource=typeof(CoreAdapter).Assembly.GetManifestResourceStream("Main.xaml")){
             var window=(Window)XamlReader.Load(resource);window.ShowInTaskbar=false;window.ShowActivated=false;window.Left=-20000;
             var composer=(TextBox)window.FindName("Composer");Check(composer.MaxHeight==150&&composer.MinHeight==42,"compact composer changed");composer.Text="Exact Unicode 👩🏽‍💻 🇺🇸 ❤️";((TextBlock)window.FindName("ComposerHint")).Visibility=Visibility.Collapsed;EmojiColor.DraftPreview((WrapPanel)window.FindName("EmojiDraftPreview"),composer.Text);
+            var olderAttachments=(Button)window.FindName("OlderGroupAttachments");Check(olderAttachments!=null&&olderAttachments.Visibility==Visibility.Collapsed&&((Button)window.FindName("Older"))!=null,"bounded attachment history control missing or changed message paging");
             ((ItemsControl)window.FindName("Messages")).ItemsSource=group.Messages;((StackPanel)window.FindName("ChatEmpty")).Visibility=Visibility.Collapsed;
             ((Border)window.FindName("GroupImageDraft")).Visibility=Visibility.Visible;((Image)window.FindName("GroupImageDraftPreview")).Source=draft.Preview;((TextBlock)window.FindName("GroupImageDraftName")).Text=draft.Name+" · Image draft — Send to share";
             window.Show();window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));using(var output=File.Create(Path.Combine(args[0],"group-image-draft.png")))png.Save(output);window.Close();
             Check(composer.Text=="Exact Unicode 👩🏽‍💻 🇺🇸 ❤️"&&window.FindName("EmojiDraftPreview")!=null&&window.FindName("Emoji")!=null,"draft altered text/emoji controls");
         }
-        Console.WriteLine("PASS group attachment UI: stable bubble, verified actions, expiry, scoped drop/draft, bounded PNG/XAML; local ABI bounds and stale response rejection");return 0;
+        Console.WriteLine("PASS group attachment UI: stable bubble, verified actions, expiry, scoped drop/draft, bounded PNG/XAML, older-page cursor/control; local ABI bounds and stale response rejection");return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }

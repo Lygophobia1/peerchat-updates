@@ -35,8 +35,15 @@ class ChatAttachmentTest {
         Check(ChatText.DisplayMessage(prose)==prose,"long message content replaced");
         var longChat=new ChatText{Message=prose};var view=longChat.Content as BoundedTextView;
         Check(view!=null&&view.Viewer.Text==prose&&view.Viewer.IsReadOnly,"exact multiline long prose missing");
-        Check(view.Viewer.FontFamily.Source=="Segoe UI"&&view.Viewer.VerticalScrollBarVisibility==ScrollBarVisibility.Auto&&view.Viewer.MaxHeight==160,"prose typography or scrollbar bounds");
+        // Accepted Unicode emoji rendering keeps the text font first and the
+        // emoji fallback second; preserve the rest of the layout assertions.
+        Check(view.Viewer.FontFamily.Source=="Segoe UI, Segoe UI Emoji"&&view.Viewer.VerticalScrollBarVisibility==ScrollBarVisibility.Auto&&view.Viewer.MaxHeight==160,"prose typography or scrollbar bounds");
         view.Measure(new Size(320,double.PositiveInfinity));Check(view.DesiredSize.Height<260,"long bubble unbounded");
+        // The accepted emoji UI initially shows its color surface. Exercise
+        // the real user-facing toggle before testing the text scrollbar.
+        var selectUnicode=view.Children.OfType<Button>().Single(button=>Convert.ToString(button.Content)=="Select Unicode text / Color view");
+        Check(view.Viewer.Visibility==Visibility.Collapsed,"color preview is not the initial prose surface");
+        selectUnicode.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(view.Viewer.Visibility==Visibility.Visible,"Unicode text selection surface did not open");
         var host=new Window{Content=longChat,Width=360,Height=400,ShowInTaskbar=false,ShowActivated=false,WindowStartupLocation=WindowStartupLocation.Manual,Left=-20000};host.Show();host.UpdateLayout();var frame=new System.Windows.Threading.DispatcherFrame();view.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,new Action(()=>frame.Continue=false));System.Windows.Threading.Dispatcher.PushFrame(frame);view.Viewer.ScrollToEnd();frame=new System.Windows.Threading.DispatcherFrame();view.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,new Action(()=>frame.Continue=false));System.Windows.Threading.Dispatcher.PushFrame(frame);Console.WriteLine("scroll height="+view.Viewer.ActualHeight+" extent="+view.Viewer.ExtentHeight+" viewport="+view.Viewer.ViewportHeight+" offset="+view.Viewer.VerticalOffset);Check(view.Viewer.VerticalOffset>0,"inline vertical scrolling does not reach later content");host.Close();app.MainWindow=null;
         view.Expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(view.Viewer.MaxHeight==320,"expand did not preserve bounded height");
         view.Expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(view.Viewer.MaxHeight==160&&view.Viewer.Text==prose,"collapse changed text");
@@ -44,7 +51,7 @@ class ChatAttachmentTest {
         view.OpenFull.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));var full=app.Windows.Cast<Window>().Single(w=>w.Title=="Long message — read-only");
         Check(((TextBox)full.Content).Text==prose&&((TextBox)full.Content).IsReadOnly,"open full altered content or allows edits");full.Close();
         string code=String.Concat(Enumerable.Repeat("public class Sample {\n  int value = 1;\n}\n",70));
-        Check(((BoundedTextView)new ChatText{Message=code}.Content).Viewer.FontFamily.Source=="Consolas","code-like content typography");
+        Check(((BoundedTextView)new ChatText{Message=code}.Content).Viewer.FontFamily.Source=="Consolas, Segoe UI Emoji","code-like content typography");
         var page=new StackPanel{Width=320};for(int i=0;i<30;i++)page.Children.Add(new ChatText{Message=prose});
         var clock=System.Diagnostics.Stopwatch.StartNew();page.Measure(new Size(320,double.PositiveInfinity));Console.WriteLine("long_message_layout height="+page.DesiredSize.Height+" elapsed_seconds="+clock.Elapsed.TotalSeconds);Check(page.DesiredSize.Height<30*260&&clock.Elapsed.TotalSeconds<15,"several long messages have unbounded/slow layout");
         var longRow=new CoreAdapter.FileTransferData{id="typed",name=ChatAttachmentProjection.LongMessageName,state=4,time=100,size=Encoding.UTF8.GetByteCount(prose)};

@@ -18,14 +18,14 @@ public sealed partial class CoreAdapter {
     public sealed class GroupAttachmentData {
         public string id,logicalId,group,name,path,error,senderPeer,state,exportState,exportPath;
         public long size,transferSize,done,time;
-        public bool sending,plaintextVerified,sourceVerified,canRetry,canCancel,canOpen,outputPending;
+        public bool sending,plaintextVerified,sourceVerified,canRetry,canCancel,canOpen,outputPending,preparationRequired;
         public GroupAttachmentRecipient[] recipients;
     }
-    public sealed class GroupAttachmentSnapshot {public bool supported;public string reason;public GroupAttachmentData[] items;}
+    public sealed class GroupAttachmentSnapshot {public bool supported;public string reason,historyCursor;public bool historyMore;public GroupAttachmentData[] items;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)]
     static extern IntPtr ui_group_attachment(IntPtr handle,uint operation,string group,string id,string path);
     public string GroupAttachment(uint operation,string group="",string id="",string path=""){
-        if(operation==1)SelectedTransferFile.ValidateSize(path);
+        if(operation==1||operation==4&&!String.IsNullOrEmpty(path))SelectedTransferFile.ValidateSize(path);
         lock(mailboxGate){
             if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
             IntPtr result;
@@ -39,6 +39,16 @@ public sealed partial class CoreAdapter {
         try{return new JavaScriptSerializer{MaxJsonLength=4*1024*1024}.Deserialize<GroupAttachmentSnapshot>(GroupAttachment(0,group))??new GroupAttachmentSnapshot{reason="Group attachment snapshot unavailable."};}
         catch(NotSupportedException error){return new GroupAttachmentSnapshot{reason=error.Message};}
     }
+    public GroupAttachmentSnapshot GroupAttachmentHistory(string group,string before){
+        if(String.IsNullOrEmpty(group)||String.IsNullOrEmpty(before)||!GroupAttachmentHistoryCursor.Valid(before))throw new InvalidDataException("Attachment history cursor unavailable.");
+        var page=new JavaScriptSerializer{MaxJsonLength=4*1024*1024}.Deserialize<GroupAttachmentSnapshot>(GroupAttachment(8,group,before));
+        if(page==null)throw new InvalidDataException("Attachment history page unavailable.");
+        return page;
+    }
+}
+public static class GroupAttachmentHistoryCursor {
+    public static bool Valid(string value){ulong parsed;return !String.IsNullOrEmpty(value)&&value[0]!='0'&&value.All(ch=>ch>='0'&&ch<='9')&&UInt64.TryParse(value,out parsed)&&parsed>0&&parsed<=Int64.MaxValue;}
+    public static bool Advances(string before,string after){ulong oldValue,newValue;return Valid(before)&&Valid(after)&&UInt64.TryParse(before,out oldValue)&&UInt64.TryParse(after,out newValue)&&newValue<oldValue;}
 }
 public static class GroupAttachmentProjection {
     public static string LogicalId(CoreAdapter.GroupAttachmentData row){return String.IsNullOrEmpty(row.logicalId)?row.id:row.logicalId;}
@@ -111,7 +121,7 @@ public sealed class GroupAttachmentCard:StackPanel {
         }
         var actions=new WrapPanel();Children.Add(actions);
         if(!row.sending&&row.state=="available"&&!row.plaintextVerified)AddAction(actions,"Download…","accept");
-        if(row.canRetry&&row.state!="expired")AddAction(actions,row.state=="paused"?"Resume":"Retry","retry");
+        if(row.canRetry&&row.state!="expired")AddAction(actions,row.preparationRequired?"Prepare again…":row.state=="paused"?"Resume":"Retry","retry");
         if(row.canCancel)AddAction(actions,"Cancel","cancel");
         if(GroupAttachmentProjection.CanRequestOpen(row)&&!row.outputPending&&row.exportState!="copying"){AddAction(actions,"Preview","preview");AddAction(actions,"Open","open");AddAction(actions,"Save As…","save");}
     }
@@ -131,50 +141,131 @@ public sealed class GroupImageDraft {
     }
     public bool Matches(string group,ulong profile){return Group==group&&ProfileGeneration==profile;}
 }
+public sealed class GroupFileDraft {
+    public sealed class Entry {
+        public readonly string Path,Name;public readonly long Size;public readonly DateTime ModifiedUtc;
+        internal Entry(string path,FileInfo info){Path=path;Name=info.Name;Size=info.Length;ModifiedUtc=info.LastWriteTimeUtc;}
+        public bool Unchanged(){
+            try{var info=new FileInfo(Path);return info.Exists&&(info.Attributes&FileAttributes.ReparsePoint)==0&&info.Length==Size&&info.LastWriteTimeUtc==ModifiedUtc&&info.Name==Name;}
+            catch{return false;}
+        }
+    }
+    public readonly string Group;public readonly ulong ProfileGeneration;public readonly Entry[] Files;public BitmapSource Preview{get;internal set;}
+    GroupFileDraft(string group,ulong profile,Entry[] files){Group=group;ProfileGeneration=profile;Files=files;}
+    public static GroupFileDraft Create(string group,ulong profile,string[] paths){
+        if(String.IsNullOrEmpty(group)||paths==null||paths.Length==0||paths.Length>4)throw new InvalidDataException("Choose one to four regular files.");
+        var entries=new List<Entry>();var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach(var selected in paths){
+            if(String.IsNullOrWhiteSpace(selected))throw new InvalidDataException("A selected file is unavailable.");
+            var path=Path.GetFullPath(selected);if(!seen.Add(path))throw new InvalidDataException("A file was selected more than once.");
+            var info=new FileInfo(path);
+            if(!info.Exists||(info.Attributes&FileAttributes.ReparsePoint)!=0)throw new InvalidDataException("Choose regular files, not links or folders.");
+            SelectedTransferFile.ValidateSize(path);entries.Add(new Entry(path,info));
+        }
+        return new GroupFileDraft(group,profile,entries.ToArray());
+    }
+    public bool Matches(string group,ulong profile){return Group==group&&ProfileGeneration==profile;}
+}
 public partial class DesktopApplication {
     GroupAttachmentSnapshotState groupAttachmentState=new GroupAttachmentSnapshotState();
     sealed class GroupAttachmentSnapshotState {public bool Supported;public ulong Profile;public object Owner;public string Reason="Checking group attachment availability…";}
-    bool groupAttachmentRefreshing,groupAttachmentOperating,groupImageDraftPreparing;GroupImageDraft groupImageDraft;
-    sealed class PendingGroupAttachmentAction {public string Action,Destination,Group;public ulong Profile;public object Owner;}
+    bool groupAttachmentRefreshing,groupAttachmentOperating,groupImageDraftPreparing;GroupImageDraft groupImageDraft;GroupFileDraft groupFileDraft;int groupFileDraftNext;
+    sealed class PendingGroupAttachmentAction {public string Action,Destination,Group;public ulong Profile;public object Owner;public bool Busy;}
+    sealed class GroupAttachmentHistoryState {public ulong Profile;public object Owner;public string Cursor;public bool More,Loading;}
+    readonly Dictionary<string,GroupAttachmentHistoryState> groupAttachmentHistory=new Dictionary<string,GroupAttachmentHistoryState>();
+    GroupAttachmentHistoryState AttachmentHistoryState(string group){
+        foreach(var stale in groupAttachmentHistory.Where(pair=>pair.Value.Profile!=profileSessionGeneration||pair.Value.Owner!=discovery).Select(pair=>pair.Key).ToArray())groupAttachmentHistory.Remove(stale);
+        GroupAttachmentHistoryState state;
+        if(!groupAttachmentHistory.TryGetValue(group,out state)||state.Profile!=profileSessionGeneration||state.Owner!=discovery){
+            state=new GroupAttachmentHistoryState{Profile=profileSessionGeneration,Owner=discovery};groupAttachmentHistory[group]=state;
+        }
+        return state;
+    }
+    void RefreshGroupAttachmentHistoryButton(){
+        var button=Find<Button>("OlderGroupAttachments");
+        string selected=model.Groups&&model.SelectedGroup!=null?model.SelectedGroup.Id:null;
+        GroupAttachmentHistoryState state=null;
+        if(selected!=null)groupAttachmentHistory.TryGetValue(selected,out state);
+        bool current=state!=null&&state.Profile==profileSessionGeneration&&state.Owner==discovery;
+        button.Visibility=current&&state.More?Visibility.Visible:Visibility.Collapsed;
+        button.IsEnabled=current&&state.More&&!state.Loading&&!groupAttachmentOperating;
+        button.Content=current&&state.Loading?"Loading older attachments…":"↑    Load older attachments";
+    }
+    async Task LoadOlderGroupAttachments(){
+        if(closing||groupAttachmentRefreshing||groupAttachmentOperating||!model.Groups||model.SelectedGroup==null)return;
+        var group=model.SelectedGroup;var state=AttachmentHistoryState(group.Id);
+        if(!state.More||state.Loading||!GroupAttachmentHistoryCursor.Valid(state.Cursor))return;
+        string before=state.Cursor;ulong generation=profileSessionGeneration;var owner=discovery;
+        state.Loading=true;RefreshGroupAttachmentHistoryButton();
+        try{
+            var page=await Task.Run(()=>core.GroupAttachmentHistory(group.Id,before));
+            if(closing||generation!=profileSessionGeneration||owner!=discovery||state!=AttachmentHistoryState(group.Id))return;
+            var items=page.items??new CoreAdapter.GroupAttachmentData[0];
+            if(items.Length>32||items.Any(row=>row==null||row.group!=group.Id)||page.historyMore&&!GroupAttachmentHistoryCursor.Advances(before,page.historyCursor)||items.Length==0&&page.historyMore)throw new InvalidDataException("Attachment history page is invalid.");
+            var viewer=Find<ScrollViewer>("MessageScroll");double offset=viewer.VerticalOffset,extent=viewer.ExtentHeight;
+            bool changed=false;foreach(var row in items)changed|=GroupAttachmentProjection.Apply(group,row);
+            state.More=page.historyMore;state.Cursor=GroupAttachmentHistoryCursor.Advances(before,page.historyCursor)?page.historyCursor:before;
+            if(changed){Refresh();SizeBubbles();window.Dispatcher.BeginInvoke((Action)(()=>{if(!closing&&model.Groups&&model.SelectedGroup==group)viewer.ScrollToVerticalOffset(offset+Math.Max(0,viewer.ExtentHeight-extent));}));}
+        }catch(Exception error){if(!closing&&generation==profileSessionGeneration&&owner==discovery)Notify("Older attachments unavailable: "+error.Message);}
+        finally{state.Loading=false;if(!closing)RefreshGroupAttachmentHistoryButton();}
+    }
     readonly Dictionary<string,PendingGroupAttachmentAction> pendingGroupAttachmentActions=new Dictionary<string,PendingGroupAttachmentAction>();
     bool GroupAttachmentsAvailable(){return groupAttachmentState.Supported&&groupAttachmentState.Profile==profileSessionGeneration&&groupAttachmentState.Owner==discovery;}
     string GroupAttachmentUnavailable(){return groupAttachmentState.Profile==profileSessionGeneration&&groupAttachmentState.Owner==discovery?groupAttachmentState.Reason:"Group attachments are unavailable for this session.";}
     void BindGroupAttachments(){
+        Find<Button>("OlderGroupAttachments").Click+=async(s,e)=>await LoadOlderGroupAttachments();
         window.AddHandler(GroupAttachmentCard.ActionEvent,new RoutedEventHandler(async(s,e)=>{var action=(GroupAttachmentActionEventArgs)e;e.Handled=true;await GroupAttachmentAction(action);}));
         DataObject.AddPastingHandler(Find<TextBox>("Composer"),async(s,e)=>{
             if(!model.Groups||model.SelectedGroup==null||!e.DataObject.GetDataPresent(DataFormats.Bitmap))return;
             e.CancelCommand();
             if(groupAttachmentOperating||groupImageDraftPreparing){Notify("Please wait for the current attachment operation.");return;}
             if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return;}
+            if(groupFileDraft!=null){Notify("A file draft is waiting. Send or remove it before pasting an image.");return;}
             if(groupImageDraft!=null&&!groupImageDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration)){Notify("An image draft is waiting in another group. Send or remove that draft before pasting another image.");return;}
             string group=model.SelectedGroup.Id;ulong profile=profileSessionGeneration;var owner=discovery;groupImageDraftPreparing=true;RefreshGroupImageDraft();
             try{var image=e.DataObject.GetData(DataFormats.Bitmap) as BitmapSource;if(image==null)throw new InvalidDataException("Clipboard bitmap unavailable.");image=image.Clone();image.Freeze();var draft=await Task.Run(()=>GroupImageDraft.Create(group,profile,image));if(!closing&&profile==profileSessionGeneration&&owner==discovery){groupImageDraft=draft;RefreshGroupImageDraft();}}
             catch(Exception error){if(!closing&&profile==profileSessionGeneration&&owner==discovery)Notify("Image draft could not be prepared: "+error.Message);}
             finally{groupImageDraftPreparing=false;if(!closing)RefreshGroupImageDraft();}
         });
-        Find<Button>("RemoveGroupImageDraft").Click+=(s,e)=>{if(!groupAttachmentOperating&&!groupImageDraftPreparing){groupImageDraft=null;RefreshGroupImageDraft();}};
-        window.Closed+=(s,e)=>{groupImageDraft=null;pendingGroupAttachmentActions.Clear();};
+        Find<Button>("RemoveGroupImageDraft").Click+=(s,e)=>{if(!groupAttachmentOperating&&!groupImageDraftPreparing){groupImageDraft=null;groupFileDraft=null;groupFileDraftNext=0;RefreshGroupImageDraft();}};
+        window.Closed+=(s,e)=>{groupImageDraft=null;groupFileDraft=null;pendingGroupAttachmentActions.Clear();groupAttachmentHistory.Clear();};
     }
     void RefreshGroupImageDraft(){
         if(groupImageDraft!=null&&groupImageDraft.ProfileGeneration!=profileSessionGeneration)groupImageDraft=null;
-        bool visible=groupImageDraft!=null&&model.Groups&&model.SelectedGroup!=null&&groupImageDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration);
+        if(groupFileDraft!=null&&groupFileDraft.ProfileGeneration!=profileSessionGeneration){groupFileDraft=null;groupFileDraftNext=0;}
+        bool imageVisible=groupImageDraft!=null&&model.Groups&&model.SelectedGroup!=null&&groupImageDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration);
+        bool fileVisible=groupFileDraft!=null&&model.Groups&&model.SelectedGroup!=null&&groupFileDraft.Matches(model.SelectedGroup.Id,profileSessionGeneration);
+        bool visible=imageVisible||fileVisible;
         Find<Border>("GroupImageDraft").Visibility=visible?Visibility.Visible:Visibility.Collapsed;
-        Find<Image>("GroupImageDraftPreview").Source=visible?groupImageDraft.Preview:null;
-        Find<TextBlock>("GroupImageDraftName").Text=visible?groupImageDraft.Name+" · Image draft — Send to share":"";
+        Find<Image>("GroupImageDraftPreview").Source=imageVisible?groupImageDraft.Preview:fileVisible?groupFileDraft.Preview:null;
+        Find<TextBlock>("GroupImageDraftName").Text=imageVisible?groupImageDraft.Name+" · Image draft — Send to share":fileVisible?String.Join("\n",groupFileDraft.Files.Skip(groupFileDraftNext).Select(file=>file.Name+" · "+file.Size.ToString("N0")+" bytes"))+"\nFile draft — Send to share":"";
         Find<Button>("RemoveGroupImageDraft").IsEnabled=!groupAttachmentOperating&&!groupImageDraftPreparing;
     }
     async Task<bool> SendGroupImageDraft(){
         if(model.Groups&&groupImageDraftPreparing)return true;
+        var files=groupFileDraft;
+        if(files!=null&&model.Groups&&model.SelectedGroup!=null&&files.Matches(model.SelectedGroup.Id,profileSessionGeneration)){
+            if(groupAttachmentOperating)return true;
+            while(groupFileDraft==files&&groupFileDraftNext<files.Files.Length){
+                var entry=files.Files[groupFileDraftNext];
+                if(!entry.Unchanged()){Notify("The selected file changed. Remove this draft and select it again.");return true;}
+                int index=groupFileDraftNext;
+                if(!await GroupAttachmentOperation(1,files.Group,path:entry.Path,accepted:result=>{if(groupFileDraft==files&&groupFileDraftNext==index&&!String.IsNullOrEmpty(result))groupFileDraftNext++;}))return true;
+                if(groupFileDraft==files)RefreshGroupImageDraft();
+            }
+            if(groupFileDraft==files){groupFileDraft=null;groupFileDraftNext=0;RefreshGroupImageDraft();}
+            return true;
+        }
         var draft=groupImageDraft;if(draft==null||!model.Groups||model.SelectedGroup==null||!draft.Matches(model.SelectedGroup.Id,profileSessionGeneration))return false;
         if(groupAttachmentOperating)return true;
         if(await GroupAttachmentOperation(7,draft.Group,draft.Name,draft.Base64))if(groupImageDraft==draft){groupImageDraft=null;RefreshGroupImageDraft();}
         return true;
     }
-    async Task<bool> GroupAttachmentOperation(uint operation,string group,string id="",string path=""){
+    async Task<bool> GroupAttachmentOperation(uint operation,string group,string id="",string path="",Action<string> accepted=null){
         if(groupAttachmentOperating){Notify("Please wait for the current attachment operation.");return false;}
         if(operation==1||operation==7){if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return false;}}
         groupAttachmentOperating=true;var generation=profileSessionGeneration;var owner=discovery;
-        try{await Task.Run(()=>core.GroupAttachment(operation,group,id,path));return !closing&&generation==profileSessionGeneration&&owner==discovery;}
+        try{string result=await Task.Run(()=>core.GroupAttachment(operation,group,id,path));if(accepted!=null)accepted(result);return !closing&&generation==profileSessionGeneration&&owner==discovery;}
         catch(FileTooLargeException){Notify(FileTooLargeException.Explanation);return false;}
         catch(Exception error){if(!closing&&generation==profileSessionGeneration&&owner==discovery)Notify(error.Message);return false;}
         finally{groupAttachmentOperating=false;if(!closing){RefreshGroupImageDraft();await RefreshGroupAttachments();}}
@@ -187,23 +278,56 @@ public partial class DesktopApplication {
     }
     async Task SendGroupFiles(GroupModel group,string[] files){
         if(group==null||group.Invited||files==null||files.Length==0||files.Length>4){Notify("Choose up to four regular files for a group you have joined.");return;}
+        if(groupAttachmentOperating||groupImageDraftPreparing){Notify("Please wait for the current attachment operation.");return;}
+        if(groupFileDraft!=null||groupImageDraft!=null){Notify("An attachment draft is waiting. Send or remove it before selecting another file.");return;}
+        if(!GroupAttachmentsAvailable()){Notify(GroupAttachmentUnavailable());return;}
         ulong generation=profileSessionGeneration;var owner=discovery;
-        foreach(string path in files){if(generation!=profileSessionGeneration||owner!=discovery)return;if(!await GroupAttachmentOperation(1,group.Id,path:path))return;}
+        try{
+            var draft=GroupFileDraft.Create(group.Id,generation,files);
+            if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup!=group)return;
+            groupFileDraft=draft;groupFileDraftNext=0;RefreshGroupImageDraft();
+            groupImageDraftPreparing=true;
+            try{
+                foreach(var entry in draft.Files){
+                    var preview=await SafeAttachmentPreview.ReadAsync(entry.Path,entry.Size);
+                    if(closing||generation!=profileSessionGeneration||owner!=discovery||groupFileDraft!=draft)return;
+                    if(preview.Image!=null){draft.Preview=preview.Image;RefreshGroupImageDraft();break;}
+                }
+            }finally{groupImageDraftPreparing=false;if(!closing)RefreshGroupImageDraft();}
+        }catch(FileTooLargeException){Notify(FileTooLargeException.Explanation);}
+        catch(Exception error){Notify("File draft unavailable: "+error.Message);}
     }
     async Task GroupAttachmentAction(GroupAttachmentActionEventArgs action){
         var row=action.Attachment;if(row==null)return;
+        if(!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=row.group)return;
         if(action.Action=="cancel"){await GroupAttachmentOperation(3,row.group,row.id);return;}
-        if(action.Action=="retry"){await GroupAttachmentOperation(4,row.group,row.id);return;}
-        if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=Path.GetFileName(row.name),Title="Download attachment to folder",OverwritePrompt=false};if(choose.ShowDialog(window)==true)await GroupAttachmentOperation(2,row.group,row.id,Path.GetDirectoryName(choose.FileName));return;}
+        if(action.Action=="retry"){
+            if(row.preparationRequired){
+                var retryGeneration=profileSessionGeneration;var retryOwner=discovery;
+                var choose=new Microsoft.Win32.OpenFileDialog{FileName=row.name,Title="Select the original file to prepare again",CheckFileExists=true};
+                if(choose.ShowDialog(window)!=true)return;
+                if(closing||retryGeneration!=profileSessionGeneration||retryOwner!=discovery||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=row.group)return;
+                try{
+                    SelectedTransferFile.ValidateSize(choose.FileName);
+                    var info=new FileInfo(choose.FileName);
+                    if(!info.Exists||(info.Attributes&FileAttributes.ReparsePoint)!=0||info.Name!=row.name||info.Length!=row.size)throw new InvalidDataException("Choose the same original file name and size to prepare again.");
+                }catch(FileTooLargeException){Notify(FileTooLargeException.Explanation);return;}
+                catch(Exception error){Notify(error.Message);return;}
+                await GroupAttachmentOperation(4,row.group,row.id,choose.FileName);
+            }else await GroupAttachmentOperation(4,row.group,row.id);
+            return;
+        }
+        if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=Path.GetFileName(row.name),Title="Download attachment to folder",OverwritePrompt=false};if(choose.ShowDialog(window)==true&&model.Groups&&model.SelectedGroup!=null&&model.SelectedGroup.Id==row.group)await GroupAttachmentOperation(2,row.group,row.id,Path.GetDirectoryName(choose.FileName));return;}
         if(!GroupAttachmentProjection.CanRequestOpen(row)){Notify("The local attachment is not available for verification.");return;}
         if(pendingGroupAttachmentActions.ContainsKey(row.id)){Notify("This attachment is being verified.");return;}
         var generation=profileSessionGeneration;var owner=discovery;
         try{
             string destination="";if(action.Action=="save"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=Path.GetFileName(row.name),Title="Save a verified attachment copy",OverwritePrompt=false};if(choose.ShowDialog(window)!=true)return;destination=choose.FileName;}
-            if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
-            var pending=new PendingGroupAttachmentAction{Action=action.Action,Destination=destination,Group=row.group,Profile=generation,Owner=owner};
+            if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=row.group)return;
+            var pending=new PendingGroupAttachmentAction{Action=action.Action,Destination=destination,Group=row.group,Profile=generation,Owner=owner,Busy=true};
             pendingGroupAttachmentActions[row.id]=pending;
             string path=await Task.Run(()=>core.GroupAttachment(action.Action=="save"?5u:6u,row.group,row.id,destination));
+            pending.Busy=false;
             if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
             if(String.IsNullOrEmpty(path)){Notify("Verifying local attachment…");return;}
             pendingGroupAttachmentActions.Remove(row.id);
@@ -224,8 +348,10 @@ public partial class DesktopApplication {
     async Task ContinueGroupAttachmentActions(CoreAdapter.GroupAttachmentData[] rows){
         foreach(var pair in pendingGroupAttachmentActions.ToArray()){
             var pending=pair.Value;if(!PendingGroupActionCurrent(pending)){pendingGroupAttachmentActions.Remove(pair.Key);continue;}
+            if(pending.Busy)continue;
             var row=rows.FirstOrDefault(item=>item!=null&&item.id==pair.Key&&item.group==pending.Group);if(row==null)continue;
             try{
+                pending.Busy=true;
                 if(pending.Action=="save"){
                     if(row.exportState=="failed")throw new IOException(row.error??"Verified export failed.");
                     string result=await Task.Run(()=>core.GroupAttachment(5,row.group,row.id,pending.Destination));
@@ -240,6 +366,7 @@ public partial class DesktopApplication {
                     pendingGroupAttachmentActions.Remove(pair.Key);await ShowVerifiedGroupAttachment(row,pending,path);
                 }
             }catch(Exception error){pendingGroupAttachmentActions.Remove(pair.Key);if(PendingGroupActionCurrent(pending))Notify("Attachment unavailable: "+error.Message);}
+            finally{pending.Busy=false;}
         }
     }
     async Task RefreshGroupAttachments(){
@@ -248,12 +375,19 @@ public partial class DesktopApplication {
         try{
             string selected=model.Groups&&model.SelectedGroup!=null?model.SelectedGroup.Id:"";
             var snapshot=await Task.Run(()=>core.GroupAttachments(selected));if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
+            if(!String.IsNullOrEmpty(selected)){
+                var history=AttachmentHistoryState(selected);
+                if(history.Cursor==null){
+                    if(snapshot.historyMore&&!GroupAttachmentHistoryCursor.Valid(snapshot.historyCursor))throw new InvalidDataException("Attachment history cursor unavailable.");
+                    history.Cursor=snapshot.historyCursor??"";history.More=snapshot.historyMore;
+                }
+            }
             groupAttachmentState=new GroupAttachmentSnapshotState{Supported=snapshot.supported,Profile=generation,Owner=owner,Reason=String.IsNullOrEmpty(snapshot.reason)?"Group attachments are unavailable on this connection.":snapshot.reason};
             bool changed=false;foreach(var row in snapshot.items??new CoreAdapter.GroupAttachmentData[0]){GroupModel group;if(row!=null&&row.group!=null&&model.GroupChats.TryGetValue(row.group,out group))changed|=GroupAttachmentProjection.Apply(group,row);}
             if(changed){Refresh();SizeBubbles();}
             await ContinueGroupAttachmentActions(snapshot.items??new CoreAdapter.GroupAttachmentData[0]);
         }catch{if(generation==profileSessionGeneration&&owner==discovery)groupAttachmentState=new GroupAttachmentSnapshotState{Profile=generation,Owner=owner,Reason="Group attachment status unavailable. Reconnect and try again."};}
-        finally{groupAttachmentRefreshing=false;}
+        finally{groupAttachmentRefreshing=false;if(!closing)RefreshGroupAttachmentHistoryButton();}
     }
 }
 }
