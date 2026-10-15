@@ -24,7 +24,7 @@ data class MessageUi(
     val id: String, val senderId: String, val senderName: String, val text: String,
     val outgoing: Boolean, val time: String, val date: String = "Today",
     val status: MessageStatus = MessageStatus.Received,
-    val timestamp:Long=0,val logicalOrder:Long=0
+    val timestamp:Long=0,val logicalOrder:Long=0,val retryAvailable:Boolean=false,val deliveryDetail:String=""
 )
 data class VoiceRoomUi(val id: String, val name: String, val participants: List<String>, val joined: Boolean = false,
     val muted: Boolean = false, val deafened: Boolean = false)
@@ -55,14 +55,19 @@ sealed interface LoginResult {
 }
 data class PeerChatUiState(
     val demo: Boolean = true, val diagnostics: String = "UI demo — no live diagnostics",
+    val voiceAvailable:Boolean=false,val voiceDiagnostic:String="Voice calls are unavailable in this build.",
     val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,
     val incomingRequests:List<MemberUi> = emptyList(),
+    val groupInvitations:List<com.peerchat.android.application.GroupInvitationSnapshot> = emptyList(),
     val route: Route = Route.Welcome, val tab: Tab = Tab.Chats, val kind: ChatKind = ChatKind.Direct,
     val conversations: List<ConversationUi> = emptyList(), val selectedId: String? = null,
     val query: String = "", val searching: Boolean = false,
     val load: LoadState = LoadState.Ready, val connection: ConnectionState = ConnectionState.Online,
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
     val rememberMe:Boolean=false,
+    val deviceVerification:com.peerchat.android.application.DeviceVerification?=null,
+    val mailboxReenrollment:com.peerchat.android.application.MailboxReenrollment?=null,
+    val mailboxRecoveryError:String?=null,val mailboxRecoveryBusy:Boolean=false,
     val serverTrust:ServerTrustUi?=null,
     val serverIdentityChanged:ServerUi?=null,
     val startupStatus:String?=null,
@@ -96,6 +101,9 @@ class UnconnectedAccountAccess : AccountAccess {
 }
 
 sealed interface UiAction {
+    data class CreateGroup(val name:String):UiAction
+    data class InviteGroup(val group:String,val account:Long):UiAction
+    data class RespondGroup(val id:String,val accept:Boolean):UiAction
     data object Explore : UiAction
     data object SignOut : UiAction
     data object ResetNetworkSession : UiAction
@@ -131,6 +139,8 @@ sealed interface UiAction {
     data class Notice(val text: String?) : UiAction
     data class SetTheme(val theme: ThemeChoice) : UiAction
     data class PreviewLoginFailure(val failure: LoginResult) : UiAction
+    data class VerifyDevice(val value:com.peerchat.android.application.DeviceVerification,val accept:Boolean):UiAction
+    data class ReenrollMailbox(val value:com.peerchat.android.application.MailboxReenrollment,val accept:Boolean):UiAction
     data object PreviewIncomingCall : UiAction
     data class JoinVoice(val roomId: String) : UiAction
     data class LeaveVoice(val roomId: String) : UiAction
@@ -148,6 +158,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
     fun updateSelected(transform: (ConversationUi) -> ConversationUi) = state.copy(conversations =
         state.conversations.map { if (it.id == state.selectedId) transform(it) else it })
     return when (action) {
+        is UiAction.CreateGroup,is UiAction.InviteGroup,is UiAction.RespondGroup -> state
         UiAction.Explore -> state.copy(route = Route.Home, notice = null)
         UiAction.ResetNetworkSession -> state.copy(route=Route.Login,startupStatus=null,loginBusy=false,connection=ConnectionState.Offline)
         UiAction.DisconnectChangeServer -> state.copy(route=Route.Server,startupStatus=null,loginBusy=false,connection=ConnectionState.Offline)
@@ -195,6 +206,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Notice -> state.copy(notice = action.text)
         is UiAction.SetTheme -> state.copy(theme = action.theme)
         is UiAction.PreviewLoginFailure -> state.copy(loginError = "Preview only: " + loginFailureText(action.failure))
+        is UiAction.VerifyDevice,is UiAction.ReenrollMailbox -> state
         UiAction.PreviewIncomingCall -> state.copy(incomingCallPreview = !state.incomingCallPreview)
         // These commands exercise local UI fixtures ONLY. A real presenter delegates to application owners.
         is UiAction.JoinVoice -> updateSelected { c -> c.copy(voiceRooms = c.voiceRooms.map { room ->

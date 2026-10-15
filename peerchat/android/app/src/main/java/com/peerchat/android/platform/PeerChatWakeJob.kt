@@ -129,27 +129,7 @@ class PeerChatWakeJob:JobService() {
             }}
         };return true
     }
-    private fun show(accountKey:String,value:LocalMessageNotification):Boolean {
-        android.util.Log.i("PeerChatWake","stage=notification_attempt")
-        if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
-            android.util.Log.i("PeerChatWake","stage=notification_unavailable reason=permission");return false
-        }
-        val manager=getSystemService(NotificationManager::class.java);if(!manager.areNotificationsEnabled()){
-            android.util.Log.i("PeerChatWake","stage=notification_unavailable reason=app_disabled");return false
-        }
-        manager.createNotificationChannel(NotificationChannel("messages","Messages",NotificationManager.IMPORTANCE_DEFAULT))
-        val id=(accountKey+value.conversationId).hashCode()
-        val intent=Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra("peerchat_account_key",accountKey).putExtra("peerchat_conversation",value.conversationId)
-        val pending=PendingIntent.getActivity(this,id,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification=Notification.Builder(this,"messages").setSmallIcon(R.drawable.peerchat_icon)
-            .setContentTitle(value.title).setContentText(value.body).setContentIntent(pending).setAutoCancel(true)
-            .setVisibility(Notification.VISIBILITY_PRIVATE).setNumber(value.count).setGroup("peerchat_messages").build()
-        manager.notify(id,notification)
-        android.util.Log.i("PeerChatWake","stage=notification_posted")
-        WakeSystemDiagnostics.power(this,"notification_posted_power")
-        return true
-    }
+    private fun show(accountKey:String,value:LocalMessageNotification)=showMessageNotification(this,accountKey,value)
     override fun onStopJob(params:JobParameters):Boolean {
         WakeSystemDiagnostics.record(this,"wake_job_stopped",if(Build.VERSION.SDK_INT>=31)params.stopReason else -1)
         admittedJobs.remove(params.jobId);OpaquePushWake.finished(params.jobId)

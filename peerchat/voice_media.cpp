@@ -1,4 +1,6 @@
+#ifndef RTC_STATIC
 #define RTC_STATIC
+#endif
 #include <rtc/rtc.h>
 #include <opus/opus.h>
 #include "voice_media.hpp"
@@ -17,6 +19,13 @@
 namespace peerchat {
 namespace {
 std::atomic<std::uint64_t> NextMediaSessionId{1};
+const char* processingUnavailableMessage(){
+#if defined(__ANDROID__)
+    return "WebRTC microphone processing unavailable; Android session effects are reported separately";
+#else
+    return "Microphone processing unavailable; raw PCM bypass active";
+#endif
+}
 const char* pcStateName(rtcState state) {
     switch(state){case RTC_NEW:return "new";case RTC_CONNECTING:return "connecting";case RTC_CONNECTED:return "connected";case RTC_DISCONNECTED:return "disconnected";case RTC_FAILED:return "failed";case RTC_CLOSED:return "closed";}return "unknown";
 }
@@ -36,11 +45,15 @@ std::string candidateSummary(const std::string& candidate) {
     return "type="+type+" address_class="+addressClass;
 }
 std::wstring receiveDllPath() {
+#if defined(__ANDROID__)
+    return {}; // Existing pc_rx ABI is statically linked on Android.
+#else
     wchar_t path[32768]{};
     auto length=GetModuleFileNameW(nullptr,path,32768);
     if(!length||length>=32768)return {};
     std::wstring result(path,length);auto slash=result.find_last_of(L"\\/");
     return slash==std::wstring::npos?std::wstring{}:result.substr(0,slash+1)+L"PeerChat.AudioReceive.dll";
+#endif
 }
 }
 
@@ -160,7 +173,7 @@ struct VoiceMedia::Impl {
 #endif
         if (processing.enabled) {
             if (!apm.processFrame(pcm) && !apmWarningSent.exchange(true))
-                push(EventKind::AudioProcessingError, "Microphone processing unavailable; raw PCM bypass active");
+                push(EventKind::AudioProcessingError, processingUnavailableMessage());
         } else ++unprocessedFrames;
         unsigned char encoded[4000];
         int size;
@@ -196,6 +209,10 @@ struct VoiceMedia::Impl {
         if(!receive->engine.open(receiveDllPath())||!receive->engine.authorize(receive->key,receive->generation)){
             // Receive failure is audio-scoped; sender/transport remain available.
             receive->failure=PC_RX_FAILED;
+#if defined(__ANDROID__)
+            error=L"Pinned Android NetEq receive component is unavailable; voice cannot start.";
+            return false;
+#endif
         }
         opus_encoder_ctl(encoder, OPUS_SET_BITRATE(24000));
         opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(5));
@@ -204,7 +221,7 @@ struct VoiceMedia::Impl {
         unprocessedFrames = 0;
         if (processing.enabled && !apm.open(processing.noiseSuppression, processing.automaticGain,
                 processing.noiseSuppressionStrength, processing.automaticGainStrength, processing.echoCancellation) && !apmWarningSent.exchange(true))
-            push(EventKind::AudioProcessingError, "Microphone processing unavailable; raw PCM bypass active");
+            push(EventKind::AudioProcessingError, processingUnavailableMessage());
         audio = std::make_unique<Audio>();
         audio->setDevices(inputDevice,outputDevice);
         audio->setVolumes(inputGain,outputGain);

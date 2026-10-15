@@ -18,3 +18,18 @@ fun planMessageNotification(snapshot:MessagingSnapshot,conversation:Conversation
     }
     return LocalMessageNotification("account:${conversation.friend.accountId}",title,body,incoming.size)
 }
+
+/** Bounded native-verified group history, with the same privacy preference. */
+fun planGroupMessageNotification(snapshot:MessagingSnapshot,group:GroupConversationSnapshot,
+    prior:ConversationPreference?,preview:NotificationPreview):LocalMessageNotification? {
+    if(!snapshot.authenticated||prior==null||prior.baselinePending)return null
+    val incoming=group.messages.filter{it.device!=snapshot.localPeerId&&it.sequence>maxOf(prior.readSequence,prior.notifiedSequence)}.distinctBy{it.id}
+    if(incoming.isEmpty())return null
+    val title=if(preview==NotificationPreview.HideContent)"PeerChat" else group.name
+    val body=when(preview){
+        NotificationPreview.SenderAndMessage->incoming.last().text.take(240)
+        NotificationPreview.SenderOnly->if(incoming.size==1)"New group message" else "${incoming.size} new group messages"
+        NotificationPreview.HideContent->"New PeerChat message"
+    }
+    return LocalMessageNotification("group:${group.id}",title,body,incoming.size)
+}

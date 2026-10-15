@@ -10,6 +10,9 @@ import com.peerchat.android.platform.tls.RelayFrames
 internal class AndroidRelayExecution(private val profile: Long,private val request: RelayExecution,
     private val accounts: ServerAccounts,private val remoteAccount: Long) : AutoCloseable {
     val requestPeerId:String get()=request.peerId
+    @Volatile var failureDiagnostic:String?=null
+        private set
+    val groupScope:GroupRelayScope? get()=request.group
     @Volatile private var stopping=false
     @Volatile private var channel: ServerChannel?=null
     @Volatile var attached=false
@@ -28,7 +31,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         var stage="relay_rendezvous"
         try {
             android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
-            val relay=accounts.openRelay(remoteAccount,request.peerId,request.archive?.fields(),request.attempt) {opened->
+            val relay=accounts.openRelay(remoteAccount,request.peerId,request.group?.fields()?:request.archive?.fields(),request.attempt) {opened->
                 channel=opened
                 if(stopping){opened.close();throw java.io.IOException("Relay cancelled before pairing")}
             }
@@ -49,13 +52,14 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                         if(bytes.isNotEmpty())relay.channel.write(frames.wrap(bytes),43+65536)
                         else {lastOutputIdleNanos=System.nanoTime();Thread.sleep(10)} // Readout, not a reconnect decision.
                     }
-                } catch(_: Exception) {try {relay.channel.close()}catch(_: Exception){}}
+                } catch(failure: Exception) {failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=relay_output reason="+relayFailureCode(failure);try {relay.channel.close()}catch(_: Exception){}}
             },"PeerChat relay output").apply {isDaemon=true;start()}
             while(!stopping) {
                 val bytes=frames.unwrap(relay.channel.read(43+65536))
                 check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)
             }
         } catch(failure: Exception) {
+            if(!stopping&&failureDiagnostic==null)failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=$stage reason="+relayFailureCode(failure)
             android.util.Log.i("PeerChatWake","stage="+stage+" attempt=${request.attempt} result="+failure.javaClass.simpleName)
             if(request.archive!=null)android.util.Log.w("PeerChatArchive","event=attempt_failed attempt=${request.attempt} role="+
                 (if(request.archive.source==request.peerId)"reader" else "source")+" stage=$stage reason="+
@@ -77,4 +81,13 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         ReliableBridge.close(profile,request.attempt,false)
         // Do not join while holding any native/application gate.
     }
+}
+
+// Fixed classification only; no server bodies, credentials or exception messages.
+internal fun relayFailureCode(failure:Exception):String = when {
+    failure is com.peerchat.android.platform.ServerRejected&&failure.code in setOf("relay_duplicate_attachment","relay_pair_timeout","relay_not_authorized","session_invalid","session_superseded")->failure.code
+    failure is java.net.SocketTimeoutException->"transport_timeout"
+    failure is java.io.IOException->"transport_io_failure"
+    failure is IllegalStateException->"native_or_relay_admission_rejected"
+    else->"relay_execution_failed"
 }

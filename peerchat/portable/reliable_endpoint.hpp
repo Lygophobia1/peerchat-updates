@@ -25,12 +25,26 @@ public:
     // Platform execution seam into the ONE profile TransferManager. No sockets,
     // retry policy, transfer journal or key ownership lives in this endpoint.
     using TransferReceiver=std::function<void(const std::string&,const Blob&,std::uint64_t)>;
+    struct GroupAdmission {
+        session::ReliableAuthorization scope;
+        std::function<bool(const Blob*)> current;
+        std::function<std::vector<Blob>(const Blob&,const Blob&,std::uint64_t)> receive;
+        std::function<std::vector<Blob>(const Blob&,std::uint64_t)> outgoing;
+        std::function<bool()> settled{};
+    };
+    struct VoiceAdmission {
+        std::function<bool()> available;
+        std::function<void(const std::string&,const Blob&,std::uint64_t)> receive;
+    };
+    static bool voiceFrame(unsigned type){return (type>=protocol::CallOffer&&type<=protocol::CallCandidate)||
+        (type>=protocol::CallMediaRestart&&type<=protocol::CallMediaRecoveryRequest);}
 private:
     const Profile& local_;
     Storage& store_;
     session::SessionTransportManager& sessions_;
     delivery::DeliveryManager& deliveries_;
     const reliable::AuthenticatedFriendSnapshot& friends_;
+    const std::uint64_t authenticationGeneration_;
     session::SessionEpoch epoch_;
     session::TransportInstanceId id_;
     std::unique_ptr<TlsSession> tls_;
@@ -40,13 +54,16 @@ private:
     std::deque<Event> events_;
     bool closed_=false;
     std::optional<ArchiveAdmission> archive_;
+    std::optional<GroupAdmission> group_;
+    std::optional<VoiceAdmission> voice_;
     TransferReceiver transfer_;
     bool archiveBound_=false,archiveBindingSent_=false;
     const char* stage_="created";
     bool authorized()const{
-        return archive_?archive_->policy&&archive::currentSessionAuthorization(*archive_->policy,archive_->scope):
+        return group_?group_->current&&group_->current(nullptr):archive_?archive_->policy&&archive::currentSessionAuthorization(*archive_->policy,archive_->scope):
             friends_.contains(runtime_.expected);
     }
+    bool groupKeyCurrent()const{auto key=tls_->remotePublicKey();return group_&&group_->current&&group_->current(&key);}
     std::vector<session::TransportInstanceId> retired_;
     static constexpr size_t MaxOutput=2*1024*1024;
     std::map<std::string,Contact> contacts()const{
@@ -76,7 +93,8 @@ private:
         protocol::check(result.activated());
         if(!archive_)protocol::check(deliveries_.authorizeTransport(id_,runtime_.peerId));
         retired_.insert(retired_.end(),result.retire.begin(),result.retire.end());
-        if(archive_){
+        if(group_){protocol::check(groupKeyCurrent());}
+        else if(archive_){
             protocol::check(authorized());
             if(!archiveBindingSent_){archiveBindingSent_=true;auto bind=archive::sessionBinding(archive_->scope);packet(bind);}
             return;
@@ -86,7 +104,8 @@ private:
     void approve(){
         stage_="identity_grant_binding";
         protocol::check(!closed_&&runtime_.hello&&!runtime_.identityMismatch&&authorized());
-        if(archive_){
+        if(group_){protocol::check(groupKeyCurrent());}
+        else if(archive_){
             auto key=tls_->remotePublicKey();
             protocol::check(archive::currentSessionAuthorization(*archive_->policy,archive_->scope,&key));
         }else{
@@ -111,6 +130,7 @@ private:
             if(archive_){
                 protocol::check((runtime_.remoteCapabilities&protocol::CapabilityArchiveControl)!=0);approve();return;
             }
+            if(group_){protocol::check((runtime_.remoteCapabilities&protocol::CapabilityGroupKeyHandoff)!=0);approve();return;}
             auto known=contacts();auto found=known.find(runtime_.peerId);
             if(runtime_.verifiedContactMatches(found==known.end()?nullptr:&found->second,tls_->remotePublicKey()))approve();
             else event({EventKind::TrustRequired,runtime_.peerId,{},std::nullopt});
@@ -121,6 +141,11 @@ private:
             protocol::check(sessions_.markRemoteAccepted(epoch_,id_));activate();return;
         }
         runtime_.requireOnline(sessions_.active(id_));
+        if(group_){
+            protocol::check(authorized()&&group_->receive&&groupKeyCurrent());
+            for(auto& response:group_->receive(bytes,tls_->remotePublicKey(),now_))sendGroupControl(response);
+            pump();return;
+        }
         if(archive_){
             protocol::check(authorized());
             if(!archiveBound_){
@@ -135,7 +160,12 @@ private:
             return;
         }
         protocol::check(friends_.contains(runtime_.peerId));
-        if(reader.type()==protocol::FileTransfer){
+        if(voiceFrame(reader.type())){
+            protocol::check(voice_&&voice_->available&&voice_->available()&&voice_->receive&&
+                (runtime_.remoteCapabilities&protocol::CapabilityVoiceCalls));
+            if(reader.type()>=protocol::CallMediaRestart)protocol::check(runtime_.remoteCapabilities&protocol::CapabilityMediaRecovery);
+            voice_->receive(runtime_.peerId,bytes,now_);
+        }else if(reader.type()==protocol::FileTransfer){
             protocol::check(bool(transfer_)&&(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)!=0);
             try{transfer_(runtime_.peerId,bytes,now_);}catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(refusal);}
         }else if(reader.type()==protocol::Text){
@@ -155,14 +185,17 @@ public:
             delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
             session::SessionEpoch epoch,session::TransportInstanceId id,std::unique_ptr<TlsSession> tls,
             const std::string& expected,session::RouteObservation route,std::uint64_t now,
-            std::optional<ArchiveAdmission> archiveAdmission={},TransferReceiver transferReceiver={})
+            std::optional<ArchiveAdmission> archiveAdmission={},TransferReceiver transferReceiver={},std::optional<GroupAdmission> groupAdmission={},std::optional<VoiceAdmission> voiceAdmission={})
         :local_(local),store_(store),sessions_(sessions),deliveries_(deliveries),friends_(friends),
-         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
-         archive_(std::move(archiveAdmission)),transfer_(std::move(transferReceiver)),now_(now),began_(now){
+         authenticationGeneration_(friends.generation()),epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
+         archive_(std::move(archiveAdmission)),group_(std::move(groupAdmission)),voice_(std::move(voiceAdmission)),transfer_(std::move(transferReceiver)),now_(now),began_(now){
         runtime_.expected=expected;
         protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&authorized()&&
             route.kind==session::TransportKind::Relay&&route.routeClass==session::RouteClass::ServerRelay);
-        if(archive_){
+        protocol::check(!(archive_&&group_));
+        if(group_){
+            protocol::check(group_->scope.expectedRemoteDeviceId==expected&&(sessions_.recognizeGroupControlAttempt(epoch,id,group_->scope,route)||sessions_.registerGroupControlAttempt(epoch,id,group_->scope,route,now)));
+        }else if(archive_){
             protocol::check(archive_->policy->localDevice()==local.peerId&&archive_->scope.expectedRemoteDeviceId==expected);
             protocol::check(sessions_.recognizeArchiveControlAttempt(epoch,id,archive_->scope,route)||
                 sessions_.registerArchiveControlAttempt(epoch,id,archive_->scope,route,now));
@@ -180,14 +213,34 @@ public:
     bool authenticationExpired(std::uint64_t now)const noexcept{return now>=began_&&now-began_>=20000;}
     const std::string& expected()const noexcept{return runtime_.expected;}
     const session::ReliableAuthorization* archiveScope()const noexcept{return archive_?&archive_->scope:nullptr;}
+    const session::ReliableAuthorization* groupScope()const noexcept{return group_?&group_->scope:nullptr;}
+    std::uint64_t voiceCapabilities()const{
+        return !archive_&&!group_&&ready()&&voice_&&voice_->available&&voice_->available()?
+            runtime_.remoteCapabilities&(protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery):0;
+    }
+    bool sendVoiceControl(const Blob& bytes){
+        if(!(voiceCapabilities()&protocol::CapabilityVoiceCalls)||bytes.size()>protocol::MaxPacket||output_.size()>MaxOutput/2)return false;
+        protocol::Reader r(bytes);protocol::check(voiceFrame(r.type()));
+        if(r.type()>=protocol::CallMediaRestart&&!(voiceCapabilities()&protocol::CapabilityMediaRecovery))return false;
+        protocol::Writer w(static_cast<protocol::Type>(r.type()));w.data=bytes;packet(w);return true;
+    }
+    bool outputEmpty()const noexcept{return output_.empty();}
+    bool groupExchangeComplete()const{return group_&&group_->settled&&group_->settled();}
+    void sendGroupControl(const Blob& bytes){
+        protocol::check(group_&&ready()&&bytes.size()<=65536);
+        protocol::Reader r(bytes);protocol::check(r.type()==protocol::GroupRosterEvent||r.type()==protocol::GroupKeyOffer||r.type()==protocol::GroupKeyAck);
+        protocol::Writer w(static_cast<protocol::Type>(r.type()));w.data=bytes;packet(w);
+    }
     void receive(const Blob& bytes,std::uint64_t now){
         protocol::check(!closed_);now_=now;
         try{
             stage_="authorization_current";
-            const auto continuity=archive_?archive_->scope.continuityKey():runtime_.expected;
+            const auto continuity=group_?group_->scope.continuityKey():archive_?archive_->scope.continuityKey():runtime_.expected;
             protocol::check(authorized()&&sessions_.attachablePeer(epoch_,id_)==std::optional<std::string>{continuity});
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
+                ((!archive_&&!group_&&voice_&&voice_->available&&voice_->available())?(protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery):0)|
+                (group_?(protocol::CapabilitySignedGroups|protocol::CapabilityGroupKeyHandoff):0)|
                 (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
             stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
@@ -197,7 +250,7 @@ public:
     }
     bool initialPin(std::uint64_t generation,std::uint64_t now,reliable::InitialPinDecision* result=nullptr){
         if(result)*result=reliable::InitialPinDecision::StaleIdentity;
-        if(archive_)return false;
+        if(archive_||group_)return false;
         now_=now;auto key=tls_->ready()?tls_->remotePublicKey():Blob{};
         auto pins=contacts();
         auto decision=friends_.initialPin(&runtime_,!closed_,runtime_.expected,generation,tls_->ready()?&key:nullptr,pins);
@@ -205,7 +258,30 @@ public:
         if(decision!=reliable::InitialPinDecision::Allowed)return false;
         approve();return true;
     }
+    // Same explicit contact approval used by Windows Node, restricted to the
+    // exact live authenticated DM presentation. Group/archive never create pins.
+    std::optional<std::vector<std::string>> verificationPins(std::uint64_t generation,std::uint64_t now){
+        if(generation!=authenticationGeneration_||archive_||group_||closed_||authenticationExpired(now)||!tls_->ready()||
+           sessions_.attachablePeer(epoch_,id_)!=std::optional<std::string>{runtime_.expected})return {};
+        auto key=tls_->remotePublicKey();auto known=contacts();
+        if(friends_.initialPin(&runtime_,true,runtime_.expected,generation,&key,known)!=reliable::InitialPinDecision::HistoricalPin)return {};
+        const auto account=friends_.accountFor(runtime_.peerId);std::vector<std::string> pins;
+        for(const auto& pair:known)if(pair.second.verified&&friends_.accountFor(pair.first)==account&&
+            Storage::publicKeyId(pair.second.publicKey)==pair.first)pins.push_back(pair.first);
+        protocol::check(!pins.empty()&&pins.size()<=32);return pins;
+    }
+    bool verifyPresented(std::uint64_t generation,const std::string& fingerprint,bool accepted,std::uint64_t now){
+        if(!verificationPins(generation,now)||fingerprint!=runtime_.peerId)return false;
+        now_=now;if(!accepted){close(false);return true;}
+        approve();return true;
+    }
     void pump(){
+        if(group_){
+            if(!ready()||output_.size()>MaxOutput/2)return;
+            protocol::check(group_->outgoing&&groupKeyCurrent());
+            for(auto& frame:group_->outgoing(tls_->remotePublicKey(),now_))sendGroupControl(frame);
+            return;
+        }
         if(archive_||!ready()||!friends_.contains(runtime_.expected))return;
         for(const auto& message:deliveries_.pendingMessages(runtime_.peerId,100)){
             if(deliveries_.wasSubmittedMessage(runtime_.peerId,message.id,id_))continue;
@@ -215,13 +291,16 @@ public:
         }
     }
     bool sendTransfer(const Blob& bytes){
-        if(archive_||!transfer_||!ready()||!friends_.contains(runtime_.expected)||
+        if(archive_||group_||!transfer_||!ready()||!friends_.contains(runtime_.expected)||
            !(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)||output_.size()>MaxOutput/2)return false;
         protocol::check(bytes.size()<=65536);protocol::Reader reader(bytes);protocol::check(reader.type()==protocol::FileTransfer);
         protocol::Writer frame(protocol::FileTransfer);frame.data=bytes;packet(frame);return true;
     }
     Blob takeOutput(){
-        if(archive_&&!authorized()){close(false);return {};}
+        if(!authorized()){close(false);return {};}
+        const auto continuity=group_?group_->scope.continuityKey():archive_?archive_->scope.continuityKey():runtime_.expected;
+        if(!closed_&&sessions_.attachablePeer(epoch_,id_)!=std::optional<std::string>{continuity}){close(false);return {};}
+        if(group_&&tls_->ready()&&!groupKeyCurrent()){close(false);return {};}
         auto count=std::min<size_t>(65536,output_.size());
         Blob bytes(output_.begin(),output_.begin()+count);
         output_.erase(output_.begin(),output_.begin()+count);

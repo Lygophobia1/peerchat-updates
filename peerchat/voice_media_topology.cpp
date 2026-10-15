@@ -1,8 +1,14 @@
 #define NOMINMAX
+#ifndef RTC_STATIC
 #define RTC_STATIC
+#endif
 #include "voice_media_topology.hpp"
 #include <rtc/rtc.h>
+#if defined(__ANDROID__)
+#include "platform/portable_crypto.hpp"
+#else
 #include <bcrypt.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -12,20 +18,27 @@
 #include <sstream>
 namespace peerchat {
 namespace {
-std::string randomId(){unsigned char bytes[16]{};if(BCryptGenRandom(nullptr,bytes,sizeof(bytes),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)return {};const char hex[]="0123456789abcdef";std::string id;for(auto b:bytes){id+=hex[b>>4];id+=hex[b&15];}return id;}
-struct Endpoint;
+bool secureRandom(unsigned char* data,std::size_t size){
+#if defined(__ANDROID__)
+    try{auto bytes=platform::portable_crypto::random(size);std::copy(bytes.begin(),bytes.end(),data);return true;}catch(...){return false;}
+#else
+    return BCryptGenRandom(nullptr,data,static_cast<ULONG>(size),BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0;
+#endif
+}
+std::string randomId(){unsigned char bytes[16]{};if(!secureRandom(bytes,sizeof(bytes)))return {};const char hex[]="0123456789abcdef";std::string id;for(auto b:bytes){id+=hex[b>>4];id+=hex[b&15];}return id;}
+struct VoiceTopologyEndpoint;
 // Lifetime registry only. A callback acquires shared ownership before touching
 // any endpoint. Registry does not own sessions, transport policy or audio state.
-std::mutex registryMutex;std::map<int,std::weak_ptr<Endpoint>> registry;
-std::shared_ptr<Endpoint> findEndpoint(int id){std::lock_guard<std::mutex> lock(registryMutex);auto it=registry.find(id);return it==registry.end()?nullptr:it->second.lock();}
-struct Endpoint:std::enable_shared_from_this<Endpoint> {
+std::mutex registryMutex;std::map<int,std::weak_ptr<VoiceTopologyEndpoint>> registry;
+std::shared_ptr<VoiceTopologyEndpoint> findEndpoint(int id){std::lock_guard<std::mutex> lock(registryMutex);auto it=registry.find(id);return it==registry.end()?nullptr:it->second.lock();}
+struct VoiceTopologyEndpoint:std::enable_shared_from_this<VoiceTopologyEndpoint> {
     std::mutex control,eventsMutex,callbackRegistration;
     std::atomic<bool> retired{false},open{false};std::atomic<int> state{RTC_NEW};
     int pc=-1,track=-1,receiveTrack=-1;std::string key,route,reason;std::uint64_t generation=1;
     IVoiceMediaTopology::Incoming incoming;
     std::deque<VoiceTransportSignal> events;
     std::atomic<std::uint64_t> sent{0},sentBytes{0},received{0},receivedBytes{0},dropped{0};
-    ~Endpoint(){stop();}
+    ~VoiceTopologyEndpoint(){stop();}
     void push(std::string kind,std::string data,std::string mid="0"){
         if(retired)return;
         std::lock_guard<std::mutex> lock(eventsMutex);
@@ -60,7 +73,7 @@ struct Endpoint:std::enable_shared_from_this<Endpoint> {
         pc=rtcCreatePeerConnection(&config);if(pc<0){reason="Media endpoint creation failed";return false;}
         {std::lock_guard<std::mutex> lock(registryMutex);registry[pc]=shared_from_this();}
         rtcSetLocalDescriptionCallback(pc,description);rtcSetLocalCandidateCallback(pc,candidate);rtcSetStateChangeCallback(pc,changed);rtcSetTrackCallback(pc,incomingTrack);
-        std::uint32_t ssrc=0;if(BCryptGenRandom(nullptr,reinterpret_cast<unsigned char*>(&ssrc),sizeof(ssrc),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0){reason="RTP identity allocation failed";return false;}if(!ssrc)ssrc=1;
+        std::uint32_t ssrc=0;if(!secureRandom(reinterpret_cast<unsigned char*>(&ssrc),sizeof(ssrc))){reason="RTP identity allocation failed";return false;}if(!ssrc)ssrc=1;
         rtcTrackInit init{};init.direction=RTC_DIRECTION_SENDRECV;init.codec=RTC_CODEC_OPUS;init.payloadType=111;init.ssrc=ssrc;init.mid="0";init.name="PeerChat voice";init.msid="peerchat";init.trackId="voice";
         track=rtcAddTrackEx(pc,&init);if(track<0){reason="Audio track creation failed";return false;}
         {std::lock_guard<std::mutex> lock(registryMutex);registry[track]=shared_from_this();}
@@ -104,9 +117,9 @@ struct Endpoint:std::enable_shared_from_this<Endpoint> {
 struct RelayMeshVoiceTopology::Impl {
     std::mutex mutex;std::string local;MediaIceConfiguration ice;Incoming incoming;
     std::map<std::string,AuthorizedVoiceSource> authorized;
-    std::map<std::string,std::shared_ptr<Endpoint>> endpoints;
-    std::shared_ptr<Endpoint> add(const std::string& key,const std::string& route){
-        auto endpoint=std::make_shared<Endpoint>();endpoint->key=key;endpoint->route=route;endpoint->incoming=incoming;
+    std::map<std::string,std::shared_ptr<VoiceTopologyEndpoint>> endpoints;
+    std::shared_ptr<VoiceTopologyEndpoint> add(const std::string& key,const std::string& route){
+        auto endpoint=std::make_shared<VoiceTopologyEndpoint>();endpoint->key=key;endpoint->route=route;endpoint->incoming=incoming;
         if(!endpoint->create(ice)){endpoint->stop();endpoint->state=RTC_FAILED;}
         endpoints[key]=endpoint;return endpoint;
     }

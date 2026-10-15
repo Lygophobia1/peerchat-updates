@@ -23,13 +23,16 @@ private:
     std::map<std::uint64_t,Request> pending_;
     std::map<std::string,bool> presence_;
     std::function<bool(const session::ReliableAuthorization&)> archiveCurrent_;
+    std::function<bool(const session::ReliableAuthorization&)> groupCurrent_;
     bool allowed(const Request& request)const{return request.authorization.permitsArchiveControl()?
-        archiveCurrent_&&archiveCurrent_(request.authorization):friends_.contains(request.peer);}
-    static std::string continuity(const Request& request){return request.authorization.permitsArchiveControl()?request.authorization.continuityKey():request.peer;}
+        archiveCurrent_&&archiveCurrent_(request.authorization):request.authorization.scope==session::ReliableAuthorizationScope::GroupControl?
+        groupCurrent_&&groupCurrent_(request.authorization):friends_.contains(request.peer);}
+    static std::string continuity(const Request& request){return request.authorization.scope!=session::ReliableAuthorizationScope::Friend?request.authorization.continuityKey():request.peer;}
 public:
     RelayRequests(session::SessionTransportManager& owner,const reliable::AuthenticatedFriendSnapshot& friends,
-                  session::SessionEpoch epoch,std::uint64_t& next,std::function<bool(const session::ReliableAuthorization&)> archiveCurrent={})
-        :owner_(owner),friends_(friends),epoch_(epoch),next_(next),archiveCurrent_(std::move(archiveCurrent)){owner_.setDemandDriven(true);}
+                  session::SessionEpoch epoch,std::uint64_t& next,std::function<bool(const session::ReliableAuthorization&)> archiveCurrent={},
+                  std::function<bool(const session::ReliableAuthorization&)> groupCurrent={})
+        :owner_(owner),friends_(friends),epoch_(epoch),next_(next),archiveCurrent_(std::move(archiveCurrent)),groupCurrent_(std::move(groupCurrent)){owner_.setDemandDriven(true);}
     std::uint64_t network()const noexcept{return network_;}
     bool authenticatedNetwork(std::uint64_t generation,std::uint64_t network){
         if(!friends_.localAccount()||generation!=friends_.generation()||!network||network<network_||!owner_.observeNetwork(epoch_,network))return false;
@@ -73,14 +76,16 @@ public:
         if(pending_.size()>=capacity)return result;
         for(const auto& due:owner_.takeDueRelayAttempts(now)){
             const bool archive=due.authorization.permitsArchiveControl();
-            if((archive?(!archiveCurrent_||!archiveCurrent_(due.authorization)):!friends_.contains(due.remoteDeviceId))||due.networkRevision!=network_)continue;
+            const bool group=due.authorization.scope==session::ReliableAuthorizationScope::GroupControl;
+            if((archive?(!archiveCurrent_||!archiveCurrent_(due.authorization)):group?(!groupCurrent_||!groupCurrent_(due.authorization)):!friends_.contains(due.remoteDeviceId))||due.networkRevision!=network_)continue;
             if(pending_.size()>=capacity||next_==std::numeric_limits<std::uint64_t>::max()){
-                owner_.scheduleRelayRetry(archive?due.authorization.continuityKey():due.remoteDeviceId,now,random);continue;
+                owner_.scheduleRelayRetry((archive||group)?due.authorization.continuityKey():due.remoteDeviceId,now,random);continue;
             }
             auto id=session::TransportInstanceId{next_++};
             session::RouteObservation route{{id.value},"relay:"+due.remoteDeviceId,"PeerChat server relay","opaque relay",false,
                 due.networkRevision,session::TransportKind::Relay,session::RouteClass::ServerRelay};
-            if(archive){if(!owner_.registerArchiveControlAttempt(epoch_,id,due.authorization,route,now))continue;}
+            if(group){if(!owner_.registerGroupControlAttempt(epoch_,id,due.authorization,route,now))continue;}
+            else if(archive){if(!owner_.registerArchiveControlAttempt(epoch_,id,due.authorization,route,now))continue;}
             else if(!owner_.registerAttempt(epoch_,id,due.remoteDeviceId,route,now))continue;
             Request request{id,due.remoteDeviceId,std::move(route),now,due.authorization};
             pending_.emplace(id.value,request);result.push_back(std::move(request));

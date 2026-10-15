@@ -69,6 +69,9 @@ internal static class EncryptedMailboxServerTest {
                 end=DateTime.UtcNow.AddSeconds(10);while(DateTime.UtcNow<end&&(!sending.EventChannelConnected||!receiving.EventChannelConnected))Thread.Sleep(20);
                 Check(sending.EventChannelConnected&&receiving.EventChannelConnected);
                 var registration=receiving.Mailbox("mailbox_register",b,new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(recipient)},{"binding",Convert.ToBase64String(binding)}});Check((string)registration["state"]=="accepted");
+                // Recipient is offline before storage. Keep its exact authenticated
+                // device/key registration; closing presence is not revocation.
+                receiving.StopEventChannel();Check(!receiving.EventChannelConnected);
                 var upload=new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(sender)},{"envelope",Convert.ToBase64String(envelope)}};
                 Check((string)sending.Mailbox("mailbox_store",a,upload)["state"]=="stored");Check((string)sending.Mailbox("mailbox_store",a,upload)["state"]=="stored");
                 Check(push.Started.WaitOne(5000));
@@ -94,8 +97,22 @@ internal static class EncryptedMailboxServerTest {
                 push.Release.Set();
                 Check(push.Completed.WaitOne(5000));
                 Check(!sending.EventChannelConnected);
+                // Recipient reconnects only after the sender is fully logged out.
+                receiving.StartEventChannel(b,e=>{});end=DateTime.UtcNow.AddSeconds(10);
+                while(DateTime.UtcNow<end&&!receiving.EventChannelConnected)Thread.Sleep(20);
+                Check(receiving.EventChannelConnected);
+                registration=receiving.Mailbox("mailbox_register",b,new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(recipient)},{"binding",Convert.ToBase64String(binding)}});
+                Check((string)registration["state"]=="accepted");
+                // A failed pinned connection cannot consume pending ciphertext.
+                var interrupted=new DiscoveryClient("localhost",port,new string('0',64)){SessionToken=receiving.SessionToken};
+                Reject(()=>interrupted.Mailbox("mailbox_fetch",b,new Dictionary<string,object>()));
+                Check(db.FetchMailbox(8,b).Count==1);
                 var fetched=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>());
                 var rows=(System.Collections.IEnumerable)fetched["envelopes"];var values=rows.Cast<object>().Cast<Dictionary<string,object>>().ToArray();Check(values.Length==1&&Convert.FromBase64String((string)values[0]["envelope"]).SequenceEqual(envelope));
+                var fetchedAgain=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>());
+                var replay=((System.Collections.IEnumerable)fetchedAgain["envelopes"]).Cast<object>().Cast<Dictionary<string,object>>().ToArray();
+                Check(replay.Length==1&&Convert.FromBase64String((string)replay[0]["envelope"]).SequenceEqual(envelope));
+                Check(db.MailboxReceipts(7,a).Count==0);
                 // RPC must not replace the active event channel/device session.
                 Check(receiving.EventChannelConnected);
                 var ack=new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(recipient)},{"receipt",Convert.ToBase64String(receipt)}};
@@ -108,7 +125,7 @@ internal static class EncryptedMailboxServerTest {
                 var proofs=sending.Mailbox("mailbox_receipts",a,new Dictionary<string,object>());Check(((System.Collections.IEnumerable)proofs["receipts"]).Cast<object>().Count()==1);
                 Reject(()=>sending.Mailbox("mailbox_fetch",b,new Dictionary<string,object>()));
                 var wrong=new DiscoveryClient("localhost",port,new string('0',64)){SessionToken=sending.SessionToken};Reject(()=>wrong.Mailbox("mailbox_fetch",a,new Dictionary<string,object>()));
-                Console.WriteLine("PASS: pinned TLS mailbox fetch/ACK with sender logged out, offline and unreachable; recipient cleanup precedes sender reopen/receipt reconciliation; duplicate/wrong-device/pin rejection.");
+                Console.WriteLine("PASS: pinned TLS recipient offline during store, sender logged out, recipient reconnect/same-binding registration, failed fetch retains ciphertext, repeated fetch and signed ACK; recipient cleanup precedes sender reopen/receipt reconciliation; duplicate/wrong-device/pin rejection.");
             }finally{push.Release.Set();sending.StopEventChannel();receiving.StopEventChannel();typeof(DiscoveryServer).GetMethod("RequestStop",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(server,null);Check(worker.Join(6000));if(error!=null)throw error;}
         }
     }

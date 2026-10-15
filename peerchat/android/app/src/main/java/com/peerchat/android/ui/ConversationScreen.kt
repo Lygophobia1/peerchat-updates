@@ -62,7 +62,7 @@ import kotlinx.coroutines.delay
             }
         }, navigationIcon = { ActionIcon(Icons.AutoMirrored.Filled.ArrowBack, "Back", { dispatch(UiAction.Back) }) }, actions = {
             ActionIcon(Icons.Default.Call, if (c.kind == ChatKind.Group) "Voice rooms" else "Voice call", {
-                dispatch(if (c.kind == ChatKind.Group) UiAction.Navigate(Route.Details) else UiAction.Notice("Calls are not connected in this preview."))
+                dispatch(if (c.kind == ChatKind.Group) UiAction.Navigate(Route.Details) else UiAction.Notice(if(state.demo)"Calls are not connected in this preview." else state.voiceDiagnostic))
             })
             ActionIcon(Icons.Default.Info, "Conversation details", { dispatch(UiAction.Navigate(Route.Details)) })
         })
@@ -79,8 +79,8 @@ import kotlinx.coroutines.delay
             } }
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-                ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo&&c.kind==ChatKind.Direct)picker.launch(arrayOf("*/*")) })
-                OutlinedTextField(draft, { if (it.toByteArray().size <= 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                if(c.kind==ChatKind.Direct)ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)picker.launch(arrayOf("*/*")) })
+                OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
                 IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
@@ -156,7 +156,8 @@ import kotlinx.coroutines.delay
                     MessageStatus.Preview -> "Local preview · not sent"; else -> "Sent"
                 }}" else "", style = MaterialTheme.typography.labelSmall,
                     color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                if (m.status == MessageStatus.Failed) TextButton({ dispatch(UiAction.RetryPreview(m.id)) }) { Text("Retry locally") }
+                if(m.deliveryDetail.isNotEmpty())Text(m.deliveryDetail,style=MaterialTheme.typography.labelSmall)
+                if (m.status == MessageStatus.Failed||m.retryAvailable) TextButton({ dispatch(UiAction.RetryPreview(m.id)) }) { Text(if(m.retryAvailable)"Retry encrypted message" else "Retry locally") }
             }
         }
     }

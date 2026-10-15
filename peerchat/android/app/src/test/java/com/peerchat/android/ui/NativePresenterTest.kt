@@ -45,6 +45,13 @@ class NativePresenterTest {
         var localFailure=false
         var resets=0
         var signOuts=0
+        val reenrollments=mutableListOf<Pair<MailboxReenrollment,Boolean>>()
+        var failReenrollment=false
+        override suspend fun reenrollMailbox(value:MailboxReenrollment,accept:Boolean){
+            reenrollments.add(value to accept)
+            if(failReenrollment)error("test-only enrollment failure")
+            state.value=state.value.copy(mailboxReenrollment=null)
+        }
         override suspend fun restoreLocalHistory(endpoint:ServerEndpoint):Boolean {
             if(localFailure)error("test-only local history failure")
             if(!localHistory)return false
@@ -87,6 +94,34 @@ class NativePresenterTest {
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
         dispatcher.scheduler.advanceUntilIdle()
         return p
+    }
+    private fun reenrollmentOffer()=mailboxReenrollment(NativeRecordWriter(3).also{w->
+        w.text("PeerChat/MailboxReenrollment/v1");w.number(19);w.number(3);w.number(4)
+        w.text("a".repeat(64));w.text("b".repeat(32));w.number(2);w.text("localhost:7443")
+        w.text("c".repeat(64));w.text("d".repeat(32));w.blob(byteArrayOf(1))
+    }.bytes())
+    @Test fun mailboxConsentForwardsExactOfferOnceAndDoesNotClaimRegistrationCompleted() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        val value=reenrollmentOffer()
+        commands.state.value=commands.state.value.copy(mailboxReenrollment=value);dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.ReenrollMailbox(value,true));p.dispatch(UiAction.ReenrollMailbox(value,true))
+        assertTrue(p.state.value.mailboxRecoveryBusy)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf(value to true),commands.reenrollments)
+        assertFalse(p.state.value.mailboxRecoveryBusy)
+        assertEquals("Enrollment requested; offline receiving waits for authenticated registration.",p.state.value.notice)
+    }
+    @Test fun mailboxEnrollmentFailurePreservesOfferAndDoesNotReportSuccess() {
+        val commands=Commands().apply{reject=false;failReenrollment=true};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        val value=reenrollmentOffer()
+        commands.state.value=commands.state.value.copy(mailboxReenrollment=value);dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.ReenrollMailbox(value,true));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(value,p.state.value.mailboxReenrollment)
+        assertTrue(p.state.value.mailboxRecoveryError!!.contains("Reconnect to the trusted server"))
+        assertFalse(p.state.value.mailboxRecoveryBusy)
+        assertFalse(p.state.value.notice?.contains("Enrollment requested")==true)
     }
     @Test fun savedEndpointAndPinAreUsedAfterPresenterRestartAndSignOut() {
         val settings=Settings();val application=ApplicationProvider.getApplicationContext<Application>()

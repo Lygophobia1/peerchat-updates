@@ -4,6 +4,7 @@ import android.content.Context
 import com.peerchat.android.NativeProfile
 import com.peerchat.android.ProfileBridge
 import com.peerchat.android.ReliableBridge
+import com.peerchat.android.MailboxBridge
 import com.peerchat.android.platform.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -21,6 +22,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val gate=Any()
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val mutable=MutableStateFlow(MessagingSnapshot())
+    private val relayFailureDiagnostics=linkedMapOf<Long,String>()
+    private val pendingDeviceVerifications=linkedMapOf<String,DeviceVerification>()
+    private val declinedDeviceVerifications=mutableSetOf<String>()
     private val peerAuthenticationDiagnostics=linkedMapOf<String,String>()
     override val state: StateFlow<MessagingSnapshot> = mutable.asStateFlow()
     private var profile: NativeProfile?=null
@@ -51,14 +55,67 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastMailboxAcknowledgedNanos=0L
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
+    private val groupExecution=GroupExecution()
+    private val voiceExecution=VoiceExecution()
+    private val groupNotifications=GroupNotifications(this.context,profileName)
+    private var groupRefreshAt=0L
+    private var groupProjectionAt=0L
+    private var groupPendingAt=0L
+    private var groupPendingMore=true
+    private var groupCompletionAt=0L
+    private val groupCompletionObserved=mutableMapOf<Long,Long>()
     // Profile-local product default is ON only when absent. Explicit OFF persists;
     // unreadable protected preferences fail closed. History policy is separate.
     private val mailboxPreferences=AndroidQolStore(this.context,profileName)
     private fun mailboxAllowed():Boolean=try{mailboxPreferences.load().mailboxStorageAllowed}catch(_:Exception){false}
     override suspend fun setMailboxStorageAllowed(allowed:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
-        check(!stopped);mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
+        check(!stopped)
+        if(!allowed){
+            val owner=accounts;val native=profile
+            if(owner?.session==null||native==null||!authorizationSnapshotInstalled)throw MailboxConsentChangeUnavailable(false)
+            configureMailboxEnrollment(owner,native.handle)
+            requireMailboxConsentChangeAllowed(MailboxBridge.hasScopedEnrollment(native.handle))
+        }
+        mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
         mailboxExecution.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
+    private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
+        val session=checkNotNull(owner.session)
+        val server=owner.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+owner.endpoint.port
+        check(MailboxBridge.configureEnrollment(native,session.accountId,generation,server.toByteArray(Charsets.US_ASCII),owner.endpoint.certificatePin.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.US_ASCII))==0){"Authenticated mailbox scope is unavailable"}
+    }
+    private fun mailboxRecoveryFailure(code:String):String=when(code){
+        "approval_expired_or_session_changed"->"The mailbox confirmation expired or the account/server session changed. Reconnect and review the current confirmation. Existing keys and messages are preserved."
+        "key_possession_or_protected_enrollment_failed"->"The existing mailbox key could not be verified or the protected enrollment could not be saved. Do not reset app data or keys; return the diagnostics for recovery."
+        else->"The existing mailbox binding or key could not be validated. Keep app data and keys intact and return the messaging diagnostics."
+    }
+    override suspend fun reenrollMailbox(value:MailboxReenrollment,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled&&mutable.value.authenticated&&mutable.value.serverPresenceLive&&mailboxAllowed())
+        val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle
+        check(mutable.value.mailboxReenrollment==value&&owner.session?.accountId==value.account&&generation==value.generation&&mutable.value.localPeerId==value.device){"Mailbox confirmation is stale"}
+        if(accept){
+            // Reuse the existing pinned messaging bootstrap, which verifies the
+            // authenticated account and registered device identity on the server.
+            refresh(true)
+            check(owner===accounts&&owner.session?.accountId==value.account&&generation==value.generation){"Authenticated mailbox ownership changed"}
+        }
+        configureMailboxEnrollment(owner,native)
+        val result=MailboxBridge.reenrollmentDecision(native,mailboxReenrollmentDecision(value,accept))
+        if(result!=0){
+            val reason=MailboxBridge.reenrollmentError(native)?.toString(Charsets.US_ASCII)?:"unavailable"
+            mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=mailboxRecoveryFailure(reason))
+            error(mailboxRecoveryFailure(reason))
+        }
+        mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null)
+        if(accept){mailboxExecution.reset();mailboxAt=0L}
+    }}
+    private fun projectMailboxRecovery(native:Long){
+        if(!mailboxAllowed()||!mutable.value.authenticated||!mutable.value.serverPresenceLive){mutable.value=mutable.value.copy(mailboxReenrollment=null);return}
+        val offer=MailboxBridge.reenrollmentOffer(native)
+        val error=MailboxBridge.reenrollmentError(native)?.toString(Charsets.US_ASCII)
+        mutable.value=mutable.value.copy(mailboxReenrollment=offer?.let{mailboxReenrollment(it)},
+            mailboxRecoveryError=if(error!=null&&error!="none")mailboxRecoveryFailure(error) else mutable.value.mailboxRecoveryError)
+    }
     private fun archiveExecution(owner:ServerAccounts,native:NativeProfile)=ArchiveEnrollmentExecution(
         {op,bytes->checkNotNull(com.peerchat.android.ArchiveBridge.request(native.handle,op,bytes)){"Native archive operation rejected"}},
         owner::archive)
@@ -195,6 +252,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // The same identity, trust, presence/bootstrap and Remember Me path.
             // Server registration rejects an identity already owned by another account.
             val authenticated=if(creating)connection.register(username,password) else connection.login(username,password)
+            if(mutable.value.accountId!=authenticated.accountId){groupExecution.reset();mutable.value=mutable.value.copy(groups=emptyList(),groupInvitations=emptyList())}
             try {
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
@@ -318,6 +376,33 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
         }
     }
+    override suspend fun createGroup(name:String)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed);val s=mutable.value
+        groupExecution.create(checkNotNull(accounts),checkNotNull(profile).handle,s.accountId,generation,name,s.username);groupRefreshAt=0L
+    }}
+    override suspend fun inviteGroup(id:String,target:Long)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);val g=mutable.value.groups.single{it.id==id};require(friends.any{it.accountId==target})
+        groupExecution.invite(checkNotNull(accounts),id,g.epoch,target);groupRefreshAt=0L
+    }}
+    override suspend fun respondGroup(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);groupExecution.respond(checkNotNull(accounts),id,accept);groupRefreshAt=0L
+    }}
+    override suspend fun sendGroup(id:String,text:String):String=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed);require(text.isNotBlank()&&text.length<=4096)
+        val message=groupExecution.send(checkNotNull(profile).handle,mutable.value.accountId,generation,id,text){events?.queueGroup(it)==true}
+        groupPendingMore=true;groupPendingAt=0L
+        try{mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))}catch(_:Exception){}
+        message
+    }}
+    override suspend fun groupHistory(id:String,before:Long):List<GroupMessageSnapshot> = withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);val page=groupExecution.load(checkNotNull(profile).handle,mutable.value.accountId,generation,id,before,true)
+        mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation));page
+    }}
+    override suspend fun retryGroup(id:String,message:String)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed)
+        groupExecution.retry(checkNotNull(profile).handle,mutable.value.accountId,generation,id,message){events?.queueGroup(it)==true}
+        mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))
+    }}
     private var transferDiagnosticsAt=0L
     private var attachmentProjectionAt=0L;private var attachmentProjectionHandle=0L;private var attachmentProjectionGeneration=0L
     private var attachmentProjection=emptyList<AttachmentSnapshot>()
@@ -356,6 +441,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
+        mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)
+        groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
@@ -391,7 +479,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val old=accounts;accounts=null;friends=emptyList();index=null
             pushRegisteredToken=null
             try {profile?.let{revokeSaved(it,checkNotNull(ProfileBridge.publicKey(it.handle)))};old?.logout()}
-            finally {mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
+            finally {groupExecution.reset();mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
             Unit
         }
     }
@@ -412,7 +500,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
         authoritative.forEach {friend->writer.number(friend.accountId);writer.text(friend.peerId);writer.number(friend.knownPeerIds.size.toLong());friend.knownPeerIds.forEach {writer.text(it)}}
         val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
-        if(identityChanged)generation++
+        if(identityChanged){generation++;groupRefreshAt=0L;groupProjectionAt=0L}
         val native=checkNotNull(profile).handle
         if(identityChanged)check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
         authorizationSnapshotInstalled=true
@@ -446,6 +534,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
             events?.let {stream->
                 if(stream.connected&&!eventWasConnected){
                     eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L
+                    groupPendingMore=true;groupPendingAt=0L
+                    try{groupExecution.resetPending(native,mutable.value.accountId,generation)}catch(_:Exception){}
                     android.util.Log.i("PeerChatNetwork","event=connected repair=requested")
                 }
                 if(stream.finished){
@@ -471,21 +561,46 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 mutable.value=mutable.value.copy(serverPresenceLive=false,status=serverRefreshFailure(failure)+"; local history retained")
             }finally {refreshAt=System.nanoTime()/1_000_000+if(events?.connected==true)900000 else 120000}
         }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupRefreshAt){
+            try{groupExecution.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation);groupRefreshAt=now+60000;groupProjectionAt=0L;groupPendingMore=true}
+            catch(failure:Exception){
+                if(expiredServerSession(failure))throw failure
+                try{groupExecution.invalidate(native,mutable.value.accountId,generation)}catch(_:Exception){}
+                groupRefreshAt=now+60000;mutable.value=mutable.value.copy(groups=mutable.value.groups.map{it.copy(ready=false)},groupInvitations=emptyList(),groupDiagnostics="Group snapshot unavailable; authorization invalidated (${failure.javaClass.simpleName})")
+            }
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupProjectionAt){
+            groupProjectionAt=now+1000
+            try{mutable.value=mutable.value.copy(voice=voiceExecution.snapshot(native,mutable.value.accountId,generation))}catch(_:Exception){mutable.value=mutable.value.copy(voice=VoiceSnapshot(diagnostic="Voice capability readout unavailable"))}
+            try{mutable.value=mutable.value.copy(groups=groupExecution.snapshot(native,mutable.value.accountId,generation),groupInvitations=groupExecution.invitations,groupDiagnostics=groupExecution.diagnostic)}catch(_:Exception){}
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&events?.connected==true&&groupPendingMore&&now>=groupPendingAt){
+            groupPendingAt=now+1000
+            try{groupPendingMore=groupExecution.submitPending(native,mutable.value.accountId,generation){events?.queueGroup(it)==true}}
+            catch(_:Exception){groupPendingAt=now+30000}
+        }
         if(mutable.value.authenticated&&now>=mailboxAt) {
             try {
                 measured("mailbox_service") {
+                    configureMailboxEnrollment(checkNotNull(accounts),native)
                     mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed()) { inserted ->
                         lastMailboxAcknowledgedNanos=System.nanoTime()
                         if(inserted)android.util.Log.i("PeerChatWake","stage=mailbox_native_history_received_server_acknowledged")
                     }
                 }
+                mutable.value=mutable.value.copy(mailboxRecoveryError=null)
                 publish()
             } catch(failure:Exception) {
                 if(expiredServerSession(failure))throw failure
+                if(mailboxExecution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
+                    mailboxRecoveryError="The server did not accept this mailbox enrollment. Existing keys, the original binding and queued messages are preserved. Return the diagnostics; do not reset or retry with a different key.")
                 // No plaintext/error message. An unavailable/rejected mailbox
                 // does not manufacture a peer route or invalidate local history.
                 android.util.Log.i("PeerChatWake","stage=mailbox_service_pending ${mailboxExecution.diagnostic}")
-            } finally {mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000}
+            } finally {
+                try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
+                mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
+            }
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
@@ -509,12 +624,29 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.
         val iterator=executions.iterator()
+        val checkGroupCompletion=now>=groupCompletionAt
+        if(checkGroupCompletion)groupCompletionAt=now+500
         while(iterator.hasNext()) {
             val (attempt,execution)=iterator.next()
-            if(execution.finished){iterator.remove();continue}
+            if(execution.finished){
+                execution.failureDiagnostic?.let{relayFailureDiagnostics[attempt]="relay_attempt=$attempt $it";while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())}
+                groupCompletionObserved.remove(attempt);iterator.remove();continue}
             if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
             if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();continue}
+            if(checkGroupCompletion&&execution.groupScope!=null){
+                try{
+                    if(groupExecution.controlSettled(native,mutable.value.accountId,generation,attempt)){
+                        val observed=groupCompletionObserved.getOrPut(attempt){System.nanoTime()}
+                        // Writer publishes this timestamp only after prior bytes
+                        // completed their synchronous authenticated socket write.
+                        if(execution.lastOutputIdleNanos>observed){
+                            val finished=groupExecution.finishControl(native,mutable.value.accountId,generation,attempt);groupCompletionObserved.remove(attempt)
+                            if(finished){execution.close();iterator.remove();continue}
+                        }
+                    }else groupCompletionObserved.remove(attempt)
+                }catch(_:Exception){groupCompletionObserved.remove(attempt)}
+            }
             repeat(16) {
                 val event=ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0)) ?: return@repeat
                 if(event.isEmpty())return@repeat
@@ -532,26 +664,53 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     peerAuthenticationDiagnostics[execution.requestPeerId]=detail
                     while(peerAuthenticationDiagnostics.size>32)peerAuthenticationDiagnostics.remove(peerAuthenticationDiagnostics.keys.first())
                     android.util.Log.i("PeerChatWake",detail)
-                    if(accepted?.firstOrNull()?.toInt()!=1)mutable.value=mutable.value.copy(status="Device verification required; automatic replacement refused")
+                    if(outcome=="existing_verified_account_device_requires_explicit_verification"){
+                        val challenge=ReliableBridge.exchange(native,attempt,ReliableBridge.DEVICE_VERIFICATION,ByteArray(0))
+                        val friend=friends.singleOrNull{it.peerId==execution.requestPeerId}
+                        if(challenge!=null&&friend!=null){
+                            val value=deviceVerification(challenge,friend.username)
+                            if(value.localAccount==mutable.value.accountId&&value.generation==generation&&value.account==friend.accountId&&value.presented==friend.peerId&&
+                                value.presented !in declinedDeviceVerifications&&(pendingDeviceVerifications.containsKey(value.presented)||pendingDeviceVerifications.size<32))pendingDeviceVerifications[value.presented]=value
+                        }
+                        mutable.value=mutable.value.copy(status="Server online; device verification required for messaging")
+                    }else if(accepted?.firstOrNull()?.toInt()!=1)mutable.value=mutable.value.copy(status="Peer authentication rejected ($outcome); server presence does not establish messaging")
                 }
             }
         }
         for(request in relayExecutions(checkNotNull(ReliableBridge.requests(native)))) {
             val friend=friends.find {it.peerId==request.peerId}
             val archive=request.archive;val session=accounts?.session
-            val admitted=if(archive==null)friend!=null else session!=null&&archive.account==session.accountId&&
+            val group=request.group
+            val admitted=if(group!=null)session!=null&&group.account==session.accountId&&group.authenticationGeneration==generation&&mutable.value.groups.any{it.id==group.group&&it.epoch==group.epoch}
+                else if(archive==null)friend!=null else session!=null&&archive.account==session.accountId&&
                 ((archive.reader==mutable.value.localPeerId&&archive.source==request.peerId)||(archive.source==mutable.value.localPeerId&&archive.reader==request.peerId))
             if(!admitted||executions.size>=32){ReliableBridge.close(native,request.attempt,admitted);continue}
-            val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),archive?.account?:checkNotNull(friend).accountId)
+            val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId)
             executions[request.attempt]=execution;execution.start()
         }
         publish()
     }
     private fun handleServerEvent(event:org.json.JSONObject){
+        if(event.optString("type") in setOf("group_message","group_delivery")){
+            try{groupExecution.event(event,checkNotNull(profile).handle,mutable.value.accountId,generation){events?.queueGroup(it)==true};groupProjectionAt=0L
+                if(event.optString("type")=="group_message"){
+                    mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))
+                    localEndpoint?.let{groupNotifications.publish(it,mutable.value)}
+                }}
+            catch(_:Exception){mutable.value=mutable.value.copy(groupDiagnostics="Group event rejected by native admission or bounded projection")}
+            return
+        }
         when(val kind=event.optString("event")){
+            "group_roster_changed","group_invite_changed"->{groupRefreshAt=0L}
             "mailbox_ready","mailbox_receipt_ready"->{mailboxAt=0L;android.util.Log.i("PeerChatNetwork","mailbox_trigger=$kind")}
             "presence_changed","friend_request","friend_request_updated","friendship_changed"->{contactsDirty=true}
             "relay_demand"->{
+                if(event.optString("purpose")=="group_control"){
+                    if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
+                    try{groupExecution.incomingControl(event,checkNotNull(profile).handle,mutable.value.accountId,generation)}
+                    catch(_:Exception){groupRefreshAt=0L}
+                    return
+                }
                 if(event.optString("purpose")=="archive_history"){
                     if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                     try {
@@ -579,11 +738,38 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }
     }
+    override suspend fun verifyDevice(value:DeviceVerification,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        val current=pendingDeviceVerifications[value.presented]
+        check(authorizationSnapshotInstalled&&value.localAccount==mutable.value.accountId&&value.generation==generation&&
+            current!=null&&current.account==value.account&&current.localAccount==value.localAccount&&current.generation==value.generation){"Verification session changed"}
+        val native=checkNotNull(profile).handle
+        if(!accept){
+            // Rejection never grants trust and may dismiss a matching fingerprint
+            // even if its old TLS attempt expired while the user was comparing.
+            declinedDeviceVerifications.add(value.presented);pendingDeviceVerifications.remove(value.presented)
+            ReliableBridge.exchange(native,current.attempt,ReliableBridge.VERIFY_PRESENTED_DEVICE,verificationDecision(current,false))
+            executions.remove(current.attempt)?.close()
+            mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList(),status="Device remains untrusted; server presence does not establish messaging");return@synchronized
+        }
+        check(value.live&&current==value){"Verification presentation changed"}
+        val result=ReliableBridge.exchange(native,value.attempt,ReliableBridge.VERIFY_PRESENTED_DEVICE,verificationDecision(value,true))
+        pendingDeviceVerifications.remove(value.presented)
+        mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
+        check(result?.contentEquals(byteArrayOf(1))==true){"Identity presentation expired; reconnect and compare again"}
+        mutable.value=mutable.value.copy(status="Device explicitly verified; delivery awaits native acknowledgment")
+        mailboxAt=0L;check(ReliableBridge.demand(native,value.presented.toByteArray(Charsets.US_ASCII))==0)
+    }}
     private fun publish() {
+        pendingDeviceVerifications.entries.removeAll{it.value.generation!=generation}
+        pendingDeviceVerifications.replaceAll{_,value->value.copy(live=value.attempt in executions&&executions[value.attempt]?.finished==false)}
+        mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
         mutable.value=mutable.value.copy(messagingDiagnostics=buildString {
             appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
+            appendLine(mailboxExecution.inboundDiagnostic)
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
+            appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
+            relayFailureDiagnostics.values.forEach{appendLine(it)}
         })
         val native=checkNotNull(profile).handle
         val conversations=nativeConversationProjection(friends,

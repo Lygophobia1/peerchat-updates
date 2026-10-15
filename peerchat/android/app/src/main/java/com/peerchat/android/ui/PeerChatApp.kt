@@ -55,6 +55,21 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     login: (String, String) -> Unit = { _, _ -> }) {
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
+        if(state.serverTrust==null)state.deviceVerification?.let { value ->
+            fun fingerprint(id:String)=id.chunked(4).joinToString(" ").uppercase()
+            AlertDialog(onDismissRequest={dispatch(UiAction.VerifyDevice(value,false))},
+                title={Text("Verify new device identity")},
+                text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+                    Text("${value.contact} · account ${value.account}")
+                    Text("A different device was presented for an account with previously verified identities. This may be an additional/replacement device or an impersonation attempt.")
+                    Text("Previously trusted fingerprints:\n"+value.previous.joinToString("\n"){fingerprint(it)})
+                    Text("Presented device fingerprint:\n"+fingerprint(value.presented))
+                    if(!value.live)Text("This presentation expired. Waiting for a fresh authenticated connection; approval is disabled.")
+                    Text("Compare the complete presented fingerprint with your contact through an independent trusted channel before accepting. Previous identities and queued recipients will not be replaced.")
+                }},
+                confirmButton={TextButton({dispatch(UiAction.VerifyDevice(value,true))},enabled=value.live){Text("Verify and Accept")}},
+                dismissButton={TextButton({dispatch(UiAction.VerifyDevice(value,false))}){Text("Keep Untrusted")}})
+        }
         state.serverTrust?.let { trust ->
             fun fingerprint(pin:String)=pin.chunked(2).joinToString(":").uppercase()
             AlertDialog(onDismissRequest={dispatch(UiAction.CancelServerTrust)},
@@ -68,6 +83,34 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
                 }},
                 confirmButton={if(trust.expected.isEmpty())TextButton({dispatch(UiAction.TrustServer)}){Text("Trust Server")}},
                 dismissButton={TextButton({dispatch(UiAction.CancelServerTrust)}){Text(if(trust.expected.isEmpty())"Cancel" else "Close")}})
+        }
+        if(state.serverTrust==null&&state.deviceVerification==null){
+            state.mailboxReenrollment?.let { value ->
+                fun decide(accept:Boolean){if(!state.mailboxRecoveryBusy)dispatch(UiAction.ReenrollMailbox(value,accept))}
+                AlertDialog(onDismissRequest={decide(false)},title={Text("Re-enroll this phone's mailbox?")},
+                    text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+                        Text("Original account ${value.oldAccount} → current account ${value.account}")
+                        Text("Register this phone's existing encryption key for future offline messages to account ${value.account}. The device identity and private key stay the same.")
+                        Text("Server: ${value.server}")
+                        Text("Server certificate fingerprint:\n${value.serverFingerprint.chunked(4).joinToString(" ").uppercase()}")
+                        Text("Phone fingerprint:\n${value.device.chunked(4).joinToString(" ").uppercase()}")
+                        Text("Source key enrollment: ${value.sourceKey} · generation ${value.sourceGeneration}. The new enrollment identifies the same existing private key.")
+                        Text("Original history and the account ${value.oldAccount} binding are preserved. This grants no access to account ${value.oldAccount}, and does not redirect messages addressed to another device.")
+                        Text("Offline receiving starts only after authenticated server registration succeeds.")
+                        if(state.mailboxRecoveryBusy)Text("Saving the enrollment request…")
+                        state.mailboxRecoveryError?.let{Text(it,color=MaterialTheme.colorScheme.error)}
+                    }},
+                    confirmButton={TextButton({decide(true)},enabled=!state.mailboxRecoveryBusy){Text("Re-enroll mailbox")}},
+                    dismissButton={TextButton({decide(false)},enabled=!state.mailboxRecoveryBusy){Text("Keep existing binding")}})
+            }
+            if(state.mailboxReenrollment==null)state.mailboxRecoveryError?.let { error ->
+                var dismissed by remember(error,state.account){mutableStateOf(false)}
+                if(!dismissed)AlertDialog(onDismissRequest={dismissed=true},title={Text("Offline mailbox needs attention")},
+                    text={Column(verticalArrangement=Arrangement.spacedBy(12.dp)){
+                        Text(error)
+                        Text("Reconnect to the trusted server, then review any new enrollment offer. Existing keys, bindings and history are preserved.")
+                    }},confirmButton={TextButton({dismissed=true}){Text("Close")}})
+            }
         }
         if(state.startupStatus!=null) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),

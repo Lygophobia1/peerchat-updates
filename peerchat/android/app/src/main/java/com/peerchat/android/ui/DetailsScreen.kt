@@ -12,6 +12,25 @@ import androidx.compose.ui.tooling.preview.Preview
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun DetailsScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
+    if(!state.demo){
+        Scaffold(topBar={PageBar(if(c.kind==ChatKind.Group)"Group details" else "Conversation details",dispatch)}){padding->
+            Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+                Avatar(c.name,c.kind==ChatKind.Group,64);Text(c.name,style=MaterialTheme.typography.headlineSmall)
+                if(c.kind==ChatKind.Group){
+                    Text(if(c.online)"Signed membership and current group key ready" else "Waiting for signed membership and current group key")
+                    Text("${c.members.size} authenticated roster devices")
+                    c.members.forEach{Text("${it.name} · ${it.role}\n${it.accountId}")}
+                    Text("Invite a friend",style=MaterialTheme.typography.titleMedium)
+                    state.conversations.filter{it.kind==ChatKind.Direct}.forEach{friend->
+                        TextButton({friend.id.removePrefix("account:").toLongOrNull()?.let{dispatch(UiAction.InviteGroup(c.id.removePrefix("group:"),it))}}){Text(friend.name)}
+                    }
+                    Text("Messages use the existing native group encryption. Delivery reports describe online recipient sessions. Group attachments and calling are unavailable in this candidate.",style=MaterialTheme.typography.bodySmall)
+                }else Text("Device verification, delivery and local history are owned by the native messaging engine.")
+                TextButton({dispatch(UiAction.Navigate(Route.Diagnostics))}){Text("Application diagnostics")}
+            }
+        }
+        return
+    }
     var confirm by remember { mutableStateOf(false) }
     var audioMember by remember { mutableStateOf<MemberUi?>(null) }
     Scaffold(topBar = { PageBar(if (c.kind == ChatKind.Group) "Group details" else "Conversation details", dispatch) }) { padding ->

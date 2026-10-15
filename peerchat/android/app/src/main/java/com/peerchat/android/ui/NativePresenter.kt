@@ -20,6 +20,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -29,6 +31,7 @@ import com.peerchat.android.platform.tls.ServerChannel
 /** Immutable presentation only. Native Profile/Storage and session/delivery owners
  * remain authoritative. This adapter never constructs peer frames or delivery ACKs. */
 internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState): PeerChatUiState {
+    fun accountName(account:Long)=if(account==snapshot.accountId)snapshot.username else snapshot.conversations.firstOrNull{it.friend.accountId==account}?.friend?.username?:"Account $account"
     val conversations=snapshot.conversations.map { c ->
         val id="account:${c.friend.accountId}"
         val messages=chronologicalMessages(c.messages).map {m ->
@@ -41,6 +44,17 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8,attachments=c.attachments)
+    }+snapshot.groups.map {g->
+        val messages=g.messages.map{m->val outgoing=m.device==snapshot.localPeerId
+            MessageUi(m.id,m.device,if(outgoing)snapshot.username else accountName(m.account),m.text,outgoing,
+                SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
+                SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
+                if(!outgoing)MessageStatus.Received else if(m.status.startsWith("Recipients:")||m.status.startsWith("Server accepted"))MessageStatus.Sent else if(m.status.startsWith("Not submitted")||m.status.contains("unknown")||m.status.contains("rejected"))MessageStatus.Failed else MessageStatus.Queued,
+                m.timestamp,m.order,retryAvailable=outgoing&&!m.status.startsWith("Recipients:"),deliveryDetail=if(outgoing)m.status else "")
+        }
+        ConversationUi("group:${g.id}",g.name,ChatKind.Group,g.ready,messages.lastOrNull()?.text?:if(g.ready)"Encrypted group text" else "Waiting for signed membership and current group key",
+            messages.lastOrNull()?.time?:"",unread=g.unread,messages=messages,hasOlder=g.hasOlder,
+            members=g.memberRows.map{MemberUi(it.device,accountName(it.account),false,if(it.invited)"Invited" else when(it.role){3L->"Owner";2L->"Admin";else->"Member"})})
     }
     // Diagnostics are safe owner metadata, never messages, credentials or keys.
     val diagnostics=buildString {
@@ -49,6 +63,10 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         appendLine("Profile identity: ${snapshot.localPeerId}")
         appendLine("Messaging execution:")
         appendLine(snapshot.messagingDiagnostics)
+        appendLine("Group execution:")
+        appendLine(snapshot.groupDiagnostics)
+        appendLine("Voice execution:")
+        appendLine(snapshot.voice.diagnostic)
         appendLine("History Sync admission:")
         appendLine(snapshot.archiveAuthorizationDiagnostics)
         appendLine("File transfer measurements (native, confirmed/durable bytes):")
@@ -63,24 +81,34 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
             // IDs/attribution/state are enough to correlate a controlled send.
             for(message in c.messages.takeLast(3))if(message.id.matches(Regex("[0-9a-f]{32}"))&&
                 message.senderDevice.matches(Regex("[0-9a-f]{64}"))&&message.recipientDevice.matches(Regex("[0-9a-f]{64}")))
-                appendLine("recent_native_row message_id=${message.id} sender_device=${message.senderDevice} recipient_device=${message.recipientDevice} delivery=${message.delivery}")
+                appendLine("recent_native_row message_id=${message.id} sender_device=${message.senderDevice} recipient_device=${message.recipientDevice} delivery=${message.delivery} recipient_relation="+
+                    if(message.recipientDevice==c.friend.peerId)"current_resolved_device" else if(message.recipientDevice in c.friend.knownPeerIds)"historical_account_device" else "not_in_account_display_index")
         }
     }
-    return previous.copy(demo=false,conversations=conversations,diagnostics=diagnostics,
+    return previous.copy(demo=false,conversations=conversations,deviceVerification=snapshot.deviceVerifications.firstOrNull(),
+        mailboxReenrollment=if(snapshot.authenticated)snapshot.mailboxReenrollment else null,
+        mailboxRecoveryError=if(snapshot.authenticated)snapshot.mailboxRecoveryError else null,
+        diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
             snapshot.authenticated->ConnectionState.Reconnecting
             else->ConnectionState.Offline},
-        load=if(conversations.isEmpty())LoadState.Empty else LoadState.Ready,recentCalls=emptyList())
+        load=if(conversations.isEmpty())LoadState.Empty else LoadState.Ready,recentCalls=emptyList(),groupInvitations=snapshot.groupInvitations)
 }
 
 class NativePresenter(application: Application,private val backend:MessagingApplication,
     private val serverConfiguration:ServerConfigurationRepository=AndroidServerConfigurationStore(application),
     private val configurationDispatcher:CoroutineDispatcher=Dispatchers.IO,
     private val qol:AndroidQolRepository=AndroidQolStore(application),
+    private val groupQol:AndroidQolRepository=AndroidGroupQolStore(application),
     private val inspectServer:(ServerEndpoint)->String={ServerChannel.inspectCertificate(it.host,it.port)}
 ):AndroidViewModel(application),PeerChatPresenter {
+    // Preserve the original explicit six-argument constructor as well as
+    // trailing-lambda call sites when injecting the separate group repository.
+    constructor(application:Application,backend:MessagingApplication,serverConfiguration:ServerConfigurationRepository,
+        configurationDispatcher:CoroutineDispatcher,qol:AndroidQolRepository,inspectServer:(ServerEndpoint)->String):
+        this(application,backend,serverConfiguration,configurationDispatcher,qol,AndroidGroupQolStore(application),inspectServer)
     constructor(application:Application):this(application,AndroidMessagingRuntime.acquire(application))
     private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList(),startupStatus="Checking saved sign-in…"))
     override val state:StateFlow<PeerChatUiState> = mutable.asStateFlow()
@@ -132,9 +160,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     }
     // In-memory continuation only; never persists or logs a password.
     private var loginAfterTrust:(()->Unit)?=null
+    private var verificationBusy=false
     private var foreground=true
     private var qolState=AndroidQolState()
     private var qolReady=false
+    private var groupQolState=AndroidQolState()
+    private var groupQolReady=false
+    private val groupPreferenceWrites=Mutex()
     private val draftSaves=mutableMapOf<String,Job>()
     private var pendingOpen:Pair<String,String>?=null
     private fun preferenceAccountKey():String? {
@@ -143,7 +175,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         return accountPreferenceKey(ServerEndpoint(endpoint.host,endpoint.port.toInt(),endpoint.certificatePin),current.accountId)
     }
     fun openNotification(accountKey:String,conversationId:String) {
-        if(!accountKey.matches(Regex("[0-9a-f]{64}"))||!conversationId.matches(Regex("account:[1-9][0-9]{0,18}")))return
+        if(!accountKey.matches(Regex("[0-9a-f]{64}"))||!conversationId.matches(Regex("(?:account:[1-9][0-9]{0,18}|group:[0-9a-f]{32})")))return
         pendingOpen=accountKey to conversationId;project()
     }
     private fun savePreference(key:String,update:(ConversationPreference)->ConversationPreference) {
@@ -156,6 +188,25 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             catch(_:Exception){mutable.value=mutable.value.copy(notice="Local preferences could not be saved securely.")}
         }
     }
+    private fun saveGroupPreference(key:String,update:(ConversationPreference)->ConversationPreference) {
+        if(!groupQolReady)return
+        viewModelScope.launch {
+            try{groupPreferenceWrites.withLock{withContext(configurationDispatcher){groupQol.update{state->
+                check(state.conversations.containsKey(key)||state.conversations.size<128)
+                state.copy(conversations=state.conversations+(key to update(state.conversations[key] ?: ConversationPreference(baselinePending=true))))
+            }}}}
+            catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notice="Group drafts and read position could not be saved securely.")}
+        }
+    }
+    private fun updateGroupPreference(key:String,update:(ConversationPreference)->ConversationPreference):Boolean {
+        if(!groupQolReady)return false
+        if(key !in groupQolState.conversations&&groupQolState.conversations.size>=128){
+            mutable.value=mutable.value.copy(notice="The saved group preference limit has been reached.");return false
+        }
+        val row=update(groupQolState.conversations[key] ?: ConversationPreference(baselinePending=true))
+        groupQolState=groupQolState.copy(conversations=groupQolState.conversations+(key to row))
+        return true
+    }
     // View-only older pages, always fetched from native Storage. Never an outbox.
     private val older=mutableMapOf<Long,List<MessageSnapshot>>()
     private val exhausted=mutableSetOf<Long>()
@@ -165,7 +216,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         })
         // projectMessaging's paging hint is overridden by the actual native page result.
         mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->
-            c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
+            if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
         })}
         if(retainedDiagnostics.isNotEmpty())mutable.value=mutable.value.copy(diagnostics=mutable.value.diagnostics+"\nRetained application diagnostics:\n"+retainedDiagnostics.joinToString("\n"))
         val accountKey=preferenceAccountKey() ?: return
@@ -175,6 +226,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }}
         if(qolReady){
             val unseen=mutable.value.conversations.map {c->
+                if(c.kind==ChatKind.Group)return@map c
                 val key=conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())
                 val preference=qolState.conversations[key]
                 val source=current.conversations.find{it.friend.accountId.toString()==c.id.removePrefix("account:")}
@@ -191,15 +243,47 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val row=qolState.conversations[key] ?: ConversationPreference()
                 c.copy(unread=incoming.count{it.sequence>row.readSequence})
             }
-            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (largeDrafts[c.id] ?: qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
+            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (if(c.kind==ChatKind.Group)mutable.value.drafts[c.id]?:"" else largeDrafts[c.id] ?: qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
+        }
+        if(groupQolReady){
+            val groups=current.groups.associateBy{it.id}
+            val rows=mutable.value.conversations.map {c->
+                if(c.kind!=ChatKind.Group)return@map c
+                val group=groups[c.id.removePrefix("group:")] ?: return@map c
+                val key=groupPreferenceKey(accountKey,group.id)
+                val incoming=group.messages.filter{it.device!=current.localPeerId}.sortedBy{it.sequence}
+                val newest=incoming.maxOfOrNull{it.sequence} ?: 0L
+                val preference=groupQolState.conversations[key]
+                if((preference==null||preference.baselinePending)&&(group.messages.isNotEmpty()||!group.hasOlder)){
+                    // Only current execution's admitted new arrivals are unread
+                    // during first history initialization; older pages are baseline.
+                    val baseline=incoming.dropLast(group.unread.coerceIn(0,incoming.size)).maxOfOrNull{it.sequence} ?: 0L
+                    val update:(ConversationPreference)->ConversationPreference={it.copy(readSequence=maxOf(it.readSequence,baseline),notifiedSequence=maxOf(it.notifiedSequence,baseline),baselinePending=false)}
+                    if(updateGroupPreference(key,update))saveGroupPreference(key,update)
+                }
+                val initialized=groupQolState.conversations[key]
+                if(foreground&&mutable.value.route==Route.Conversation&&mutable.value.selectedId==c.id&&initialized!=null&&!initialized.baselinePending&&newest>initialized.readSequence){
+                    val update:(ConversationPreference)->ConversationPreference={it.copy(readSequence=maxOf(it.readSequence,newest))}
+                    if(updateGroupPreference(key,update))saveGroupPreference(key,update)
+                }
+                val row=groupQolState.conversations[key]
+                c.copy(unread=if(row==null||row.baselinePending)group.unread else incoming.count{it.sequence>row.readSequence})
+            }
+            mutable.value=mutable.value.copy(conversations=rows,drafts=mutable.value.drafts+rows.filter{it.kind==ChatKind.Group}.associate{c->
+                c.id to (groupQolState.conversations[groupPreferenceKey(accountKey,c.id.removePrefix("group:"))]?.draft ?: "")
+            })
         }
     }
     init {
     // Collect during authentication, rather than only after restore completes.
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(recovering)return@collect
-        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap())}
+        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
         current=snapshot
+        if(foreground&&mutable.value.route==Route.Conversation){
+            val group=snapshot.groups.find{"group:${it.id}"==mutable.value.selectedId&&it.unread>0}
+            if(group!=null)viewModelScope.launch{try{backend.groupHistory(group.id)}catch(_:Exception){}}
+        }
         if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
         mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress)
         if(!automaticResumeSuppressed&&snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
@@ -224,6 +308,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         watchStartup()
         try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true}
         catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notificationsEnabled=false,notice="Local preferences could not be verified; notifications remain unavailable.")}
+        try{groupQolState=withContext(configurationDispatcher){groupQol.load()};groupQolReady=true}
+        catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notice="Saved group drafts and read position could not be verified.")}
         var settingsVerified=false
         try {
             val saved=withContext(configurationDispatcher){serverConfiguration.load()}
@@ -296,6 +382,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     fun setForeground(active:Boolean) {
         foreground=active
         backend.setForeground(active)
+        if(active)project()
         if(active&&!automaticResumeSuppressed&&!recovering&&configurationReady&&!configurationInvalid&&!mutable.value.loginBusy){
             val s=mutable.value
             if(!validServerDraft(s.server))return
@@ -316,6 +403,17 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     override fun dispatch(action:UiAction) {
         when(action) {
             is UiAction.Draft -> {
+                if(action.conversationId.startsWith("group:")){
+                    val group=current.groups.find{"group:${it.id}"==action.conversationId} ?: return
+                    if(action.text.toByteArray(Charsets.UTF_8).size>4096)return
+                    val owner=preferenceAccountKey() ?: return
+                    val key=groupPreferenceKey(owner,group.id)
+                    val update:(ConversationPreference)->ConversationPreference={it.copy(draft=action.text)}
+                    if(!updateGroupPreference(key,update))return
+                    mutable.value=reduceUi(mutable.value,action)
+                    draftSaves[key]?.cancel();draftSaves[key]=viewModelScope.launch{delay(250);saveGroupPreference(key,update)}
+                    return
+                }
                 val c=current.conversations.find{"account:${it.friend.accountId}"==action.conversationId} ?: return
                 if(action.text.toByteArray().size>512*1024)return
                 if(action.text.length>4096){largeDrafts[action.conversationId]=action.text;mutable.value=reduceUi(mutable.value,action);return}
@@ -326,6 +424,32 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key] ?: ConversationPreference()).copy(draft=action.text)))
                 draftSaves[key]?.cancel();draftSaves[key]=viewModelScope.launch{delay(250);savePreference(key){it.copy(draft=action.text)}}
             }
+            is UiAction.VerifyDevice -> {
+                if(verificationBusy||mutable.value.deviceVerification!=action.value)return
+                verificationBusy=true
+                viewModelScope.launch{
+                    try{backend.verifyDevice(action.value,action.accept);mutable.value=mutable.value.copy(deviceVerification=null,notice=if(action.accept)"Device explicitly verified. Existing messages retain their original recipients." else "Device remains untrusted. Previous identities and queued messages are unchanged.")}
+                    catch(_:Exception){mutable.value=mutable.value.copy(deviceVerification=null,notice="Verification could not complete on this connection. Reconnect and review the current fingerprint; no identity or queued recipient was replaced.")}
+                    finally{verificationBusy=false}
+                }
+            }
+            is UiAction.ReenrollMailbox -> {
+                if(mutable.value.mailboxRecoveryBusy||mutable.value.mailboxReenrollment!=action.value||!current.authenticated||
+                    current.accountId!=action.value.account||current.localPeerId!=action.value.device)return
+                mutable.value=mutable.value.copy(mailboxRecoveryBusy=true,mailboxRecoveryError=null)
+                viewModelScope.launch{
+                    try{
+                        backend.reenrollMailbox(action.value,action.accept)
+                        if(!current.authenticated||current.accountId!=action.value.account||current.localPeerId!=action.value.device)return@launch
+                        mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null,
+                            notice=if(action.accept)"Enrollment requested; offline receiving waits for authenticated registration."
+                                else "Existing mailbox binding, keys and history are unchanged.")
+                    }catch(_:Exception){
+                        if(current.authenticated&&current.accountId==action.value.account&&current.localPeerId==action.value.device)
+                            mutable.value=mutable.value.copy(mailboxRecoveryError="Mailbox enrollment could not be requested. Reconnect to the trusted server and review the current offer. Existing keys and history are preserved.")
+                    }finally{mutable.value=mutable.value.copy(mailboxRecoveryBusy=false)}
+                }
+            }
             is UiAction.NotificationSettings -> {
                 mutable.value=reduceUi(mutable.value,action)
                 viewModelScope.launch{try{qolState=withContext(configurationDispatcher){qol.update{it.copy(notifications=action.enabled,preview=action.preview)};qol.load()}}
@@ -333,7 +457,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             is UiAction.MailboxStorage -> viewModelScope.launch {
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
+                catch(failure:Exception){mutable.value=mutable.value.copy(notice=if(failure is com.peerchat.android.application.MailboxConsentChangeUnavailable)failure.message else "Mailbox privacy preference could not be saved; existing consent is unchanged.")}
             }
             UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize -> {
                 if(mutable.value.archiveBusy)return
@@ -359,7 +483,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     }finally{if(epoch==uiGeneration)mutable.value=mutable.value.copy(archiveBusy=false)}
                 }
             }
-            is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()}
+            is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()
+                if(action.id.startsWith("group:"))viewModelScope.launch{try{backend.groupHistory(action.id.removePrefix("group:"))}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history requires current verified authorization.")}}
+            }
+            is UiAction.CreateGroup -> viewModelScope.launch{try{backend.createGroup(action.name)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group creation failed; no server membership is claimed.")}}
+            is UiAction.InviteGroup -> viewModelScope.launch{try{backend.inviteGroup(action.group,action.account)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group invitation was not accepted by the server.")}}
+            is UiAction.RespondGroup -> viewModelScope.launch{try{backend.respondGroup(action.id,action.accept)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group invitation response failed.")}}
             is UiAction.RequestFriend -> viewModelScope.launch {
                 try {backend.requestFriend(action.username);mutable.value=mutable.value.copy(notice="Friend request sent through authenticated server.")}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="Friend request was not accepted by server.")}
@@ -390,6 +519,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}
             is UiAction.PreviewMessage -> {
                 if(mutable.value.sendBusy)return
+                val group=mutable.value.selectedId?.removePrefix("group:")?.let{id->current.groups.find{it.id==id}}
+                if(group!=null){
+                    if(action.text.isBlank()||action.text.toByteArray(Charsets.UTF_8).size>4096)return
+                    val key=preferenceAccountKey()?.let{groupPreferenceKey(it,group.id)}
+                    val epoch=uiGeneration;val account=current.accountId
+                    mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false)
+                    viewModelScope.launch{var accepted=false;try{backend.sendGroup(group.id,action.text);accepted=true
+                            if(key!=null){draftSaves.remove(key)?.cancel();val update:(ConversationPreference)->ConversationPreference={it.copy(draft="")};if(updateGroupPreference(key,update))saveGroupPreference(key,update)}
+                            if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(drafts=mutable.value.drafts+("group:${group.id}" to ""))}
+                        catch(_:Exception){mutable.value=mutable.value.copy(notice="Native group send could not complete. Check current membership and key synchronization; your draft is retained.")}
+                        finally{mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)}}
+                    return
+                }
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 if(action.text.isBlank()||action.text.toByteArray().size>512*1024)return
                 mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false)
@@ -407,6 +549,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 }
             }
             UiAction.BeginOlder,UiAction.Older -> {
+                val group=mutable.value.selectedId?.removePrefix("group:")?.let{id->current.groups.find{it.id==id}}
+                if(group!=null){viewModelScope.launch{try{backend.groupHistory(group.id,group.messages.minOfOrNull{it.sequence}?:Long.MAX_VALUE)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history page unavailable.")}};return}
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 val account=current.accountId
                 if(mutable.value.olderLoading)return
@@ -430,9 +574,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             UiAction.ResetNetworkSession -> recoverNetwork(Route.Login)
             UiAction.DisconnectChangeServer -> recoverNetwork(Route.Server)
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
-            is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen,
+            is UiAction.RetryPreview -> {val selected=mutable.value.selectedId
+                if(selected?.startsWith("group:")==true)viewModelScope.launch{try{backend.retryGroup(selected.removePrefix("group:"),action.messageId)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Exact group retry requires the current epoch and a live event channel. The saved message is retained.")}}
+                else mutable.value=mutable.value.copy(notice="This retry capability is unavailable.")
+            }
+            is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen -> mutable.value=mutable.value.copy(notice=mutable.value.voiceDiagnostic)
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,
-            is UiAction.PreviewLoginFailure,is UiAction.RetryPreview -> mutable.value=mutable.value.copy(notice="This capability is unavailable in Android messaging.")
+            is UiAction.PreviewLoginFailure -> mutable.value=mutable.value.copy(notice="This capability is unavailable in Android messaging.")
             UiAction.CancelServerTrust -> {
                 loginAfterTrust=null
                 mutable.value=mutable.value.copy(serverTrust=null,notice="Server trust unchanged.")

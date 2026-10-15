@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$All,[switch]$Client,[switch]$Server,[switch]$ServerAdmin,[switch]$ScreenMedia,[switch]$Updater,[string]$DependencyRoot,[switch]$CacheCandidate)
+param([switch]$All,[switch]$Client,[switch]$Server,[switch]$ServerAdmin,[switch]$ScreenMedia,[switch]$Updater,[string]$DependencyRoot,[switch]$CacheCandidate,[string]$ValidationDirectory)
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 if(-not($All-or$Client-or$Server-or$ServerAdmin-or$ScreenMedia-or$Updater)){$All=$true}
@@ -15,7 +15,13 @@ try {
  $revisionPattern='^'+[regex]::Escape($baseVersion)+'\.(\d+)$'
  $revisions=@(@($developmentRoot,$evaluationRoot) | Where-Object {Test-Path -LiteralPath $_} | ForEach-Object {Get-ChildItem -LiteralPath $_ -Directory} | ForEach-Object {if($_.Name -match $revisionPattern){[int]$Matches[1]}})
  $nextRevision=[int]($sourceVersion.Split('.')[-1]);if($revisions.Count){$nextRevision=[Math]::Max($nextRevision,([int](($revisions|Measure-Object -Maximum).Maximum))+1)}
- while($true){$version="$baseVersion.$nextRevision";$out=Join-Path $outputRoot $version;if(Test-Path -LiteralPath $out){$nextRevision++;continue};try{New-Item -ItemType Directory -Path $out -ErrorAction Stop|Out-Null;break}catch{if(Test-Path -LiteralPath $out){$nextRevision++;continue};throw}}
+ if($ValidationDirectory){
+  # Integration validation must not allocate a release revision or overwrite an
+  # accepted package. All normal build steps still run on the current version.
+  $out=[IO.Path]::GetFullPath($ValidationDirectory);$validationRoot=[IO.Path]::GetFullPath((Join-Path $root 'build'))+[IO.Path]::DirectorySeparatorChar
+  if(!$out.StartsWith($validationRoot,[StringComparison]::OrdinalIgnoreCase)-or(Test-Path -LiteralPath $out)){throw 'Validation output must be a new directory under this worktree build folder'}
+  $version=$sourceVersion;New-Item -ItemType Directory -Path $out -ErrorAction Stop|Out-Null
+ }else{while($true){$version="$baseVersion.$nextRevision";$out=Join-Path $outputRoot $version;if(Test-Path -LiteralPath $out){$nextRevision++;continue};try{New-Item -ItemType Directory -Path $out -ErrorAction Stop|Out-Null;break}catch{if(Test-Path -LiteralPath $out){$nextRevision++;continue};throw}}}
  $clientOut=Join-Path $out 'Client';$screenOut=Join-Path $out 'ScreenMedia';$serverOut=Join-Path $out 'Server';$adminOut=Join-Path $out 'ServerAdmin';$updaterOut=Join-Path $out 'Updater';$packageOut=Join-Path $out 'Package'
  $generatedVersionSource=Join-Path $out 'VersionInfo.cs'
  $hpkeCompile=@('.\platform\go_hpke_provider.cpp','-Wno-cast-function-type')

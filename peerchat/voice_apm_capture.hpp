@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(__ANDROID__)
+#include "portable/voice_apm_android.hpp"
+#else
+
 #include "audio_processing/peerchat_audio_processing.h"
 #include "voice_processing_presets.hpp"
 #include "media_performance.hpp"
@@ -225,3 +229,4 @@ private:
 };
 
 } // namespace peerchat
+#endif

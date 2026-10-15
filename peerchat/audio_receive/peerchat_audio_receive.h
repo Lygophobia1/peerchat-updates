@@ -1,7 +1,9 @@
 #ifndef PEERCHAT_AUDIO_RECEIVE_H
 #define PEERCHAT_AUDIO_RECEIVE_H
 #include <stdint.h>
-#ifdef PC_RECEIVE_BUILD
+#if !defined(_WIN32)
+#define PC_RX_API
+#elif defined(PC_RECEIVE_BUILD)
 #define PC_RX_API __declspec(dllexport)
 #else
 #define PC_RX_API __declspec(dllimport)

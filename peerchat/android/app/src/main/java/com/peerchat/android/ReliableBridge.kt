@@ -24,4 +24,6 @@ object ReliableBridge {
     const val STATUS = 2
     const val INITIAL_AUTHENTICATED_FRIEND_PIN = 3
     const val EVENT = 4
+    const val DEVICE_VERIFICATION = 5
+    const val VERIFY_PRESENTED_DEVICE = 6
 }

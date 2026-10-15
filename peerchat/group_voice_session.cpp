@@ -1,4 +1,7 @@
 #include "group_voice_session.hpp"
+#if defined(__ANDROID__)
+#include "portable/android_media_capabilities.hpp"
+#endif
 namespace peerchat {
 namespace {
 class WindowsVoiceAudioDevice final:public IVoiceAudioDevice {
@@ -19,6 +22,9 @@ GroupVoiceSession::~GroupVoiceSession(){stop();}
 bool GroupVoiceSession::start(VoiceRoomBinding binding,MediaIceConfiguration ice,const std::wstring& dll,
     VoiceMedia::ProcessingOptions processing,int input,int output,float inputGain,float outputGain,std::wstring& error){
     stop();error.clear();error_.clear();
+#if defined(__ANDROID__)
+    if(!androidVoiceAvailable()){error=L"Pinned Android WebRTC NetEq receive library unavailable";return false;}
+#endif
     if(!topology_||binding.group.size()!=32||binding.room.size()!=32||binding.epoch.size()!=32||binding.localDevice.size()!=64||binding.participation.size()!=32||!binding.localAccount||!binding.rosterGeneration||!binding.generation){error=L"Invalid authorized voice-room binding";return false;}
     binding_=std::move(binding);receive_=std::make_shared<VoiceReceiveEngine>();
     if(!receive_->open(dll)||!source_.open(processing)){error=L"Voice audio engine unavailable";stop();return false;}

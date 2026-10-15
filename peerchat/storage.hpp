@@ -157,6 +157,7 @@ public:
     bool reserveGroupNonce(const std::string& keyFingerprint,const Blob& nonce);
     void queueGroupKeyHandoff(const GroupKeyHandoff& handoff);
     std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& recipientPeerId,int limit=64);
+    std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& recipientPeerId,const std::string& groupId,std::uint64_t generation,int limit=64);
     void acknowledgeGroupKeyHandoff(const std::string& id,const std::string& recipientPeerId);
     bool hasGroupKeyReceipt(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId);
     bool hasPendingGroupKeyHandoff(const std::string& groupId,std::uint64_t generation,const std::string& recipientPeerId);

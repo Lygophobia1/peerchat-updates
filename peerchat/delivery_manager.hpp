@@ -3,6 +3,7 @@
 #include "storage.hpp"
 #include "group.hpp"
 #include "mailbox_key_coordinator.hpp"
+#include "mailbox_scoped_enrollment.hpp"
 #include "portable/utf8.hpp"
 #include "archive_session.hpp"
 #include "archive_provenance.hpp"
@@ -128,15 +129,34 @@ public:
     MailboxReceive acceptMailbox(const Blob& wire,std::uint64_t verifiedSenderAccount,const Contact& verifiedSender,
                                 const mailbox::RecipientBinding& localBinding,DeviceKeyManager& keys,
                                 platform::IdentityProvider& identity,platform::HpkeProvider& hpke,std::uint64_t now) {
+        return acceptMailboxAuthorized(wire,verifiedSenderAccount,verifiedSender,localBinding,identity,hpke,now,[&](const auto& operation){
+            keys.withRecipient(localBinding.keyId,true,[&](const DeviceKeyMetadata& metadata,const auto& handle){
+                mailbox::require(metadata.registration==DeviceKeyRegistration::Accepted&&metadata.signedBinding==mailbox::serializeBinding(localBinding));operation(handle);
+            });
+        });
+    }
+    MailboxReceive acceptMailboxScoped(const Blob& wire,std::uint64_t verifiedSenderAccount,const Contact& verifiedSender,
+                                      const mailbox::RecipientBinding& localBinding,mailbox::ScopedEnrollment& enrollment,
+                                      const std::string& scope,std::uint64_t currentAccount,
+                                      platform::IdentityProvider& identity,platform::HpkeProvider& hpke,std::uint64_t now) {
+        mailbox::require(currentAccount==localBinding.accountId);
+        return acceptMailboxAuthorized(wire,verifiedSenderAccount,verifiedSender,localBinding,identity,hpke,now,[&](const auto& operation){
+            enrollment.withAccepted(scope,currentAccount,localBinding,operation);
+        });
+    }
+private:
+    struct MailboxPlainErase {Blob& bytes;~MailboxPlainErase(){volatile unsigned char* p=bytes.data();for(std::size_t i=0;i<bytes.size();++i)p[i]=0;}};
+    template<class Lease> MailboxReceive acceptMailboxAuthorized(const Blob& wire,std::uint64_t verifiedSenderAccount,const Contact& verifiedSender,
+                                const mailbox::RecipientBinding& localBinding,platform::IdentityProvider& identity,
+                                platform::HpkeProvider& hpke,std::uint64_t now,Lease lease) {
         auto envelope=mailbox::parse(wire);mailbox::require(verifiedSender.verified&&verifiedSender.peerId==envelope.header.senderDevice&&
             Storage::publicKeyId(verifiedSender.publicKey)==verifiedSender.peerId&&Storage::publicKeyId(identity.publicKey())==localDeviceId_&&localBinding.device==localDeviceId_);
         MailboxReceive result;const auto digest=mailboxDigest(wire);
-        keys.withRecipient(localBinding.keyId,true,[&](const DeviceKeyMetadata& metadata,const auto& handle){
-            mailbox::require(metadata.registration==DeviceKeyRegistration::Accepted&&metadata.signedBinding==mailbox::serializeBinding(localBinding));
+        lease([&](const auto& handle){
             auto plain=mailbox::open(envelope,localBinding,verifiedSenderAccount,verifiedSender.publicKey,verifyDevicePayload,Storage::publicKeyId,handle,hpke,now);
             // Erase transient decrypted buffers even on malformed text/storage failure.
-            struct Erase {Blob& bytes;~Erase(){volatile unsigned char* p=bytes.data();for(std::size_t i=0;i<bytes.size();++i)p[i]=0;}} erase{plain};
-            auto body=mailbox::parseTextBody(plain);Erase eraseText{body.utf8};
+            MailboxPlainErase erase{plain};
+            auto body=mailbox::parseTextBody(plain);MailboxPlainErase eraseText{body.utf8};
             StoredMessage message;message.id=envelope.header.messageId;message.sender=envelope.header.senderDevice;message.recipient=localDeviceId_;
             message.text=unicode::decode(std::string(body.utf8.begin(),body.utf8.end()));message.utcMilliseconds=body.messageUtc;
             message.logicalOrder=envelope.header.logicalOrder;message.delivery=Delivery::Delivered;
@@ -150,6 +170,7 @@ public:
             }
         });return result;
     }
+public:
 
     std::vector<GroupEvent> pendingGroupEvents(const std::string& destination,
                                                 int limit = 64) {
@@ -159,6 +180,9 @@ public:
     std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& destination,
                                                          int limit = 64) {
         return storage_.pendingGroupKeyHandoffs(destination, limit);
+    }
+    std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& destination,const std::string& group,std::uint64_t generation,int limit=64){
+        return storage_.pendingGroupKeyHandoffs(destination,group,generation,limit);
     }
 
     bool submittedMessage(const std::string& destination, const std::string& messageId,

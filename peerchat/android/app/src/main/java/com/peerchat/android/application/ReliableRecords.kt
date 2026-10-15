@@ -40,7 +40,15 @@ data class ArchiveRelayScope(val account:Long,val issuer:String,val source:Strin
         fun event(event:org.json.JSONObject)=ArchiveRelayScope(event.getLong("accountId"),event.getString("archiveIssuer"),event.getString("archiveSource"),event.getString("archiveReader"),event.getLong("archiveSourceGeneration"),event.getLong("archiveReaderGeneration"),event.getString("archiveSourceGrantId"),event.getString("archiveReaderGrantId"))
     }
 }
-data class RelayExecution(val attempt: Long,val peerId: String,val networkRevision: Long,val archive:ArchiveRelayScope?=null)
+data class GroupRelayScope(val account:Long,val authenticationGeneration:Long,val group:String,val epoch:Long,val targetAccount:Long,val targetDevice:String){
+    init{require(account>0&&authenticationGeneration>0&&epoch>0&&targetAccount>0&&group.matches(Regex("[0-9a-f]{32}"))&&targetDevice.matches(Regex("[0-9a-f]{64}")))}
+    fun fields()=org.json.JSONObject().put("purpose","group_control").put("groupId",group).put("rosterGeneration",epoch.toString())
+    companion object{fun parse(bytes:ByteArray):GroupRelayScope{
+        val r=NativeRecord(bytes,27);require(r.text()=="PeerChat/AndroidGroupRelay/v1")
+        val result=GroupRelayScope(r.number(),r.number(),r.text(),r.number(),r.number(),r.text());r.end();return result
+    }}
+}
+data class RelayExecution(val attempt: Long,val peerId: String,val networkRevision: Long,val archive:ArchiveRelayScope?=null,val group:GroupRelayScope?=null)
 internal fun incomingArchiveSource(scope:ArchiveRelayScope,account:Long,local:String,remote:String):Boolean =
     scope.account==account&&scope.source==local&&scope.reader==remote
 internal fun relayExecutions(bytes: ByteArray): List<RelayExecution> {
@@ -48,8 +56,10 @@ internal fun relayExecutions(bytes: ByteArray): List<RelayExecution> {
     val result=List(count.toInt()) {
         val attempt=record.number();val peer=record.text();val network=record.number()
         require(attempt>0 && network>0 && peer.matches(Regex("[0-9a-f]{64}")))
-        val binding=record.bytes();val archive=if(binding.isEmpty())null else ArchiveRelayScope.parse(binding)
+        val binding=record.bytes();val group=if(binding.size>=4&&binding[3].toInt()==27)GroupRelayScope.parse(binding)else null
+        val archive=if(binding.isEmpty()||group!=null)null else ArchiveRelayScope.parse(binding)
         require(archive==null||peer==archive.source||peer==archive.reader)
-        RelayExecution(attempt,peer,network,archive)
+        require(group==null||peer==group.targetDevice)
+        RelayExecution(attempt,peer,network,archive,group)
     };record.end();return result
 }
