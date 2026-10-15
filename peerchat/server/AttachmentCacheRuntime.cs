@@ -84,7 +84,7 @@ internal sealed class AttachmentCacheRuntime : IDisposable {
  internal Status Admit(AttachmentCacheDescriptor descriptor,IList<CacheRecipient> recipients){lock(gate){Check();Require(descriptor!=null&&recipients!=null&&recipients.Count>0&&recipients.Count<=64&&recipients.Select(x=>x.Device).Distinct(StringComparer.Ordinal).Count()==recipients.Count,"cache_recipient_set_invalid");
   var old=Binary("SELECT descriptor FROM objects WHERE id="+Quote(descriptor.Id));if(old!=null){Require(old.SequenceEqual(descriptor.Wire),"cache_conflicting_descriptor");Require(Scalar("SELECT deleting FROM objects WHERE id="+Quote(descriptor.Id))==0,"cache_attachment_unavailable");return Inspect(descriptor.Id);}
   long now=Now(),budget=checked(descriptor.CipherBytes+((descriptor.CipherBytes+32767)/32768)*8192+1024*1024+recipients.Count*4096);CleanupLocked(8,false);
-  try{Space(budget);}catch(InvalidOperationException){CleanupLocked(64,true);Space(budget);}
+  try{Space(budget);}catch(InvalidOperationException){CleanupLocked(64,true,budget);Space(budget);}
   verifiedDescriptors.Remove(descriptor.Id);Transaction(()=>{Execute("INSERT INTO objects(id,descriptor,digest,group_id,account,sender,epoch,size,budget,expires) VALUES("+Quote(descriptor.Id)+","+Blob(descriptor.Wire)+","+Quote(descriptor.CipherDigest)+","+Quote(descriptor.Group)+","+descriptor.Account+","+Quote(descriptor.Sender)+","+descriptor.Epoch+","+descriptor.CipherBytes+","+budget+","+checked(now+options.PartialIdleSeconds)+");");foreach(var r in recipients)Execute("INSERT INTO recipients(object_id,account,device,membership) VALUES("+Quote(descriptor.Id)+","+r.Account+","+Quote(r.Device)+","+Quote(r.Membership)+");");});return Inspect(descriptor.Id);
  }}
  internal string Acquire(string id,string device,bool upload,long seconds=120){lock(gate){Check();Require(MailboxProtocol.Id(device,64)&&seconds>0&&seconds<=300,"cache_lease_invalid");var d=Descriptor(id);long now=Now();Require(Scalar("SELECT expires FROM objects WHERE id="+Quote(id))>now,"cache_attachment_expired");
@@ -116,7 +116,7 @@ internal sealed class AttachmentCacheRuntime : IDisposable {
   Execute("UPDATE recipients SET durable_offset=MAX(durable_offset,"+offset+"),verified=MAX(verified,"+(verified?1:0)+") WHERE object_id="+Quote(id)+" AND device=(SELECT device FROM leases WHERE id="+Quote(lease)+");");
  }}
  internal long RecipientOffset(string id,string device){lock(gate){Check();Descriptor(id);Require(MailboxProtocol.Id(device,64),"cache_recipient_invalid");return Scalar("SELECT durable_offset FROM recipients WHERE object_id="+Quote(id)+" AND device="+Quote(device));}}
- void CleanupLocked(int operations,bool pressure){long now=Now();Execute("DELETE FROM leases WHERE expires<="+now+";");
+ void CleanupLocked(int operations,bool pressure,long incomingBudget=0){long now=Now();Execute("DELETE FROM leases WHERE expires<="+now+";");
   for(int n=0;n<operations;n++){
    var pending=Rows("SELECT object_id FROM (SELECT id AS object_id FROM objects WHERE deleting=1 ORDER BY id LIMIT 1)",1);
    if(pending.Count==0){var candidates=Rows("SELECT object_id FROM (SELECT o.id AS object_id FROM objects o WHERE deleting=0 AND NOT EXISTS(SELECT 1 FROM leases l WHERE l.object_id=o.id) AND (expires<="+now+(pressure?" OR complete=1":"")+") ORDER BY CASE WHEN expires<="+now+" THEN 0 ELSE 1 END,CASE WHEN complete=1 THEN completed ELSE expires END,id LIMIT 1)",1);if(candidates.Count==0)break;string candidate=candidates[0][0];Execute("UPDATE objects SET deleting=1 WHERE id="+Quote(candidate));pending=candidates;}
@@ -124,7 +124,9 @@ internal sealed class AttachmentCacheRuntime : IDisposable {
    if(offsets.Count>0)Transaction(()=>Execute("DELETE FROM chunks WHERE object_id="+Quote(id)+" AND offset IN ("+String.Join(",",offsets.Select(x=>Number(x[0]).ToString(CultureInfo.InvariantCulture)))+");"));
    else Transaction(()=>Execute("DELETE FROM recipients WHERE object_id="+Quote(id)+";DELETE FROM objects WHERE id="+Quote(id)+";"));
    Execute("PRAGMA incremental_vacuum(128);");
-   if(pressure){try{Space(0);break;}catch(InvalidOperationException){}}
+   // Admission must fit the reserved incoming object too. Space(0) can already
+   // pass before reclamation begins and would stop after only one tiny batch.
+   if(pressure){try{Space(incomingBudget);break;}catch(InvalidOperationException){}}
   }
  }
  internal void Cleanup(int operations=16){lock(gate){Check();Require(operations>0&&operations<=256,"cache_cleanup_bound");CleanupLocked(operations,false);}}

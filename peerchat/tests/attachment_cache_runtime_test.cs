@@ -82,5 +82,23 @@ class AttachmentCacheRuntimeTest {
   AttachmentCacheRuntime.TestFault=stage=>{if(stage=="before_commit"){File.WriteAllText(file+".ready","ready");Thread.Sleep(Timeout.Infinite);}};
   if(mode=="upload")cache.Append(lease,32768,Payload(1024*1024).Skip(32768).Take(32768).ToArray());else cache.Cleanup(1);
  }return 2;}
- static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime only; authoritative roster/session admission and client integration remain gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
+ static void Pressure(string root){using(var signer=new ECDsaCng(256)){
+  var path=Fixture(root,"pressure");var options=Options(path);var bytes=Payload(3*1024*1024);var retained=new List<AttachmentCacheDescriptor>();
+  using(var cache=new AttachmentCacheRuntime(options,()=>now))for(int n=0;n<3;n++){
+   var d=Descriptor(signer,3*1024*1024,bytes);retained.Add(d);cache.Admit(d,Readers());Upload(cache,d,bytes);now++;
+  }
+  // Existing completed data fits after a safe quota reduction, but the next
+  // upload needs actual reclamation, not merely Space(0) succeeding.
+  options.MaximumBytes=20L*1024*1024;
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   var protectedLease=cache.Acquire(retained[2].Id,new string('b',64),false);
+   var incoming=Payload(6*1024*1024);var descriptor=Descriptor(signer,6*1024*1024,incoming);
+   cache.Admit(descriptor,Readers());Check(cache.Inspect(descriptor.Id).Offset==0,"Admission progress fabricated");
+   Reject(()=>cache.Inspect(retained[0].Id),"cache_attachment_unavailable");
+   Check(cache.Inspect(retained[2].Id).Complete&&cache.Read(protectedLease,0,1024).Length==1024,"Protected newest object evicted");
+   Upload(cache,descriptor,incoming);Check(cache.ChargedBytes<=options.MaximumBytes,"Pressure upload exceeded quota");cache.Release(protectedLease);
+  }
+  Console.WriteLine("PASS admission reclaims the required incoming budget, oldest eligible first, preserving active leases");
+ }}
+ static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime only; authoritative roster/session admission and client integration remain gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }
