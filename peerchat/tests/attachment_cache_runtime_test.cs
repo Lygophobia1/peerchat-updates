@@ -18,9 +18,9 @@ class AttachmentCacheRuntimeTest {
  static void Reject(Action a,string reason){try{a();throw new Exception("Unexpected success: "+reason);}catch(InvalidOperationException e){Check(e.Message==reason||reason=="*",e.Message+" != "+reason);}}
  static void Field(BinaryWriter w,byte[] value){w.Write((ulong)value.Length);w.Write(value);}
  static void Text(BinaryWriter w,string value){Field(w,Encoding.UTF8.GetBytes(value));}
- static AttachmentCacheDescriptor Descriptor(ECDsaCng key,int plainBytes,byte[] cipher,string id=null){
+ static AttachmentCacheDescriptor Descriptor(ECDsaCng key,int plainBytes,byte[] cipher,string id=null,string group=null,long epoch=1,long account=1){
   using(var m=new MemoryStream())using(var w=new BinaryWriter(m)){
-   var publicKey=key.Key.Export(CngKeyBlobFormat.EccPublicBlob);w.Write(new byte[]{80,84,1,5});Text(w,"PeerChat/group-cache-upload/v1");Text(w,id??Guid.NewGuid().ToString("N"));Text(w,new string('1',32));Text(w,Guid.NewGuid().ToString("N"));Text(w,MailboxProtocol.Digest(publicKey));w.Write(1UL);w.Write(1UL);w.Write((ulong)plainBytes);w.Write((ulong)cipher.Length);using(var sha=SHA256.Create())Field(w,sha.ComputeHash(cipher));Field(w,publicKey);using(var sha=SHA256.Create())Field(w,key.SignHash(sha.ComputeHash(m.ToArray())));return AttachmentCacheDescriptor.Parse(m.ToArray());
+   var publicKey=key.Key.Export(CngKeyBlobFormat.EccPublicBlob);w.Write(new byte[]{80,84,1,5});Text(w,"PeerChat/group-cache-upload/v1");Text(w,id??Guid.NewGuid().ToString("N"));Text(w,group??new string('1',32));Text(w,Guid.NewGuid().ToString("N"));Text(w,MailboxProtocol.Digest(publicKey));w.Write((ulong)account);w.Write((ulong)epoch);w.Write((ulong)plainBytes);w.Write((ulong)cipher.Length);using(var sha=SHA256.Create())Field(w,sha.ComputeHash(cipher));Field(w,publicKey);using(var sha=SHA256.Create())Field(w,key.SignHash(sha.ComputeHash(m.ToArray())));return AttachmentCacheDescriptor.Parse(m.ToArray());
   }
  }
  static byte[] Payload(int plain){int size=checked(20+plain+Math.Max(1,(plain+32767)/32768)*16);var bytes=new byte[size];new Random(plain).NextBytes(bytes);return bytes;}
@@ -100,5 +100,53 @@ class AttachmentCacheRuntimeTest {
   }
   Console.WriteLine("PASS admission reclaims the required incoming budget, oldest eligible first, preserving active leases");
  }}
- static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime only; authoritative roster/session admission and client integration remain gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
+ static void Admission(string root){Directory.CreateDirectory(root);using(var owner=new ECDsaCng(256))using(var member=new ECDsaCng(256))using(var outsider=new ECDsaCng(256)){
+  var proof=GroupRosterProof.Parse(Convert.ToBase64String(GroupRosterProofTest.CreateProof(owner,new string('1',32),1)));
+  string group=proof.ServerGroupId,actor=proof.OwnerIdentity,reader=MailboxProtocol.Digest(member.Key.Export(CngKeyBlobFormat.EccPublicBlob)),other=MailboxProtocol.Digest(outsider.Key.Export(CngKeyBlobFormat.EccPublicBlob));
+  var options=Options(Fixture(root,"admission"));var data=Payload(65536);var descriptor=Descriptor(owner,65536,data,group:group,epoch:3);
+  using(var db=new AccountDatabase(Path.Combine(root,"admission-accounts.sqlite")))using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   Check(db.CreateAccountWithDevice("owner",new byte[16],new byte[32],actor)==1&&db.CreateAccountWithDevice("reader",new byte[16],new byte[32],reader)==2&&db.CreateAccountWithDevice("other",new byte[16],new byte[32],other)==3,"Admission accounts");
+   Check(db.RegisterGroup(1,actor,proof)!=null&&db.GroupInvite(group,1,actor,2,reader,1)!=null&&db.GroupRespond(group,2,reader,true,2)!=null,"Admission roster");
+   var admission=new AttachmentCacheAdmission(db,cache);string binding=db.AttachmentMembership(group,2,reader);Check(!String.IsNullOrEmpty(binding),"Membership backfill");
+   db.Execute("BEGIN IMMEDIATE;DELETE FROM group_roster_devices WHERE public_identity='"+reader+"';ROLLBACK;");Check(db.AttachmentMembership(group,2,reader)==binding,"Rolled-back membership changed");
+   Reject(()=>admission.Admit(2,reader,()=>true,descriptor.Wire),"cache_sender_binding_mismatch");
+   Reject(()=>admission.Admit(1,actor,()=>false,descriptor.Wire),"cache_session_or_epoch_stale");
+   Reject(()=>admission.Admit(1,actor,()=>true,Descriptor(owner,65536,data,group:group,epoch:2).Wire),"cache_session_or_epoch_stale");
+   admission.Admit(1,actor,()=>true,descriptor.Wire);
+   Reject(()=>admission.Acquire(2,reader,()=>true,descriptor.Id,false),"cache_upload_incomplete");
+   Reject(()=>admission.Acquire(3,other,()=>true,descriptor.Id,false),"cache_group_not_authorized");
+   string upload=admission.Acquire(1,actor,()=>true,descriptor.Id,true);
+   Reject(()=>admission.Append(1,actor,()=>false,upload,0,data.Take(32768).ToArray()),"cache_session_invalid");Check(cache.Inspect(descriptor.Id).Offset==0,"Rejected session advanced offset");
+   long offset=0;while(offset<data.Length)offset=admission.Append(1,actor,()=>true,upload,offset,data.Skip((int)offset).Take(32768).ToArray());
+   admission.Complete(1,actor,()=>true,upload);admission.Release(1,actor,()=>true,upload,true);
+   string download=admission.Acquire(2,reader,()=>true,descriptor.Id,false);Check(admission.Read(2,reader,()=>true,download,0,1024).Length==1024,"Authorized ciphertext read");
+   Reject(()=>admission.Read(1,actor,()=>true,download,0,1024),"cache_lease_device_mismatch");
+   Check(db.GroupRemove(group,1,actor,2,reader,3)!=null,"Member revocation");
+   Reject(()=>admission.Read(2,reader,()=>true,download,0,1024),"cache_group_not_authorized");
+   Check(db.GroupInvite(group,1,actor,3,other,4)!=null&&db.GroupRespond(group,3,other,true,5)!=null,"Later member");
+   Reject(()=>admission.Acquire(3,other,()=>true,descriptor.Id,false),"cache_original_membership_required");
+   Check(db.GroupInvite(group,1,actor,2,reader,6)!=null&&db.GroupRespond(group,2,reader,true,7)!=null,"Rejoined member");Check(db.AttachmentMembership(group,2,reader)!=binding,"Rejoin retained old membership");
+   Reject(()=>admission.Acquire(2,reader,()=>true,descriptor.Id,false),"cache_original_membership_required");
+   Reject(()=>admission.Read(2,reader,()=>true,download,0,1024),"cache_original_membership_required");
+   var fresh=Descriptor(owner,65536,data,group:group,epoch:8);admission.Admit(1,actor,()=>true,fresh.Wire);Upload(cache,fresh,data);
+   var lease=admission.Acquire(2,reader,()=>true,fresh.Id,false);Check(admission.Read(2,reader,()=>true,lease,0,1024).Length==1024,"New membership cannot receive new object");admission.Release(2,reader,()=>true,lease,false);
+  }
+  using(var db=new AccountDatabase(Path.Combine(root,"admission-accounts.sqlite")))using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   var admission=new AttachmentCacheAdmission(db,cache);Reject(()=>admission.Acquire(2,reader,()=>true,descriptor.Id,false),"cache_original_membership_required");
+   var lease=admission.Acquire(1,actor,()=>true,descriptor.Id,false);Check(admission.Read(1,actor,()=>true,lease,0,1024).Length==1024,"Owner restart access lost");
+  }
+  Console.WriteLine("PASS authoritative roster/session admission, wrong account/device/lease, revoke/rejoin, later-member historical exclusion, transaction rollback and restart");
+ }}
+ static void ConcurrentReservations(string root){using(var signer=new ECDsaCng(256)){
+  var options=Options(Fixture(root,"concurrent"));options.MaximumBytes=20L*1024*1024;var bytes=Payload(2*1024*1024);
+  var descriptors=Enumerable.Range(0,16).Select(n=>Descriptor(signer,2*1024*1024,bytes)).ToArray();int accepted=0,rejected=0;
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   System.Threading.Tasks.Parallel.ForEach(descriptors,d=>{try{cache.Admit(d,Readers());Interlocked.Increment(ref accepted);}catch(InvalidOperationException e){Check(e.Message=="cache_quota_or_free_space_protected",e.Message);Interlocked.Increment(ref rejected);}});
+   Check(accepted>0&&rejected>0&&accepted+rejected==16&&cache.ChargedBytes<=options.MaximumBytes,"Concurrent reservations oversubscribed quota");
+   foreach(var d in descriptors){try{Check(cache.Inspect(d.Id).Offset==0,"Offered bytes claimed durable");}catch(InvalidOperationException e){Check(e.Message=="cache_attachment_unavailable",e.Message);}}
+  }
+  using(var cache=new AttachmentCacheRuntime(options,()=>now))Check(cache.ChargedBytes<=options.MaximumBytes,"Restart lost reservations");
+  Console.WriteLine("PASS 16 concurrent admissions preserve a single bounded reservation ledger across restart; accepted="+accepted+" rejected="+rejected);
+ }}
+ static int Main(string[] args){try{if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--admission"){Admission(Path.GetFullPath(args[1]));ConcurrentReservations(Path.GetFullPath(args[1]));return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Admission(root);ConcurrentReservations(root);Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime and authoritative admission; network endpoint/client integration remain gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }

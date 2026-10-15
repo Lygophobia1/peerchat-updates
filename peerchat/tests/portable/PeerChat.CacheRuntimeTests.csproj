@@ -6,6 +6,7 @@
  </PropertyGroup>
  <ItemGroup>
   <Compile Include="PortableTestKey.cs;../attachment_cache_runtime_test.cs;../../shared/VersionInfo.cs;../../server/portable/PortableJson.cs;../../server/portable/PortablePlatform.cs" />
+  <Compile Include="../group_roster_proof_test.cs" />
   <Compile Include="../../server/*.cs" Exclude="../../server/PeerChat.Server.Admin.cs;../../server/DiscoveryIntegrationTest.cs" />
  </ItemGroup>
 </Project>
