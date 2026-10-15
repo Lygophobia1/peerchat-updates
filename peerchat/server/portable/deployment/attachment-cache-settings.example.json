@@ -1,0 +1,14 @@
+{
+  "AttachmentCache": {
+    "Enabled": false,
+    "MaximumBytes": 10737418240,
+    "RetentionSeconds": 172800,
+    "PartialIdleSeconds": 21600,
+    "MinimumFreeBytes": 2147483648,
+    "MinimumFreePercent": 20,
+    "Directory": "",
+    "ExpectedFilesystem": "",
+    "ExpectedMountPoint": "",
+    "InstanceId": ""
+  }
+}

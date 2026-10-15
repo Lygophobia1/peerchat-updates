@@ -2,10 +2,60 @@
 
 This branch owns the Windows transfer and encrypted attachment-cache milestone.
 Attachment-only per-device HPKE envelopes are user-approved. Shipping cache
-transport remains disabled; successful component tests do not establish packaged
-group delivery or physical acceptance.
+transport remains disabled in ordinary builds. The explicit dev.158 cache
+candidate has passed actual-server Windows production-path integration; physical
+Windows/Pi acceptance remains pending.
 
-## Development freeze and recovered handoff
+## Current Windows completion — supersedes archived freeze below
+
+See [GROUP_ATTACHMENTS_DEV158_VALIDATION.md](GROUP_ATTACHMENTS_DEV158_VALIDATION.md)
+and [GROUP_ATTACHMENTS_DEV158_DEPLOYMENT.md](GROUP_ATTACHMENTS_DEV158_DEPLOYMENT.md).
+
+Checkpoints: `8c24b4b` (UI), `02fda44` (controller/recovery), `cfc3fa2`
+(candidate gate/version). The final package manifest records exact source HEAD,
+source hashes and payload hashes. No merge, live deployment or Android change.
+
+Changed shared integration surfaces are deliberately narrow:
+
+- `windows_group_attachment_application.hpp`: controller-only recovery, bounded
+  cleanup/paging and protected supplemental `AttachmentJob/v3`; reads v1/v2.
+  v2 adds owned lease; v3 adds original input size. No legacy journal migration.
+- `node.cpp`: Windows-local operation 8 for older history (strict cursor, <=32
+  results). Existing Windows group-attachment exports and response domains remain.
+- `desktop/GroupAttachments.cs`, `Main.xaml`: original-file draft/explicit Send,
+  per-group history cursor, serialized verified actions and Prepare again.
+  Failed unsealed preparation op4 accepts the original path only before immutable
+  material/admission; sealed retry retains exact ciphertext and key packet.
+- `server/AttachmentCacheServer.cs`, portable project and build scripts: explicit
+  `PEERCHAT_CACHE_CANDIDATE`, not `PEERCHAT_CACHE_TESTS`. Disabled configuration
+  remains the default; standard compilation remains gated. No RPC/wire change.
+- `server/PeerChat.Server.exe.config`: Framework modern path handling for pinned
+  volume-GUID storage; installed beside the server and Admin's server copy.
+- Tests add real server-process invocation and repeated restart, missing-evidence,
+  cancellation, two-recipient receipts and filename/export verification.
+
+Server operations, immutable descriptors, HPKE envelope formats and original/
+current membership checks remain the previously reviewed contracts. Native
+portable/JNI APIs, Storage group-text schemas, authentication, PCGE and media
+protocols are unchanged. Future Android integration must consume the same
+attachment descriptor identity and independent receipt authority, not store
+different recipient envelopes as identical group-message wire.
+
+Reinspected the separate Android worktree read-only at `ade45a4` (code `227ce31`),
+including `ANDROID_GROUPS_VOICE_INTEGRATION.md` and handoff. It owns portable
+`group_application`, scoped session/relay, JNI/Kotlin group text/voice. It has no
+cached group-attachment UI. These Windows-local additions do not implement or
+replace those interfaces. Its own WIP dev.157 APK is not this Windows/cache
+candidate; Windows/Pi final version is dev.158. Do not auto-merge/cherry-pick.
+
+The final Framework dev.158 and separate portable candidate both pass actual
+sender/two-recipient TLS/HPKE/cache tests, sender offline, restarts, signed
+plaintext receipts, late/rejoined denial and missing authenticated original
+evidence rejection. Default-gate and no-test-hook metadata audits pass. Linux
+ARM32/ARM64/x64 build audits pass; Linux execution and physical group delivery
+are pending. This milestone stops for physical testing and deployment approval.
+
+## Archived development freeze and recovered handoff
 
 Development stopped at the user's request on 2026-10-15. The complete recovery,
 file inventory, validation evidence, package status, known failures and resume

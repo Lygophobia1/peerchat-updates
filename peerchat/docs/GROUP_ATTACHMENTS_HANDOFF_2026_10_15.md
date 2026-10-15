@@ -1,5 +1,10 @@
 # PeerChat group attachment development handoff
 
+> Archived STOP checkpoint. Development was subsequently authorized and the
+> focused Windows completion is documented in
+> [GROUP_ATTACHMENTS_DEV158_VALIDATION.md](GROUP_ATTACHMENTS_DEV158_VALIDATION.md).
+> Preserve the findings below as historical evidence; they are not current status.
+
 Development is stopped at the user's request. All saved source changes and completed subagent work are preserved. The server context and receipt component and the Windows durability helpers have focused passing tests. The integrated Windows attachment controller, UI and actual-server harness remain WIP. No complete group attachment candidate or physical acceptance is claimed.
 
 ## Repository and checkpoint state
