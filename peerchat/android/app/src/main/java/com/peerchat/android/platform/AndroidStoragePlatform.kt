@@ -33,7 +33,7 @@ internal fun nativeSqlStatements(sql:String):List<String> {
 
 // Platform execution/crypto only. Native Storage retains ALL schema, record,
 // history/outbox, ordering, dedupe and transaction policy.
-class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false) : AutoCloseable {
+class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false,private val registryDiagnostic:((String)->Unit)?=null) : AutoCloseable {
     private val applicationContext = context.applicationContext
     private val state = ProfileSecurity(context.applicationContext, profile)
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
@@ -86,9 +86,14 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     fun sign(bytes: ByteArray): ByteArray = identity.sign(bytes)
     // Separate DB file avoids self-contention while a KeyManager lease spans
     // decryption and durable message acceptance on the normal profile database.
-    fun keyRegistryProvider(): Any {
+    fun keyRegistryProvider(): Any = recipientOperation("key_registry_provider") {
         checkOpen(); invalid(!registryOnly)
-        return AndroidStoragePlatform(applicationContext, profile, true)
+        AndroidStoragePlatform(applicationContext, profile, true){recipientDiagnostic=it}
+    }
+    private fun <T> registryOperation(stage:String,operation:()->T):T {
+        registryDiagnostic?.invoke("stage=$stage")
+        try{return operation().also{registryDiagnostic?.invoke("stage=$stage result=ready")}}
+        catch(failure:Exception){registryDiagnostic?.invoke("stage=$stage reason="+recipientFailureCode(failure));throw failure}
     }
     private fun recipientAliasText(alias: ByteArray): String {
         checkOpen(); invalid(alias.size in 1..256)
@@ -119,7 +124,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     }
     fun protect(bytes: ByteArray, context: ByteArray): ByteArray = records.protect(bytes, context)
     fun unprotect(bytes: ByteArray, context: ByteArray): ByteArray = records.unprotect(bytes, context)
-    fun execute(bytes: ByteArray) {
+    fun execute(bytes: ByteArray) = registryOperation("registry_execute") {
         checkOpen(); invalid(bytes.size <= 32768)
         val sql = text(bytes)
         // Native execute uses fixed schema/PRAGMA/transaction statements only;
@@ -134,11 +139,11 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
             } else database.execSQL(statement)
         }
     }
-    fun prepare(bytes: ByteArray): Long {
+    fun prepare(bytes: ByteArray): Long = registryOperation("registry_prepare") {
         checkOpen(); invalid(bytes.size in 1..32768 && statements.size < 128)
         val sql = text(bytes); invalid(!sql.contains('\u0000') && !sql.contains(';'))
         if (nextStatement == Long.MAX_VALUE) throw ProviderFailure("STATEMENT_LIMIT")
-        val id = nextStatement++; statements[id] = Statement(sql); return id
+        val id = nextStatement++; statements[id] = Statement(sql); id
     }
     fun bindBytes(id: Long, index: Int, bytes: ByteArray, blob: Boolean) {
         val s = statement(id); invalid(!s.started && index in 1..128 && bytes.size <= 1048576)
@@ -155,7 +160,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
             else -> throw ProviderFailure("INVALID_BINDING")
         } }
     }
-    fun row(id: Long): Boolean {
+    fun row(id: Long): Boolean = registryOperation("registry_row") {
         val s = statement(id)
         if (!s.started) {
             s.started = true
@@ -165,7 +170,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
                 }, s.sql, emptyArray(), "")
             } else database.compileStatement(s.sql).use { bind(s, it); it.execute() }
         }
-        return s.cursor?.moveToNext() ?: false
+        s.cursor?.moveToNext() ?: false
     }
     private fun cursor(id: Long, index: Int): Cursor {
         val cursor = statement(id).cursor ?: throw ProviderFailure("NO_RESULT_ROW")

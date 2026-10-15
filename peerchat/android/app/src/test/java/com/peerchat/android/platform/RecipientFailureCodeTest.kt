@@ -4,6 +4,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RecipientFailureCodeTest {
+    @Test fun registryFailureClassificationsDoNotExposeMessages(){
+        assertEquals("REGISTRY_DATABASE_LOCKED",recipientFailureCode(android.database.sqlite.SQLiteDatabaseLockedException("secret")))
+        assertEquals("REGISTRY_SQL_FAILURE",recipientFailureCode(android.database.sqlite.SQLiteException("secret")))
+        assertEquals("IDENTITY_RECOVERY_REQUIRED",recipientFailureCode(ProviderFailure("IDENTITY_RECOVERY_REQUIRED")))
+    }
     @Test fun onlyFixedFailureCodesAreExposed(){
         assertEquals("RECIPIENT_KEY_RECOVERY_REQUIRED",recipientFailureCode(ProviderFailure("RECIPIENT_KEY_RECOVERY_REQUIRED")))
         assertEquals("RECIPIENT_PROVIDER_OPERATION_FAILED",recipientFailureCode(ProviderFailure("secret alias or payload")))
