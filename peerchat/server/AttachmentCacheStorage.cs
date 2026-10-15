@@ -18,7 +18,7 @@ internal static class AttachmentCacheStorage {
  static string Canonical(string path){var full=Path.GetFullPath(path);var root=Path.GetPathRoot(full);return full.Length>root.Length?full.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar):root;}
  static bool Within(string directory,string mount){return String.Equals(directory,mount,PathComparison)||directory.StartsWith(mount.EndsWith(Path.DirectorySeparatorChar.ToString())?mount:mount+Path.DirectorySeparatorChar,PathComparison);}
  static string ReadBounded(string path,int maximum){using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)){
-  var bytes=new byte[maximum+1];int used=0,count;while(used<bytes.Length&&(count=file.Read(bytes,used,bytes.Length-used))>0)used+=count;if(used>maximum)throw new InvalidOperationException("Cache storage evidence exceeds bound.");return new UTF8Encoding(false,true).GetString(bytes,0,used);
+  using(var contents=new MemoryStream()){var buffer=new byte[Math.Min(4096,maximum+1)];int count;while((count=file.Read(buffer,0,buffer.Length))>0){if(count>maximum-contents.Length)throw new InvalidOperationException("Cache storage evidence exceeds bound.");contents.Write(buffer,0,count);}return new UTF8Encoding(false,true).GetString(contents.ToArray());}
  }}
  static void NoLinks(string directory){for(var path=directory;!String.IsNullOrEmpty(path);path=Path.GetDirectoryName(path))if((File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new InvalidOperationException("Cache storage path contains a link.");}
  static string UnescapeMount(string value){return value.Replace("\\040"," ").Replace("\\011","\t").Replace("\\012","\n").Replace("\\134","\\");}

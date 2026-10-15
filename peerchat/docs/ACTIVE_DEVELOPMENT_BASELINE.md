@@ -19,3 +19,36 @@ The newer explicit branch-unification instruction supersedes the pasted audit
 request's earlier separate-worktree/emoji-exclusion instructions. All three audit,
 scheduling and voice phases now run here in separate logical checkpoints. No other
 branch is renamed, reset, merged or rewritten. Android/Pi deployments remain excluded.
+
+## Physical media acceptance and deferred work
+
+On 2026-10-14 the user physically accepted dev.153 voice calls and ordinary
+desktop screen sharing. Preserve that behavior during transfer/cache development;
+this acceptance does not cover smooth video playback or shared computer audio.
+
+The future media milestone has separate validation checkpoints:
+
+- Improve active-video smoothness by tracing capture, encoding, RTP arrival and
+  recovery, decoding and presentation gaps. Validate sustained 30 FPS motion and
+  evaluate optional 60 FPS only where supported; average FPS alone is insufficient.
+- Add optional Windows system-audio sharing using an appropriate native loopback
+  mechanism. Keep microphone and shared-audio volume/mute independent, preserve
+  AEC, authenticated encrypted media and group participant authorization, and
+  prevent feedback or unintended rebroadcast of call participants.
+
+The voice-quality backlog also retains background fan-noise suppression and
+individual participant volume controls. These are deferred improvements, not
+reasons to reopen the accepted milestone or expand the current transfer/cache task.
+
+The user paused transfer/group-attachment/cache development on 2026-10-14 for
+an urgent Windows/Android messaging regression. Do not resume that milestone
+without new user authorization. Android messaging diagnosis and the smallest
+proven repair are now the only active development priority on this same branch.
+Live Pi changes still require explicit approval.
+
+The paused cache work includes a disabled durable SQLite ciphertext runtime,
+pinned storage adapter, signed descriptor parsing and initial roster admission.
+Isolated storage tests passed up to 10 MiB, independent recipient progress,
+incomplete/corrupt rejection and actual process termination before upload and
+cleanup commits. Admission and client integration are unfinished and unvalidated;
+no cache endpoints are enabled and no live server data has been changed.
