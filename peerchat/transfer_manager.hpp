@@ -20,6 +20,10 @@ struct Options {
     bool valid()const{return (chunkBytes==ChunkBytes||chunkBytes==ExtendedChunkBytes)&&(window==1||window==4||window==8||window==16)&&bitsPerSecond<=10000000000ull;}
 };
 constexpr std::uint64_t MaxFileBytes=256ull*1024*1024, IdleMilliseconds=15*60*1000;
+// An explicitly admitted cache object has AEAD overhead, not a larger user-file
+// allowance. No ordinary peer packet can select this local purpose.
+constexpr std::uint64_t MaxCacheCipherBytes=20+MaxFileBytes+((MaxFileBytes+32767)/32768)*16;
+enum class Purpose { PeerFile, GroupCacheCiphertext };
 using Digest=std::array<unsigned char,32>;
 class Hash {
 public:
@@ -54,7 +58,7 @@ struct Metadata {
     Digest digest{};
     bool operator==(const Metadata& b)const{return id==b.id&&name==b.name&&size==b.size&&digest==b.digest;}
 };
-struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0,created=0;
+struct Snapshot { Metadata metadata;std::string peer,error;State state=State::Preparing;bool sending=false;std::uint64_t done=0,created=0;Purpose purpose=Purpose::PeerFile;
     bool statisticsKnown=false,etaReliable=false;std::uint64_t statisticsBytes=0,durationMilliseconds=0,currentBitsPerSecond=0;
 };
 // Persistence adapter only: no sockets, retry loop or independent transfer owner.
@@ -71,6 +75,8 @@ public:
     virtual void save(const std::vector<DurableState>&)=0;
     virtual std::unique_ptr<Source> source(const DurableState&)=0;
     virtual std::unique_ptr<Sink> sink(const DurableState&)=0;
+    // Old journals cannot silently discard a nonlegacy purpose during save.
+    virtual bool supports(Purpose purpose)const{return purpose==Purpose::PeerFile;}
     // Optional profile-local tuning sidecar; never part of durable ACK authority.
     virtual std::map<std::string,Options> loadOptions(){return {};}
     virtual void saveOptions(const std::map<std::string,Options>&){}
@@ -108,6 +114,11 @@ inline bool safeName(const std::string& name){
     return true;
 }
 class TransferManager {
+    static std::uint64_t maximum(Purpose purpose){protocol::check(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext);return purpose==Purpose::PeerFile?MaxFileBytes:MaxCacheCipherBytes;}
+    void supported(Purpose purpose)const{protocol::check(!store_||store_->supports(purpose));}
+    static void cacheContext(const Metadata& metadata,std::uint64_t plainBytes){
+        protocol::check(protocol::id(metadata.id,32)&&metadata.name=="ciphertext.peerchat"&&plainBytes<=MaxFileBytes&&metadata.size==20+plainBytes+std::max<std::uint64_t>(1,(plainBytes+32767)/32768)*16);
+    }
     struct Timer {
         std::uint64_t& total;
         std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
@@ -214,7 +225,8 @@ public:
         if(statistics_)try{statistics_->load(records);}catch(...){for(auto& d:records)d.statisticsKnown=false;}
         size_t active=0;
         for(auto& d:records){
-            if(!protocol::id(d.metadata.id,32)||!protocol::id(d.peer)||!safeName(d.metadata.name)||d.metadata.size>MaxFileBytes||
+            supported(d.purpose);
+            if(!protocol::id(d.metadata.id,32)||!protocol::id(d.peer)||!safeName(d.metadata.name)||d.metadata.size>maximum(d.purpose)||
                 d.done>d.metadata.size||d.highWaterSent>d.metadata.size||d.state>State::Suspended||!d.created||d.updated<d.created||
                 d.expires<d.created||d.expires-d.created>RetentionMilliseconds||entries_.count(d.metadata.id))throw std::runtime_error("Invalid protected transfer state");
             Entry e;static_cast<Snapshot&>(e)=d;e.location=d.location;e.highWaterSent=d.highWaterSent;
@@ -272,8 +284,19 @@ public:
         std::vector<std::string> result;for(auto& p:entries_)if(!terminal(p.second.state)||p.second.reply)result.push_back(p.second.peer);return result;
     }
     void offer(const std::string& peer,const std::string& id,std::unique_ptr<Source> source,std::uint64_t now,const Digest* expectedDigest=nullptr){
-        if(!protocol::id(peer)||!protocol::id(id,32)||!source||!safeName(source->name())||source->size()>MaxFileBytes||entries_.count(id))throw std::runtime_error("Invalid file offer");
-        room();Entry e;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();
+        offerImpl(peer,id,std::move(source),now,expectedDigest,Purpose::PeerFile);
+    }
+    // Only the authenticated cache adapter may call this after binding the
+    // immutable encrypted manifest/descriptor. Never advertise it to old peers.
+    void offerCacheCiphertext(const std::string& peer,const Metadata& expected,std::uint64_t plainBytes,std::unique_ptr<Source> source,std::uint64_t now){
+        cacheContext(expected,plainBytes);protocol::check(source&&source->size()==expected.size&&source->name()==expected.name);
+        offerImpl(peer,expected.id,std::move(source),now,&expected.digest,Purpose::GroupCacheCiphertext);
+    }
+private:
+    void offerImpl(const std::string& peer,const std::string& id,std::unique_ptr<Source> source,std::uint64_t now,const Digest* expectedDigest,Purpose purpose){
+        supported(purpose);
+        if(!protocol::id(peer)||!protocol::id(id,32)||!source||!safeName(source->name())||source->size()>maximum(purpose)||entries_.count(id))throw std::runtime_error("Invalid file offer");
+        room();Entry e;e.purpose=purpose;e.peer=peer;e.metadata.id=id;e.metadata.name=source->name();e.metadata.size=source->size();
         if(expectedDigest){e.metadata.digest=*expectedDigest;e.digestReady=true;}
         e.requested=options();e.requested.bitsPerSecond=0;
         // Snapshot this file's request, so changing defaults does not silently
@@ -282,6 +305,7 @@ public:
         tuning[id]=e.requested;if(store_)store_->saveOptions(tuning);options_=std::move(tuning);
         e.sending=true;e.statisticsKnown=true;e.lastActivity=now;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.source=std::move(source);touch(e);entries_.emplace(id,std::move(e));save();
     }
+public:
     void accept(const std::string& id,std::unique_ptr<Sink> sink,std::uint64_t now){
         auto i=entries_.find(id);if(i==entries_.end()||i->second.sending||i->second.state!=State::AwaitingAcceptance||!sink)throw std::runtime_error("File offer no longer available");
         auto& e=i->second;e.hash=hash_();if(!e.hash)throw std::runtime_error("Hash provider unavailable");e.sink=std::move(sink);e.state=State::Transferring;e.lastActivity=now;e.reply=offsetPacket(Kind::Resume,e);touch(e);save();
@@ -300,7 +324,7 @@ public:
     // One bounded hash/read/packet operation per transfer per tick. A route token
     // changes only with SessionTransportManager's winning authenticated session.
     void tick(std::uint64_t now,const std::function<std::uint64_t(const std::string&)>& route,const std::function<bool(const std::string&,const Blob&)>& send){
-        tickScoped(now,[&](const Snapshot& e){return route(e.peer);},[&](const Snapshot& e,const Blob& frame){return send(e.peer,frame);});
+        tickScoped(now,[&](const Snapshot& e){return e.purpose==Purpose::PeerFile?route(e.peer):0;},[&](const Snapshot& e,const Blob& frame){return e.purpose==Purpose::PeerFile&&send(e.peer,frame);});
     }
     // Execution adapters choose the authorized route for this exact transfer.
     // Shared preparation, journal, deadlines and completion ownership are unchanged.
@@ -387,16 +411,23 @@ public:
     }
     // Caller must verify TLS identity, purpose, negotiated capability and winner
     // BEFORE dispatch. Peer ID is never obtained from the transfer payload.
-    void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveImpl(peer,frame,now);for(auto& item:entries_)statistics(item.second,now);save();}
-    void receiveImpl(const std::string& peer,const Blob& frame,std::uint64_t now){
+    void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveScoped(peer,frame,now,Purpose::PeerFile,nullptr);}
+    void receiveCacheCiphertext(const std::string& peer,const Metadata& expected,std::uint64_t plainBytes,const Blob& frame,std::uint64_t now){
+        cacheContext(expected,plainBytes);receiveScoped(peer,frame,now,Purpose::GroupCacheCiphertext,&expected);
+    }
+private:
+    void receiveScoped(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){supported(purpose);receiveImpl(peer,frame,now,purpose,expected);for(auto& item:entries_)statistics(item.second,now);save();}
+    void receiveImpl(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){
         protocol::Reader r(frame);protocol::check(r.type()==protocol::FileTransfer);auto version=r.number();protocol::check(version==1||version==2);
         auto kind=static_cast<Kind>(r.number());auto id=r.string();protocol::check(protocol::id(id,32));auto negotiation=version==2?r.number():0;
         auto cap=capabilities_.find(peer);if(version==2)protocol::check(cap!=capabilities_.end()&&cap->second.pipeline&&cap->second.route&&negotiation);
         auto i=entries_.find(id);
+        protocol::check((!expected||expected->id==id)&&(i==entries_.end()||(i->second.purpose==purpose&&(!expected||i->second.metadata==*expected))));
         if(kind==Kind::Offer){
             Metadata m;m.id=id;m.name=r.string();m.size=r.number();auto digest=r.bytes();Options options;if(version==2){options.chunkBytes=r.number();options.window=r.number();}r.end();protocol::check(options.valid());
-            protocol::check(safeName(m.name)&&m.size<=MaxFileBytes&&digest.size()==32);
+            protocol::check(safeName(m.name)&&m.size<=maximum(purpose)&&digest.size()==32);
             std::copy(digest.begin(),digest.end(),m.digest.begin());
+            protocol::check(!expected||m==*expected);
             if(i!=entries_.end()){
                 auto& e=i->second;protocol::check(e.peer==peer&&!e.sending&&e.metadata==m);
                 e.offerSeen=true;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;
@@ -409,7 +440,7 @@ public:
                 else if(terminal(e.state))e.reply=packet(Kind::Cancel,e).data;
                 return;
             }
-            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id,version,negotiation);}Entry e;e.metadata=m;e.peer=peer;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
+            protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id,version,negotiation);}Entry e;e.purpose=purpose;e.metadata=m;e.peer=peer;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
         }
         if(kind==Kind::Cancel&&i==entries_.end()){r.end();return;} // Cancellation can race an unobserved offer.
         protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;

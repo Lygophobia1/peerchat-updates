@@ -15,7 +15,7 @@ void stage(const std::filesystem::path& root){
  auto id=Storage::newMessageId();Metadata metadata;metadata.id=id;metadata.name="encrypted.bin";
  windows::FileSink target((root/L"ciphertext").wstring(),metadata,nullptr,true);windows::Sha256 plain,cipher;
  auto manifest=seal(source,target,{id,std::string(32,'2'),profile.peerId,4,7},plain,cipher);
- windows::FileSource saved(target.path());Staged value{std::move(manifest),saved.resumeToken(),1700000000000ull,1700000000000ull+transfer::RetentionMilliseconds};
+ windows::FileSource saved(target.path(),"ciphertext.peerchat",Purpose::GroupCacheCiphertext);Staged value{std::move(manifest),saved.resumeToken(),1700000000000ull,1700000000000ull+transfer::RetentionMilliseconds};
  std::vector<Staged> records;records.push_back(std::move(value));journal.save(records);
  // Legacy transfer data is separate and remains readable by old clients.
  protocol::Writer old(protocol::FileTransfer);old.string("PeerChat/ProtectedTransferJournal/v1");old.string(profile.peerId);old.number(transfer::ChunkBytes);old.number(0);
@@ -25,7 +25,7 @@ void verify(const std::filesystem::path& root){
  Storage storage(root.wstring());auto profile=storage.profile();auto legacy=storage.transferJournal(profile.peerId);
  StagingJournal journal(storage,profile.peerId),stale(storage,profile.peerId);auto records=journal.load();auto staleRecords=stale.load();check(records.size()==1&&staleRecords.size()==1);
  auto& record=records[0];check(record.manifest.name==u8"private-📷-日本.png"&&record.manifest.size==1048577&&record.manifest.binding.account==4&&record.manifest.binding.epoch==7);
- DurableState sourceState;sourceState.location=record.location;auto source=windows::FileSource::reopen(sourceState);
+ DurableState sourceState;sourceState.purpose=Purpose::GroupCacheCiphertext;sourceState.location=record.location;auto source=windows::FileSource::reopen(sourceState);check(source->name()=="ciphertext.peerchat");
  Result result;MemorySink output(result);windows::Sha256 ph,ch;open(*source,output,record.manifest,ph,ch);check(result.committed&&result.bytes==data(1048577));
  auto previous=storage.groupAttachmentStaging(profile.peerId);journal.save(records);check(storage.groupAttachmentStaging(profile.peerId)==previous);
  record.expires--;rejected([&]{journal.save(records);});record.expires++;

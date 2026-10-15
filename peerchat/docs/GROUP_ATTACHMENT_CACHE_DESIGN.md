@@ -274,6 +274,23 @@ must still be reopened and verified before resume. A crash between ciphertext
 sealing and staging commit is not an announced or uploadable attachment; complete
 intent/orphan recovery remains an integration gate.
 
+The existing TransferManager now has an explicit local ciphertext purpose and
+manifest-bound entry points. Its maximum is the unchanged 256-MiB plaintext
+limit plus the exact bounded AEAD overhead; ordinary offers and archive fetches
+remain capped at 256 MiB. Peer frames cannot select this purpose. Control frames
+cannot cross between purposes or conflict with the caller's expected immutable
+metadata. Default route callbacks refuse cache entries; the single owner must
+select an admitted route through its existing scoped tick callback.
+
+Legacy journals explicitly lack support for this purpose and cannot receive
+cache entries. A separately protected resume-state adapter is still required
+before production use. Windows file sources can reopen the additional overhead
+only with the explicit cache purpose. A sparse maximum-size fixture verifies
+that boundary without allocating or transmitting a 256-MiB payload. A nonempty
+encrypted-object round trip uses the same TransferManager hash/credit/ACK and
+completion paths, followed by separate exact plaintext verification. Existing
+legacy restart, all eight pipeline combinations and bandwidth-budget tests pass.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with

@@ -88,12 +88,13 @@ class FileSource final:public Source {
     std::string name_;
     Blob token_;
 public:
-    explicit FileSource(const std::wstring& path,const std::string& logicalName={}){
+    explicit FileSource(const std::wstring& path,const std::string& logicalName={},Purpose purpose=Purpose::PeerFile){
+        require(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext);
         name_=logicalName.empty()?unicode::encode(std::filesystem::path(path).filename().wstring()):logicalName;require(safeName(name_));
         handle_=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle_==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot open file");
         BY_HANDLE_FILE_INFORMATION info{};LARGE_INTEGER size{};
-        if(!GetFileInformationByHandle(handle_,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||!GetFileSizeEx(handle_,&size)||size.QuadPart<0||static_cast<std::uint64_t>(size.QuadPart)>MaxFileBytes){
+        if(!GetFileInformationByHandle(handle_,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||!GetFileSizeEx(handle_,&size)||size.QuadPart<0||static_cast<std::uint64_t>(size.QuadPart)>(purpose==Purpose::PeerFile?MaxFileBytes:MaxCacheCipherBytes)){
             CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;throw std::runtime_error("Unsupported source file");
         }
         size_=static_cast<std::uint64_t>(size.QuadPart);
@@ -107,7 +108,7 @@ public:
     Blob resumeToken()const override{return token_;}
     static std::unique_ptr<FileSource> reopen(const DurableState& d){
         protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto path=r.text();
-        require(std::filesystem::path(path).is_absolute());auto source=std::make_unique<FileSource>(path);
+        require(std::filesystem::path(path).is_absolute());auto source=std::make_unique<FileSource>(path,std::string{},d.purpose);
         checkIdentity(r,source->handle_,true);
         if(r.remaining()){require(r.string()=="PeerChat/LogicalFileName/v1");source->name_=r.string();require(safeName(source->name_));source->token_=d.location;}
         r.end();return source;
