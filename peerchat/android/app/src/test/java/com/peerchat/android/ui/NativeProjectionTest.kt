@@ -7,6 +7,12 @@ import org.junit.Test
 class NativeProjectionTest {
     private val local="a".repeat(64)
     private val remote="b".repeat(64)
+    @Test fun voiceCapabilityAndDiagnosticComeFromNativeSnapshot(){
+        val reason="Pinned Android receive component unavailable"
+        val ui=projectMessaging(MessagingSnapshot(voice=VoiceSnapshot(available=false,diagnostic=reason)),PeerChatUiState())
+        assertFalse(ui.voiceAvailable);assertEquals(reason,ui.voiceDiagnostic);assertTrue(ui.diagnostics.contains(reason))
+        assertFalse(PeerChatUiState().voiceAvailable)
+    }
     private fun snapshot(delivery:Long=0,outgoing:Boolean=true)=MessagingSnapshot(19,"Jonah",local,true,"Authenticated",listOf(
         ConversationSnapshot(FriendIdentity(8,"Sammy",remote,true),ConnectionSnapshot(ready=true),listOf(
             MessageSnapshot("c".repeat(32),if(outgoing)local else remote,if(outgoing)remote else local,1700000000000,1,1,delivery,"private message")))))

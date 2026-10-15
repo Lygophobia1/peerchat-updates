@@ -20,6 +20,7 @@ import androidx.compose.ui.tooling.preview.Preview
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun Home(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var menu by remember { mutableStateOf(false) }
+    var newGroup by remember {mutableStateOf("")}
     Scaffold(topBar = {
         TopAppBar(title = { Text("PeerChat") }, actions = {
             if (state.tab == Tab.Chats) {
@@ -55,6 +56,17 @@ import androidx.compose.ui.tooling.preview.Preview
                             selected = state.kind == kind, onClick = { dispatch(UiAction.SelectKind(kind)) },
                             shape = SegmentedButtonDefaults.itemShape(index, 2)) { Text(if (kind == ChatKind.Direct) "DM" else "Groups") }
                         }
+                    }
+                    if(!state.demo&&state.kind==ChatKind.Group){
+                        Row(Modifier.fillMaxWidth().padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically){
+                            OutlinedTextField(newGroup,{newGroup=it.take(80)},label={Text("Group name")},modifier=Modifier.weight(1f),singleLine=true)
+                            TextButton({dispatch(UiAction.CreateGroup(newGroup));newGroup=""},enabled=newGroup.isNotBlank()&&state.connection==ConnectionState.Online){Text("Create")}
+                        }
+                        state.groupInvitations.forEach{invite->Row(Modifier.padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("Invitation from ${invite.inviter}",Modifier.weight(1f))
+                            TextButton({dispatch(UiAction.RespondGroup(invite.id,true))}){Text("Accept")}
+                            TextButton({dispatch(UiAction.RespondGroup(invite.id,false))}){Text("Decline")}
+                        }}
                     }
                     when (state.load) {
                         LoadState.Loading -> StatusPanel("Loading conversations…", "Preview loading state") { CircularProgressIndicator() }

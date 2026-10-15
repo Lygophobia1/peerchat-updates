@@ -17,6 +17,24 @@ class AttachmentParityTest {
     @get:Rule val compose=createComposeRule()
     private val peer="b".repeat(64)
     private fun row(state:Int=2,path:String="")=AttachmentSnapshot("c".repeat(32),peer,"résumé-日本.png",100000,state,false,0,1,"",path)
+    @Test fun liveDmCallButtonShowsActualUnavailableReason(){
+        val actions=mutableListOf<UiAction>()
+        val direct=ConversationUi("account:8","Other",ChatKind.Direct,true,"","",hasOlder=false)
+        val reason="Android voice receive component unavailable"
+        val state=PeerChatUiState(demo=false,route=Route.Conversation,selectedId=direct.id,conversations=listOf(direct),account=AccountUi("account:19","Test"),voiceDiagnostic=reason)
+        compose.setContent{PeerChatTheme(true){ConversationScreen(direct,state,actions::add)}}
+        compose.onNodeWithContentDescription("Voice call").performClick()
+        compose.runOnIdle{assertEquals(listOf(UiAction.Notice(reason)),actions)}
+    }
+    @Test fun groupComposerDoesNotAdvertiseAttachmentsAndRejectsOversizedText(){
+        val actions=mutableListOf<UiAction>()
+        val group=ConversationUi("group:"+"c".repeat(32),"Group",ChatKind.Group,true,"","",hasOlder=false)
+        val state=PeerChatUiState(demo=false,route=Route.Conversation,selectedId=group.id,conversations=listOf(group),account=AccountUi("account:19","Test"))
+        compose.setContent{PeerChatTheme(true){ConversationScreen(group,state,actions::add)}}
+        compose.onNodeWithContentDescription("Send picture or file").assertDoesNotExist()
+        compose.onNodeWithTag("composer").performTextInput("x".repeat(4097))
+        compose.runOnIdle{assertTrue(actions.none{it is UiAction.Draft})}
+    }
     @Test fun statisticsProjectConfirmedBytesWithoutInventingRates(){
         val current=row(3).copy(done=50000,statisticsKnown=true,statisticsBytes=50000,durationMs=2000,rateBits=80000,etaReliable=true)
         assertTrue(current.statisticsText.contains("50.00%"));assertTrue(current.statisticsText.contains("Current 0.08 Mbps"));assertTrue(current.statisticsText.contains("Average 0.20 Mbps"));assertTrue(current.statisticsText.contains("ETA 5 s"))
