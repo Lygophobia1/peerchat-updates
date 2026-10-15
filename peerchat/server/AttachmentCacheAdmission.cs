@@ -29,7 +29,7 @@ internal sealed partial class AttachmentCacheAdmission {
  internal AttachmentCacheRuntime.Status Admit(long account,string device,Func<bool> current,byte[] descriptor){
   var signed=AttachmentCacheDescriptor.Parse(descriptor);Require(signed.Account==account&&signed.Sender==device,"cache_sender_binding_mismatch");AttachmentCacheRuntime.Status result=null;
   bool allowed=accounts.WithGroupRosterAuthorization(signed.Group,account,device,roster=>{
-   Require(current()&&Convert.ToInt64(roster["rosterGeneration"])==signed.Epoch,"cache_session_or_epoch_stale");result=cache.Admit(signed,accounts.AttachmentRecipients(signed.Group));
+   Require(current()&&Convert.ToInt64(roster["rosterGeneration"])==signed.Epoch,"cache_session_or_epoch_stale");result=cache.Admit(signed,accounts.AttachmentRecipients(signed.Group),AttachmentCacheContext.Snapshot(roster));
    Require(cache.OriginalMembership(signed.Id,account,device)==accounts.AttachmentMembership(signed.Group,account,device),"cache_membership_replaced");
   });Require(allowed&&result!=null,"cache_group_not_authorized");return result;
  }

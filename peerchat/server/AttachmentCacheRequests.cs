@@ -30,6 +30,9 @@ internal sealed class AttachmentCacheRequests {
    switch(operation){
     case "cache_admit":Status(reply,admission.Admit(account,device,current,MailboxProtocol.Decode(Text(request,"descriptor",2732),2048)));break;
     case "cache_status":Status(reply,admission.Inspect(account,device,current,Id(request,"id")));break;
+    case "cache_context":foreach(var item in admission.Context(account,device,current,Id(request,"id")))reply[item.Key]=item.Value;break;
+    case "cache_verified":reply["newVerificationReceipt"]=admission.VerifyReceipt(account,device,current,Id(request,"id"),Decode(Text(request,"receipt",5462),AttachmentVerificationReceipt.MaximumWire));break;
+    case "cache_receipts":foreach(var item in admission.VerificationReceipts(account,device,current,Id(request,"id"),Text(request,"after",64)))reply[item.Key]=item.Value;break;
     case "cache_acquire":reply["lease"]=admission.Acquire(account,device,current,Id(request,"id"),Flag(request,"upload"));break;
     case "cache_append":{
      byte[] bytes=Decode(Text(request,"data",87382));Require(bytes.Length>0);
