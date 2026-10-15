@@ -1,3 +1,5 @@
+> Physical dev.161 update: `ANDROID_DEV161_ROUTING_AND_WAKE_FINDINGS.md`. Owner confirms scoped enrollment and offline receipt after reopening. Pi confirms both test messages have Motorola ACKs plus separate pending Windows copies. Background wake remains unaccepted: delivered dev.161 FCM_CONFIGURED=false. Read-only investigation only; no routing/Pi/application changes.
+
 > Current recovery candidate: `ANDROID_REPAIR_DEV161.md`, code dba61c0. Approved implementation is complete; explicit on-phone account-19 to account-4 approval and physical acceptance remain pending. Original keys/data/binding preserved. 219 host tests and native offline/security/TLS suites passed. The historical stopped-development audit below predates this authorized repair and is retained for provenance.
 
 > Current recovery proposal: `ANDROID_MAILBOX_ACCOUNT_REENROLLMENT_PLAN.md`. Original account19/new Linux account4 history confirmed. Same-key scoped enrollment is protocol-feasible; implementation and on-phone enrollment await approval. Tests/docs only.
