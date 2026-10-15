@@ -278,7 +278,7 @@ struct Node::Impl {
             auto snapshots=transfers->snapshots();auto found=std::find_if(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==command.id&&!s.sending&&s.state==transfer::State::AwaitingAcceptance;});
             if(found==snapshots.end())throw std::runtime_error("File offer unavailable");
             for(auto i=transferPaths.begin();i!=transferPaths.end();)if(std::none_of(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==i->first;}))i=transferPaths.erase(i);else ++i;
-            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,nullptr,true);auto path=sink->path();
+            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,nullptr,true,true);auto path=sink->path();
             transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;return L"ok";
         }
         if(command.sourceKind==3){if(archiveTransfers&&archiveTransfers->owns(command.id))archiveTransfers->cancel(command.id);else transfers->cancel(command.id);return L"ok";}
@@ -1764,7 +1764,7 @@ Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
 void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name,bool startDirectListener){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name,startDirectListener]{impl_->run(directory,port,name,startDirectListener);});}
 void Node::stop(){impl_->stop();}
 Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messageId,bool storageAllowed){
-    if(operation>8||input.size()>mailbox::MaxWire||(!messageId.empty()&&!protocol::id(messageId,32)))throw std::invalid_argument("Invalid native mailbox command");
+    if(operation>9||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.mailbox=true;command.sourceKind=operation;command.bytes=input;command.id=messageId;command.accepted=storageAllowed;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");

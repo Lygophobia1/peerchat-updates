@@ -18,7 +18,7 @@ using System.Web.Script.Serialization;
 using System.Threading;
 
 namespace PeerChatDesktop {
-public sealed class DiscoveryClient {
+public sealed partial class DiscoveryClient {
     readonly JavaScriptSerializer json=new JavaScriptSerializer { MaxJsonLength=16*1024 };
     public string Host, CertificateSha256, SessionToken, Username, RegisteredPublicIdentity;
     public long AccountId;

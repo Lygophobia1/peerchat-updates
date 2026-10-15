@@ -30,6 +30,7 @@ class WindowsMailbox {
     KeyCoordinator coordinator_;
     std::shared_ptr<platform::HpkeProvider> hpke_;
     const Profile& profile_;
+    std::map<std::string,std::uint64_t> rememberedChallenges_;
     static std::uint64_t now(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
     Contact contact(Storage& storage,const reliable::AuthenticatedFriendSnapshot& friends,const std::string& device,std::uint64_t account){
         require(account>0&&friends.accountFor(device)==account);
@@ -37,6 +38,26 @@ class WindowsMailbox {
         require(found!=list.end()&&found->verified&&Storage::publicKeyId(found->publicKey)==device);return *found;
     }
 public:
+    // Sign only the server's fixed remembered-device proof after the current
+    // native authenticated account has been published for this profile.
+    Blob rememberedDeviceProof(const Blob& input,std::uint64_t linkedAccount,std::uint64_t authenticatedAccount){
+        require(input.size()>0&&input.size()<=1024&&linkedAccount>0&&linkedAccount==authenticatedAccount);
+        protocol::Reader request(input);
+        require(request.type()==protocol::FileTransfer&&request.string()=="PeerChat/RememberedDeviceProof/v1");
+        auto issued=request.number();auto action=request.string();auto account=request.number();auto device=request.string();auto challenge=request.string();auto binding=request.string();
+        auto original=request.bytes();request.end();
+        require(action=="enroll"||action=="resume");
+        require(account==linkedAccount&&device==profile_.peerId&&Storage::publicKeyId(profile_.publicKey)==profile_.peerId);
+        auto hex=[](const std::string& value){return value.size()==64&&std::all_of(value.begin(),value.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');});};
+        require(hex(challenge)&&hex(binding));
+        const auto expected="PeerChat remembered device v1|"+action+"|"+std::to_string(account)+"|"+device+"|"+challenge+"|"+binding;
+        require(original==Blob(expected.begin(),expected.end()));
+        const auto current=now();require(issued<=current&&current-issued<=60000);
+        for(auto it=rememberedChallenges_.begin();it!=rememberedChallenges_.end();){if(current>=it->second&&current-it->second>60000)it=rememberedChallenges_.erase(it);else ++it;}
+        require(rememberedChallenges_.size()<256&&rememberedChallenges_.emplace(challenge,current).second);
+        protocol::Writer response(protocol::Accepted);response.bytes(profile_.publicKey);response.bytes(signDevicePayload(original,profile_));
+        return response.data;
+    }
     // Node-only attachment adapter; the existing device-key registry and HPKE
     // provider retain key custody and operation leases.
     void attachmentKeys(const std::function<void(DeviceKeyManager&,platform::HpkeProvider&,platform::IdentityProvider&)>& operation){operation(keys_,*hpke_,identity_);}
@@ -49,6 +70,7 @@ public:
     Blob execute(unsigned operation,const Blob& input,const std::string& id,bool allowed,
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
                  session::SessionTransportManager& sessions){
+        if(operation==9){require(id.empty()&&!allowed);return rememberedDeviceProof(input,storage.groupAccount().accountId,friends.localAccount());}
         if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
         require(input.size()<=MaxWire);
         if(operation==0){
