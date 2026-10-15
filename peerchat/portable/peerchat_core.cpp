@@ -65,6 +65,7 @@ struct Instance {
     }
     std::unique_ptr<peerchat::archive::Enrollment> archiveApplication;
     std::unique_ptr<peerchat::archive::Execution> archiveExecution;
+    std::unique_ptr<peerchat::archive::GroupHistoryAccess> archiveGroups;
     std::unique_ptr<peerchat::archive::AttachmentTransfers> archiveTransfers;
     std::set<std::string> cataloguedTransfers;
     std::vector<peerchat::archive::Attachment> catalogProjection;
@@ -548,8 +549,16 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_
         if(instance->archiveGeneration!=instance->friends.generation()){
             instance->archiveApplication->authenticated(instance->friends.generation());instance->archiveGeneration=instance->friends.generation();
         }
-        if(!instance->archiveExecution)instance->archiveExecution=std::make_unique<peerchat::archive::Execution>(*instance->storage,instance->profile,
-            instance->archiveApplication->policy(),*instance->deliveries,instance->sessions);
+        if(!instance->archiveExecution){
+            instance->archiveExecution=std::make_unique<peerchat::archive::Execution>(*instance->storage,instance->profile,
+                instance->archiveApplication->policy(),*instance->deliveries,instance->sessions);
+            instance->archiveGroups=std::make_unique<peerchat::archive::GroupHistoryAccess>(*instance->storage,instance->profile,instance->friends.localAccount(),
+                [instance](const std::string& server)->std::optional<peerchat::archive::GroupHistoryContext>{
+                    if(!instance->groups||instance->groups->generation()!=instance->friends.generation())return {};
+                    return instance->groups->historyContext(server);
+                });
+            instance->archiveExecution->groupHistory(*instance->archiveGroups);
+        }
         if(operation>=16&&operation<=18){
             using namespace peerchat;protocol::Reader r(bytes);archive::require(r.type()==archive::LocalFormat&&r.string()=="PeerChat/ArchiveApplication/v1"&&r.number()==1&&r.number()==static_cast<unsigned>(operation));
             auto account=r.number(),generation=r.number();archive::require(instance->archiveApplication->matches(account,generation));auto result=archive::applicationHeader(operation);
@@ -574,7 +583,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_re
         auto account=r.number(),generation=r.number();protocol::check(bool(instance));
         std::lock_guard<std::mutex> lock(instance->gate);
         protocol::check(account>0&&account==instance->friends.localAccount()&&generation>0&&generation==instance->friends.generation()&&instance->storage&&instance->deliveries);
-        if(!instance->groups)instance->groups=std::make_unique<portable::GroupApplication>(*instance->storage,instance->profile,*instance->deliveries,account);
+        if(!instance->groups)instance->groups=std::make_unique<portable::GroupApplication>(*instance->storage,instance->profile,*instance->deliveries,account,true);
         auto& groups=*instance->groups;protocol::check(groups.account()==account);
         protocol::Writer out(protocol::GroupRosterEvent);out.string("PeerChat/AndroidGroups/v1");out.number(operation);
         if(operation==0){r.end();instance->invalidateGroups();}
@@ -600,11 +609,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_re
                     auto key=instance->storage->groupKey(row->legacyGroupId,row->generation);out.number(key.size()==32&&ledger&&group_keys::GroupKeyManager::matchesSignedLedger(*row,ledger->state()));platform::group_crypto::wipe(key.data(),key.size());out.number(row->devices.size());
                     for(const auto& d:row->devices){out.number(d.accountId);out.string(d.peerId);out.number(static_cast<unsigned>(d.role));out.number(d.invited);}
                 }
+                out.string("PeerChat/GroupHistoryRevision/v1");out.number(instance->storage->groupArchiveWatermark()+instance->storage->groupHistoryOrderRevision());
             }else if(operation==3){
                 auto id=r.string();auto before=r.number();r.end();auto row=groups.roster(id);protocol::check(row&&before>0&&before<=INT64_MAX);
-                auto records=instance->storage->authenticatedGroupHistory(row->legacyGroupId,8,before);out.number(records.size());
+                const bool ready=instance->storage->groupHistoryOrderingReady(row->legacyGroupId);
+                auto records=ready?instance->storage->authenticatedGroupHistory(row->legacyGroupId,8,before):std::vector<AuthenticatedGroupMessage>{};out.number(records.size());
                 for(auto& record:records){group_messages::Envelope e;protocol::check(group_messages::parse(record.envelope,e)==group_messages::Result::Accepted);
                     auto body=group_text::decode(record.plaintext);out.string(e.messageId);out.string(e.senderDevice);out.number(e.senderAccount);out.number(body.time);out.number(body.order);out.number(record.sequence);out.string(record.status);out.text(body.text);platform::group_crypto::wipe(record.plaintext.data(),record.plaintext.size());}
+                out.string("PeerChat/GroupHistoryPage/v1");out.number(ready);
             }else if(operation==4){auto name=r.text(),user=r.text();r.end();out.bytes(groups.create(name,user,mailboxNow()));
             }else if(operation==5){auto id=r.string();auto text=r.text();r.end();auto created=groups.send(id,text,mailboxNow());out.string(group_messages::resultName(created.result));if(created.result==group_messages::Result::Accepted){if(instance->groupPending)instance->groupPending->changed();out.string(created.envelope.messageId);out.number(created.envelope.rosterGeneration);out.bytes(created.wire);}
             }else if(operation==6){auto expectedGroup=r.string(),expectedMessage=r.string();auto wire=r.bytes();r.end();group_messages::Envelope envelope;
@@ -724,8 +736,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                 for(const auto& group:instance->groups->groups()){
                     auto roster=instance->groups->roster(group);
                     for(const auto& member:roster->devices){
-                        if(member.invited||member.peerId==instance->profile.peerId||
-                           (roster->distributorPeerId!=instance->profile.peerId&&member.peerId!=roster->distributorPeerId))continue;
+                        if(member.invited||member.peerId==instance->profile.peerId||member.accountId==instance->friends.localAccount()||
+                           !peerchat::archive::reconciliationPeer(*roster,instance->profile.peerId,member.peerId,now/60000))continue;
                         peerchat::session::ReliableAuthorization scope{peerchat::session::ReliableAuthorizationScope::GroupControl,group,roster->generation,member.peerId};
                         if(instance->groups->needsControl(scope))instance->sessions.demandGroupRoute(scope,now+2000,instance->relayRequests->network(),now);
                     }
@@ -747,7 +759,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
             }
             else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
-                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first,peer.second->permitsDeferredHistory());if(!request.empty())peer.second->sendArchiveControl(request);}
+                try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first,peer.second->permitsDeferredHistory(),peer.second->permitsGroupHistory());if(!request.empty())peer.second->sendArchiveControl(request);}
                 catch(...){instance->archiveExecution->disconnected(*scope,peer.first);peer.second->close(false);}
             }
         }
@@ -794,13 +806,14 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
                 [owner,scope](const peerchat::Blob* key){return owner->groups&&owner->groups->current(scope,key);},
                 [ensure](const peerchat::Blob& bytes,const peerchat::Blob& key,std::uint64_t now){return ensure(key).receive(bytes,now);},
                 [ensure](const peerchat::Blob& key,std::uint64_t now){return ensure(key).outgoing(now);},
-                [control]{return *control&&(*control)->complete();}};
+                [control]{return *control&&(*control)->complete();},
+                [ensure](const peerchat::Blob& key,std::uint64_t now,std::uint64_t capabilities){return ensure(key).historyOutgoing(now,capabilities);}};
         }
         if(request->authorization.permitsArchiveControl()){
             peerchat::protocol::check(instance->archiveApplication&&instance->archiveExecution);
             auto scope=request->authorization;auto owner=instance.get();
             archive=peerchat::portable::ReliableEndpoint::ArchiveAdmission{&instance->archiveApplication->policy(),scope,
-                [owner,scope](const peerchat::Blob& bytes){peerchat::protocol::Reader r(bytes);if(r.type()==peerchat::protocol::ArchiveControl&&r.string()==peerchat::archive::AttachmentDomain){peerchat::protocol::check(r.number()==1);if(r.number()>=3){owner->prepareAttachments(runtimeNow());owner->archiveTransfers->control(scope,bytes,runtimeNow());return peerchat::Blob{};}}return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());},true,[owner,scope](const peerchat::Blob& bytes){owner->archiveExecution->sourceQueued(scope,bytes);}};
+                [owner,scope](const peerchat::Blob& bytes){peerchat::protocol::Reader r(bytes);if(r.type()==peerchat::protocol::ArchiveControl&&r.string()==peerchat::archive::AttachmentDomain){peerchat::protocol::check(r.number()==1);if(r.number()>=3){owner->prepareAttachments(runtimeNow());owner->archiveTransfers->control(scope,bytes,runtimeNow());return peerchat::Blob{};}}return owner->archiveExecution->control(scope,bytes,mailboxNow(),runtimeNow());},true,[owner,scope](const peerchat::Blob& bytes){owner->archiveExecution->sourceQueued(scope,bytes);},true};
         }
         if(!group)instance->prepareAttachments(runtimeNow());auto owner=instance.get();
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,

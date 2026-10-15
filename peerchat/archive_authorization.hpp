@@ -71,6 +71,12 @@ inline Grant decodeGrant(const Blob& bytes){
     g.generation=r.number();g.issued=r.number();g.issuanceId=r.string();auto revoked=r.number();require(revoked<=1);g.revoked=revoked!=0;
     r.end();g.signature=std::move(signature);require(g.signature.size()==64&&grantPayload(g)==payload);return g;
 }
+inline bool historyParticipationEnabled(Storage& storage,std::uint64_t account,const std::string& device){
+    require(account>0&&protocol::id(device));protocol::Writer key(LocalFormat);key.string("PeerChat/ArchiveSyncPreference/v1");key.number(account);key.string(device);
+    static const char hex[]="0123456789abcdef";std::string context;for(auto b:digestDevicePayload(key.data)){context+=hex[b>>4];context+=hex[b&15];}
+    auto bytes=storage.archiveSyncState(context);if(bytes.empty())return true;
+    protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveSyncPreference/v1"&&r.number()==account&&r.string()==device);auto value=r.number();require(value<=1);r.end();return value!=0;
+}
 class Authorization {
     struct Authority {Blob publicKey;bool enabled=true;};
     Storage& storage_;const Profile& local_;std::uint64_t account_;
@@ -102,9 +108,7 @@ public:
     // Participation policy, NOT a grant. Stored in the existing protected local
     // record store. Every admission re-reads it so OFF also stops an older owner.
     bool historySyncEnabled()const{
-        auto bytes=storage_.archiveSyncState(syncPreferenceContext());if(bytes.empty())return true;
-        protocol::Reader r(bytes);require(r.type()==LocalFormat&&r.string()=="PeerChat/ArchiveSyncPreference/v1"&&r.number()==account_&&r.string()==local_.peerId);
-        auto value=r.number();require(value<=1);r.end();return value!=0;
+        return historyParticipationEnabled(storage_,account_,local_.peerId);
     }
     void setHistorySyncEnabled(bool enabled){
         auto context=syncPreferenceContext();auto previous=storage_.archiveSyncState(context);

@@ -51,6 +51,7 @@ constexpr std::uint64_t CapabilityArchiveControl=2048;
 constexpr std::uint64_t CapabilityArchiveDeferred=4096;
 // Windows DM transfer v2. Absence means exactly legacy 32 KiB x 1.
 constexpr std::uint64_t CapabilityTransferPipeline=8192;
+constexpr std::uint64_t CapabilityArchiveGroups=16384;
 inline Blob frame(const Blob& data){check(data.size()<=MaxPacket);Blob out;for(int i=3;i>=0;i--)out.push_back(static_cast<unsigned char>(data.size()>>(8*i)));out.insert(out.end(),data.begin(),data.end());return out;}
 struct Writer {
     Blob data;

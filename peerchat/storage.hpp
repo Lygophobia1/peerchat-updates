@@ -12,6 +12,7 @@ using Blob = std::vector<unsigned char>;
 struct GroupEvent;
 struct GroupAccount { std::uint64_t accountId=0;std::wstring name; };
 struct AuthenticatedGroupMessage { Blob envelope,plaintext;std::int64_t sequence=0;std::string status; };
+struct GroupArchivePage {std::vector<AuthenticatedGroupMessage> records;std::int64_t next=0;bool complete=false;};
 // Sensitive group-key handoffs are persisted only in the sender's DPAPI-protected
 // profile store and travel only inside an authenticated peer-TLS control stream.
 struct GroupKeyHandoff {
@@ -152,6 +153,10 @@ public:
         const Blob& envelope,const Blob& plaintext,const std::string& localGroupId={});
     AuthenticatedGroupMessage authenticatedGroupMessage(const std::string& serverGroupId,const std::string& messageId);
     std::vector<AuthenticatedGroupMessage> authenticatedGroupHistory(const std::string& localGroupId,int limit=100,std::int64_t before=INT64_MAX);
+    std::int64_t groupArchiveWatermark(const std::string& serverGroup={});
+    GroupArchivePage groupArchivePage(std::int64_t after,std::int64_t through,int limit=8,const std::string& serverGroup={});
+    bool groupHistoryOrderingReady(const std::string& localGroup,int batch=64);
+    std::uint64_t groupHistoryOrderRevision();
     bool setGroupMessageStatus(const std::string& groupId,const std::string& messageId,const std::string& status,std::uint32_t stage=0);
     // Durable local nonce reservation, scoped to the actual key fingerprint (not the group name).
     bool reserveGroupNonce(const std::string& keyFingerprint,const Blob& nonce);

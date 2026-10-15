@@ -80,6 +80,7 @@ struct Connection : reliable::SharedPeerRuntime {
     Clock::time_point began=Clock::now(),lastProgress=Clock::now();
     std::optional<session::DirectTransportAdapter> directTransport;
     std::set<std::string> sentGroupRosterEvents;
+    std::unique_ptr<archive::GroupHistoryJob> groupHistory;
     ~Connection(){stop();if(socket!=INVALID_SOCKET)closesocket(socket);}
 };
 struct Resolver {
@@ -106,6 +107,7 @@ struct Node::Impl {
     std::unique_ptr<mailbox::WindowsMailbox> mailboxApplication;
     std::unique_ptr<archive::Enrollment> archiveApplication;
     std::unique_ptr<archive::Execution> archiveExecution;
+    std::unique_ptr<archive::GroupHistoryAccess> archiveGroups;
     std::unique_ptr<archive::AttachmentTransfers> archiveTransfers;
     void prepareArchiveTransfers(){
         if(archiveTransfers||!archiveApplication||!archiveExecution||!transfers)return;
@@ -217,7 +219,7 @@ struct Node::Impl {
                     if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);c->relayPipe->output.clear();c->relayPipe->queued=0;}
                 }else if(c->online&&c->archiveBound&&c->output.size()-c->sent<MaxQueue/4){
                     auto request=archiveTransfers?archiveTransfers->request(c->authorization,c->attemptId):Blob{};
-                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds(),c->attemptId,(c->remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0);
+                    if(request.empty())request=archiveExecution->request(c->authorization,nowMilliseconds(),c->attemptId,(c->remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0,(c->remoteCapabilities&protocol::CapabilityArchiveGroups)!=0);
                     if(!request.empty())packet(*c,request);
                 }
             }catch(const std::exception&){c->closeReason=L"Archive synchronization failed closed";c->dead=true;}
@@ -336,6 +338,38 @@ struct Node::Impl {
     GroupAccount groupAccount;
     std::unique_ptr<group_keys::GroupKeyManager> groupKeys;
     std::uint64_t groupRosterDiscoveryGeneration=0;
+    std::map<std::string,std::int64_t> groupHistoryRefreshes;
+    std::uint64_t groupHistoryRefreshAt=0;
+    std::optional<archive::GroupHistoryContext> historyContext(const std::string& server){
+        if(!groupKeys||groupAccount.accountId!=authenticatedFriends.localAccount()||groupRosterDiscoveryGeneration!=authenticatedFriends.generation())return {};
+        auto roster=groupKeys->roster(server);if(!roster)return {};auto ledger=groups.find(roster->legacyGroupId);
+        if(ledger==groups.end()||!group_keys::GroupKeyManager::matchesSignedLedger(*roster,ledger->second.state()))return {};
+        return archive::GroupHistoryContext{*roster,ledger->second.state()};
+    }
+    bool groupHistoryCurrent(Connection& c){
+        if(c.dead||!c.online||!c.relay||c.authorization.scope!=session::ReliableAuthorizationScope::GroupControl||c.peerId!=c.authorization.expectedRemoteDeviceId)return false;
+        auto context=historyContext(c.authorization.groupId);if(!context||context->roster.generation!=c.authorization.rosterGeneration)return false;
+        auto peer=std::find_if(context->roster.devices.begin(),context->roster.devices.end(),[&](const auto& d){return !d.invited&&d.peerId==c.peerId;});
+        auto member=peer==context->roster.devices.end()?nullptr:context->ledger.device(peer->accountId,c.peerId);
+        return member&&member->publicKey==c.tls->remotePublicKey()&&group_keys::GroupKeyManager::currentMember(context->roster,groupAccount.accountId,profile.peerId)&&archive::historyParticipationEnabled(*store,groupAccount.accountId,profile.peerId);
+    }
+    void ensureGroupHistory(Connection& c){
+        if(c.groupHistory||!(c.remoteCapabilities&protocol::CapabilityArchiveGroups)||!groupHistoryCurrent(c))return;
+        c.groupHistory=std::make_unique<archive::GroupHistoryJob>(*store,profile,groupAccount.accountId,c.authorization,
+            [this](const std::string& group){return historyContext(group);},[this,&c]{return groupHistoryCurrent(c);},
+            [this](const std::string& local){groupHistoryRefreshes[local]=INT64_MAX;});
+    }
+    void serviceGroupHistory(){
+        const auto now=nowMilliseconds();
+        if(now>=groupHistoryRefreshAt&&!groupHistoryRefreshes.empty()){
+            groupHistoryRefreshAt=now+1000;auto row=*groupHistoryRefreshes.begin();groupHistoryRefreshes.erase(groupHistoryRefreshes.begin());
+            try{emitGroupHistoryPage(row.first,row.second);}catch(...){/* Protected history remains available for explicit retry. */}
+        }
+        for(auto& c:connections)if(c->online&&!c->dead&&c->authorization.scope==session::ReliableAuthorizationScope::GroupControl){
+            try{ensureGroupHistory(*c);if(c->groupHistory&&c->output.size()-c->sent<MaxQueue/2){auto request=c->groupHistory->request(nowMilliseconds());if(!request.empty())packet(*c,request);}}
+            catch(...){c->closeReason=L"Group history authorization or verified import failed";c->dead=true;}
+        }
+    }
     void clearGroupAttachmentSession(){
         if(!groupAttachments)return;
         protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/AttachmentSession/v1");w.number(0);w.number(0);w.string("");groupAttachments->network(0,w.data);
@@ -436,6 +470,9 @@ struct Node::Impl {
         auto found=groups.find(groupId);if(found==groups.end())throw std::runtime_error("Unknown Group ID");
         const auto& state=found->second.state();
         if(!groupAccount.accountId||(!state.members.count(groupAccount.accountId)&&!state.invitations.count(groupAccount.accountId)))return;
+        if(!store->groupHistoryOrderingReady(groupId)){
+            groupHistoryRefreshes[groupId]=before;NodeEvent pending;pending.kind=NodeEvent::Kind::GroupHistory;pending.peerId=groupId;pending.text=L"Preparing protected group history ordering";emit(std::move(pending));return;
+        }
         auto records=store->authenticatedGroupHistory(groupId,100,before);
         if(!records.empty()||(groupKeys&&groupKeys->isAuthoritativeGroup(groupId))){
             NodeEvent history;history.kind=NodeEvent::Kind::GroupHistory;history.peerId=groupId;
@@ -1011,6 +1048,10 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             const auto* roster=groupKeys->roster(c.authorization.groupId);
             protocol::check(roster&&roster->generation==c.authorization.rosterGeneration&&
                 group_keys::GroupKeyManager::currentMember(*roster,groupAccount.accountId,profile.peerId));
+            if(r.type()==protocol::ArchiveControl){
+                protocol::check((c.remoteCapabilities&protocol::CapabilityArchiveGroups)!=0);ensureGroupHistory(c);protocol::check(bool(c.groupHistory));
+                auto response=c.groupHistory->control(frame,nowMilliseconds());if(!response.empty())packet(c,response);return;
+            }
             if(r.type()==protocol::GroupRosterEvent){
                 Blob signedFrame=r.bytes();r.end();
                 GroupEvent event=decodeGroupEvent(signedFrame);
@@ -1233,7 +1274,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         // Voice capability describes authenticated call control. The media
         // path remains independent ICE/DTLS-SRTP and is never put on relay.
         capabilities|=protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery;
-        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred;if(transfers)capabilities|=protocol::CapabilityFileTransfer|protocol::CapabilityTransferPipeline;
+        capabilities|=protocol::CapabilityGroupKeyHandoff|protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|protocol::CapabilityArchiveGroups;if(transfers)capabilities|=protocol::CapabilityFileTransfer|protocol::CapabilityTransferPipeline;
         if(screenAvailable)capabilities|=protocol::CapabilityScreenShare|protocol::CapabilityScreenBackendNegotiation;
         if(!c.incoming&&sessionTransports->handoffCandidate({c.attemptId}))capabilities|=protocol::CapabilityHandoffCandidate;
         bool live=c.reliable::SharedPeerRuntime::receive(*c.tls,encrypted,profile,capabilities,profile.listenPort,
@@ -1279,7 +1320,17 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     archiveApplication->authenticated(authenticatedFriends.generation());archiveGeneration=authenticatedFriends.generation();
                 }
                 auto utc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-                if(!archiveExecution)archiveExecution=std::make_unique<archive::Execution>(*store,profile,archiveApplication->policy(),*deliveries,*sessionTransports);
+                if(!archiveExecution){
+                    archiveExecution=std::make_unique<archive::Execution>(*store,profile,archiveApplication->policy(),*deliveries,*sessionTransports);
+                    archiveGroups=std::make_unique<archive::GroupHistoryAccess>(*store,profile,authenticatedFriends.localAccount(),
+                        [this](const std::string& server)->std::optional<archive::GroupHistoryContext>{
+                            if(!groupKeys||groupAccount.accountId!=authenticatedFriends.localAccount())return {};
+                            auto roster=groupKeys->roster(server);if(!roster)return {};auto ledger=groups.find(roster->legacyGroupId);
+                            if(ledger==groups.end()||!group_keys::GroupKeyManager::matchesSignedLedger(*roster,ledger->second.state()))return {};
+                            return archive::GroupHistoryContext{*roster,ledger->second.state()};
+                        },[this](const std::string& local){groupHistoryRefreshes[local]=INT64_MAX;});
+                    archiveExecution->groupHistory(*archiveGroups);
+                }
                 auto output=command.sourceKind>=12?archive::executeSyncOperation(*archiveApplication,*archiveExecution,command.sourceKind,command.bytes,nowMilliseconds(),networkGeneration):
                     archive::executeEnrollmentOperation(*archiveApplication,command.sourceKind,command.bytes,utc);
                 if(command.bytesResponse)command.bytesResponse->set_value(std::move(output));
@@ -1639,7 +1690,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
-            archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+            archiveTransfers.reset();archiveExecution.reset();archiveGroups.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
@@ -1719,7 +1770,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 // Relay-only idle iterations skip the direct-socket select below, so retire
                 // relay EOFs here before that early sleep/continue can bypass manager cleanup.
-                serviceArchive();reapDeadConnections();resolved();serviceTransfers();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
+                serviceArchive();serviceGroupHistory();reapDeadConnections();resolved();serviceTransfers();handoffEffects(sessionTransports->handoffTick(sessionEpoch,nowMilliseconds()));mediaEvents();serviceMediaRecovery();screenMediaEvents();serviceScreenRecovery();
                 if(screenShares.expired(nowMilliseconds())){auto active=screenShares.active();if(active){if(auto connection=screenConnection(active->peer)){protocol::Writer end(protocol::ScreenEnd);end.string(active->id);packet(*connection,end);}}clearScreen(L"Screen share timed out");}
                 if(calls.timedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Call timed out",true);}
                 if(calls.mediaTimedOut(nowMilliseconds())||calls.controlAndMediaTimedOut(nowMilliseconds())){auto active=calls.active();if(active){if(auto connection=voiceConnection(calls.peer())){protocol::Writer end(protocol::CallEnd);end.string(active->id.value);packet(*connection,end);}}clearVoice(L"Voice connection could not be restored",true);}
@@ -1771,7 +1822,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 reapDeadConnections();
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
-        archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+        archiveTransfers.reset();archiveExecution.reset();archiveGroups.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}downloadSaves.reset();groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include "delivery_manager.hpp"
 #include "archive_attachment_sync.hpp"
+#include "archive_group_history.hpp"
 #include <limits>
 #include <set>
 
@@ -128,6 +129,10 @@ inline ManifestPage decodeManifestPage(const Blob& bytes){
 inline void validateHistoryControl(const Blob& bytes){
     require(bytes.size()<=protocol::MaxPacket);protocol::Reader r(bytes);
     if(r.type()==protocol::ArchiveControl&&r.string()==AttachmentDomain){validateAttachmentControl(bytes);return;}
+    protocol::Reader group(bytes);
+    if(group.type()==protocol::ArchiveControl&&group.string()==GroupHistoryDomain){
+        require(group.number()==1);auto kind=group.number();if(kind==1)decodeGroupHistoryRequest(bytes);else{require(kind==2);decodeGroupHistoryPage(bytes);}return;
+    }
     protocol::Reader history(bytes);
     require(history.type()==protocol::ArchiveControl&&history.string()=="PeerChat/ArchiveHistory/v1"&&history.number()==1);
     auto kind=history.number();if(kind==2||kind==11){decodeHistoryRequest(bytes);return;}

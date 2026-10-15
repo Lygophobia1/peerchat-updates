@@ -9,6 +9,7 @@ class Execution {
     Storage& storage_;const Profile& local_;Authorization& policy_;
     delivery::DeliveryManager& deliveries_;session::SessionTransportManager& sessions_;
     std::unique_ptr<SyncReader> reader_;
+    GroupHistoryAccess* groups_=nullptr;
     std::optional<session::ReliableAuthorization> scope_;
     std::map<std::string,std::pair<session::ReliableAuthorization,std::uint64_t>> serving_;
     bool running_=false;std::string state_="Not started";
@@ -41,6 +42,8 @@ class Execution {
         storage_.saveArchiveSyncState(intentContext_,savedIntent_,w.data);savedIntent_=std::move(w.data);intentIssuer_=issuer;intentSource_=source;restore_=false;completedIntent_=disposition==2;
     }
 public:
+    void groupHistory(GroupHistoryAccess& access){require(!reader_);groups_=&access;}
+    std::string completedState()const{auto p=snapshot();return p.groupsUnsupported?"DM history synchronized; source does not support group history":p.deferred?"Partial history: "+std::to_string(p.deferred)+" unresolved records":"History synchronized";}
     Execution(Storage& storage,const Profile& local,Authorization& policy,delivery::DeliveryManager& deliveries,
         session::SessionTransportManager& sessions):storage_(storage),local_(local),policy_(policy),deliveries_(deliveries),sessions_(sessions){
         protocol::Writer key(LocalFormat);key.string("PeerChat/ArchiveIntentContext/v1");key.number(policy_.account());key.string(local_.peerId);
@@ -97,7 +100,7 @@ public:
             (void)historyRequestFields(r);r.number();r.number();auto count=r.number();if(count<=HistoryPageRecords&&providedQueued_<=INT64_MAX-count)providedQueued_+=count;
         }catch(...){/* Supplemental counters cannot affect transport. */}
     }
-    std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark());}
+    std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark())+static_cast<std::uint64_t>(storage_.groupArchiveWatermark());}
     // Read-only application diagnostics; holding a route does not imply pages
     // have transferred. No fabricated provider counters or percentage.
     std::vector<std::string> providingDevices(std::uint64_t now)const{
@@ -176,12 +179,12 @@ public:
     void start(const std::string& issuer,const std::string& source,bool newScan){
         require(!running_&&source!=local_.peerId);
         auto scope=sessionAuthorization(policy_,issuer,source,local_.peerId);
-        auto reader=std::make_unique<SyncReader>(storage_,local_,policy_,deliveries_,scope,directory(),[this]{require(received_<INT64_MAX);++received_;});
+        auto reader=std::make_unique<SyncReader>(storage_,local_,policy_,deliveries_,scope,directory(),[this]{require(received_<INT64_MAX);++received_;},groups_);
         if(newScan&&reader->snapshot().complete)reader->rescan();
         intent(issuer,source,reader->snapshot().complete?2:1);
         scope_=std::move(scope);reader_=std::move(reader);pendingAttempt_=0;running_=!reader_->snapshot().complete;
         require(scanGeneration_<INT64_MAX);++scanGeneration_;received_=0;rejectedStage_="none";
-        state_=running_?"Connecting to archive":reader_->snapshot().deferred?"Partial history: "+std::to_string(reader_->snapshot().deferred)+" unresolved records":"History synchronized";
+        state_=running_?"Connecting to archive":completedState();
     }
     void incoming(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t network){
         const auto& a=scope.archive;
@@ -223,7 +226,7 @@ public:
             reader_->disconnected();pendingAttempt_=0;state_=policy_.historySyncEnabled()?"Archive authorization unavailable":"History synchronization is off";
             retire(*scope_);return close;
         }
-        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_=reader_->snapshot().deferred?"Partial history: "+std::to_string(reader_->snapshot().deferred)+" unresolved records":"History synchronized";if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
+        if(reader_->snapshot().complete){intent(scope_->archive.issuer,scope_->archive.source,2);running_=false;state_=completedState();if(!serving_.count(scope_->continuityKey()))retire(*scope_);return close;}
         if(reader_->snapshot().pending&&now>=pendingAt_&&now-pendingAt_>=15000){
             auto route=sessions_.snapshot(scope_->continuityKey());
             if(route&&route->activeTransport.value==pendingAttempt_&&pendingAttempt_){auto id=route->activeTransport;sessions_.closeTransport(route->epoch,id,"Archive page response deadline",true);close.push_back(id);
@@ -238,10 +241,10 @@ public:
         }else state_="Archive route unavailable";
         return close;
     }
-    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t attempt,bool allowDeferred=false){
+    Blob request(const session::ReliableAuthorization& scope,std::uint64_t now,std::uint64_t attempt,bool allowDeferred=false,bool allowGroups=false){
         require(attempt&&currentSessionAuthorization(policy_,scope));
         if(!running_||!scope_||sessionBinding(*scope_).data!=sessionBinding(scope).data||reader_->snapshot().pending)return {};
-        auto bytes=reader_->nextRequest(allowDeferred);pendingAt_=now;pendingAttempt_=bytes.empty()?0:attempt;return bytes;
+        auto bytes=reader_->nextRequest(allowDeferred,allowGroups);pendingAt_=now;pendingAttempt_=bytes.empty()?0:attempt;return bytes;
     }
     Blob control(const session::ReliableAuthorization& scope,const Blob& bytes,std::uint64_t utc,std::uint64_t now){
         require(currentSessionAuthorization(policy_,scope));
@@ -249,15 +252,15 @@ public:
             const char* stage="source_serving_lease";
             try{auto found=serving_.find(scope.continuityKey());require(found!=serving_.end()&&now<found->second.second&&
                 sessionBinding(found->second.first).data==sessionBinding(scope).data);
-            auto response=serveSyncControl(storage_,local_,policy_,scope,bytes,directory(),utc,&stage);
+            auto response=serveSyncControl(storage_,local_,policy_,scope,bytes,directory(),utc,&stage,groups_);
             require(now<=UINT64_MAX-30000);found->second.second=now+30000;return response;
             }catch(...){sourceRejectedStage_=stage;recordTransport(0,scope,stage);throw;}
         }
         require(running_&&scope_&&sessionBinding(*scope_).data==sessionBinding(scope).data);
         try{
             reader_->accept(bytes);pendingAttempt_=0;
-            if(reader_->snapshot().complete)retainResult(reader_->snapshot().deferred?2:1,utc);
-            if(reader_->snapshot().complete&&!reader_->snapshot().deferred){
+            if(reader_->snapshot().complete)retainResult(reader_->snapshot().deferred||reader_->snapshot().groupsUnsupported?2:1,utc);
+            if(reader_->snapshot().complete&&!reader_->snapshot().deferred&&!reader_->snapshot().groupsUnsupported){
                 require(utc<=INT64_MAX);protocol::Writer w(LocalFormat);w.string("PeerChat/ArchivePresentation/v1");w.number(policy_.account());w.string(local_.peerId);w.number(utc);
                 storage_.saveArchiveSyncState(presentationContext_,savedPresentation_,w.data);savedPresentation_=std::move(w.data);lastSuccessful_=utc;
             }

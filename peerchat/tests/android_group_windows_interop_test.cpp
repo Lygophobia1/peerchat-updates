@@ -16,19 +16,22 @@ struct AndroidSide {
     reliable::AuthenticatedFriendSnapshot friends;TlsCredentials credentials;
     std::unique_ptr<portable::ReliableEndpoint> endpoint;
     AndroidSide(const std::filesystem::path& path,std::uint64_t account):store(path.wstring()),profile(store.profile()),
-        deliveries(store,profile.peerId),app(store,profile,deliveries,account),sessions(profile.peerId,profile.peerId,{1}),credentials(profile){friends.replace(account,1,{});}
-    void connect(const group_keys::RosterSnapshot& row,std::uint64_t token){
-        session::ReliableAuthorization scope{session::ReliableAuthorizationScope::GroupControl,row.serverGroupId,row.generation,row.distributorPeerId};
+        deliveries(store,profile.peerId),app(store,profile,deliveries,account,true),sessions(profile.peerId,profile.peerId,{1}),credentials(profile){friends.replace(account,1,{});}
+    void connect(const group_keys::RosterSnapshot& row,std::uint64_t token,const std::string& target={},bool server=true){
+        const auto remote=target.empty()?row.distributorPeerId:target;
+        session::ReliableAuthorization scope{session::ReliableAuthorizationScope::GroupControl,row.serverGroupId,row.generation,remote};
         auto state=std::make_shared<std::shared_ptr<portable::GroupApplication::Control>>();
         auto control=[this,scope,token,state](const Blob& key)->portable::GroupApplication::Control&{
             if(!*state)*state=std::make_shared<portable::GroupApplication::Control>(app,scope,session::TransportInstanceId{token},key);
             return **state;};
         portable::ReliableEndpoint::GroupAdmission admission{scope,[this,scope](const Blob* key){return app.current(scope,key);},
             [control](const Blob& bytes,const Blob& key,std::uint64_t now){return control(key).receive(bytes,now);},
-            [control](const Blob& key,std::uint64_t now){return control(key).outgoing(now);}};
+            [control](const Blob& key,std::uint64_t now){return control(key).outgoing(now);},
+            [state]{return *state&&(*state)->complete();},
+            [control](const Blob& key,std::uint64_t now,std::uint64_t caps){return control(key).historyOutgoing(now,caps);}};
         session::RouteObservation route{{token},"relay:windows-android","authenticated roster","native interop",false,1,session::TransportKind::Relay,session::RouteClass::ServerRelay};
         endpoint=std::make_unique<portable::ReliableEndpoint>(profile,store,sessions,deliveries,friends,session::SessionEpoch{1},session::TransportInstanceId{token},
-            std::make_unique<TlsSession>(credentials,true),row.distributorPeerId,route,1,std::nullopt,portable::ReliableEndpoint::TransferReceiver{},std::move(admission));
+            std::make_unique<TlsSession>(credentials,server),remote,route,1,std::nullopt,portable::ReliableEndpoint::TransferReceiver{},std::move(admission));
         endpoint->receive({},2);
     }
 };
@@ -38,12 +41,12 @@ int main(int argc,char** argv){Node windows;try{
     windows.start((root/"windows").wstring(),0,L"Isolated Windows owner",false);
     std::string owner;std::array<std::uint64_t,2> attempts{};std::array<bool,2> attached{};
     std::set<std::string> acked;unsigned receipts=0,duplicates=0,windowsMessages=0;std::uint64_t tick=3,rosterGeneration=3;
-    Blob windowsWire;const std::wstring text=L"Native interop \U0001F44B \U0001F680 e\u0301 \u65e5\u672c\u8a9e \u041f\u0440\u0438\u0432\u0435\u0442\nsecond line";
+    bool bOffline=false;Blob windowsWire;const std::wstring text=L"Native interop \U0001F44B \U0001F680 e\u0301 \u65e5\u672c\u8a9e \u041f\u0440\u0438\u0432\u0435\u0442\nsecond line";
     auto collect=[&]{for(const auto& event:windows.poll()){
-        if(event.kind==NodeEvent::Kind::Ready){check(event.port==0,"Ordinary listener opened");owner=event.peerId;windows.setNetworkContext(1,L"isolated relay");windows.setGroupAccount(1,L"Owner");}
+        if(event.kind==NodeEvent::Kind::Ready){check(event.port==0,"Ordinary listener opened");owner=event.peerId;windows.setNetworkContext(1,L"isolated relay");windows.replaceAuthenticatedFriends(1,1,{});windows.setGroupAccount(1,L"Owner");}
         else if(event.kind==NodeEvent::Kind::RelayRequested){check(event.authorizationRosterGeneration==rosterGeneration,"Stale relay authority");bool known=false;for(size_t i=0;i<2;i++)if(event.peerId==android[i]->profile.peerId){attempts[i]=event.attemptId;known=true;}check(known,"Unknown group peer requested");}
         else if(event.kind==NodeEvent::Kind::ConnectionLifecycle&&event.text==L"Group key offer acknowledged by member")acked.insert(event.peerId);
-        else if(event.kind==NodeEvent::Kind::GroupCiphertext){windowsWire=unbase64(event.detail);for(auto* peer:android)if(peer->app.generation())check(peer->app.receive(windowsWire)==group_messages::Result::Accepted,"Android rejected Windows PCGE");}
+        else if(event.kind==NodeEvent::Kind::GroupCiphertext){windowsWire=unbase64(event.detail);for(auto* peer:android)if(peer->app.generation()&&!(bOffline&&peer==&b))check(peer->app.receive(windowsWire)==group_messages::Result::Accepted,"Android rejected Windows PCGE");}
         else if(event.kind==NodeEvent::Kind::GroupCiphertextAck){if(event.text==L"accepted")++receipts;else if(event.text==L"duplicate_message")++duplicates;else throw std::runtime_error("Windows rejected Android PCGE");}
         else if(event.kind==NodeEvent::Kind::GroupMessage){check(event.groupEvents.size()==1&&event.groupEvents[0].message==text,"Windows Unicode display mismatch");++windowsMessages;}
         else if(event.kind==NodeEvent::Kind::TrustRequired)throw std::runtime_error("Group transport requested friendship trust");
@@ -79,6 +82,33 @@ int main(int argc,char** argv){Node windows;try{
     check(b.app.receive(windowsWire)==group_messages::Result::DuplicateMessage,"Android duplicate not rejected");
     auto tamper=windowsWire;tamper.back()^=1;check(b.app.receive(tamper)!=group_messages::Result::Accepted,"Android accepted modified Windows ciphertext");
     for(auto* peer:android){auto history=peer->store.authenticatedGroupHistory(legacy);check(history.size()==3,"Android history missing message");for(const auto& row:history)check(group_text::decode(row.plaintext).text==text,"Android Unicode history mismatch");check(peer->store.contacts().empty(),"Android added friend trust");}
+    // Deliberately do not deliver these through live fanout. The existing scoped
+    // peer TLS route must import the missing PCGE records in BOTH directions.
+    attached[0]=false;bOffline=true;windows.relayClosed(attempts[0],L"Isolated group history interruption");b.endpoint->close(false);b.endpoint.reset();attempts[0]=0;
+    for(unsigned n=0;n<7;++n){windowsWire.clear();check(windows.sendGroup(legacy,text),"Offline Windows group send");wait([&]{return !windowsWire.empty();},"Offline group message was not created");}
+    for(unsigned n=0;n<5;++n)check(b.app.send(roster.serverGroupId,text,4000+n).result==group_messages::Result::Accepted,"Offline Android durable creation");
+    check(b.store.groupArchiveWatermark()==8,"Offline messages leaked through live fanout");
+    check(windows.beginGroupControl(roster.serverGroupId,2,b.profile.peerId,1),"History reconnect rejected");wait([&]{return attempts[0]!=0;},"History relay request missing");b.connect(roster,104);check(windows.relayReady(attempts[0],false),"History relay attach failed");attached[0]=true;
+    wait([&]{return b.store.groupArchiveWatermark()==15;},"Windows-to-Android nonempty TLS history import failed");
+    // A selected Windows history read is the real Node projection, not a direct
+    // test import or fabricated receiver acknowledgment.
+    windows.loadGroupHistory(legacy,INT64_MAX);
+    for(unsigned n=0;n<50;++n){pump();std::this_thread::sleep_for(std::chrono::milliseconds(3));}
+    bOffline=false;
+    attached={};b.endpoint.reset();c.endpoint.reset();windows.stop();
+    // Original source really is stopped. Two already authorized members must
+    // reconcile through the same group-scoped native TLS adapter without it.
+    b.connect(roster,201,c.profile.peerId,false);c.connect(roster,202,b.profile.peerId,true);
+    auto fallbackUntil=std::chrono::steady_clock::now()+std::chrono::seconds(25);
+    while(std::chrono::steady_clock::now()<fallbackUntil&&c.store.groupArchiveWatermark()!=15){
+        auto left=b.endpoint->takeOutput(),right=c.endpoint->takeOutput();
+        if(!left.empty())c.endpoint->receive(left,++tick);
+        if(!right.empty())b.endpoint->receive(right,++tick);
+        b.endpoint->pump();c.endpoint->pump();std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    check(c.store.groupArchiveWatermark()==15,"Fallback group source did not recover history while original source was offline");
+    b.endpoint.reset();c.endpoint.reset();owner.clear();windows.start((root/"windows").wstring(),0,L"Isolated Windows owner",false);
+    wait([&]{return !owner.empty();},"Windows source restart timed out");check(windows.setAuthenticatedGroupRoster(1,1,roster),"Reopened source roster rejected");
     // Recreate the adapter using durable protected membership/history. Neither
     // disk persistence nor a successful earlier TLS channel grants live authority.
     portable::GroupApplication reopened(b.store,b.profile,b.deliveries,2);
@@ -94,8 +124,8 @@ int main(int argc,char** argv){Node windows;try{
     check(b.store.groupKey(legacy,4).size()==32&&b.store.groupKey(legacy,4)!=b.store.groupKey(legacy,3),"Android rotation failed");
     check(c.store.groupKey(legacy,4).empty(),"Removed Android obtained future key");check(c.app.receive(windowsWire)==group_messages::Result::RosterUnavailable,"Revoked Android retained ingress authority");
     windows.stop();Storage ownerStore((root/"windows").wstring());check(ownerStore.contacts().empty(),"Windows added friend trust");
-    check(ownerStore.authenticatedGroupHistory(legacy).size()==3,"Windows protected history lost on reopen");
+    check(ownerStore.authenticatedGroupHistory(legacy).size()==15,"Android-to-Windows protected history import/reopen failed");
     check(ownerStore.groupKey(legacy,4)==b.store.groupKey(legacy,4),"Windows and Android rotated keys differ");
     check(!ownerStore.hasGroupKeyReceipt(legacy,4,c.profile.peerId),"Removed device has future key receipt");
-    std::cout<<"PASS: unchanged Windows Node interoperates with two Android native adapters over real Schannel TLS; signed membership/key ACK, Unicode PCGE both directions, durable dedupe/history, restart reauthorization, removal rotation, no friend auto-trust. HOST ONLY\n";return 0;
+    std::cout<<"PASS: Windows Node and Android native adapters over real Schannel TLS; signed key ACK, Unicode PCGE, 7 missed Windows and 5 missed Android messages recovered without live fanout, member-source fallback with Windows stopped, durable history/reopen, removal rotation and no friend auto-trust. HOST ONLY\n";return 0;
 }catch(const std::exception& e){windows.stop();std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

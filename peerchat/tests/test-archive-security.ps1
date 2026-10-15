@@ -7,19 +7,19 @@ $compiler=if(Get-Command g++ -ErrorAction SilentlyContinue){(Get-Command g++).So
 Push-Location $root
 try {
     if($Enrollment){
-        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_enrollment_test.cpp group.cpp -o "$out\archive-enrollment-test.exe" -lbcrypt -lcrypt32 -lncrypt
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_enrollment_test.cpp group.cpp group_message_envelope.cpp -o "$out\archive-enrollment-test.exe" -lbcrypt -lcrypt32 -lncrypt
         if($LASTEXITCODE -ne 0){throw 'Archive enrollment compilation failed'}
         & "$out\archive-enrollment-test.exe"
         if($LASTEXITCODE -ne 0){throw 'Archive enrollment regression failed'}
     }
     if($HistoryStorage){
-        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_history_storage_test.cpp group.cpp -o "$out\archive-history-storage-test.exe" -lbcrypt -lcrypt32 -lncrypt
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_history_storage_test.cpp group.cpp group_message_envelope.cpp -o "$out\archive-history-storage-test.exe" -lbcrypt -lcrypt32 -lncrypt
         if($LASTEXITCODE -ne 0){throw 'Archive history storage compilation failed'}
         & "$out\archive-history-storage-test.exe"
         if($LASTEXITCODE -ne 0){throw 'Archive history storage regression failed'}
     }
     if($PeerTls){
-        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_reliable_endpoint_test.cpp tls.cpp storage.cpp group.cpp -o "$out\archive-peer-tls-test.exe" -lbcrypt -lcrypt32 -lncrypt -lsecur32
+        & $compiler -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/archive_reliable_endpoint_test.cpp tls.cpp storage.cpp group.cpp group_message_envelope.cpp -o "$out\archive-peer-tls-test.exe" -lbcrypt -lcrypt32 -lncrypt -lsecur32
         if($LASTEXITCODE -ne 0){throw 'Archive peer TLS compilation failed'}
         & "$out\archive-peer-tls-test.exe"
         if($LASTEXITCODE -ne 0){throw 'Archive peer TLS regression failed'}

@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include "storage.hpp"
 #include "group.hpp"
+#include "group_text.hpp"
 #include "mailbox_protocol.hpp"
 #include "platform/identity_provider.hpp"
 #include "platform/storage_backend.hpp"
@@ -194,6 +195,17 @@ struct Statement : platform::CheckedSqlStatement {
 struct Transaction : platform::SqlTransaction {
     using platform::SqlTransaction::SqlTransaction;
 };
+void indexGroupOrder(platform::SqlDatabase& sql,std::int64_t sequence,const Blob& plaintext,const Blob& envelope){
+    std::uint64_t logical=0;std::string sender;
+    if(group_text::valid(plaintext))logical=group_text::decode(plaintext).order;
+    // Public PCGE v1 sender offset; used only to index an already authenticated
+    // protected record. Admission still uses the canonical envelope validator.
+    constexpr size_t senderOffset=4+2+32+8+8+32+8;
+    if(envelope.size()>=senderOffset+64&&envelope[0]=='P'&&envelope[1]=='C'&&envelope[2]=='G'&&envelope[3]=='E'){
+        sender.assign(envelope.begin()+senderOffset,envelope.begin()+senderOffset+64);if(!identifier(sender))sender.clear();
+    }
+    Statement insert(sql,"INSERT INTO group_message_order_v1(sequence,logical_order,sender) VALUES(?,?,?)");insert.number(1,sequence);insert.number(2,logical);insert.text(3,sender);insert.row();
+}
 StoredMessage decodeMessage(const Blob& plain) {
     Reader r(plain);StoredMessage m;m.id=r.string();m.sender=r.string();m.recipient=r.string();m.text=r.text();m.utcMilliseconds=r.number();auto state=r.number();
     // v0.2 encrypted records end after delivery. New records append the logical
@@ -228,6 +240,10 @@ struct Storage::Impl {
                     "INSERT INTO message_archive_index(message_id) SELECT m.id FROM messages m WHERE NOT EXISTS(SELECT 1 FROM message_archive_index a WHERE a.message_id=m.id) ORDER BY m.rowid;");
             execute("CREATE TABLE IF NOT EXISTS group_message_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,server_group TEXT NOT NULL,local_group TEXT NOT NULL,message_id TEXT NOT NULL,UNIQUE(server_group,message_id));"
                     "CREATE INDEX IF NOT EXISTS group_message_history ON group_message_index(local_group,sequence);");
+            execute("CREATE TABLE IF NOT EXISTS group_message_order_v1(sequence INTEGER PRIMARY KEY,logical_order INTEGER NOT NULL,sender TEXT NOT NULL);"
+                    "CREATE INDEX IF NOT EXISTS group_message_logical_v1 ON group_message_order_v1(logical_order,sender,sequence);"
+                    "CREATE TABLE IF NOT EXISTS group_order_state_v1(id INTEGER PRIMARY KEY,revision INTEGER NOT NULL);"
+                    "INSERT OR IGNORE INTO group_order_state_v1 VALUES(1,0);");
             // Additive index only; names, paths, digests and provenance remain
             // in the existing platform-protected object backend.
             execute("CREATE TABLE IF NOT EXISTS attachment_history_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,attachment_id TEXT UNIQUE NOT NULL);");
@@ -717,6 +733,8 @@ bool Storage::appendAuthenticatedGroupMessage(const std::string& group,const std
         require(identifier(local,32),"Invalid local group history identity");
         Statement index(impl_->sql,"INSERT INTO group_message_index(server_group,local_group,message_id) VALUES(?,?,?)");
         index.text(1,group);index.text(2,local);index.text(3,id);index.row();
+        Statement position(impl_->sql,"SELECT sequence FROM group_message_index WHERE server_group=? AND message_id=?");position.text(1,group);position.text(2,id);require(position.row(),"Group history index commit failed");
+        indexGroupOrder(impl_->sql,position.number(0),plaintext,envelope);impl_->execute("UPDATE group_order_state_v1 SET revision=revision+1 WHERE id=1");
     }
     transaction.commit();return true;
 }
@@ -731,14 +749,31 @@ AuthenticatedGroupMessage Storage::authenticatedGroupMessage(const std::string& 
 }
 std::vector<AuthenticatedGroupMessage> Storage::authenticatedGroupHistory(const std::string& local,int limit,std::int64_t before){
     require(identifier(local,32)&&limit>0&&limit<=100&&before>0,"Invalid group history page");
-    Statement query(impl_->sql,"SELECT server_group,message_id,sequence FROM group_message_index WHERE local_group=? AND sequence<? ORDER BY sequence DESC LIMIT ?");
-    query.text(1,local);query.number(2,before);query.number(3,limit);std::vector<AuthenticatedGroupMessage> page;
+    require(groupHistoryOrderingReady(local),"Group history ordering pending");
+    std::int64_t logical=INT64_MAX;std::string sender(64,'z'),message(64,'z');
+    if(before!=INT64_MAX){Statement cursor(impl_->sql,"SELECT CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END,o.sender,i.message_id FROM group_message_index i JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND i.sequence=?");cursor.text(1,local);cursor.number(2,before);require(cursor.row(),"Unknown group history page cursor");logical=cursor.number(0);sender=cursor.text(1);message=cursor.text(2);}
+    Statement query(impl_->sql,"SELECT i.server_group,i.message_id,i.sequence FROM group_message_index i JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND (CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END,o.sender,i.message_id)<(?,?,?) ORDER BY CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END DESC,o.sender DESC,i.message_id DESC LIMIT ?");
+    query.text(1,local);query.number(2,logical);query.text(3,sender);query.text(4,message);query.number(5,limit);std::vector<AuthenticatedGroupMessage> page;
     while(query.row()){
         auto group=query.text(0),id=query.text(1);auto item=authenticatedGroupMessage(group,id);item.sequence=query.number(2);
         page.push_back(std::move(item));
     }
     std::reverse(page.begin(),page.end());return page;
 }
+bool Storage::groupHistoryOrderingReady(const std::string& local,int batch){
+    require(identifier(local,32)&&batch>0&&batch<=64,"Invalid group history indexing batch");
+    Transaction transaction(impl_->sql);
+    Statement q(impl_->sql,"SELECT i.server_group,i.message_id,i.sequence FROM group_message_index i LEFT JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND o.sequence IS NULL ORDER BY i.sequence LIMIT ?");q.text(1,local);q.number(2,batch);
+    bool changed=false;
+    while(q.row()){
+        auto row=authenticatedGroupMessage(q.text(0),q.text(1));indexGroupOrder(impl_->sql,q.number(2),row.plaintext,row.envelope);
+        std::fill(row.plaintext.begin(),row.plaintext.end(),0);
+        changed=true;
+    }
+    if(changed)impl_->execute("UPDATE group_order_state_v1 SET revision=revision+1 WHERE id=1");
+    Statement more(impl_->sql,"SELECT 1 FROM group_message_index i LEFT JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND o.sequence IS NULL LIMIT 1");more.text(1,local);bool ready=!more.row();transaction.commit();return ready;
+}
+std::uint64_t Storage::groupHistoryOrderRevision(){Statement q(impl_->sql,"SELECT revision FROM group_order_state_v1 WHERE id=1");require(q.row()&&q.number(0)>=0,"Group history revision unavailable");return static_cast<std::uint64_t>(q.number(0));}
 bool Storage::setGroupMessageStatus(const std::string& group,const std::string& id,const std::string& status,std::uint32_t stage){
     require(identifier(group,32)&&identifier(id,32)&&status.size()<=160&&stage<=2,"Invalid group delivery status");
     Secret saved{impl_->get("authenticated-group-message/"+group+"/"+id)};require(!saved.data.empty(),"Unknown group message status");
@@ -747,6 +782,31 @@ bool Storage::setGroupMessageStatus(const std::string& group,const std::string& 
     // 0 local/uncertain, 1 server admission, 2 recipient validation report.
     // A late admission/disconnect cannot overwrite a known recipient receipt.
     Writer writer;writer.string(status);writer.number(stage);impl_->put(key,writer.data);return true;
+}
+std::int64_t Storage::groupArchiveWatermark(const std::string& group){
+    if(!group.empty()){
+        require(identifier(group,32),"Invalid group archive scope");Statement q(impl_->sql,"SELECT COALESCE(MAX(sequence),0) FROM group_message_index WHERE server_group=?");q.text(1,group);require(q.row(),"Group archive watermark unavailable");return q.number(0);
+    }
+    Statement q(impl_->sql,"SELECT seq FROM sqlite_sequence WHERE name='group_message_index'");
+    if(!q.row())return 0;
+    auto value=q.number(0);require(value>=0,"Invalid group archive watermark");return value;
+}
+GroupArchivePage Storage::groupArchivePage(std::int64_t after,std::int64_t through,int limit,const std::string& group){
+    require(after>=0&&through>=after&&through<=groupArchiveWatermark(group)&&limit>0&&limit<=8,"Invalid group archive page");
+    GroupArchivePage page;page.next=after;size_t bytes=512;
+    Statement q(impl_->sql,group.empty()?"SELECT server_group,message_id,sequence FROM group_message_index WHERE sequence>? AND sequence<=? ORDER BY sequence LIMIT ?":"SELECT server_group,message_id,sequence FROM group_message_index WHERE sequence>? AND sequence<=? AND server_group=? ORDER BY sequence LIMIT ?");
+    q.number(1,after);q.number(2,through);if(group.empty())q.number(3,limit);else{q.text(3,group);q.number(4,limit);}
+    while(q.row()){
+        auto item=authenticatedGroupMessage(q.text(0),q.text(1));
+        // Plaintext never enters archive serialization or the relay.
+        std::fill(item.plaintext.begin(),item.plaintext.end(),0);item.plaintext.clear();item.sequence=q.number(2);
+        if(!page.records.empty()&&bytes+item.envelope.size()+32>69000)break;
+        require(item.envelope.size()+544<=70000,"Group archive envelope exceeds wire bound");
+        bytes+=item.envelope.size()+32;page.next=item.sequence;page.records.push_back(std::move(item));
+    }
+    Statement more(impl_->sql,group.empty()?"SELECT 1 FROM group_message_index WHERE sequence>? AND sequence<=? LIMIT 1":"SELECT 1 FROM group_message_index WHERE sequence>? AND sequence<=? AND server_group=? LIMIT 1");more.number(1,page.next);more.number(2,through);if(!group.empty())more.text(3,group);page.complete=!more.row();
+    if(page.complete)page.next=through;
+    return page;
 }
 bool Storage::reserveGroupNonce(const std::string& fingerprint,const Blob& nonce){
     require(identifier(fingerprint)&&nonce.size()==12,"Invalid group nonce reservation");

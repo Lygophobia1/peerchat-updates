@@ -21,6 +21,7 @@ public:
         std::function<Blob(const Blob&)> control{};
         bool attachments=false;
         std::function<void(const Blob&)> queued{};
+        bool groups=false;
     };
     // Platform execution seam into the ONE profile TransferManager. No sockets,
     // retry policy, transfer journal or key ownership lives in this endpoint.
@@ -31,6 +32,7 @@ public:
         std::function<std::vector<Blob>(const Blob&,const Blob&,std::uint64_t)> receive;
         std::function<std::vector<Blob>(const Blob&,std::uint64_t)> outgoing;
         std::function<bool()> settled{};
+        std::function<std::vector<Blob>(const Blob&,std::uint64_t,std::uint64_t)> historyOutgoing{};
     };
     struct VoiceAdmission {
         std::function<bool()> available;
@@ -143,6 +145,7 @@ private:
         runtime_.requireOnline(sessions_.active(id_));
         if(group_){
             protocol::check(authorized()&&group_->receive&&groupKeyCurrent());
+            if(reader.type()==protocol::ArchiveControl)protocol::check(group_->historyOutgoing&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups));
             for(auto& response:group_->receive(bytes,tls_->remotePublicKey(),now_))sendGroupControl(response);
             pump();return;
         }
@@ -205,6 +208,7 @@ public:
     bool ready()const{return !closed_&&sessions_.active(id_)&&(!archive_||archiveBound_)&&authorized();}
     bool closed()const noexcept{return closed_;}
     bool permitsDeferredHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0;}
+    bool permitsGroupHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups)!=0;}
     const char* diagnosticStage()const noexcept{return stage_;}
     void sendArchiveControl(const Blob& bytes){
         protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
@@ -228,7 +232,8 @@ public:
     bool groupExchangeComplete()const{return group_&&group_->settled&&group_->settled();}
     void sendGroupControl(const Blob& bytes){
         protocol::check(group_&&ready()&&bytes.size()<=65536);
-        protocol::Reader r(bytes);protocol::check(r.type()==protocol::GroupRosterEvent||r.type()==protocol::GroupKeyOffer||r.type()==protocol::GroupKeyAck);
+        protocol::Reader r(bytes);protocol::check(r.type()==protocol::GroupRosterEvent||r.type()==protocol::GroupKeyOffer||r.type()==protocol::GroupKeyAck||
+            (r.type()==protocol::ArchiveControl&&group_->historyOutgoing&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups)));
         protocol::Writer w(static_cast<protocol::Type>(r.type()));w.data=bytes;packet(w);
     }
     void receive(const Blob& bytes,std::uint64_t now){
@@ -240,8 +245,8 @@ public:
             sessions_.observeProgress(epoch_,id_,now);
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
                 ((!archive_&&!group_&&voice_&&voice_->available&&voice_->available())?(protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery):0)|
-                (group_?(protocol::CapabilitySignedGroups|protocol::CapabilityGroupKeyHandoff):0)|
-                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
+                (group_?(protocol::CapabilitySignedGroups|protocol::CapabilityGroupKeyHandoff|(group_->historyOutgoing?protocol::CapabilityArchiveGroups:0)):0)|
+                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|(archive_->groups?protocol::CapabilityArchiveGroups:0)):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
             stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
@@ -280,6 +285,7 @@ public:
             if(!ready()||output_.size()>MaxOutput/2)return;
             protocol::check(group_->outgoing&&groupKeyCurrent());
             for(auto& frame:group_->outgoing(tls_->remotePublicKey(),now_))sendGroupControl(frame);
+            if(group_->historyOutgoing)for(auto& frame:group_->historyOutgoing(tls_->remotePublicKey(),now_,runtime_.remoteCapabilities))sendGroupControl(frame);
             return;
         }
         if(archive_||!ready()||!friends_.contains(runtime_.expected))return;

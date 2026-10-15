@@ -3,6 +3,7 @@
 #include "../group_message_envelope.hpp"
 #include "../group_text.hpp"
 #include "../delivery_manager.hpp"
+#include "../archive_group_history.hpp"
 
 namespace peerchat::portable {
 // Android application adapter over the SAME native group owners used by Node.
@@ -14,6 +15,9 @@ class GroupApplication {
     group_keys::GroupKeyManager keys_;
     std::map<std::string,GroupLedger> ledgers_;
     std::set<std::string> current_;
+    std::map<std::string,std::uint64_t> historyDue_;
+    bool historyEnabled_=false;
+    static std::uint64_t historyClock(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     GroupEvent event(GroupLedger& ledger,GroupEventKind kind,std::uint64_t now)const{
         GroupEvent e;e.groupId=ledger.state().groupId;e.kind=kind;e.logicalOrder=ledger.state().maxLogicalOrder+1;
         e.createdMilliseconds=now;e.actorAccountId=account_;e.actorPeerId=profile_.peerId;return e;
@@ -29,15 +33,20 @@ class GroupApplication {
     }
     void append(GroupLedger& ledger,GroupEvent e){signGroupEvent(e,profile_);admit(ledger,e);}
 public:
-    GroupApplication(Storage& store,const Profile& profile,delivery::DeliveryManager& deliveries,std::uint64_t account)
-        :store_(store),profile_(profile),deliveries_(deliveries),account_(account),keys_(store,account,profile.peerId){
+    GroupApplication(Storage& store,const Profile& profile,delivery::DeliveryManager& deliveries,std::uint64_t account,bool historyEnabled=false)
+        :store_(store),profile_(profile),deliveries_(deliveries),account_(account),keys_(store,account,profile.peerId),historyEnabled_(historyEnabled){
         protocol::check(account>0);
         auto bound=store.groupAccount();protocol::check(!bound.accountId||bound.accountId==account);
         for(const auto& id:store.groupIds())ledgers_.emplace(id,group_devices::Replica::restoreStored(store,id));
     }
     std::uint64_t account()const{return account_;}
     std::uint64_t generation()const{return generation_;}
-    void invalidate(){for(const auto& id:current_)keys_.revoke(id);current_.clear();generation_=0;++revision_;}
+    std::optional<archive::GroupHistoryContext> historyContext(const std::string& server)const{
+        auto row=keys_.roster(server);if(!generation_||!row)return {};
+        auto found=ledgers_.find(row->legacyGroupId);if(found==ledgers_.end()||!group_keys::GroupKeyManager::matchesSignedLedger(*row,found->second.state()))return {};
+        return archive::GroupHistoryContext{*row,found->second.state()};
+    }
+    void invalidate(){for(const auto& id:current_)keys_.revoke(id);current_.clear();historyDue_.clear();generation_=0;++revision_;}
     // Authenticated server inputs only. A rejected complete snapshot revokes all
     // live authority; protected history stays untouched for later verification.
     void authenticated(std::uint64_t generation,std::vector<group_keys::RosterSnapshot> rows){
@@ -87,17 +96,31 @@ public:
         if(ledger==ledgers_.end()||!group_keys::GroupKeyManager::matchesSignedLedger(*r,ledger->second.state()))return true;
         auto key=store_.groupKey(r->legacyGroupId,r->generation);bool present=key.size()==32;platform::group_crypto::wipe(key.data(),key.size());
         if(!present)return true;
-        return r->distributorPeerId==profile_.peerId&&!store_.hasGroupKeyReceipt(r->legacyGroupId,r->generation,scope.expectedRemoteDeviceId);
+        if(r->distributorPeerId==profile_.peerId&&!store_.hasGroupKeyReceipt(r->legacyGroupId,r->generation,scope.expectedRemoteDeviceId))return true;
+        if(!historyEnabled_)return false;
+        const auto now=historyClock();
+        auto due=historyDue_.find(scope.continuityKey());return due==historyDue_.end()||now>=due->second;
     }
     class Control {
         GroupApplication& owner_;session::ReliableAuthorization scope_;session::TransportInstanceId transport_;
         Blob remoteKey_;std::set<std::string> sent_;
         std::uint64_t observed_=0;
         bool exchanged_=false;
+        bool historyUnavailable_=false;
+        std::unique_ptr<archive::GroupHistoryJob> history_;
     public:
         Control(GroupApplication& owner,session::ReliableAuthorization scope,session::TransportInstanceId transport,Blob key)
             :owner_(owner),scope_(std::move(scope)),transport_(transport),remoteKey_(std::move(key)){protocol::check(owner_.current(scope_,&remoteKey_));}
-        bool complete()const noexcept{return exchanged_;}
+        bool complete()const noexcept{return history_?history_->settled():exchanged_||historyUnavailable_;}
+        std::vector<Blob> historyOutgoing(std::uint64_t now,std::uint64_t capabilities){
+            if(!owner_.historyEnabled_||!(capabilities&protocol::CapabilityArchiveGroups)||!archive::historyParticipationEnabled(owner_.store_,owner_.account_,owner_.profile_.peerId)){historyUnavailable_=true;owner_.historyDue_[scope_.continuityKey()]=historyClock()+60000;return {};}
+            if(!owner_.historyContext(scope_.groupId))return {};
+            if(!history_)history_=std::make_unique<archive::GroupHistoryJob>(owner_.store_,owner_.profile_,owner_.account_,scope_,
+                [this](const std::string& server){return owner_.historyContext(server);},[this]{return owner_.current(scope_,&remoteKey_)&&archive::historyParticipationEnabled(owner_.store_,owner_.account_,owner_.profile_.peerId);});
+            auto bytes=history_->request(now);if(history_->settled())owner_.historyDue_[scope_.continuityKey()]=historyClock()+60000;
+            if(bytes.empty())return {};
+            return {std::move(bytes)};
+        }
         std::vector<Blob> outgoing(std::uint64_t now){
             protocol::check(owner_.current(scope_,&remoteKey_));std::vector<Blob> frames;
             if(observed_==owner_.revision_)return frames;
@@ -130,7 +153,13 @@ public:
         std::vector<Blob> receive(const Blob& bytes,std::uint64_t now){
             protocol::check(owner_.current(scope_,&remoteKey_));auto r=owner_.roster(scope_.groupId);
             protocol::Reader reader(bytes);const auto remote=scope_.expectedRemoteDeviceId;
-            if(reader.type()==protocol::GroupRosterEvent){
+            if(reader.type()==protocol::ArchiveControl){
+                if(!history_){auto initial=historyOutgoing(now,protocol::CapabilityArchiveGroups);protocol::check(bool(history_));auto response=history_->control(bytes,now);if(!response.empty())initial.push_back(std::move(response));return initial;}
+                protocol::check(bool(history_));auto response=history_->control(bytes,now);
+                if(history_->settled())owner_.historyDue_[scope_.continuityKey()]=historyClock()+60000;
+                if(response.empty())return {};
+                return {std::move(response)};
+            }else if(reader.type()==protocol::GroupRosterEvent){
                 auto e=decodeGroupEvent(reader.bytes());reader.end();
                 protocol::check(e.groupId==r->legacyGroupId&&e.kind!=GroupEventKind::Message&&e.message.empty()&&
                     (remote==r->distributorPeerId||e.actorPeerId==remote));
