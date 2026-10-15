@@ -85,13 +85,13 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
     "CREATE TABLE IF NOT EXISTS announcements(object_id TEXT PRIMARY KEY REFERENCES objects(id),wire BLOB NOT NULL,digest TEXT NOT NULL);"+
     "CREATE TABLE IF NOT EXISTS announcement_acks(object_id TEXT NOT NULL REFERENCES objects(id),device TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(object_id,device));");
    if(!existing)Execute("INSERT INTO settings VALUES(1,"+Quote(options.InstanceId)+");");
-   ValidateInstance();
+   ValidateInstance();InitializeKeyEnvelopes();
    // Exclusive owner has been acquired. Every old process lease is now stale;
    // durable byte offsets/reservations remain authoritative and are NOT reset.
    InitializeReservationLedger();Transaction(()=>Execute("DELETE FROM leases;"));Reconcile();
   }catch{if(database!=IntPtr.Zero){Sqlite.sqlite3_close(database);database=IntPtr.Zero;}directory.Dispose();throw;}
  }
- void Reconcile(){Require(Scalar("SELECT count(*) FROM objects WHERE size<36 OR durable_offset<0 OR durable_offset>size OR budget<size OR complete NOT IN (0,1) OR deleting NOT IN (0,1) OR (complete=1 AND durable_offset<>size)")==0,"cache_index_bounds_invalid");
+ void Reconcile(){ReconcileKeyEnvelopes();Require(Scalar("SELECT count(*) FROM objects WHERE size<36 OR durable_offset<0 OR durable_offset>size OR budget<size OR complete NOT IN (0,1) OR deleting NOT IN (0,1) OR (complete=1 AND durable_offset<>size)")==0,"cache_index_bounds_invalid");
   Require(Reserved()==CalculatedReservations(),"cache_reservation_ledger_mismatch");
   Require(Scalar("SELECT count(*) FROM announcements a JOIN objects o ON o.id=a.object_id WHERE o.complete<>1 OR length(a.wire)<254 OR length(a.wire)>65790 OR length(a.digest)<>64")==0,"cache_announcement_index_invalid");
   Require(Scalar("SELECT count(*) FROM announcement_acks a WHERE NOT EXISTS(SELECT 1 FROM announcements n WHERE n.object_id=a.object_id AND n.digest=a.digest) OR NOT EXISTS(SELECT 1 FROM recipients r WHERE r.object_id=a.object_id AND r.device=a.device)")==0,"cache_announcement_receipt_invalid");
@@ -164,7 +164,7 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
    if(pending.Count==0){var candidates=Rows("SELECT object_id FROM (SELECT o.id AS object_id FROM objects o WHERE deleting=0 AND NOT EXISTS(SELECT 1 FROM leases l WHERE l.object_id=o.id) AND (expires<="+now+(pressure?" OR complete=1":"")+") ORDER BY CASE WHEN expires<="+now+" THEN 0 ELSE 1 END,CASE WHEN complete=1 THEN completed ELSE expires END,id LIMIT 1)",1);if(candidates.Count==0)break;string candidate=candidates[0][0];Execute("UPDATE objects SET deleting=1 WHERE id="+Quote(candidate));pending=candidates;}
    string id=pending[0][0];var offsets=Rows("SELECT offset FROM chunks WHERE object_id="+Quote(id)+" ORDER BY offset LIMIT 8",8);
    if(offsets.Count>0)Transaction(()=>Execute("DELETE FROM chunks WHERE object_id="+Quote(id)+" AND offset IN ("+String.Join(",",offsets.Select(x=>Number(x[0]).ToString(CultureInfo.InvariantCulture)))+");"));
-   else ReservedMutation(id,()=>Execute("DELETE FROM announcement_acks WHERE object_id="+Quote(id)+";DELETE FROM announcements WHERE object_id="+Quote(id)+";DELETE FROM recipients WHERE object_id="+Quote(id)+";DELETE FROM objects WHERE id="+Quote(id)+";"));
+   else ReservedMutation(id,()=>Execute("DELETE FROM attachment_key_envelopes WHERE object_id="+Quote(id)+";DELETE FROM announcement_acks WHERE object_id="+Quote(id)+";DELETE FROM announcements WHERE object_id="+Quote(id)+";DELETE FROM recipients WHERE object_id="+Quote(id)+";DELETE FROM objects WHERE id="+Quote(id)+";"));
    Execute("PRAGMA incremental_vacuum(128);");
    // Admission must fit the reserved incoming object too. Space(0) can already
    // pass before reclamation begins and would stop after only one tiny batch.

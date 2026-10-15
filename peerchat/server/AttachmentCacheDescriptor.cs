@@ -18,6 +18,7 @@ internal sealed class AttachmentCacheDescriptor {
  internal string CipherDigest {get;private set;}
  internal byte[] Wire {get;private set;}
  byte[] signingKey;
+ internal bool VerifySource(byte[] original,byte[] signature){return MailboxProtocol.Verify(original,signature,signingKey,Sender);}
  internal bool MatchesAnnouncement(byte[] wire){string message;return GroupCiphertextFanout.Route(wire,Group,Epoch,new GroupFanoutSession{Account=Account,Device=Sender},out message)&&message==Message&&MailboxProtocol.Verify(wire.Take(wire.Length-64).ToArray(),wire.Skip(wire.Length-64).ToArray(),signingKey,Sender);}
  AttachmentCacheDescriptor(){}
  internal static AttachmentCacheDescriptor Parse(byte[] wire){

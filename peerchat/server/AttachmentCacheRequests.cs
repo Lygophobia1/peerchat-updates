@@ -20,6 +20,7 @@ internal sealed class AttachmentCacheRequests {
  internal static string Encode(byte[] bytes){return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');}
  internal static byte[] Decode(string text,int maximum=65536){Require(maximum>0&&maximum<=GroupCiphertextFanout.MaxEnvelope&&text.Length<=(maximum*4+2)/3&&text.Length%4!=1&&Regex.IsMatch(text,"^[A-Za-z0-9_-]*$"));var bytes=Convert.FromBase64String(text.Replace('-','+').Replace('_','/')+new string('=',(4-text.Length%4)%4));Require(bytes.Length<=maximum&&Encode(bytes)==text);return bytes;}
  static Dictionary<string,object> Announcement(AttachmentCacheRuntime.Announcement value){return new Dictionary<string,object>{{"id",value.Id},{"messageId",value.Message},{"digest",value.Digest},{"envelope",Encode(value.Wire)},{"descriptor",Encode(value.Descriptor)},{"dataEncoding","base64url"}};}
+ static Dictionary<string,object> Key(AttachmentCacheRuntime.KeyEnvelope value){return new Dictionary<string,object>{{"id",value.Id},{"device",value.Device},{"digest",value.Digest},{"envelope",Encode(value.Wire)},{"dataEncoding","base64url"}};}
  static void Status(Dictionary<string,object> reply,AttachmentCacheRuntime.Status value){reply["ciphertextSize"]=value.Size;reply["durableOffset"]=value.Offset;reply["ciphertextComplete"]=value.Complete;reply["expiresUtc"]=value.Expires;}
  internal Dictionary<string,object> Execute(long account,string device,Func<bool> current,Dictionary<string,object> request){
   var reply=new Dictionary<string,object>{{"state","cache_malformed_request"},{"cacheVersion",1}};
@@ -44,6 +45,13 @@ internal sealed class AttachmentCacheRequests {
     case "cache_publish":admission.Publish(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",87720),GroupCiphertextFanout.MaxEnvelope));break;
     case "cache_announcement":reply["announcement"]=Announcement(admission.Announcement(account,device,current,Id(request,"id")));break;
     case "cache_announcement_ack":reply["newAnnouncementReceipt"]=admission.AcknowledgeAnnouncement(account,device,current,Id(request,"id"),Text(request,"digest",64));break;
+    case "cache_recipient_keys":reply["recipients"]=admission.RecipientKeys(account,device,current,Id(request,"id"));break;
+    case "cache_publish_key":reply["newKeyEnvelope"]=admission.PublishKey(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",10923),AttachmentKeyEnvelope.MaximumWire));break;
+    case "cache_key":reply["keyEnvelope"]=Key(admission.Key(account,device,current,Id(request,"id")));break;
+    case "cache_key_ack":reply["newKeyReceipt"]=admission.AcknowledgeKey(account,device,current,Id(request,"id"),Text(request,"digest",64));break;
+    case "cache_pending_keys":{
+     string cursor;bool more;var page=admission.PendingKeys(account,device,current,Text(request,"after",32),out cursor,out more);var items=new List<Dictionary<string,object>>();foreach(var item in page)items.Add(Key(item));reply["items"]=items;reply["cursor"]=cursor;reply["more"]=more;break;
+    }
     case "cache_pending":{
      var page=admission.PendingAnnouncements(account,device,current,Text(request,"after",32));var items=new List<Dictionary<string,object>>();foreach(var item in page.Items)items.Add(Announcement(item));reply["items"]=items;reply["cursor"]=page.Cursor;reply["more"]=page.More;break;
     }

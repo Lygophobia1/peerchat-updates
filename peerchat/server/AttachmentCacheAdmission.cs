@@ -22,7 +22,7 @@ sealed partial class AccountDatabase {
 }
 // No socket or retry ownership. Each operation runs under authoritative roster
 // admission, through the durable storage operation, before its reply is sent.
-internal sealed class AttachmentCacheAdmission {
+internal sealed partial class AttachmentCacheAdmission {
  readonly AccountDatabase accounts;readonly AttachmentCacheRuntime cache;
  internal AttachmentCacheAdmission(AccountDatabase accounts,AttachmentCacheRuntime cache){this.accounts=accounts;this.cache=cache;accounts.EnsureAttachmentMembership();}
  static void Require(bool ok,string reason){if(!ok)throw new InvalidOperationException(reason);}
