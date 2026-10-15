@@ -1,3 +1,5 @@
+> Current candidate: `ANDROID_REPAIR_DEV162.md`. Reuses existing ignored Firebase Android client configuration; FCM_CONFIGURED=true, same app ID/signing certificate. 219 host tests and lint/build passed. No application/native/protocol/routing/Pi changes; background wake awaits physical testing.
+
 > Physical dev.161 update: `ANDROID_DEV161_ROUTING_AND_WAKE_FINDINGS.md`. Owner confirms scoped enrollment and offline receipt after reopening. Pi confirms both test messages have Motorola ACKs plus separate pending Windows copies. Background wake remains unaccepted: delivered dev.161 FCM_CONFIGURED=false. Read-only investigation only; no routing/Pi/application changes.
 
 > Current recovery candidate: `ANDROID_REPAIR_DEV161.md`, code dba61c0. Approved implementation is complete; explicit on-phone account-19 to account-4 approval and physical acceptance remain pending. Original keys/data/binding preserved. 219 host tests and native offline/security/TLS suites passed. The historical stopped-development audit below predates this authorized repair and is retained for provenance.
