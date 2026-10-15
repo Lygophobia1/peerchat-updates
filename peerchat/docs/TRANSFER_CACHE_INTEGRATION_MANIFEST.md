@@ -8,6 +8,14 @@ Windows/Pi acceptance remains pending.
 
 ## Current Windows completion — supersedes archived freeze below
 
+The Windows dev.160 repair adds a scoped, Windows-local `ui_mailbox` operation 9
+for the existing server enrollment/resume challenges, a DPAPI-protected cache
+credential sidecar, explicit asynchronous cache verification, exact DM receive
+basenames and composer PNG drafts. No server wire protocol, group encryption
+format, transfer limit/window or Android code changes. Details and compatibility
+boundaries: [Windows dev.160 attachment repair](WINDOWS_DEV160_ATTACHMENT_REPAIR.md).
+The live Pi remains dev.158; no redeployment is part of this repair.
+
 See [GROUP_ATTACHMENTS_DEV158_VALIDATION.md](GROUP_ATTACHMENTS_DEV158_VALIDATION.md)
 and [GROUP_ATTACHMENTS_DEV158_DEPLOYMENT.md](GROUP_ATTACHMENTS_DEV158_DEPLOYMENT.md).
 
