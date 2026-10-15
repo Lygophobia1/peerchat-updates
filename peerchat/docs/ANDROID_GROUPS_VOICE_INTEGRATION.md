@@ -1,5 +1,13 @@
 # Android groups and voice integration manifest
 
+Focused Android repair resumed by user authorization after physical dev.155 evidence.
+See `ANDROID_REPAIR_DEV158.md`: dev.158 reuses Windows native explicit contact approval
+through a bounded Android prompt, retains registration/relay failure stages, and
+fixes stale buffered DM output after revocation. Source checkpoint837c357;198 host
+checks and debug/instrumentation/lint pass. Phone mailbox cause and physical delivery
+remain pending. No group/voice/attachment protocol or Main Work changes.
+
+
 > Finalization audit: see `ANDROID_CHECKPOINT_AND_REMAINING_WORK.md` for the
 > current authoritative status. The interrupted handoff below is preserved as
 > the STOP-time snapshot. Source remains227ce31; the focused authorized lint
