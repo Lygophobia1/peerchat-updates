@@ -84,4 +84,17 @@ class AndroidQolTest {
         val original=disk!!.copyOf();disk=original.also{it[it.lastIndex]=(it.last().toInt() xor 1).toByte()}
         assertThrows(Exception::class.java){open().load()}
     }
+    @Test fun groupPreferencesHaveSeparateProtectionAndRetainPendingHistoryBaseline(){
+        var disk:ByteArray?=null
+        fun group()=ProtectedAndroidQolStore({disk},{disk=it.copyOf()},{records},"android-group-qol-v1",Regex("[0-9a-f]{64}:group:[0-9a-f]{32}"))
+        val key=groupPreferenceKey("a".repeat(64),"b".repeat(32))
+        val expected=AndroidQolState(conversations=mapOf(key to ConversationPreference("pending draft",baselinePending=true)))
+        group().save(expected);assertEquals(expected,group().load())
+        assertFalse(disk!!.toString(Charsets.UTF_8).contains("pending draft"))
+        assertThrows(Exception::class.java){ProtectedAndroidQolStore({disk},{},{records}).load()}
+        assertThrows(Exception::class.java){group().save(AndroidQolState(conversations=mapOf(conversationPreferenceKey("a".repeat(64),8) to ConversationPreference())))}
+        val full=(1..129).associate{groupPreferenceKey("a".repeat(64),it.toString(16).padStart(32,'0')) to ConversationPreference()}
+        assertThrows(Exception::class.java){group().save(AndroidQolState(conversations=full))}
+        assertEquals(expected,group().load())
+    }
 }
