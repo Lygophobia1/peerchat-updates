@@ -1,3 +1,5 @@
+> Current recovery proposal: `ANDROID_MAILBOX_ACCOUNT_REENROLLMENT_PLAN.md`. Original account19/new Linux account4 history confirmed. Same-key scoped enrollment is protocol-feasible; implementation and on-phone enrollment await approval. Tests/docs only.
+
 > Latest: `ANDROID_REPAIR_DEV160.md`. User confirms live DM both directions. Offline mailbox is blocked by existing binding validation; read-only inspection candidate, no accepted recovery.
 
 > Latest focused incoming investigation: see `ANDROID_REPAIR_DEV159.md`. User physically accepted dev.158 verification and outgoing messaging; incoming remains blocked. Dev.159 is diagnostic, not an accepted receiving repair.

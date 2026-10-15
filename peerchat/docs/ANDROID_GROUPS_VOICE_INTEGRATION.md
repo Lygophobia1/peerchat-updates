@@ -1,5 +1,11 @@
 # Android groups and voice integration manifest
 
+Current approval proposal: `ANDROID_MAILBOX_ACCOUNT_REENROLLMENT_PLAN.md`. Historical
+account19→Linuxaccount4 mismatch confirmed; read-only live server metadata inspected.
+Only isolated tests/docs added. No enrollment implementation, shared API, key format,
+wire change or live mutation. Planned native enrollment/lease interfaces require
+explicit approval and coordination; Main manifest0a7b18ce reviewed.
+
 Latest read-only mailbox inspection: `ANDROID_REPAIR_DEV160.md`. Physical live DM
 works both directions; offline recovery remains blocked by retained binding validation.
 Shared coordinator/core diagnostics expand only; no wire/custody/trust change.
