@@ -167,6 +167,25 @@ class MailboxIsolationTest {
         assertFalse(s.operations.contains("mailbox_ack"))
         assertEquals(1,n.receives)
     }
+    @Test fun transientFetchDisconnectRetriesWithoutAcknowledgingOrReplacingRegistration(){
+        val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
+        val s=Server().apply{withReceipt=false}
+        val execution=MailboxExecution(n);var disconnect=true
+        val transport={op:String,body:JSONObject->
+            if(op=="mailbox_fetch"&&disconnect){disconnect=false;throw java.io.IOException("isolated fetch interrupted")}
+            s.request(op,body)
+        }
+        val notifications=mutableListOf<Boolean>()
+        assertThrows(java.io.IOException::class.java){execution.service(transport,1,true){notifications.add(it)}}
+        assertTrue(notifications.isEmpty());assertEquals(0,n.receives)
+        assertEquals(listOf("mailbox_register"),s.operations)
+        assertEquals(2,n.registrationReads)
+        execution.service(transport,1,true){notifications.add(it)}
+        assertEquals(listOf(true),notifications)
+        assertEquals(2,n.registrationReads)
+        assertArrayEquals(byteArrayOf(7),n.binding)
+        assertTrue(execution.inboundDiagnostic.contains("imported=1 acknowledged=1"))
+    }
     private fun received(inserted:Long)=NativeRecordWriter(3).also{
         it.number(inserted);it.blob(byteArrayOf(8));it.text("peer");it.text("message")
     }.bytes()
