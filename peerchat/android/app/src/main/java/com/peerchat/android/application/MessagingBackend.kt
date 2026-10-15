@@ -4,6 +4,7 @@ import android.content.Context
 import com.peerchat.android.NativeProfile
 import com.peerchat.android.ProfileBridge
 import com.peerchat.android.ReliableBridge
+import com.peerchat.android.MailboxBridge
 import com.peerchat.android.platform.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -68,9 +69,53 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val mailboxPreferences=AndroidQolStore(this.context,profileName)
     private fun mailboxAllowed():Boolean=try{mailboxPreferences.load().mailboxStorageAllowed}catch(_:Exception){false}
     override suspend fun setMailboxStorageAllowed(allowed:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
-        check(!stopped);mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
+        check(!stopped)
+        if(!allowed){
+            val owner=accounts;val native=profile
+            if(owner?.session==null||native==null||!authorizationSnapshotInstalled)throw MailboxConsentChangeUnavailable(false)
+            configureMailboxEnrollment(owner,native.handle)
+            requireMailboxConsentChangeAllowed(MailboxBridge.hasScopedEnrollment(native.handle))
+        }
+        mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
         mailboxExecution.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
+    private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
+        val session=checkNotNull(owner.session)
+        val server=owner.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+owner.endpoint.port
+        check(MailboxBridge.configureEnrollment(native,session.accountId,generation,server.toByteArray(Charsets.US_ASCII),owner.endpoint.certificatePin.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.US_ASCII))==0){"Authenticated mailbox scope is unavailable"}
+    }
+    private fun mailboxRecoveryFailure(code:String):String=when(code){
+        "approval_expired_or_session_changed"->"The mailbox confirmation expired or the account/server session changed. Reconnect and review the current confirmation. Existing keys and messages are preserved."
+        "key_possession_or_protected_enrollment_failed"->"The existing mailbox key could not be verified or the protected enrollment could not be saved. Do not reset app data or keys; return the diagnostics for recovery."
+        else->"The existing mailbox binding or key could not be validated. Keep app data and keys intact and return the messaging diagnostics."
+    }
+    override suspend fun reenrollMailbox(value:MailboxReenrollment,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled&&mutable.value.authenticated&&mutable.value.serverPresenceLive&&mailboxAllowed())
+        val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle
+        check(mutable.value.mailboxReenrollment==value&&owner.session?.accountId==value.account&&generation==value.generation&&mutable.value.localPeerId==value.device){"Mailbox confirmation is stale"}
+        if(accept){
+            // Reuse the existing pinned messaging bootstrap, which verifies the
+            // authenticated account and registered device identity on the server.
+            refresh(true)
+            check(owner===accounts&&owner.session?.accountId==value.account&&generation==value.generation){"Authenticated mailbox ownership changed"}
+        }
+        configureMailboxEnrollment(owner,native)
+        val result=MailboxBridge.reenrollmentDecision(native,mailboxReenrollmentDecision(value,accept))
+        if(result!=0){
+            val reason=MailboxBridge.reenrollmentError(native)?.toString(Charsets.US_ASCII)?:"unavailable"
+            mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=mailboxRecoveryFailure(reason))
+            error(mailboxRecoveryFailure(reason))
+        }
+        mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null)
+        if(accept){mailboxExecution.reset();mailboxAt=0L}
+    }}
+    private fun projectMailboxRecovery(native:Long){
+        if(!mailboxAllowed()||!mutable.value.authenticated||!mutable.value.serverPresenceLive){mutable.value=mutable.value.copy(mailboxReenrollment=null);return}
+        val offer=MailboxBridge.reenrollmentOffer(native)
+        val error=MailboxBridge.reenrollmentError(native)?.toString(Charsets.US_ASCII)
+        mutable.value=mutable.value.copy(mailboxReenrollment=offer?.let{mailboxReenrollment(it)},
+            mailboxRecoveryError=if(error!=null&&error!="none")mailboxRecoveryFailure(error) else mutable.value.mailboxRecoveryError)
+    }
     private fun archiveExecution(owner:ServerAccounts,native:NativeProfile)=ArchiveEnrollmentExecution(
         {op,bytes->checkNotNull(com.peerchat.android.ArchiveBridge.request(native.handle,op,bytes)){"Native archive operation rejected"}},
         owner::archive)
@@ -397,7 +442,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }}
     private fun clearAuthorization() {
         pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
-        mutable.value=mutable.value.copy(deviceVerifications=emptyList())
+        mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)
         groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
@@ -537,18 +582,25 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(mutable.value.authenticated&&now>=mailboxAt) {
             try {
                 measured("mailbox_service") {
+                    configureMailboxEnrollment(checkNotNull(accounts),native)
                     mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed()) { inserted ->
                         lastMailboxAcknowledgedNanos=System.nanoTime()
                         if(inserted)android.util.Log.i("PeerChatWake","stage=mailbox_native_history_received_server_acknowledged")
                     }
                 }
+                mutable.value=mutable.value.copy(mailboxRecoveryError=null)
                 publish()
             } catch(failure:Exception) {
                 if(expiredServerSession(failure))throw failure
+                if(mailboxExecution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
+                    mailboxRecoveryError="The server did not accept this mailbox enrollment. Existing keys, the original binding and queued messages are preserved. Return the diagnostics; do not reset or retry with a different key.")
                 // No plaintext/error message. An unavailable/rejected mailbox
                 // does not manufacture a peer route or invalidate local history.
                 android.util.Log.i("PeerChatWake","stage=mailbox_service_pending ${mailboxExecution.diagnostic}")
-            } finally {mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000}
+            } finally {
+                try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
+                mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
+            }
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}

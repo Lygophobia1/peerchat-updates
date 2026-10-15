@@ -4,6 +4,11 @@ package com.peerchat.android
 // native KeyManager/Storage/DeliveryManager own custody, identity, IDs and ACKs.
 object MailboxBridge {
     init { System.loadLibrary("peerchat_messaging") }
+    external fun configureEnrollment(handle:Long,account:Long,generation:Long,server:ByteArray,pin:ByteArray):Int
+    external fun reenrollmentOffer(handle:Long):ByteArray?
+    external fun reenrollmentDecision(handle:Long,proof:ByteArray):Int
+    external fun reenrollmentError(handle:Long):ByteArray?
+    external fun hasScopedEnrollment(handle:Long):Int
     external fun registration(handle: Long, storageAllowed: Boolean): ByteArray?
     external fun registrationDiagnostic(handle:Long):ByteArray?
     external fun registered(handle: Long, binding: ByteArray): Int

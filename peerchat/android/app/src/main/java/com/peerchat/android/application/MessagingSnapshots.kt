@@ -20,7 +20,8 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val archiveAuthorizationDiagnostics:String="No authenticated History Sync snapshot yet.",val transferDiagnostics:String="",
     val messagingDiagnostics:String="",val groups:List<GroupConversationSnapshot> = emptyList(),
     val groupInvitations:List<GroupInvitationSnapshot> = emptyList(),val groupDiagnostics:String="Group authorization not loaded",
-    val voice:VoiceSnapshot=VoiceSnapshot(),val deviceVerifications:List<DeviceVerification> = emptyList())
+    val voice:VoiceSnapshot=VoiceSnapshot(),val deviceVerifications:List<DeviceVerification> = emptyList(),
+    val mailboxReenrollment:MailboxReenrollment?=null,val mailboxRecoveryError:String?=null)
 
 // Fixed native decision codes only: never format provider exception messages,
 // server payloads, credentials or key material into the diagnostic projection.
@@ -52,7 +53,7 @@ data class AccountRequestSnapshot(val accountId:Long,val username:String)
 
 /** Network quiescence never destroys the local-history projection. */
 internal fun localOfflineSnapshot(snapshot:MessagingSnapshot,status:String):MessagingSnapshot = snapshot.copy(
-    authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),deviceVerifications=emptyList(),status=status,
+    authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null,status=status,
     groups=snapshot.groups.map{it.copy(ready=false)},groupInvitations=emptyList(),voice=VoiceSnapshot(diagnostic="Voice authorization unavailable"),
     conversations=snapshot.conversations.map{it.copy(friend=it.friend.copy(online=false),connection=ConnectionSnapshot())})
 

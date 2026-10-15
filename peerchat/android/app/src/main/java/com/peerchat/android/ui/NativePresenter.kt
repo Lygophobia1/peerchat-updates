@@ -85,7 +85,10 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                     if(message.recipientDevice==c.friend.peerId)"current_resolved_device" else if(message.recipientDevice in c.friend.knownPeerIds)"historical_account_device" else "not_in_account_display_index")
         }
     }
-    return previous.copy(demo=false,conversations=conversations,deviceVerification=snapshot.deviceVerifications.firstOrNull(),diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
+    return previous.copy(demo=false,conversations=conversations,deviceVerification=snapshot.deviceVerifications.firstOrNull(),
+        mailboxReenrollment=if(snapshot.authenticated)snapshot.mailboxReenrollment else null,
+        mailboxRecoveryError=if(snapshot.authenticated)snapshot.mailboxRecoveryError else null,
+        diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
@@ -430,6 +433,23 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     finally{verificationBusy=false}
                 }
             }
+            is UiAction.ReenrollMailbox -> {
+                if(mutable.value.mailboxRecoveryBusy||mutable.value.mailboxReenrollment!=action.value||!current.authenticated||
+                    current.accountId!=action.value.account||current.localPeerId!=action.value.device)return
+                mutable.value=mutable.value.copy(mailboxRecoveryBusy=true,mailboxRecoveryError=null)
+                viewModelScope.launch{
+                    try{
+                        backend.reenrollMailbox(action.value,action.accept)
+                        if(!current.authenticated||current.accountId!=action.value.account||current.localPeerId!=action.value.device)return@launch
+                        mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null,
+                            notice=if(action.accept)"Enrollment requested; offline receiving waits for authenticated registration."
+                                else "Existing mailbox binding, keys and history are unchanged.")
+                    }catch(_:Exception){
+                        if(current.authenticated&&current.accountId==action.value.account&&current.localPeerId==action.value.device)
+                            mutable.value=mutable.value.copy(mailboxRecoveryError="Mailbox enrollment could not be requested. Reconnect to the trusted server and review the current offer. Existing keys and history are preserved.")
+                    }finally{mutable.value=mutable.value.copy(mailboxRecoveryBusy=false)}
+                }
+            }
             is UiAction.NotificationSettings -> {
                 mutable.value=reduceUi(mutable.value,action)
                 viewModelScope.launch{try{qolState=withContext(configurationDispatcher){qol.update{it.copy(notifications=action.enabled,preview=action.preview)};qol.load()}}
@@ -437,7 +457,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             is UiAction.MailboxStorage -> viewModelScope.launch {
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Mailbox privacy preference could not be saved; existing consent is unchanged.")}
+                catch(failure:Exception){mutable.value=mutable.value.copy(notice=if(failure is com.peerchat.android.application.MailboxConsentChangeUnavailable)failure.message else "Mailbox privacy preference could not be saved; existing consent is unchanged.")}
             }
             UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize -> {
                 if(mutable.value.archiveBusy)return
