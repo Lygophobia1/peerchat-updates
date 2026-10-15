@@ -5,6 +5,7 @@ package com.peerchat.android
 object MailboxBridge {
     init { System.loadLibrary("peerchat_messaging") }
     external fun registration(handle: Long, storageAllowed: Boolean): ByteArray?
+    external fun registrationDiagnostic(handle:Long):ByteArray?
     external fun registered(handle: Long, binding: ByteArray): Int
     external fun pending(handle: Long): ByteArray?
     external fun prepare(handle: Long, messageId: ByteArray, binding: ByteArray, storageAllowed: Boolean): ByteArray?

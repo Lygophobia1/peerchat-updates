@@ -21,6 +21,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val gate=Any()
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val mutable=MutableStateFlow(MessagingSnapshot())
+    private val relayFailureDiagnostics=linkedMapOf<Long,String>()
+    private val pendingDeviceVerifications=linkedMapOf<String,DeviceVerification>()
+    private val declinedDeviceVerifications=mutableSetOf<String>()
     private val peerAuthenticationDiagnostics=linkedMapOf<String,String>()
     override val state: StateFlow<MessagingSnapshot> = mutable.asStateFlow()
     private var profile: NativeProfile?=null
@@ -393,6 +396,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
+        mutable.value=mutable.value.copy(deviceVerifications=emptyList())
         groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
@@ -571,7 +576,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(checkGroupCompletion)groupCompletionAt=now+500
         while(iterator.hasNext()) {
             val (attempt,execution)=iterator.next()
-            if(execution.finished){groupCompletionObserved.remove(attempt);iterator.remove();continue}
+            if(execution.finished){
+                execution.failureDiagnostic?.let{relayFailureDiagnostics[attempt]="relay_attempt=$attempt $it";while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())}
+                groupCompletionObserved.remove(attempt);iterator.remove();continue}
             if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
             if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();continue}
@@ -605,7 +612,16 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     peerAuthenticationDiagnostics[execution.requestPeerId]=detail
                     while(peerAuthenticationDiagnostics.size>32)peerAuthenticationDiagnostics.remove(peerAuthenticationDiagnostics.keys.first())
                     android.util.Log.i("PeerChatWake",detail)
-                    if(accepted?.firstOrNull()?.toInt()!=1)mutable.value=mutable.value.copy(status="Device verification required; automatic replacement refused")
+                    if(outcome=="existing_verified_account_device_requires_explicit_verification"){
+                        val challenge=ReliableBridge.exchange(native,attempt,ReliableBridge.DEVICE_VERIFICATION,ByteArray(0))
+                        val friend=friends.singleOrNull{it.peerId==execution.requestPeerId}
+                        if(challenge!=null&&friend!=null){
+                            val value=deviceVerification(challenge,friend.username)
+                            if(value.localAccount==mutable.value.accountId&&value.generation==generation&&value.account==friend.accountId&&value.presented==friend.peerId&&
+                                value.presented !in declinedDeviceVerifications&&(pendingDeviceVerifications.containsKey(value.presented)||pendingDeviceVerifications.size<32))pendingDeviceVerifications[value.presented]=value
+                        }
+                        mutable.value=mutable.value.copy(status="Server online; device verification required for messaging")
+                    }else if(accepted?.firstOrNull()?.toInt()!=1)mutable.value=mutable.value.copy(status="Peer authentication rejected ($outcome); server presence does not establish messaging")
                 }
             }
         }
@@ -670,11 +686,37 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }
     }
+    override suspend fun verifyDevice(value:DeviceVerification,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        val current=pendingDeviceVerifications[value.presented]
+        check(authorizationSnapshotInstalled&&value.localAccount==mutable.value.accountId&&value.generation==generation&&
+            current!=null&&current.account==value.account&&current.localAccount==value.localAccount&&current.generation==value.generation){"Verification session changed"}
+        val native=checkNotNull(profile).handle
+        if(!accept){
+            // Rejection never grants trust and may dismiss a matching fingerprint
+            // even if its old TLS attempt expired while the user was comparing.
+            declinedDeviceVerifications.add(value.presented);pendingDeviceVerifications.remove(value.presented)
+            ReliableBridge.exchange(native,current.attempt,ReliableBridge.VERIFY_PRESENTED_DEVICE,verificationDecision(current,false))
+            executions.remove(current.attempt)?.close()
+            mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList(),status="Device remains untrusted; server presence does not establish messaging");return@synchronized
+        }
+        check(value.live&&current==value){"Verification presentation changed"}
+        val result=ReliableBridge.exchange(native,value.attempt,ReliableBridge.VERIFY_PRESENTED_DEVICE,verificationDecision(value,true))
+        pendingDeviceVerifications.remove(value.presented)
+        mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
+        check(result?.contentEquals(byteArrayOf(1))==true){"Identity presentation expired; reconnect and compare again"}
+        mutable.value=mutable.value.copy(status="Device explicitly verified; delivery awaits native acknowledgment")
+        mailboxAt=0L;check(ReliableBridge.demand(native,value.presented.toByteArray(Charsets.US_ASCII))==0)
+    }}
     private fun publish() {
+        pendingDeviceVerifications.entries.removeAll{it.value.generation!=generation}
+        pendingDeviceVerifications.replaceAll{_,value->value.copy(live=value.attempt in executions&&executions[value.attempt]?.finished==false)}
+        mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
         mutable.value=mutable.value.copy(messagingDiagnostics=buildString {
             appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
+            appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
+            relayFailureDiagnostics.values.forEach{appendLine(it)}
         })
         val native=checkNotNull(profile).handle
         val conversations=nativeConversationProjection(friends,

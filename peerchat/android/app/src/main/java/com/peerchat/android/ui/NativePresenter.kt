@@ -81,10 +81,11 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
             // IDs/attribution/state are enough to correlate a controlled send.
             for(message in c.messages.takeLast(3))if(message.id.matches(Regex("[0-9a-f]{32}"))&&
                 message.senderDevice.matches(Regex("[0-9a-f]{64}"))&&message.recipientDevice.matches(Regex("[0-9a-f]{64}")))
-                appendLine("recent_native_row message_id=${message.id} sender_device=${message.senderDevice} recipient_device=${message.recipientDevice} delivery=${message.delivery}")
+                appendLine("recent_native_row message_id=${message.id} sender_device=${message.senderDevice} recipient_device=${message.recipientDevice} delivery=${message.delivery} recipient_relation="+
+                    if(message.recipientDevice==c.friend.peerId)"current_resolved_device" else if(message.recipientDevice in c.friend.knownPeerIds)"historical_account_device" else "not_in_account_display_index")
         }
     }
-    return previous.copy(demo=false,conversations=conversations,diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
+    return previous.copy(demo=false,conversations=conversations,deviceVerification=snapshot.deviceVerifications.firstOrNull(),diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
@@ -156,6 +157,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     }
     // In-memory continuation only; never persists or logs a password.
     private var loginAfterTrust:(()->Unit)?=null
+    private var verificationBusy=false
     private var foreground=true
     private var qolState=AndroidQolState()
     private var qolReady=false
@@ -418,6 +420,15 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 mutable.value=reduceUi(mutable.value,action)
                 qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key] ?: ConversationPreference()).copy(draft=action.text)))
                 draftSaves[key]?.cancel();draftSaves[key]=viewModelScope.launch{delay(250);savePreference(key){it.copy(draft=action.text)}}
+            }
+            is UiAction.VerifyDevice -> {
+                if(verificationBusy||mutable.value.deviceVerification!=action.value)return
+                verificationBusy=true
+                viewModelScope.launch{
+                    try{backend.verifyDevice(action.value,action.accept);mutable.value=mutable.value.copy(deviceVerification=null,notice=if(action.accept)"Device explicitly verified. Existing messages retain their original recipients." else "Device remains untrusted. Previous identities and queued messages are unchanged.")}
+                    catch(_:Exception){mutable.value=mutable.value.copy(deviceVerification=null,notice="Verification could not complete on this connection. Reconnect and review the current fingerprint; no identity or queued recipient was replaced.")}
+                    finally{verificationBusy=false}
+                }
             }
             is UiAction.NotificationSettings -> {
                 mutable.value=reduceUi(mutable.value,action)

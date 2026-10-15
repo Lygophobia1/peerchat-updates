@@ -20,6 +20,7 @@ interface MessagingApplication:AutoCloseable {
     /** Readout only: native output was drained after received-history observation. */
     fun backgroundOutputDrained(afterNanos:Long):Boolean = false
     suspend fun awaitQuiescence(milliseconds:Long):Boolean = true
+    suspend fun verifyDevice(value:DeviceVerification,accept:Boolean){error("Device verification unavailable")}
     suspend fun send(peerId:String,text:String):String
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
     suspend fun createGroup(name:String){error("Group creation unavailable")}

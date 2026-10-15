@@ -55,6 +55,21 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     login: (String, String) -> Unit = { _, _ -> }) {
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
+        if(state.serverTrust==null)state.deviceVerification?.let { value ->
+            fun fingerprint(id:String)=id.chunked(4).joinToString(" ").uppercase()
+            AlertDialog(onDismissRequest={dispatch(UiAction.VerifyDevice(value,false))},
+                title={Text("Verify new device identity")},
+                text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)){
+                    Text("${value.contact} · account ${value.account}")
+                    Text("A different device was presented for an account with previously verified identities. This may be an additional/replacement device or an impersonation attempt.")
+                    Text("Previously trusted fingerprints:\n"+value.previous.joinToString("\n"){fingerprint(it)})
+                    Text("Presented device fingerprint:\n"+fingerprint(value.presented))
+                    if(!value.live)Text("This presentation expired. Waiting for a fresh authenticated connection; approval is disabled.")
+                    Text("Compare the complete presented fingerprint with your contact through an independent trusted channel before accepting. Previous identities and queued recipients will not be replaced.")
+                }},
+                confirmButton={TextButton({dispatch(UiAction.VerifyDevice(value,true))},enabled=value.live){Text("Verify and Accept")}},
+                dismissButton={TextButton({dispatch(UiAction.VerifyDevice(value,false))}){Text("Keep Untrusted")}})
+        }
         state.serverTrust?.let { trust ->
             fun fingerprint(pin:String)=pin.chunked(2).joinToString(":").uppercase()
             AlertDialog(onDismissRequest={dispatch(UiAction.CancelServerTrust)},

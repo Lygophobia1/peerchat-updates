@@ -40,6 +40,8 @@ struct Instance {
     std::unique_ptr<peerchat::Storage> storage;
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
+    const char* mailboxStage="not_requested";
+    const char* registrationStage="not_requested";
     std::unique_ptr<peerchat::portable::GroupApplication> groups;
     std::unique_ptr<peerchat::portable::GroupPendingProjection> groupPending;
     std::set<std::string> groupScopeIds;
@@ -185,18 +187,23 @@ void messageRecord(peerchat::protocol::Writer& value,const peerchat::StoredMessa
 std::uint64_t mailboxNow(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
 void mailboxProviders(Instance& instance){
     using namespace peerchat;
+    instance.mailboxStage="provider_preconditions";
     mailbox::require(instance.storage&&instance.deliveries&&instance.friends.localAccount()>0);
     if(instance.keys)return;
+    instance.mailboxStage="identity_provider";
     auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance.profile.identity);
     mailbox::require(identity!=nullptr);
     auto context=identity->context;
     platform::android::Context::Call call(context->vm);
+    instance.mailboxStage="registry_facade";
     auto facade=call.env->CallObjectMethod(context->object,context->method(call.env,"keyRegistryProvider","()Ljava/lang/Object;"));
     platform::android::Context::checked(call.env);mailbox::require(facade!=nullptr);
     auto registryContext=std::make_shared<platform::android::Context>(call.env,facade);
     auto database=std::make_shared<platform::android::Database>(registryContext);
     auto records=std::make_unique<platform::android::Records>(context);
+    instance.mailboxStage="registry_schema";
     auto store=std::make_unique<platform::SqlKeyRegistryStore>(database);
+    instance.mailboxStage="registry_protection";
     auto registry=std::make_unique<platform::ProtectedKeyRegistry>(*store,*records,instance.profile.peerId);
     auto provider=std::make_unique<platform::android::RecipientProvider>(context);
     auto manager=std::make_unique<DeviceKeyManager>(*identity,*provider,*registry);
@@ -220,16 +227,27 @@ peerchat::Blob mailboxArgument(JNIEnv* env,jbyteArray input,std::size_t maximum)
 }
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_registration(JNIEnv* env,jobject,jlong handle,jboolean allowed){
+    auto instance=lookup(static_cast<pc_core_handle>(handle));
     try{
-        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);mailboxProviders(*instance);
         auto context=instance->recipientProvider->context;
+        instance->mailboxStage="registry_read_provision_or_binding";
         auto binding=instance->keyCoordinator->prepare(instance->friends.localAccount(),allowed==JNI_TRUE,[&](std::uint32_t generation){
             peerchat::platform::android::Context::Call call(context->vm);
             auto result=static_cast<jbyteArray>(call.env->CallObjectMethod(context->object,context->method(call.env,"recipientAlias","(I)[B"),static_cast<jint>(generation)));
             auto bytes=peerchat::platform::android::Context::output(call.env,result);return std::string(bytes.begin(),bytes.end());
         },peerchat::Storage::newMessageId,mailboxNow());
+        instance->mailboxStage="binding_prepared_local";instance->registrationStage=instance->mailboxStage;
         return peerchat::platform::android::Context::input(env,peerchat::mailbox::serializeBinding(binding));
+    }catch(...){if(instance){std::lock_guard<std::mutex> lock(instance->gate);instance->registrationStage=instance->mailboxStage;}if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_registrationDiagnostic(JNIEnv* env,jobject,jlong handle){
+    try{auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);
+        return peerchat::platform::android::Context::input(env,std::string("native_registration_stage=")+instance->registrationStage+
+            " native_storage="+(instance->storage?"ready":"missing")+" native_delivery="+(instance->deliveries?"ready":"missing")+
+            " native_authenticated_account="+std::to_string(instance->friends.localAccount())+" native_authentication_generation="+std::to_string(instance->friends.generation()));
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_MailboxBridge_registered(JNIEnv* env,jobject,jlong handle,jbyteArray input){
@@ -666,7 +684,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         try{
             if(operation==0){endpoint.receive(peerchat::platform::android::Context::output(env,input),runtimeNow());retireEndpoints(*instance,endpoint);}
             else{
-                if(env->GetArrayLength(input)!=0)return nullptr;
+                if(operation<=5&&env->GetArrayLength(input)!=0)return nullptr;
                 if(operation==1){instance->serviceTransfers(runtimeNow());output=endpoint.takeOutput();}
                 else if(operation==2)output={static_cast<unsigned char>(endpoint.ready()),static_cast<unsigned char>(endpoint.closed())};
                 else if(operation==3){
@@ -680,6 +698,19 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                         peerchat::protocol::Writer value(peerchat::protocol::Ack);value.number(static_cast<std::uint64_t>(event->kind));value.string(event->peer);value.string(event->id);value.number(event->message?1:0);
                         if(event->message)messageRecord(value,*event->message);
                         output=std::move(value.data);
+                    }
+                }else if(operation==5||operation==6){
+                    auto pins=endpoint.verificationPins(instance->friends.generation(),runtimeNow());if(!pins)return nullptr;
+                    peerchat::protocol::Writer challenge(peerchat::protocol::Ack);challenge.string("PeerChat/DeviceVerification/v1");
+                    challenge.number(instance->friends.localAccount());challenge.number(instance->friends.generation());challenge.number(token);
+                    challenge.number(instance->friends.accountFor(endpoint.expected()));challenge.string(endpoint.expected());challenge.number(pins->size());
+                    for(const auto& pin:*pins)challenge.string(pin);
+                    if(operation==5)output=challenge.data;
+                    else{
+                        auto decision=peerchat::platform::android::Context::output(env,input);
+                        if(decision.size()!=challenge.data.size()+1||!std::equal(challenge.data.begin(),challenge.data.end(),decision.begin())||decision.back()>1)return nullptr;
+                        const bool accepted=endpoint.verifyPresented(instance->friends.generation(),endpoint.expected(),decision.back()==1,runtimeNow());
+                        output={static_cast<unsigned char>(accepted)};retireEndpoints(*instance,endpoint);
                     }
                 }else return nullptr;
             }

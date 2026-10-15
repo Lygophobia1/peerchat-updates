@@ -65,6 +65,7 @@ data class PeerChatUiState(
     val load: LoadState = LoadState.Ready, val connection: ConnectionState = ConnectionState.Online,
     val server: ServerUi = ServerUi(), val loginBusy: Boolean = false, val loginError: String? = null,
     val rememberMe:Boolean=false,
+    val deviceVerification:com.peerchat.android.application.DeviceVerification?=null,
     val serverTrust:ServerTrustUi?=null,
     val serverIdentityChanged:ServerUi?=null,
     val startupStatus:String?=null,
@@ -136,6 +137,7 @@ sealed interface UiAction {
     data class Notice(val text: String?) : UiAction
     data class SetTheme(val theme: ThemeChoice) : UiAction
     data class PreviewLoginFailure(val failure: LoginResult) : UiAction
+    data class VerifyDevice(val value:com.peerchat.android.application.DeviceVerification,val accept:Boolean):UiAction
     data object PreviewIncomingCall : UiAction
     data class JoinVoice(val roomId: String) : UiAction
     data class LeaveVoice(val roomId: String) : UiAction
@@ -201,6 +203,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Notice -> state.copy(notice = action.text)
         is UiAction.SetTheme -> state.copy(theme = action.theme)
         is UiAction.PreviewLoginFailure -> state.copy(loginError = "Preview only: " + loginFailureText(action.failure))
+        is UiAction.VerifyDevice -> state
         UiAction.PreviewIncomingCall -> state.copy(incomingCallPreview = !state.incomingCallPreview)
         // These commands exercise local UI fixtures ONLY. A real presenter delegates to application owners.
         is UiAction.JoinVoice -> updateSelected { c -> c.copy(voiceRooms = c.voiceRooms.map { room ->
