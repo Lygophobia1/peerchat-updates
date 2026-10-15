@@ -42,7 +42,9 @@ struct Instance {
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
     const char* mailboxStage="not_requested";
     const char* registrationStage="not_requested";
+    const char* registrationKeyAccess="not_checked";
     const char* mailboxReceiveStage="not_requested";
+    std::string mailboxEnvelopeDiagnostic="received_envelope=not_requested";
     std::unique_ptr<peerchat::portable::GroupApplication> groups;
     std::unique_ptr<peerchat::portable::GroupPendingProjection> groupPending;
     std::set<std::string> groupScopeIds;
@@ -232,7 +234,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
     try{
         if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);
-        instance->mailboxStage="provider_diagnostic_begin";
+        instance->mailboxStage="provider_diagnostic_begin";instance->registrationKeyAccess="not_checked";
+        if(instance->keyCoordinator)instance->keyCoordinator->resetDiagnostic();
         auto identity=std::dynamic_pointer_cast<peerchat::platform::android::Identity>(instance->profile.identity);
         if(identity){peerchat::platform::android::Context::Call call(identity->context->vm);
             call.env->CallVoidMethod(identity->context->object,identity->context->method(call.env,"beginMailboxRegistration","()V"));
@@ -247,13 +250,25 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
         },peerchat::Storage::newMessageId,mailboxNow(),[&](peerchat::mailbox::KeyPreparationStage stage){instance->mailboxStage=peerchat::mailbox::keyPreparationStageName(stage);});
         instance->mailboxStage="binding_prepared_local";instance->registrationStage=instance->mailboxStage;
         return peerchat::platform::android::Context::input(env,peerchat::mailbox::serializeBinding(binding));
-    }catch(...){if(instance){std::lock_guard<std::mutex> lock(instance->gate);instance->registrationStage=instance->mailboxStage;}if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+    }catch(...){if(instance){std::lock_guard<std::mutex> lock(instance->gate);
+        instance->registrationStage=instance->mailboxStage;
+        // Read-only probe of the exact retained key. Never provision, sign,
+        // rewrite metadata or use an invalid binding to authorize receiving.
+        if(instance->keys&&instance->keyCoordinator&&!instance->keyCoordinator->inspectedKeyId().empty()){
+            try{auto key=instance->keys->openRecipient(instance->keyCoordinator->inspectedKeyId());
+                instance->registrationKeyAccess=key?"available_matching_metadata":"unavailable_or_mismatch";}
+            catch(...){instance->registrationKeyAccess="unavailable_or_mismatch";}
+        }
+    }if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_registrationDiagnostic(JNIEnv* env,jobject,jlong handle){
     try{auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);
         return peerchat::platform::android::Context::input(env,std::string("native_registration_stage=")+instance->registrationStage+
             " native_receive_stage="+instance->mailboxReceiveStage+
+            " native_recipient_key_access="+instance->registrationKeyAccess+
+            " native_recipient_provider=AndroidKeyStore "+instance->mailboxEnvelopeDiagnostic+
+            " "+(instance->keyCoordinator?instance->keyCoordinator->bindingDiagnostic():"binding_inspection=coordinator_unavailable")+
             " native_storage="+(instance->storage?"ready":"missing")+" native_delivery="+(instance->deliveries?"ready":"missing")+
             " native_authenticated_account="+std::to_string(instance->friends.localAccount())+" native_authentication_generation="+std::to_string(instance->friends.generation()));
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
@@ -335,8 +350,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
     auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
     try{
         std::lock_guard<std::mutex> lock(instance->gate);
-        instance->mailboxReceiveStage="envelope_parse";
+        instance->mailboxReceiveStage="envelope_parse";instance->mailboxEnvelopeDiagnostic="received_envelope=parse_pending";
         auto wire=mailboxArgument(env,input,peerchat::mailbox::MaxWire);auto header=peerchat::mailbox::parse(wire).header;
+        instance->mailboxEnvelopeDiagnostic="received_recipient_account="+std::to_string(header.recipientAccount)+
+            " received_recipient_device="+header.recipientDevice+" received_key_id="+header.keyId+
+            " received_sender_device="+header.senderDevice;
         instance->mailboxReceiveStage="providers";mailboxProviders(*instance);
         instance->mailboxReceiveStage="sender_authorization";
         auto contact=mailboxContact(*instance,header.senderDevice,header.senderAccount);

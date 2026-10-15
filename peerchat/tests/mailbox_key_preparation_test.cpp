@@ -2,6 +2,7 @@
 #include "../platform/sql_key_registry.hpp"
 #include "../platform/windows_recipient_key.hpp"
 #include "../mailbox_key_coordinator.hpp"
+#include "../reliable_peer_protocol.hpp"
 #include <iostream>
 using namespace peerchat;
 static void check(bool value){if(!value)throw std::runtime_error("Mailbox key preparation assertion failed");}
@@ -57,12 +58,53 @@ int main(){try{
     auto binding=coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace);
     check(last==Stage::BindingPrepared&&recipient.creates==1);
     coordinator.accepted(binding);
+    // Existing device approval persists contacts in message Storage, not the
+    // separate mailbox registry. Exact protected bytes must remain unchanged.
+    Blob registryBefore;sql.locked([&]{check(sql.read(registryBefore));});
+    Storage contactStore((root/L"contact").wstring());auto contactProfile=contactStore.profile();
+    reliable::PeerProtocolState authenticated;authenticated.hello=true;
+    authenticated.peerId=contactProfile.peerId;authenticated.name=L"Verified isolated contact";
+    reliable::persistAuthenticatedContact(profileStore,authenticated,nullptr,contactProfile.publicKey);
+    Blob registryAfter;sql.locked([&]{check(sql.read(registryAfter));});
+    check(registryBefore==registryAfter);
     auto previousCreates=recipient.creates,previousOpens=recipient.opens;
     auto reopened=coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace);
     check(mailbox::serializeBinding(binding)==mailbox::serializeBinding(reopened));
     check(recipient.creates==previousCreates&&recipient.opens==previousOpens);
     rejects([&]{coordinator.prepare(5,true,makeAlias,Storage::newMessageId,100,trace);});
-    check(last==Stage::BindingReadValidate&&recipient.creates==1);
+    check(last==Stage::BindingAccount&&recipient.creates==1);
+    check(coordinator.bindingDiagnostic().find("binding_account=4")!=std::string::npos);
+    check(coordinator.bindingDiagnostic().find("binding_account_matches=false")!=std::string::npos);
+    check(coordinator.bindingDiagnostic().find("binding_device_matches=true")!=std::string::npos);
+    check(manager.openRecipient(coordinator.inspectedKeyId())->publicKey()==binding.publicKey);
+    check(mailbox::serializeBinding(coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace))==mailbox::serializeBinding(binding));
+    coordinator.resetDiagnostic();check(coordinator.inspectedKeyId().empty());
+    check(coordinator.bindingDiagnostic()=="binding_inspection=not_read");
+    auto retained=manager.snapshot();
+    auto invalid=[&](mailbox::RecipientBinding value,Stage expected){
+        auto changed=retained;changed.front().signedBinding=mailbox::serializeBinding(value);
+        registry.locked([&]{registry.replace(changed);});
+        rejects([&]{coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace);});
+        check(last==expected&&recipient.creates==1);
+        check(manager.openRecipient(coordinator.inspectedKeyId())->publicKey()==binding.publicKey);
+        registry.locked([&]{registry.replace(retained);});
+    };
+    auto altered=binding;altered.keyId=std::string(32,'e');invalid(altered,Stage::BindingKeyId);
+    altered=binding;altered.publicKey.back()^=1;invalid(altered,Stage::BindingPublicKey);
+    altered=binding;altered.generation++;invalid(altered,Stage::BindingGeneration);
+    altered=binding;altered.accountId=5;invalid(altered,Stage::BindingAccount);
+    check(coordinator.bindingDiagnostic().find("binding_signature_valid=false")!=std::string::npos);
+    altered=binding;altered.accountId=5;altered.signature=signer.sign(mailbox::bindingPayload(altered));
+    invalid(altered,Stage::BindingAccount);
+    check(coordinator.bindingDiagnostic().find("binding_signature_valid=true")!=std::string::npos);
+    altered=binding;altered.device=std::string(64,'e');invalid(altered,Stage::BindingDevice);
+    altered=binding;altered.signature.back()^=1;invalid(altered,Stage::BindingSignature);
+    auto malformed=retained;malformed.front().signedBinding.front()^=1;
+    registry.locked([&]{registry.replace(malformed);});
+    rejects([&]{coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace);});
+    check(last==Stage::BindingParse&&recipient.creates==1);
+    registry.locked([&]{registry.replace(retained);});
+    check(mailbox::serializeBinding(coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace))==mailbox::serializeBinding(binding));
     Blob saved;sql.locked([&]{check(sql.read(saved));auto corrupt=saved;corrupt.back()^=1;sql.replace(corrupt);});
     rejects([&]{coordinator.prepare(4,true,makeAlias,Storage::newMessageId,100,trace);});
     check(last==Stage::RegistrySnapshot&&recipient.creates==1);
