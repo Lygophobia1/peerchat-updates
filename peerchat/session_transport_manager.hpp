@@ -70,6 +70,25 @@ public:
         if(changed)plan.relayDueMilliseconds=now;
         demandLiveRoute(key,until,now);return true;
     }
+    // Additive demand adapter for existing authenticated group-control scopes.
+    // The application verifies membership; this owner retains retry/winner policy.
+    bool demandGroupRoute(const ReliableAuthorization& authorization,std::uint64_t until,
+                          std::uint64_t network,std::uint64_t now){
+        if(!authorization.valid()||authorization.scope!=ReliableAuthorizationScope::GroupControl||until<=now||
+           until-now>60000||network<networkRevision_||authorization.expectedRemoteDeviceId==localDeviceId_)return false;
+        auto key=authorization.continuityKey();auto found=plans_.find(key);
+        if(found==plans_.end()){
+            size_t count=0;for(const auto& p:plans_)if(p.second.authorization.scope==ReliableAuthorizationScope::GroupControl)++count;
+            // Match the bounded authenticated input (128 groups x256 devices).
+            // Physical/pending attempts remain capped by the platform executor;
+            // offline early peers must not exclude later eligible memberships.
+            if(count>=128u*256u)return false;
+        }else if(found->second.authorization.rosterGeneration!=authorization.rosterGeneration)return false;
+        auto& plan=plans_[key];bool changed=plan.networkRevision!=network||!plan.relayAvailable;
+        plan.authorization=authorization;plan.networkRevision=network;plan.relayAvailable=true;plan.suspended=false;
+        if(changed)plan.relayDueMilliseconds=now;
+        demandLiveRoute(key,until,now);return true;
+    }
     std::vector<TransportInstanceId> finishArchiveRoute(const ReliableAuthorization& authorization){
         std::vector<TransportInstanceId> retired;
         if(authorization.scope!=ReliableAuthorizationScope::ArchiveControl||!authorization.valid())return retired;
@@ -85,6 +104,17 @@ public:
         for(auto& item:transports_)if(!item.second.closed&&item.second.continuityKey()==key){
             item.second.cancelled=true;retired.push_back(item.second.instance);closeTransport(epoch_,item.second.instance,"archive work finished or cancelled",false);
         }
+        removePeer(key);return retired;
+    }
+    std::vector<TransportInstanceId> finishGroupRoute(const ReliableAuthorization& authorization){
+        std::vector<TransportInstanceId> retired;
+        if(!authorization.valid()||authorization.scope!=ReliableAuthorizationScope::GroupControl)return retired;
+        const auto key=authorization.continuityKey();auto plan=plans_.find(key);
+        if(plan!=plans_.end()&&(plan->second.authorization.scope!=ReliableAuthorizationScope::GroupControl||
+            plan->second.authorization.rosterGeneration!=authorization.rosterGeneration))return retired;
+        for(const auto& row:transports_)if(!row.second.closed&&row.second.continuityKey()==key&&
+            (row.second.authorization.scope!=ReliableAuthorizationScope::GroupControl||row.second.authorization.rosterGeneration!=authorization.rosterGeneration))return retired;
+        for(auto& row:transports_)if(!row.second.closed&&row.second.continuityKey()==key){row.second.cancelled=true;retired.push_back(row.second.instance);closeTransport(epoch_,row.second.instance,"group key control complete",false);}
         removePeer(key);return retired;
     }
     std::vector<TransportInstanceId> retireIdleRoutes(std::uint64_t now) {
@@ -152,6 +182,17 @@ public:
             record.route.revision.value==route.revision.value&&record.route.networkRevision==route.networkRevision&&record.route.endpointUtf8==route.endpointUtf8&&
             record.route.kind==route.kind&&record.route.routeClass==route.routeClass&&record.route.sourceUtf8==route.sourceUtf8&&record.route.routeUtf8==route.routeUtf8;
     }
+    bool recognizeGroupControlAttempt(SessionEpoch epoch,TransportInstanceId instance,
+                                     const ReliableAuthorization& authorization,const RouteObservation& route)const{
+        if(epoch!=epoch_||!authorization.valid()||authorization.scope!=ReliableAuthorizationScope::GroupControl||route.networkRevision<networkRevision_)return false;
+        auto found=transports_.find(instance.value);if(found==transports_.end())return false;
+        const auto& record=found->second;const auto& old=record.authorization;
+        return !record.closed&&!record.cancelled&&record.state==TransportState::Connecting&&!record.locallyTrusted&&!record.remoteAccepted&&
+            old.scope==authorization.scope&&old.groupId==authorization.groupId&&old.rosterGeneration==authorization.rosterGeneration&&
+            old.expectedRemoteDeviceId==authorization.expectedRemoteDeviceId&&record.route.revision.value==route.revision.value&&
+            record.route.networkRevision==route.networkRevision&&record.route.endpointUtf8==route.endpointUtf8&&record.route.kind==route.kind&&
+            record.route.routeClass==route.routeClass&&record.route.sourceUtf8==route.sourceUtf8&&record.route.routeUtf8==route.routeUtf8;
+    }
 private:
     // The same lifetime/winner machinery owns both restricted purposes.
     bool registerScopedAttempt(SessionEpoch epoch,TransportInstanceId instance,
@@ -190,6 +231,10 @@ public:
                                                               std::uint64_t currentGeneration) {
         std::vector<TransportInstanceId> closed;
         if (epoch != epoch_ || !ReliableAuthorization::hexId(groupId, 32)) return closed;
+        std::vector<std::string> removedPlans;
+        for(const auto& p:plans_)if(p.second.authorization.scope==ReliableAuthorizationScope::GroupControl&&
+            p.second.authorization.groupId==groupId&&(!currentGeneration||p.second.authorization.rosterGeneration!=currentGeneration))removedPlans.push_back(p.first);
+        for(const auto& key:removedPlans)removePeer(key);
         for (auto& item : transports_) {
             auto& record = item.second;
             if (record.closed || record.authorization.scope != ReliableAuthorizationScope::GroupControl ||
@@ -753,7 +798,7 @@ public:
                 transport.second.matches(item.first)&&transport.second.route.kind==TransportKind::Relay){relayPending=true;break;}
             if(relayPending)continue;
             plan.relayDueMilliseconds=never();
-            result.push_back({plan.authorization.scope==ReliableAuthorizationScope::ArchiveControl?plan.authorization.expectedRemoteDeviceId:item.first,plan.networkRevision,plan.authorization});touch(item.first);
+            result.push_back({plan.authorization.scope!=ReliableAuthorizationScope::Friend?plan.authorization.expectedRemoteDeviceId:item.first,plan.networkRevision,plan.authorization});touch(item.first);
         }
         return result;
     }
