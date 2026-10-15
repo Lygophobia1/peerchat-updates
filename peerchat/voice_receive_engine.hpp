@@ -7,7 +7,9 @@
 #include <map>
 #include <mutex>
 #include <string>
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 namespace peerchat {
 // Reusable receive/mix owner, independent of room semantics and route topology.
@@ -43,7 +45,10 @@ private:
     using Create=decltype(&pc_rx_create);using Destroy=decltype(&pc_rx_destroy);
     using Add=decltype(&pc_rx_source_add);using Remove=decltype(&pc_rx_source_remove);
     using Insert=decltype(&pc_rx_insert);using Pull=decltype(&pc_rx_pull_10ms);using Stats=decltype(&pc_rx_get_source_stats);
-    HMODULE module_=nullptr;pc_rx_engine engine_=0;
+#if defined(_WIN32)
+    HMODULE module_=nullptr;
+#endif
+    pc_rx_engine engine_=0;
     Create create_=nullptr;Destroy destroy_=nullptr;Add add_=nullptr;Remove remove_=nullptr;
     Insert insert_=nullptr;Pull pull_=nullptr;Stats stats_=nullptr;
     std::mutex mutex_;std::map<std::string,Source> sources_;Snapshot counters_;

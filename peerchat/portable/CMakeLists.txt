@@ -9,7 +9,7 @@ endif()
 target_include_directories(peerchat_messaging PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(peerchat_messaging PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
 if(ANDROID)
-    # The pinned existing crypto dependency only. No TLS, media or downloads.
+    # Offline pinned native dependencies; no downloads.
     set(PEERCHAT_DEPENDENCY_ROOT "$ENV{PEERCHAT_DEPENDENCY_ROOT}" CACHE PATH "Shared dependency sources")
     if(NOT PEERCHAT_DEPENDENCY_ROOT)
         set(PEERCHAT_DEPENDENCY_ROOT "C:/Peerchatdep/deps")
@@ -27,13 +27,16 @@ if(ANDROID)
     if(PEERCHAT_STORAGE_TEST_HOOKS)
         target_compile_definitions(peerchat_messaging PRIVATE PEERCHAT_STORAGE_TEST_HOOKS)
     endif()
-    target_link_libraries(peerchat_messaging PRIVATE mbedcrypto)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../android/voice-media" android-media)
+    target_link_libraries(peerchat_messaging PRIVATE mbedcrypto peerchat_android_voice)
+    # JNI exports must be part of the shared object, not an unreferenced archive.
+    target_sources(peerchat_messaging PRIVATE audio_android.cpp)
     # Keep statically linked C++ runtime symbols private to this C ABI library.
     target_link_options(peerchat_messaging PRIVATE "-Wl,--exclude-libs,ALL")
 endif()
-# Explicit source list: shared Storage/Profile only on Android; no Node, Windows
-# platform APIs/Schannel, audio, RTC, or ScreenMedia. Android byte-feed TLS uses
-# the profile's opaque platform provider, never a replacement messaging engine.
+# Explicit Android adapters reuse shared Storage, TLS, calls and media. Node,
+# Windows platform APIs/Schannel and ScreenMedia remain excluded. The profile
+# retains its opaque platform providers and existing messaging owners.
 option(PEERCHAT_PORTABLE_TESTS "Build the host ABI/format regression" ON)
 if(PEERCHAT_PORTABLE_TESTS)
     enable_testing()

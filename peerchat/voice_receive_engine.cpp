@@ -5,15 +5,18 @@
 namespace peerchat {
 namespace {
 std::uint32_t be32(const unsigned char* b){return (std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
+#if defined(_WIN32)
 template<class T> T symbol(HMODULE module,const char* name){
     auto address=GetProcAddress(module,name);T target=nullptr;
     static_assert(sizeof(target)==sizeof(address),"Windows function pointer width");
     std::memcpy(&target,&address,sizeof(target));return target;
 }
+#endif
 }
 VoiceReceiveEngine::~VoiceReceiveEngine(){close();}
 bool VoiceReceiveEngine::open(const std::wstring& path){
     std::lock_guard<std::mutex> guard(mutex_);closeLocked();counters_={};busyPullBlocks_=0;busyInserts_=0;performance_.reset();
+#if defined(_WIN32)
     if(path.size()<3||!(path[1]==L':'||(path[0]==L'\\'&&path[1]==L'\\')))return false;
     module_=LoadLibraryExW(path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
     if(!module_){counters_.lastError=PC_RX_FAILED;return false;}
@@ -22,13 +25,24 @@ bool VoiceReceiveEngine::open(const std::wstring& path){
     BIND(add_,Add,"pc_rx_source_add") BIND(remove_,Remove,"pc_rx_source_remove")
     BIND(insert_,Insert,"pc_rx_insert") BIND(pull_,Pull,"pc_rx_pull_10ms") BIND(stats_,Stats,"pc_rx_get_source_stats")
 #undef BIND
+#elif defined(__ANDROID__) && defined(PEERCHAT_ANDROID_STATIC_RECEIVE)
+    (void)path;
+    create_=&pc_rx_create;destroy_=&pc_rx_destroy;add_=&pc_rx_source_add;remove_=&pc_rx_source_remove;
+    insert_=&pc_rx_insert;pull_=&pc_rx_pull_10ms;stats_=&pc_rx_get_source_stats;
+#else
+    (void)path;counters_.lastError=PC_RX_FAILED;return false;
+#endif
     pc_rx_config config{sizeof(config),PC_RX_DEVICE_PACED,32,100,200};
     counters_.lastError=create_(&config,&engine_);
     if(counters_.lastError!=PC_RX_OK){closeLocked();return false;}return true;
 }
 void VoiceReceiveEngine::closeLocked(){
     if(engine_&&destroy_)destroy_(engine_);
-    engine_=0;sources_.clear();if(module_)FreeLibrary(module_);module_=nullptr;
+    engine_=0;sources_.clear();
+#if defined(_WIN32)
+    if(module_)FreeLibrary(module_);
+    module_=nullptr;
+#endif
 }
 void VoiceReceiveEngine::close(){std::lock_guard<std::mutex> guard(mutex_);closeLocked();}
 bool VoiceReceiveEngine::authorize(const std::string& key,std::uint64_t generation){
