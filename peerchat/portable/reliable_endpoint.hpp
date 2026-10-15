@@ -44,6 +44,7 @@ private:
     session::SessionTransportManager& sessions_;
     delivery::DeliveryManager& deliveries_;
     const reliable::AuthenticatedFriendSnapshot& friends_;
+    const std::uint64_t authenticationGeneration_;
     session::SessionEpoch epoch_;
     session::TransportInstanceId id_;
     std::unique_ptr<TlsSession> tls_;
@@ -186,7 +187,7 @@ public:
             const std::string& expected,session::RouteObservation route,std::uint64_t now,
             std::optional<ArchiveAdmission> archiveAdmission={},TransferReceiver transferReceiver={},std::optional<GroupAdmission> groupAdmission={},std::optional<VoiceAdmission> voiceAdmission={})
         :local_(local),store_(store),sessions_(sessions),deliveries_(deliveries),friends_(friends),
-         epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
+         authenticationGeneration_(friends.generation()),epoch_(epoch),id_(id),tls_(std::move(tls)),observation_(epoch,id,route,expected),
          archive_(std::move(archiveAdmission)),group_(std::move(groupAdmission)),voice_(std::move(voiceAdmission)),transfer_(std::move(transferReceiver)),now_(now),began_(now){
         runtime_.expected=expected;
         protocol::check(tls_&&protocol::id(expected)&&expected!=local.peerId&&authorized()&&
@@ -257,6 +258,23 @@ public:
         if(decision!=reliable::InitialPinDecision::Allowed)return false;
         approve();return true;
     }
+    // Same explicit contact approval used by Windows Node, restricted to the
+    // exact live authenticated DM presentation. Group/archive never create pins.
+    std::optional<std::vector<std::string>> verificationPins(std::uint64_t generation,std::uint64_t now){
+        if(generation!=authenticationGeneration_||archive_||group_||closed_||authenticationExpired(now)||!tls_->ready()||
+           sessions_.attachablePeer(epoch_,id_)!=std::optional<std::string>{runtime_.expected})return {};
+        auto key=tls_->remotePublicKey();auto known=contacts();
+        if(friends_.initialPin(&runtime_,true,runtime_.expected,generation,&key,known)!=reliable::InitialPinDecision::HistoricalPin)return {};
+        const auto account=friends_.accountFor(runtime_.peerId);std::vector<std::string> pins;
+        for(const auto& pair:known)if(pair.second.verified&&friends_.accountFor(pair.first)==account&&
+            Storage::publicKeyId(pair.second.publicKey)==pair.first)pins.push_back(pair.first);
+        protocol::check(!pins.empty()&&pins.size()<=32);return pins;
+    }
+    bool verifyPresented(std::uint64_t generation,const std::string& fingerprint,bool accepted,std::uint64_t now){
+        if(!verificationPins(generation,now)||fingerprint!=runtime_.peerId)return false;
+        now_=now;if(!accepted){close(false);return true;}
+        approve();return true;
+    }
     void pump(){
         if(group_){
             if(!ready()||output_.size()>MaxOutput/2)return;
@@ -279,7 +297,7 @@ public:
         protocol::Writer frame(protocol::FileTransfer);frame.data=bytes;packet(frame);return true;
     }
     Blob takeOutput(){
-        if((archive_||group_)&&!authorized()){close(false);return {};}
+        if(!authorized()){close(false);return {};}
         const auto continuity=group_?group_->scope.continuityKey():archive_?archive_->scope.continuityKey():runtime_.expected;
         if(!closed_&&sessions_.attachablePeer(epoch_,id_)!=std::optional<std::string>{continuity}){close(false);return {};}
         if(group_&&tls_->ready()&&!groupKeyCurrent()){close(false);return {};}
