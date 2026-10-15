@@ -106,6 +106,10 @@ public:
     std::uint64_t archiveHistoryCount(const std::string& conversation,std::uint64_t after,std::uint64_t through);
     Blob transferJournal(const std::string& device);
     void saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next);
+    // Supplemental immutable encrypted-group-attachment staging only. Uses the
+    // existing protected object store, never the legacy transfer journal format.
+    Blob groupAttachmentStaging(const std::string& device);
+    void saveGroupAttachmentStaging(const std::string& device,const Blob& expected,const Blob& next);
     void saveArchiveSyncState(const std::string& contextId,const Blob& expected,const Blob& next);
     Blob attachmentMetadata(const std::string& id);
     void saveAttachmentMetadata(const std::string& id,const Blob& expected,const Blob& record);

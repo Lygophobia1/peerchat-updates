@@ -411,6 +411,16 @@ void Storage::saveTransferJournal(const std::string& device,const Blob& expected
 Blob Storage::attachmentMetadata(const std::string& id){
     require(identifier(id,32),"Invalid attachment identity");return impl_->get("attachment-history/v1/"+id);
 }
+Blob Storage::groupAttachmentStaging(const std::string& device){
+    require(identifier(device),"Invalid staging device");return impl_->get("group-attachment-staging/v1/"+device);
+}
+void Storage::saveGroupAttachmentStaging(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid group attachment staging");
+    Transaction transaction(impl_->sql);Secret previous{groupAttachmentStaging(device)};
+    require(previous.data==expected,"Group attachment staging changed concurrently");
+    if(previous.data!=next)impl_->put("group-attachment-staging/v1/"+device,next);
+    transaction.commit();
+}
 void Storage::saveAttachmentMetadata(const std::string& id,const Blob& expected,const Blob& record){
     require(identifier(id,32)&&!record.empty()&&record.size()<=16384,"Invalid attachment metadata");
     Transaction transaction(impl_->sql);

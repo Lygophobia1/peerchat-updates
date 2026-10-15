@@ -263,6 +263,17 @@ recovery, offline announcements, group attachment UI and plaintext completion
 receipts remain required before opening this gate. The earlier dev.154 results
 below remain the negotiated DM pipeline baseline, not group feature acceptance.
 
+Protected immutable staging is now available through a bounded supplemental
+object in the existing profile-protected store, with no message schema or
+legacy transfer-journal format change. It retains the original Unicode name,
+attachment binding, AES key/nonce prefix, digests and opaque source token.
+An existing object's key, nonce, binding, token and expiry cannot be rewritten
+in place. Actual process exit and reopen recover exact plaintext; stale writes,
+device substitution and corrupted protected data fail closed. Source ciphertext
+must still be reopened and verified before resume. A crash between ciphertext
+sealing and staging commit is not an announced or uploadable attachment; complete
+intent/orphan recovery remains an integration gate.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with
