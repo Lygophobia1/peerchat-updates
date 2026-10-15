@@ -20,6 +20,14 @@ the existing ProfileBridge/MailboxBridge APIs. It separates recipient-registrati
 failure from outbound/receipt servicing without changing encryption or routing.
 Those changes belong to that branch and have not been copied or edited here.
 
+Refreshed inspection: parallel HEAD `d67b0e5`, with a clean working tree. Its
+`docs/ANDROID_GROUPS_VOICE_INTEGRATION.md` records the shared ownership boundaries.
+Mailbox isolation is now committed as `d6c3a64`; `158d317` adds a build-only
+Android Opus foundation, not a voice runtime. No new shared group C ABI or
+attachment format is published there. Do not copy or reimplement those commits.
+Its independent dev.156 APK remains a qualified mailbox candidate, not proof
+that physical Android messaging or recipient registration is repaired.
+
 That task plans secure Android group text/application integration followed by
 voice. A concrete new shared group/voice C ABI was not yet published. Therefore
 this milestone does not define competing JNI, Kotlin, group-session or voice
@@ -120,6 +128,15 @@ client-integration gate; reaching the bound must reject rather than fill disk.
 This adapter requires no core C export/JNI or Android group interface change.
 Any later application/history bridge remains subject to the checks above.
 
+Its maintenance operation is Windows-private and caller-budgeted: remove
+only expired, unreferenced packets after protected-record/signature/path ownership
+verification. Preserve active staging references, corrupt/unrecognized files and
+all actual attachment copies. It must add no timer, thread or transfer owner.
+Checkpoint `29566b3` implements this bounded scan, verifying and deleting the same
+opened file handle. Multiple hard links, corrupt protection and unknown files
+are retained. The caller must supply successfully loaded active/staging object
+references; this helper is not permission to clear metadata after a failed load.
+
 Existing PCGE, DM/mailbox, archive and file-transfer wire formats are unchanged.
 No numeric peer-message type, existing C export or JNI signature is changed.
 Old clients must never receive a key envelope as ordinary group text. New
@@ -166,6 +183,19 @@ allocated yet, and no live Pi installation is authorized by this manifest.
 - `3c4068e`: explicit canonical base64url discovery and actual TLS decode check.
 - `5a4c2d8`: protected exact packet preparation, fresh-process recovery without
   crypto, key-rotation stability, single file owner and bounded storage.
+- `8d97e69`: cascading cache-key ownership compatible with older parent cleanup
+  SQL; incompatible pre-release schemas rejected without mutation.
+- `c8701f2`: exact-packet recovery and cache schema compatibility manifest.
+- `29566b3`: caller-budgeted expiration of verified unreferenced preparation
+  packets; active, unexpired, corrupt, hard-linked and unknown files preserved.
+
+Latest focused evidence: `build/tests/attachment-keys-d2075706b18a48d884a04d2d3b8bc807`.
+The real HPKE/registry, exact fresh-process preparation recovery and managed
+durable-cache interoperability suite passed for both cross-account and explicit
+same-account devices. New maintenance assertions verify one-entry scan budgets,
+protected expired references, unexpired records, hard-link refusal, corruption
+retention and unchanged ciphertext/staging. Native compilation uses warnings as
+errors; the managed fixture build retains 15 existing warnings and zero errors.
 
 Current evidence includes actual shipping HPKE/CNG and protected-registry tests, native to managed
 durable-cache to native decryption, authoritative key lookup/publication,
