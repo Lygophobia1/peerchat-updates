@@ -170,8 +170,12 @@ class FileSink final:public Sink {
     bool durable_=false;
     Blob token_;
 public:
-    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr,bool durable=false,bool originalName=false):durable_(durable){
-        require(protocol::id(metadata.id,32)&&safeName(metadata.name));
+    FileSink(const std::wstring& directory,const Metadata& metadata,CleanupJournal* journal=nullptr,bool durable=false,bool originalName=false,const std::string& selectedBasename={}):durable_(durable){
+        require(protocol::id(metadata.id,32)&&safeName(metadata.name)&&(!originalName||selectedBasename.empty())&&(selectedBasename.empty()||safeName(selectedBasename)));
+        if(!selectedBasename.empty()){
+            auto selected=unicode::decode(selectedBasename),partialName=unicode::decode(metadata.id+".peerchat-part");
+            require(CompareStringOrdinal(selected.c_str(),-1,partialName.c_str(),-1,TRUE)!=CSTR_EQUAL);
+        }
         // Hold the destination directory without delete sharing. Reject junctions
         // and symlinks; never derive a destination directory from remote metadata.
         directory_=CreateFileW(directory.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
@@ -195,12 +199,18 @@ public:
             }
             CloseHandle(directory_);directory_=child;
         }
-        final_=(base/(originalName?unicode::decode(metadata.name):unicode::decode(metadata.id)+L"-"+unicode::decode(metadata.name))).wstring();
+        final_=(base/(!selectedBasename.empty()?unicode::decode(selectedBasename):originalName?unicode::decode(metadata.name):unicode::decode(metadata.id)+L"-"+unicode::decode(metadata.name))).wstring();
         partial_=(base/(unicode::decode(metadata.id)+L".peerchat-part")).wstring();
+        if(!selectedBasename.empty()){
+            auto attributes=GetFileAttributesW(final_.c_str());
+            if(attributes!=INVALID_FILE_ATTRIBUTES||GetLastError()!=ERROR_FILE_NOT_FOUND){CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;throw std::runtime_error("Selected attachment destination already exists or is unavailable");}
+        }
         handle_=CreateFileW(partial_.c_str(),GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle_==INVALID_HANDLE_VALUE){if(!journal_.empty())DeleteFileW(journal_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;if(originalName)RemoveDirectoryW(base.c_str());throw std::runtime_error("Cannot create partial file");}
         try{if(journal)journal_=journal->record(metadata.id,partial_,handle_);
-            protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(partial_).wstring());token.text(std::filesystem::absolute(final_).wstring());fileIdentity(token,handle_,false);token_=std::move(token.data);
+            protocol::Writer token(protocol::FileTransfer);token.text(std::filesystem::absolute(partial_).wstring());token.text(std::filesystem::absolute(final_).wstring());fileIdentity(token,handle_,false);
+            if(!selectedBasename.empty()){token.string("PeerChat/SelectedFileName/v1");token.string(metadata.name);token.string(selectedBasename);}
+            token_=std::move(token.data);
         }
         catch(...){CloseHandle(handle_);handle_=INVALID_HANDLE_VALUE;DeleteFileW(partial_.c_str());CloseHandle(directory_);directory_=INVALID_HANDLE_VALUE;if(originalName)RemoveDirectoryW(base.c_str());throw;}
     }
@@ -232,7 +242,7 @@ public:
         require(protocol::id(d.metadata.id,32)&&safeName(d.metadata.name));
         bool legacy=f.filename()==unicode::decode(d.metadata.id+"-"+d.metadata.name);
         bool original=p.parent_path().filename()==unicode::decode(d.metadata.id)+L".peerchat-received"&&f.filename()==unicode::decode(d.metadata.name);
-        require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part"&&(legacy||original));
+        require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part");
         auto sink=std::unique_ptr<FileSink>(new FileSink());
         sink->durable_=true;sink->partial_=partial;sink->final_=final;sink->token_=d.location;
         sink->directory_=CreateFileW(p.parent_path().c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
@@ -245,7 +255,10 @@ public:
             sink->handle_=CreateFileW(final.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
             require(sink->handle_!=INVALID_HANDLE_VALUE);sink->committed_=true;
         }
-        checkIdentity(r,sink->handle_,false);r.end();LARGE_INTEGER size{};require(GetFileSizeEx(sink->handle_,&size)&&size.QuadPart>=0&&static_cast<std::uint64_t>(size.QuadPart)>=d.done);
+        checkIdentity(r,sink->handle_,false);
+        if(r.remaining()){require(r.string()=="PeerChat/SelectedFileName/v1"&&r.string()==d.metadata.name);auto selected=r.string();auto name=unicode::decode(selected),part=unicode::decode(d.metadata.id+".peerchat-part");require(safeName(selected)&&f.filename()==name&&CompareStringOrdinal(name.c_str(),-1,part.c_str(),-1,TRUE)!=CSTR_EQUAL);}
+        else require(legacy||original);
+        r.end();LARGE_INTEGER size{};require(GetFileSizeEx(sink->handle_,&size)&&size.QuadPart>=0&&static_cast<std::uint64_t>(size.QuadPart)>=d.done);
         if(immutableComplete)require(static_cast<std::uint64_t>(size.QuadPart)==d.metadata.size);
         if(sink->committed_)require(static_cast<std::uint64_t>(size.QuadPart)==d.metadata.size);
         else{LARGE_INTEGER end{};end.QuadPart=d.done;require(SetFilePointerEx(sink->handle_,end,nullptr,FILE_BEGIN)&&SetEndOfFile(sink->handle_)&&FlushFileBuffers(sink->handle_));}

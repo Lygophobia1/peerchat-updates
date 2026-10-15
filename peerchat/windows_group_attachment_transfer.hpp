@@ -110,19 +110,27 @@ class ReceiverFinalizer {
  std::wstring outputPath_;Blob outputToken_;
  void complete(){plaintext_->commit();verified_=true;plaintext_.reset();ciphertext_.reset();}
 public:
- ReceiverFinalizer(CacheStateStore& store,const transfer::DurableState& completed,const Manifest& manifest,const std::wstring& destination):ReceiverFinalizer(store,std::make_unique<CompletedCipherSource>(completed,manifest),manifest,destination){}
+ ReceiverFinalizer(CacheStateStore& store,const transfer::DurableState& completed,const Manifest& manifest,const std::wstring& destination,const std::string& selectedBasename={}):ReceiverFinalizer(store,std::make_unique<CompletedCipherSource>(completed,manifest),manifest,destination,selectedBasename){}
  // Sender preview uses its exact protected StagedCipherSource. The caller
  // supplies immutable local ciphertext; both full hashes still gate commit.
- ReceiverFinalizer(CacheStateStore& store,std::unique_ptr<transfer::Source> ciphertext,const Manifest& manifest,const std::wstring& destination):manifest_(manifest),ciphertext_(std::move(ciphertext)){
-  manifest_.validate();protocol::check(ciphertext_&&ciphertext_->size()==manifest_.cipherSize()&&ciphertext_->name()=="ciphertext.peerchat");auto token=store.outputToken(manifest_);transfer::Metadata metadata{manifest_.binding.attachment,manifest_.name,manifest_.size,manifest_.plainDigest};
+ ReceiverFinalizer(CacheStateStore& store,std::unique_ptr<transfer::Source> ciphertext,const Manifest& manifest,const std::wstring& destination,const std::string& selectedBasename={}):manifest_(manifest),ciphertext_(std::move(ciphertext)){
+  manifest_.validate();protocol::check(ciphertext_&&ciphertext_->size()==manifest_.cipherSize()&&ciphertext_->name()=="ciphertext.peerchat"&&(selectedBasename.empty()||transfer::safeName(selectedBasename)));auto token=store.outputToken(manifest_);transfer::Metadata metadata{manifest_.binding.attachment,manifest_.name,manifest_.size,manifest_.plainDigest};
+  const auto expected=std::filesystem::absolute(std::filesystem::path(destination)/unicode::decode(selectedBasename.empty()?metadata.id+"-"+metadata.name:selectedBasename));
   if(token.empty()){
-   plaintext_=std::make_unique<transfer::windows::FileSink>(destination,metadata,&store.outputCleanup(),true);
+   plaintext_=std::make_unique<transfer::windows::FileSink>(destination,metadata,&store.outputCleanup(),true,false,selectedBasename);
    try{store.rememberOutput(manifest_,plaintext_->resumeToken());}catch(...){plaintext_->discard();throw;}
   }else{
+   // Reject a changed chooser target before reopening a partial: that reopen
+   // may truncate unverified bytes back to its last durable cursor.
+   protocol::Reader intent(token);protocol::check(intent.type()==protocol::FileTransfer);intent.text();protocol::check(std::filesystem::path(intent.text())==expected);for(unsigned n=0;n<3;++n)intent.number();
+   if(selectedBasename.empty())protocol::check(!intent.remaining());
+   else protocol::check(intent.remaining()&&intent.string()=="PeerChat/SelectedFileName/v1"&&intent.string()==metadata.name&&intent.string()==selectedBasename);
+   intent.end();
    transfer::DurableState output;output.metadata=metadata;output.location=token;output.done=metadata.size;
    try{plaintext_=transfer::windows::FileSink::reopen(output,true);recovering_=true;}
    catch(...){output.done=0;plaintext_=transfer::windows::FileSink::reopen(output);}
   }
+  protocol::check(std::filesystem::path(plaintext_->path())==expected);
   outputPath_=plaintext_->path();outputToken_=plaintext_->resumeToken();
  }
  ReceiverFinalizer(const ReceiverFinalizer&)=delete;ReceiverFinalizer& operator=(const ReceiverFinalizer&)=delete;

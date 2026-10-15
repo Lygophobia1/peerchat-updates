@@ -45,6 +45,29 @@ int main(int argc,char** argv){try{
         check(std::filesystem::path(sink.path())==root/(legacy.id+"-old.bin"),"legacy cache path changed");
     }
     check(windows::FileSink::reopen(oldState,true)->path()==(root/(legacy.id+"-old.bin")).wstring(),"old token failed to reopen");
+    auto selected=Metadata{std::string(32,'1'),"cat.png",4,{}};
+    auto selectedPath=root/L"cat2.png";
+    DurableState chosen;chosen.metadata=selected;chosen.done=4;
+    {
+        windows::FileSink sink(root.wstring(),selected,nullptr,true,false,"cat2.png");
+        check(sink.path()==selectedPath.wstring(),"chooser basename was not honored");
+        sink.append(payload);sink.flush();chosen.location=sink.resumeToken();
+    }
+    check(std::filesystem::exists(root/(selected.id+".peerchat-part"))&&!std::filesystem::exists(selectedPath),"selected partial lost or prematurely committed");
+    {auto resumed=windows::FileSink::reopen(chosen);check(resumed->path()==selectedPath.wstring(),"selected partial reopened at wrong path");resumed->commit();}
+    check(read(selectedPath)==payload&&windows::FileSink::reopen(chosen,true)->path()==selectedPath.wstring(),"selected completed file did not survive restart");
+    rejected([&]{windows::FileSink sink(root.wstring(),Metadata{std::string(32,'2'),"other.png",4,{}},nullptr,true,false,"cat2.png");});
+    check(read(selectedPath)==payload,"existing selected file overwritten");
+    auto changedOriginal=chosen;changedOriginal.metadata.name="other.png";rejected([&]{windows::FileSink::reopen(changedOriginal,true);});
+    auto changedId=chosen;changedId.metadata.id=std::string(32,'2');rejected([&]{windows::FileSink::reopen(changedId,true);});
+    for(auto name:{"../cat2.png","CON.png","folder\\cat2.png","trailing. ","NUL","cat2.png/"})
+        rejected([&]{windows::FileSink sink(root.wstring(),Metadata{std::string(32,'3'),"cat.png",4,{}},nullptr,true,false,name);});
+    rejected([&]{windows::FileSink sink(root.wstring(),Metadata{std::string(32,'3'),"cat.png",4,{}},nullptr,true,false,(std::string(32,'3')+".PEERCHAT-PART"));});
+    auto selectedRace=Metadata{std::string(32,'4'),"cat.png",4,{}};
+    {windows::FileSink sink(root.wstring(),selectedRace,nullptr,true,false,"late.png");sink.append(payload);write(root/L"late.png",Blob{'o','l','d'});rejected([&]{sink.commit();});check(read(root/L"late.png")==Blob({'o','l','d'}),"selected commit overwrote race winner");}
+    auto partialCollision=Metadata{std::string(32,'5'),"cat.png",4,{}};
+    write(root/(partialCollision.id+".peerchat-part"),payload);rejected([&]{windows::FileSink sink(root.wstring(),partialCollision,nullptr,true,false,"fresh.png");});
+    check(read(root/(partialCollision.id+".peerchat-part"))==payload,"partial collision altered existing file");
     for(auto name:{"../escape.rar","CON.rar","folder\\escape.rar","trailing. "}){
         Metadata invalid{std::string(32,'d'),name,4,{}};rejected([&]{windows::FileSink sink(root.wstring(),invalid,nullptr,true,true);});
     }
@@ -60,6 +83,6 @@ int main(int argc,char** argv){try{
     auto other=Metadata{std::string(32,'e'),"existing.rar",4,{}};auto conflict=root/(other.id+".peerchat-received");std::filesystem::create_directory(conflict);
     write(conflict/L"existing.rar",payload);rejected([&]{windows::FileSink sink(root.wstring(),other,nullptr,true,true);});
     check(read(conflict/L"existing.rar")==payload,"conflict overwrote existing content");
-    std::cout<<"PASS DM original basename, duplicate isolation, durable reopen, legacy token, traversal/reserved-name rejection and no overwrite\n";
+    std::cout<<"PASS DM original basename and selected exact basename, duplicate isolation, durable reopen, legacy token, unsafe-name rejection and no overwrite\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
