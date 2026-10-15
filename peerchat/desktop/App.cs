@@ -273,7 +273,10 @@ public partial class DesktopApplication {
                 var local=roster.Members.FirstOrDefault(value=>value.AccountId==service.AccountId&&value.PeerId==localPeer&&value.State=="member");
                 if(local==null)continue;
                 bool distributor=roster.DistributorPeerId==localPeer;
-                foreach(var remote in roster.Members.Where(value=>value.State=="member"&&value.PeerId!=localPeer&&(distributor||value.PeerId==roster.DistributorPeerId))){
+                var alternatives=roster.Members.Where(value=>value.State=="member"&&value.AccountId!=service.AccountId&&value.PeerId!=localPeer&&value.PeerId!=roster.DistributorPeerId).OrderBy(value=>value.PeerId,StringComparer.Ordinal).ToArray();
+                var historyPeers=new HashSet<string>(StringComparer.Ordinal);
+                if(alternatives.Length>0){int start=(int)((DateTime.UtcNow.Ticks/TimeSpan.TicksPerMinute)%alternatives.Length);for(int n=0;n<Math.Min(2,alternatives.Length);n++)historyPeers.Add(alternatives[(start+n)%alternatives.Length].PeerId);}
+                foreach(var remote in roster.Members.Where(value=>value.State=="member"&&value.AccountId!=service.AccountId&&value.PeerId!=localPeer&&(distributor||value.PeerId==roster.DistributorPeerId||historyPeers.Contains(value.PeerId)))){
                     string requestKey=roster.GroupId+":"+roster.RosterGeneration+":"+remote.PeerId;
                     if(groupControlRequested.Add(requestKey)&&!core.BeginGroupControl(roster.GroupId,remote.AccountId,remote.PeerId,session))groupControlRequested.Remove(requestKey);
                 }
@@ -4484,7 +4487,7 @@ public partial class DesktopApplication {
         var viewer=Find<ScrollViewer>("MessageScroll");
         if(model.Groups){
             var group=model.SelectedGroup;if(group==null||group.HistoryLoading||group.HistoryExhausted)return;
-            long before=group.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
+            long before=group.Messages.Where(message=>message.IsGroupMessage&&message.Data.sequence>0).OrderBy(message=>message.Data.logical).ThenBy(message=>message.Data.sender,StringComparer.Ordinal).ThenBy(message=>message.Data.id,StringComparer.Ordinal).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).First();
             group.HistoryLoading=true;historyScrollKey="group:"+group.Id;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.GroupHistory(group.Id,before);return;
         }
         var conversation=model.Selected;if(conversation==null||conversation.HistoryLoading||conversation.HistoryExhausted)return;

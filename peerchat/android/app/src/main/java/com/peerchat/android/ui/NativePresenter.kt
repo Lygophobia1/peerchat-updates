@@ -550,7 +550,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             UiAction.BeginOlder,UiAction.Older -> {
                 val group=mutable.value.selectedId?.removePrefix("group:")?.let{id->current.groups.find{it.id==id}}
-                if(group!=null){viewModelScope.launch{try{backend.groupHistory(group.id,group.messages.minOfOrNull{it.sequence}?:Long.MAX_VALUE)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history page unavailable.")}};return}
+                if(group!=null){viewModelScope.launch{try{backend.groupHistory(group.id,groupHistoryBefore(group.messages))}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history page unavailable.")}};return}
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 val account=current.accountId
                 if(mutable.value.olderLoading)return
