@@ -24,13 +24,39 @@ inline void hash(transfer::Hash& h,const Blob& bytes){for(size_t off=0;off<bytes
 inline Blob read(transfer::Source& source,std::uint64_t offset,size_t count){Blob result;while(result.size()<count){auto part=source.read(offset+result.size(),std::min<size_t>(transfer::ChunkBytes,count-result.size()));protocol::check(!part.empty()&&part.size()<=count-result.size());result.insert(result.end(),part.begin(),part.end());}return result;}
 inline void append(transfer::Sink& sink,const Blob& bytes){for(size_t off=0;off<bytes.size();off+=transfer::ChunkBytes)sink.append(Blob(bytes.begin()+off,bytes.begin()+std::min(bytes.size(),off+transfer::ChunkBytes)));}
 struct PlainBuffer {Blob bytes;~PlainBuffer(){platform::group_crypto::wipe(bytes.data(),bytes.size());}};
+// One header/block/final-flush step per call; borrowed I/O/hash owners must
+// outlive this codec. No socket, journal, retry loop or background worker.
+class Sealer {
+ transfer::Source& source_;transfer::Sink& ciphertext_;transfer::Hash& plainHash_;transfer::Hash& cipherHash_;
+ Manifest manifest_;std::uint64_t index_=0;bool header_=false,ready_=false,taken_=false,failed_=false;
+public:
+ Sealer(transfer::Source& source,transfer::Sink& ciphertext,Binding binding,transfer::Hash& plainHash,transfer::Hash& cipherHash):source_(source),ciphertext_(ciphertext),plainHash_(plainHash),cipherHash_(cipherHash){
+  try{manifest_.binding=std::move(binding);manifest_.name=source.name();manifest_.size=source.size();manifest_.key=platform::group_crypto::random(32);manifest_.prefix=platform::group_crypto::random(4);manifest_.validate();}catch(...){ciphertext_.discard();throw;}
+ }
+ Sealer(const Sealer&)=delete;Sealer& operator=(const Sealer&)=delete;
+ ~Sealer(){if(!taken_&&!failed_)try{ciphertext_.discard();}catch(...){}}
+ std::uint64_t processedBytes()const{return std::min(manifest_.size,index_*BlockBytes);}
+ std::uint64_t size()const{return manifest_.size;}
+ bool step(){
+  protocol::check(!taken_&&!failed_);if(ready_)return true;
+  try{
+   if(!header_){auto bytes=header(manifest_);hash(cipherHash_,bytes);append(ciphertext_,bytes);header_=true;return false;}
+   if(index_<manifest_.blocks()){
+    auto count=static_cast<size_t>(std::min<std::uint64_t>(BlockBytes,manifest_.size-index_*BlockBytes));PlainBuffer plain{read(source_,index_*BlockBytes,count)};hash(plainHash_,plain.bytes);Blob encrypted,tag(16);
+    protocol::check(platform::group_crypto::gcm(true,manifest_.key,aad(manifest_,index_,count),nonce(manifest_,index_),plain.bytes,encrypted,tag));encrypted.insert(encrypted.end(),tag.begin(),tag.end());hash(cipherHash_,encrypted);append(ciphertext_,encrypted);++index_;return false;
+   }
+   manifest_.plainDigest=plainHash_.finish();manifest_.cipherDigest=cipherHash_.finish();ciphertext_.flush();ready_=true;return true;
+  }catch(...){failed_=true;ciphertext_.discard();throw;}
+ }
+ void cancel(){protocol::check(!taken_);failed_=true;ciphertext_.discard();}
+ // Data is flushed, not renamed. The caller must durably retain this key,
+ // immutable binding and owned sink token BEFORE committing the ciphertext.
+ Manifest takeManifest(){protocol::check(ready_&&!failed_&&!taken_);taken_=true;return std::move(manifest_);}
+};
+// Synchronous codec convenience. Production preparation uses bounded Sealer
+// steps and protected staging before rename, not this whole-file helper.
 inline Manifest seal(transfer::Source& source,transfer::Sink& ciphertext,Binding binding,transfer::Hash& plainHash,transfer::Hash& cipherHash){
- Manifest m;
- try{m.binding=std::move(binding);m.name=source.name();m.size=source.size();m.key=platform::group_crypto::random(32);m.prefix=platform::group_crypto::random(4);m.validate();auto h=header(m);hash(cipherHash,h);append(ciphertext,h);
-  for(std::uint64_t index=0;index<m.blocks();++index){auto offset=index*BlockBytes;auto count=static_cast<size_t>(std::min<std::uint64_t>(BlockBytes,m.size-offset));PlainBuffer plain{read(source,offset,count)};hash(plainHash,plain.bytes);Blob encrypted,tag(16);
-   bool ok=platform::group_crypto::gcm(true,m.key,aad(m,index,count),nonce(m,index),plain.bytes,encrypted,tag);protocol::check(ok);encrypted.insert(encrypted.end(),tag.begin(),tag.end());hash(cipherHash,encrypted);append(ciphertext,encrypted);
-  }m.plainDigest=plainHash.finish();m.cipherDigest=cipherHash.finish();ciphertext.flush();ciphertext.commit();return m;
- }catch(...){ciphertext.discard();throw;}
+ try{Sealer sealer(source,ciphertext,std::move(binding),plainHash,cipherHash);while(!sealer.step()){}auto manifest=sealer.takeManifest();ciphertext.commit();return manifest;}catch(...){ciphertext.discard();throw;}
 }
 inline void open(transfer::Source& ciphertext,transfer::Sink& plaintext,const Manifest& m,transfer::Hash& plainHash,transfer::Hash& cipherHash){
  try{m.validate();protocol::check(ciphertext.size()==m.cipherSize());auto h=read(ciphertext,0,HeaderBytes);protocol::check(h==header(m));hash(cipherHash,h);std::uint64_t position=HeaderBytes;

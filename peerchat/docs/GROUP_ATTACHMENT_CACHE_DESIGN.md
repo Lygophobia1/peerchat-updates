@@ -368,6 +368,13 @@ ledger, ownership, revocation and actual process-kill recovery suite passes.
 
 ### Remaining client integration sequence
 
+The incremental `Sealer` now performs one header, 32-KiB plaintext block, or
+final hash/flush step per call. It owns no socket, journal or worker. Completion
+returns a single-use manifest without renaming the ciphertext, allowing protected
+key persistence first. Empty, boundary and 1-MiB cases, cancellation, abandonment,
+exact Unicode/content recovery, protected staging, and signed group-body tests
+pass with CNG and portable group crypto. Production scheduling is not wired yet.
+
 Prepare encrypted objects in bounded worker steps, not a whole-file blocking
 operation on the profile worker. Flush complete ciphertext and durably protect
 its manifest and owned sink token before the final rename. Resume the same
