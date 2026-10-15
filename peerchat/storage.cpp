@@ -771,10 +771,16 @@ void Storage::queueGroupKeyHandoff(const GroupKeyHandoff& handoff){
     Statement insert(impl_->sql,"INSERT INTO group_key_outbox(id,group_id,key_generation,recipient_peer,b) VALUES(?,?,?,?,?)");insert.text(1,handoff.id);insert.text(2,handoff.groupId);insert.number(3,static_cast<std::int64_t>(handoff.keyGeneration));insert.text(4,handoff.recipientPeerId);insert.blob(5,protectedRecord);insert.row();transaction.commit();
 }
 std::vector<GroupKeyHandoff> Storage::pendingGroupKeyHandoffs(const std::string& recipientPeerId,int limit){
+    return pendingGroupKeyHandoffs(recipientPeerId,"",0,limit);
+}
+std::vector<GroupKeyHandoff> Storage::pendingGroupKeyHandoffs(const std::string& recipientPeerId,const std::string& group,std::uint64_t generation,int limit){
     require(identifier(recipientPeerId)&&limit>0&&limit<=256,"Invalid group key outbox request");
-    Statement statement(impl_->sql,"SELECT id,b FROM group_key_outbox WHERE recipient_peer=? ORDER BY rowid LIMIT ?");statement.text(1,recipientPeerId);statement.number(2,limit);
+    require((group.empty()&&!generation)||(identifier(group,32)&&generation>0&&generation<=INT64_MAX),"Invalid scoped group key outbox request");
+    Statement statement(impl_->sql,group.empty()?"SELECT id,b FROM group_key_outbox WHERE recipient_peer=? ORDER BY rowid LIMIT ?":"SELECT id,b FROM group_key_outbox WHERE recipient_peer=? AND group_id=? AND key_generation=? ORDER BY rowid LIMIT ?");
+    statement.text(1,recipientPeerId);if(group.empty())statement.number(2,limit);else{statement.text(2,group);statement.number(3,generation);statement.number(4,limit);}
     std::vector<GroupKeyHandoff> pending;
     while(statement.row()){std::string id=statement.text(0);Secret plain{impl_->protect(statement.bytes(1),"PeerChat.v1/group-key-handoff/"+id+"/"+recipientPeerId,false)};Reader reader(plain.data);GroupKeyHandoff offer;offer.id=reader.string();offer.groupId=reader.string();offer.serverGroupId=reader.string();offer.distributorPeerId=reader.string();offer.recipientPeerId=reader.string();offer.rosterGeneration=reader.number();offer.keyGeneration=reader.number();offer.contentKey=reader.bytes();reader.end();require(offer.id==id&&offer.recipientPeerId==recipientPeerId&&identifier(offer.groupId,32)&&identifier(offer.serverGroupId,32)&&identifier(offer.distributorPeerId)&&offer.contentKey.size()==32,"Stored group key handoff identity mismatch");pending.push_back(std::move(offer));}
+    for(const auto& offer:pending)require(group.empty()||(offer.groupId==group&&offer.keyGeneration==generation),"Stored group key handoff scope mismatch");
     return pending;
 }
 void Storage::acknowledgeGroupKeyHandoff(const std::string& id,const std::string& recipientPeerId){

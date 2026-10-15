@@ -160,6 +160,9 @@ public:
                                                          int limit = 64) {
         return storage_.pendingGroupKeyHandoffs(destination, limit);
     }
+    std::vector<GroupKeyHandoff> pendingGroupKeyHandoffs(const std::string& destination,const std::string& group,std::uint64_t generation,int limit=64){
+        return storage_.pendingGroupKeyHandoffs(destination,group,generation,limit);
+    }
 
     bool submittedMessage(const std::string& destination, const std::string& messageId,
                           session::TransportInstanceId instance) {
