@@ -39,6 +39,8 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
     private var phase="not_started"
     var diagnostic="Not serviced"
         private set
+    var inboundDiagnostic="receive=not_serviced"
+        private set
     var needsContinuation=false
         private set
     private fun encoded(value: ByteArray) = Base64.encodeToString(value, Base64.NO_WRAP)
@@ -53,7 +55,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         diagnostic="stage=$phase state="+safeMailboxState(reply.optString("state"))
         return reply
     }
-    fun reset() { registeredBinding = null; receiptCursor = ""; needsContinuation=false;diagnostic="Not serviced" }
+    fun reset() { registeredBinding = null; receiptCursor = ""; needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
     // Completion callback is emitted only after native durable receipt creation
     // AND a real authenticated server acknowledgement. Duplicate native receives
     // still drain their ACK but do not invent another message/notification.
@@ -95,7 +97,8 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         // Only a native null result is isolated. Server/authentication failures
         // and nonzero native acceptance still propagate and fail closed.
         val receiving=registeredBinding!=null
-        var accepted=0;var awaitingVerification=0
+        inboundDiagnostic=if(receiving)"receive=registered" else "receive=blocked_native_registration"
+        var accepted=0;var pendingValidation=0;var imported=0
         var fetchedCount=0
         if(receiving){
             val fetched = request(accounts, "mailbox_fetch", JSONObject())
@@ -104,21 +107,29 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             // Small batches preserve the existing wake deadline; remaining envelopes
             // remain durably server-owned until a later servicing pass.
             fetchedCount=envelopes.length()
+            inboundDiagnostic="receive=fetched fetched=$fetchedCount imported=0 acknowledged=0 pending_native_validation=0"
             for(index in 0 until envelopes.length()) {
                 if(accepted>=4)break
                 val wire = decoded(envelopes.getJSONObject(index).getString("envelope"), 70000)
                 phase="native_envelope_validation";diagnostic="stage=$phase"
                 val result = native.receive(handle, wire)
-                if(result==null){awaitingVerification++;continue} // Unverified/changed/invalid: never ACK, never open a peer to obtain trust.
+                if(result==null){
+                    pendingValidation++
+                    inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
+                    continue // Trust, key, decrypt or storage failure: never ACK or invent trust.
+                }
                 val record = NativeRecord(result, 3)
                 val inserted = record.number().also { require(it in 0..1) } == 1L
                 val receipt = record.bytes(); record.text(); record.text(); record.end()
+                if(inserted)imported++
+                inboundDiagnostic="receive=durable_import_receipt_ready fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
                 val reply = request(accounts, "mailbox_ack", JSONObject(signing.toString()).put("receipt", encoded(receipt)))
                 check(reply.getString("state") == "acknowledged")
                 acknowledged(inserted)
                 accepted++
+                inboundDiagnostic="receive=acknowledged fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
             }
-            android.util.Log.i("PeerChatWake","stage=mailbox_receive_batch fetched=${envelopes.length()} acknowledged=$accepted pending_validation=$awaitingVerification")
+            android.util.Log.i("PeerChatWake","stage=mailbox_receive_batch fetched=${envelopes.length()} acknowledged=$accepted pending_validation=$pendingValidation")
         }
         val reconciled = request(accounts, "mailbox_receipts", JSONObject().put("afterMessageId", receiptCursor))
         check(reconciled.getString("state") == "ready")
@@ -134,7 +145,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         // the last cursor. Native verification/dedupe makes reconciliation safe.
         if (receipts.length() < 64) receiptCursor = ""
         needsContinuation=(accepted>=4&&fetchedCount>accepted)||receipts.length()==64
-        if (!storageAllowed) {diagnostic="stage=complete registered=$receiving outgoing_storage_allowed=false acknowledged=$accepted awaiting_verification=$awaitingVerification"+
+        if (!storageAllowed) {diagnostic="stage=complete registered=$receiving outgoing_storage_allowed=false acknowledged=$accepted pending_native_validation=$pendingValidation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration";return}
         phase="native_pending_uploads";diagnostic="stage=$phase"
         val pending = NativeRecord(checkNotNull(native.pending(handle)), 4)
@@ -165,11 +176,12 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                 if (reply.getString("state") == "stored") check(native.stored(handle, wire) == 0)
             }
         }
-        diagnostic="stage=complete registered=$receiving acknowledged=$accepted awaiting_verification=$awaitingVerification continuation=$needsContinuation"+
+        diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation continuation=$needsContinuation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration"
     }
 }
 
 internal fun safeMailboxState(state:String):String=if(state in setOf("accepted","ready","stored","acknowledged",
     "not_authorized","invalid_timestamp","key_conflict_or_revoked","invalid_generation","unknown_key",
-    "revoked","recipient_unavailable","recipient_disabled","quota_exceeded"))state else "unrecognized_or_missing"
+    "revoked","recipient_unavailable","recipient_disabled","quota_exceeded",
+    "rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature"))state else "unrecognized_or_missing"

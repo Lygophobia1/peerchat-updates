@@ -47,6 +47,7 @@ class MailboxIsolationTest {
         var rejection:Exception?=null
         var withReceipt=true
         var ackState="acknowledged"
+        var keysState="ready"
         fun request(op:String,body:JSONObject):JSONObject {
             operations.add(op)
             rejection?.let{throw it}
@@ -56,7 +57,7 @@ class MailboxIsolationTest {
                 "mailbox_receipts"->JSONObject().put("state","ready").put("receipts",JSONArray().also{
                     if(withReceipt)it.put(JSONObject().put("messageId","c".repeat(32)).put("receipt",encoded(byteArrayOf(3))))
                 })
-                "mailbox_keys"->JSONObject().put("state","ready").put("keys",JSONArray().put(JSONObject().put("binding",encoded(byteArrayOf(4)))))
+                "mailbox_keys"->JSONObject().put("state",keysState).put("keys",JSONArray().put(JSONObject().put("binding",encoded(byteArrayOf(4)))))
                 "mailbox_store"->JSONObject().put("state","stored")
                 "mailbox_ack"->JSONObject().put("state",ackState)
                 else->error("Unexpected operation")
@@ -129,5 +130,45 @@ class MailboxIsolationTest {
         execution.service(s::request,1,true){fail("Reset cannot reuse receive authorization")}
         assertEquals(listOf("mailbox_receipts"),s.operations)
     }
+    @Test fun inboundProgressRemainsVisibleWhenHistoricalOutgoingLookupIsRejected(){
+        val n=Native().apply{binding=byteArrayOf(7);receiveResult=received(1)}
+        val s=Server().apply{withReceipt=false;keysState="rejected_or_storage_unavailable"}
+        val execution=MailboxExecution(n);val notifications=mutableListOf<Boolean>()
+        assertThrows(IllegalStateException::class.java){execution.service(s::request,1,true){notifications.add(it)}}
+        assertEquals(listOf(true),notifications)
+        assertTrue(execution.inboundDiagnostic.contains("receive=acknowledged"))
+        assertTrue(execution.inboundDiagnostic.contains("imported=1 acknowledged=1"))
+        assertTrue(execution.diagnostic.contains("stage=mailbox_keys"))
+        assertTrue(execution.diagnostic.contains("state=rejected_or_storage_unavailable"))
+        assertEquals(0,n.stored)
+    }
+    @Test fun lostServerAckReopensRegistrationAndDrainsDuplicateWithoutAnotherImport(){
+        val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
+        val s=Server().apply{withReceipt=false;ackState="not_authorized"}
+        val first=MailboxExecution(n)
+        assertThrows(IllegalStateException::class.java){first.service(s::request,1,true){fail()}}
+        assertTrue(first.inboundDiagnostic.contains("receive=durable_import_receipt_ready"))
+        assertTrue(first.inboundDiagnostic.contains("imported=1 acknowledged=0"))
+        n.receiveResult=received(0);s.ackState="acknowledged";s.operations.clear()
+        val reopened=MailboxExecution(n);val notifications=mutableListOf<Boolean>()
+        reopened.service(s::request,1,true){notifications.add(it)}
+        assertEquals("mailbox_register",s.operations.first())
+        assertEquals(listOf(false),notifications)
+        assertTrue(reopened.inboundDiagnostic.contains("imported=0 acknowledged=1"))
+        assertArrayEquals(byteArrayOf(7),n.binding)
+    }
+    @Test fun localNativeReceiveFailureIsNotMisreportedAsVerificationOrAcknowledged(){
+        val n=Native().apply{binding=byteArrayOf(7);uploads=false}
+        val s=Server().apply{withReceipt=false}
+        val execution=MailboxExecution(n)
+        execution.service(s::request,1,true){fail()}
+        assertTrue(execution.inboundDiagnostic.contains("pending_native_validation=1"))
+        assertFalse(execution.diagnostic.contains("awaiting_verification"))
+        assertFalse(s.operations.contains("mailbox_ack"))
+        assertEquals(1,n.receives)
+    }
+    private fun received(inserted:Long)=NativeRecordWriter(3).also{
+        it.number(inserted);it.blob(byteArrayOf(8));it.text("peer");it.text("message")
+    }.bytes()
     companion object {private fun encoded(bytes:ByteArray)=Base64.encodeToString(bytes,Base64.NO_WRAP)}
 }

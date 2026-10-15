@@ -14,7 +14,7 @@ class MessagingFailureDiagnosticsTest {
             assertEquals("decision_unavailable",initialFriendPinResult(value))
     }
     @Test fun untrustedMailboxStatesCannotLeakServerText(){
-        for(value in listOf("accepted","ready","invalid_generation","key_conflict_or_revoked","not_authorized"))
+        for(value in listOf("accepted","ready","invalid_generation","key_conflict_or_revoked","not_authorized","rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature"))
             assertEquals(value,safeMailboxState(value))
         for(value in listOf("","secret payload","accepted\ncredential=hidden","x".repeat(100000)))
             assertEquals("unrecognized_or_missing",safeMailboxState(value))

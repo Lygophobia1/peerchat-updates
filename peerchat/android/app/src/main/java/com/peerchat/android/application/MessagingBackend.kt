@@ -713,6 +713,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
         mutable.value=mutable.value.copy(messagingDiagnostics=buildString {
             appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
+            appendLine(mailboxExecution.inboundDiagnostic)
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
