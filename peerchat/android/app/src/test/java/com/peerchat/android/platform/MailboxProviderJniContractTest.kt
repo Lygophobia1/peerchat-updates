@@ -16,6 +16,7 @@ class MailboxProviderJniContractTest {
         val int = Integer.TYPE
         val boolean = java.lang.Boolean.TYPE
         val void = java.lang.Void.TYPE
+        method("beginMailboxRegistration", void)
         method("keyRegistryProvider", Any::class.java)
         method("execute", void, bytes)
         method("prepare", long, bytes)

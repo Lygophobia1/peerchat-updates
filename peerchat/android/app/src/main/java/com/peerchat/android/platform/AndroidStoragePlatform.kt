@@ -39,13 +39,14 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
     private val file = File(directory, if (registryOnly) "device-key-registry.sqlite" else "peerchat.sqlite")
     private val recipient by lazy { AndroidRecipientKeyProvider(applicationContext, profile) }
-    var recipientDiagnostic:String="stage=recipient_not_requested"
-        private set
+    private val recipientEvidence=RecipientDiagnostic()
+    val recipientDiagnostic:String get()=recipientEvidence.value
+    fun beginMailboxRegistration(){recipientEvidence.begin()}
     private fun <T> recipientOperation(stage:String,operation:()->T):T {
-        recipientDiagnostic="stage=$stage"
-        try{return operation().also{recipientDiagnostic="stage=$stage result=ready"}}
+        recipientEvidence.record("stage=$stage")
+        try{return operation().also{recipientEvidence.record("stage=$stage result=ready")}}
         catch(failure:Exception){
-            recipientDiagnostic="stage=$stage reason="+recipientFailureCode(failure)
+            recipientEvidence.record("stage=$stage reason="+recipientFailureCode(failure))
             throw failure
         }
     }
@@ -88,7 +89,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     // decryption and durable message acceptance on the normal profile database.
     fun keyRegistryProvider(): Any = recipientOperation("key_registry_provider") {
         checkOpen(); invalid(!registryOnly)
-        AndroidStoragePlatform(applicationContext, profile, true){recipientDiagnostic=it}
+        AndroidStoragePlatform(applicationContext, profile, true){recipientEvidence.record(it)}
     }
     private fun <T> registryOperation(stage:String,operation:()->T):T {
         registryDiagnostic?.invoke("stage=$stage")
@@ -101,11 +102,13 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     }
     fun recipientSupported(): Boolean {
         val supported=recipientOperation("recipient_supported") {checkOpen();recipient.supported()}
-        if(!supported)recipientDiagnostic="stage=recipient_supported reason=RECIPIENT_KEY_UNSUPPORTED"
+        if(!supported)recipientEvidence.record("stage=recipient_supported reason=RECIPIENT_KEY_UNSUPPORTED")
         return supported
     }
     fun recipientAlias(generation: Int): ByteArray = recipientOperation("recipient_alias") {checkOpen();recipient.alias(generation).toByteArray(Charsets.US_ASCII)}
-    fun recipientExists(alias: ByteArray): Boolean = recipientOperation("recipient_exists") {recipient.exists(recipientAliasText(alias))}
+    fun recipientExists(alias: ByteArray): Boolean = recipientOperation("recipient_exists") {recipient.exists(recipientAliasText(alias))}.also {
+        recipientEvidence.record("stage=recipient_exists state="+if(it)"present" else "absent")
+    }
     fun recipientCreate(alias: ByteArray): ByteArray = recipientOperation("recipient_create") {recipient.create(recipientAliasText(alias))}
     fun recipientPublic(alias: ByteArray): ByteArray = recipientOperation("recipient_public") {recipient.publicKey(recipientAliasText(alias))}
     fun recipientAgree(alias: ByteArray, point: ByteArray): ByteArray = recipient.agreeP256(recipientAliasText(alias), point)
@@ -122,8 +125,12 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
             com.peerchat.android.platform.tls.AndroidTlsIdentity(identity), incoming,
             expectedPeer.toString(Charsets.US_ASCII))
     }
-    fun protect(bytes: ByteArray, context: ByteArray): ByteArray = records.protect(bytes, context)
-    fun unprotect(bytes: ByteArray, context: ByteArray): ByteArray = records.unprotect(bytes, context)
+    fun protect(bytes: ByteArray, context: ByteArray): ByteArray =
+        if(context.toString(Charsets.UTF_8).startsWith("PeerChat/device-key-registry/v1/"))
+            recipientOperation("registry_record_protect"){records.protect(bytes,context)} else records.protect(bytes,context)
+    fun unprotect(bytes: ByteArray, context: ByteArray): ByteArray =
+        if(context.toString(Charsets.UTF_8).startsWith("PeerChat/device-key-registry/v1/"))
+            recipientOperation("registry_record_unprotect"){records.unprotect(bytes,context)} else records.unprotect(bytes,context)
     fun execute(bytes: ByteArray) = registryOperation("registry_execute") {
         checkOpen(); invalid(bytes.size <= 32768)
         val sql = text(bytes)
@@ -176,7 +183,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         val cursor = statement(id).cursor ?: throw ProviderFailure("NO_RESULT_ROW")
         invalid(!cursor.isBeforeFirst && !cursor.isAfterLast && index in 0 until cursor.columnCount && !cursor.isNull(index)); return cursor
     }
-    fun bytes(id: Long, index: Int): ByteArray = cursor(id, index).getBlob(index).also { invalid(it.size in 1..1048576) }
+    fun bytes(id: Long, index: Int): ByteArray = registryOperation("registry_column_bytes") {cursor(id, index).getBlob(index).also { invalid(it.size in 1..1048576) }}
     fun text(id: Long, index: Int): ByteArray = cursor(id, index).getString(index).toByteArray(Charsets.UTF_8)
     fun number(id: Long, index: Int): Long = cursor(id, index).getLong(index)
     fun finish(id: Long) { statements.remove(id)?.cursor?.close() }
