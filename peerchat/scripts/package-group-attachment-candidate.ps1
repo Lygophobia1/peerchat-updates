@@ -1,4 +1,4 @@
-param([string]$Version='4.0.2-dev.158',[string]$SourceCheckpoint='f3b057f017334724a2ec607119f5d4b8e4b248c4')
+param([string]$Version='4.0.2-dev.158',[string]$SourceCheckpoint='6803c3a')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -10,6 +10,7 @@ try {
  if($versionText -notmatch ('Display="'+[regex]::Escape($Version)+'"')){throw 'Source version mismatch'}
  & git merge-base --is-ancestor $SourceCheckpoint HEAD
  if($LASTEXITCODE){throw 'Source checkpoint is not an ancestor'}
+ $SourceCheckpoint=(& git rev-parse $SourceCheckpoint).Trim()
  # Never describe uncommitted application code as the checkpoint's package.
  $production=@(& git ls-files '*.cs' '*.cpp' '*.hpp' '*.h' '*.xaml' '*.config' '*.zip' '*.ico' '*.png' '*.json' | Where-Object {$_ -notmatch '^(tests|docs)/'})
  & git diff --exit-code $SourceCheckpoint -- $production
@@ -43,6 +44,7 @@ try {
  # Re-open the ZIP and verify every payload byte against the staging manifest.
  $zip=[IO.Compression.ZipFile]::OpenRead($archive)
  try {
+  if(@($zip.Entries | Where-Object Name).Count -ne @(Get-ChildItem -LiteralPath $package -Recurse -File).Count){throw 'ZIP file count mismatch'}
   foreach($entry in $zip.Entries){
    if(!$entry.Name){continue}
    $expected=Join-Path $package $entry.FullName
