@@ -1,3 +1,5 @@
+> Latest focused incoming investigation: see `ANDROID_REPAIR_DEV159.md`. User physically accepted dev.158 verification and outgoing messaging; incoming remains blocked. Dev.159 is diagnostic, not an accepted receiving repair.
+
 # Android checkpoint and remaining work audit
 
 Audit date:2026-10-15. **Checkpoint/documentation only; development remains stopped.**

@@ -1,5 +1,12 @@
 # Android groups and voice integration manifest
 
+Latest focused checkpoint: `ANDROID_REPAIR_DEV159.md`, compiled code b73d035.
+Shared changes: optional KeyCoordinator diagnostic callback and Android core failure
+stages only. Platform facade adds beginMailboxRegistration()V; package Kotlin/JNI
+together. No wire/schema/custody/trust/ACK changes. Main committed manifest reviewed
+at96de469; no Main Work files modified. 202 host tests, lint/build and native online/
+offline regressions pass; physical incoming still pending.
+
 Focused Android repair resumed by user authorization after physical dev.155 evidence.
 See `ANDROID_REPAIR_DEV158.md`: dev.158 reuses Windows native explicit contact approval
 through a bounded Android prompt, retains registration/relay failure stages, and
