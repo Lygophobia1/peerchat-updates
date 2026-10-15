@@ -8,6 +8,21 @@ Windows/Pi acceptance remains pending.
 
 ## Current Windows completion — supersedes archived freeze below
 
+Windows dev162 adds local download destination persistence and automatic verified
+export for DM and group attachments, and removes redundant Save As bubble actions
+in the same candidate. Details: [Windows dev162 download workflow](WINDOWS_DEV162_DOWNLOAD_UX.md).
+Shared Windows files: `node.cpp`, `windows_transfer_io.hpp`,
+`windows_group_attachment_transfer.hpp`, `windows_group_attachment_output.hpp`,
+`windows_group_attachment_application.hpp`, new `windows_download_save.hpp`,
+`desktop/CoreAdapter.cs`, `desktop/ChatAttachments.cs`, `desktop/GroupAttachments.cs`.
+Windows-only local operation additions and supplemental AttachmentJob/v4 do not
+change portable/JNI APIs, network protocols, HPKE envelopes, transfer journals or
+Android compatibility. Existing v1–v3 jobs remain readable; new v4 jobs need the
+new controller on downgrade/recovery. Verified export primitives are checkpointed
+at `719e500`; the final package manifest identifies the complete UI/controller
+checkpoint. No deployment or Android-worktree mutation. Dev160 group/clipboard
+physical acceptance is preserved; the new download UX awaits physical testing.
+
 The Windows dev.160 repair adds a scoped, Windows-local `ui_mailbox` operation 9
 for the existing server enrollment/resume challenges, a DPAPI-protected cache
 credential sidecar, explicit asynchronous cache verification, exact DM receive

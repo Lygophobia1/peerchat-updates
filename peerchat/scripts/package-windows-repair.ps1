@@ -1,4 +1,4 @@
-param([string]$Version='4.0.2-dev.160')
+param([string]$Version='4.0.2-dev.160',[string]$Report='docs/WINDOWS_DEV160_ATTACHMENT_REPAIR.md')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -14,7 +14,7 @@ try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     Copy-Item -Path (Join-Path $runtime '*') -Destination $stage -Recurse
     $docs=New-Item -ItemType Directory -Path (Join-Path $stage 'Docs')
-    Copy-Item -LiteralPath docs/WINDOWS_DEV160_ATTACHMENT_REPAIR.md -Destination $docs.FullName
+    Copy-Item -LiteralPath $Report -Destination $docs.FullName
     $payload=@(Get-ChildItem -LiteralPath $stage -File -Recurse | ForEach-Object {
         @{path=[IO.Path]::GetRelativePath($stage,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
     })
