@@ -1,3 +1,5 @@
+> Current recovery candidate: `ANDROID_REPAIR_DEV161.md`, code dba61c0. Approved implementation is complete; explicit on-phone account-19 to account-4 approval and physical acceptance remain pending. Original keys/data/binding preserved. 219 host tests and native offline/security/TLS suites passed. The historical stopped-development audit below predates this authorized repair and is retained for provenance.
+
 > Current recovery proposal: `ANDROID_MAILBOX_ACCOUNT_REENROLLMENT_PLAN.md`. Original account19/new Linux account4 history confirmed. Same-key scoped enrollment is protocol-feasible; implementation and on-phone enrollment await approval. Tests/docs only.
 
 > Latest: `ANDROID_REPAIR_DEV160.md`. User confirms live DM both directions. Offline mailbox is blocked by existing binding validation; read-only inspection candidate, no accepted recovery.

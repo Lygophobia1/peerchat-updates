@@ -1,5 +1,9 @@
 # Android groups and voice integration manifest
 
+Current implementation: `ANDROID_REPAIR_DEV161.md`, compiled code `dba61c093beaffb217ef79bafe29eb4384955289`; native checkpoint `8cfd31d`. User-approved implementation adds explicit Android same-key scoped account reenrollment. Original account-19 authority remains immutable. Physical approval/acceptance pending. Shared files: new mailbox_scoped_enrollment.hpp, delivery_manager.hpp, portable/peerchat_core.cpp; additive JNI only, protected supplemental local table, no wire/C ABI/group crypto/media change. Main attachment manifest at088f342 reviewed read-only; no Main/Pi modifications. Package matching JNI/Kotlin together. 219 host tests, lint/build, scoped offline/security and real TLS mailbox suites passed. See dev161 report for consent-OFF limitation and validation boundaries.
+
+Earlier entries below are historical and superseded for this recovery milestone.
+
 Current approval proposal: `ANDROID_MAILBOX_ACCOUNT_REENROLLMENT_PLAN.md`. Historical
 account19→Linuxaccount4 mismatch confirmed; read-only live server metadata inspected.
 Only isolated tests/docs added. No enrollment implementation, shared API, key format,
