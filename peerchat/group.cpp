@@ -119,14 +119,14 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
         bool allowed=false;
         if(event.kind==GroupEventKind::Create){
             allowed=!next.created&&event.logicalOrder==1&&event.actorAccountId>0&&event.subjectAccountId==event.actorAccountId&&event.subjectPeerId==event.actorPeerId&&validName(event.value)&&!event.subjectPublicKey.empty()&&verifyGroupEventSignature(event,event.subjectPublicKey);
-            if(allowed){next.created=true;next.groupId=event.groupId;next.name=event.value;next.ownerAccountId=event.actorAccountId;next.members[event.actorAccountId]={event.actorAccountId,event.subjectName,event.actorPeerId,event.subjectPublicKey,GroupRole::Owner};}
+            if(allowed){next.created=true;next.groupId=event.groupId;next.name=event.value;next.ownerAccountId=event.actorAccountId;next.members[event.actorAccountId]={event.actorAccountId,event.subjectName,event.actorPeerId,event.subjectPublicKey,GroupRole::Owner,event.eventId};}
         }else if(next.created&&event.groupId==next.groupId){
             auto actor=next.members.find(event.actorAccountId);auto invitation=next.invitations.find(event.actorAccountId);
             const auto* actorDevice=next.device(event.actorAccountId,event.actorPeerId);
             bool actorMember=actorDevice&&signedBy(event,*actorDevice);bool invitedActor=invitation!=next.invitations.end()&&signedBy(event,invitation->second);
             if(event.kind==GroupEventKind::Rename){allowed=actorMember&&actor->second.role>=GroupRole::Admin&&validName(event.value);if(allowed)next.name=event.value;}
-            else if(event.kind==GroupEventKind::Invite){allowed=actorMember&&actor->second.role>=GroupRole::Admin&&event.subjectAccountId>0&&event.subjectAccountId!=event.actorAccountId&&next.members.count(event.subjectAccountId)==0&&next.invitations.count(event.subjectAccountId)==0&&validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&!event.subjectName.empty();if(allowed)next.invitations[event.subjectAccountId]={event.subjectAccountId,event.subjectName,event.subjectPeerId,event.subjectPublicKey,GroupRole::Member};}
-            else if(event.kind==GroupEventKind::Accept){allowed=invitedActor&&event.subjectAccountId==event.actorAccountId&&event.subjectPeerId==event.actorPeerId;if(allowed){next.members[event.actorAccountId]=invitation->second;next.invitations.erase(invitation);}}
+            else if(event.kind==GroupEventKind::Invite){allowed=actorMember&&actor->second.role>=GroupRole::Admin&&event.subjectAccountId>0&&event.subjectAccountId!=event.actorAccountId&&next.members.count(event.subjectAccountId)==0&&next.invitations.count(event.subjectAccountId)==0&&validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&!event.subjectName.empty();if(allowed)next.invitations[event.subjectAccountId]={event.subjectAccountId,event.subjectName,event.subjectPeerId,event.subjectPublicKey,GroupRole::Member,event.eventId};}
+            else if(event.kind==GroupEventKind::Accept){allowed=invitedActor&&event.subjectAccountId==event.actorAccountId&&event.subjectPeerId==event.actorPeerId;if(allowed){next.members[event.actorAccountId]=invitation->second;next.members[event.actorAccountId].membershipId=event.eventId;next.invitations.erase(invitation);}}
             else if(event.kind==GroupEventKind::Decline){allowed=invitedActor&&event.subjectAccountId==event.actorAccountId&&event.subjectPeerId==event.actorPeerId;if(allowed)next.invitations.erase(invitation);}
             else if(event.kind==GroupEventKind::Leave){allowed=actorMember&&actor->second.role!=GroupRole::Owner;if(allowed)next.members.erase(actor);}
             else if(event.kind==GroupEventKind::Remove){auto subject=next.members.find(event.subjectAccountId);allowed=actorMember&&subject!=next.members.end()&&subject->second.role!=GroupRole::Owner&&event.subjectAccountId!=event.actorAccountId&&(actor->second.role==GroupRole::Owner||(actor->second.role==GroupRole::Admin&&subject->second.role==GroupRole::Member));if(allowed)next.members.erase(subject);}
@@ -140,7 +140,7 @@ bool GroupLedger::rebuild(const std::string& requiredEventId){
                     validPeer(event.subjectPeerId)&&!event.subjectPublicKey.empty()&&
                     Storage::publicKeyId(event.subjectPublicKey)==event.subjectPeerId&&
                     event.value==L"PeerChat/group-device-authorization/v1"&&event.message.empty();
-                if(allowed)next.authorizedDevices[event.subjectPeerId]={event.subjectAccountId,actor->second.name,event.subjectPeerId,event.subjectPublicKey,actor->second.role};
+                if(allowed)next.authorizedDevices[event.subjectPeerId]={event.subjectAccountId,actor->second.name,event.subjectPeerId,event.subjectPublicKey,actor->second.role,event.eventId};
             }
             else if(event.kind==GroupEventKind::RevokeDevice){
                 const auto* subject=next.device(event.subjectAccountId,event.subjectPeerId);

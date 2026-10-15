@@ -3,6 +3,7 @@
 #include "group.hpp"
 #include "platform/group_crypto.hpp"
 #include "group_roster_evidence.hpp"
+#include "group_epoch_evidence.hpp"
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -118,6 +119,7 @@ public:
         if(!snapshot||snapshot->distributorPeerId!=localPeerId_||
            !currentMember(*snapshot,localAccountId_,localPeerId_)||
            !matchesSignedLedger(*snapshot,signedLedger))return false;
+        group_history::captureEpoch(store_,snapshot->serverGroupId,snapshot->generation,signedLedger);
         Blob key=store_.groupKey(snapshot->legacyGroupId,snapshot->generation);
         if(key.empty()){
             key=platform::group_crypto::random(32);
@@ -145,6 +147,7 @@ public:
            offer.recipientPeerId!=localPeerId_||offer.contentKey.size()!=32||
            !currentMember(*snapshot,localAccountId_,localPeerId_)||
            !matchesSignedLedger(*snapshot,signedLedger))return false;
+        group_history::captureEpoch(store_,snapshot->serverGroupId,snapshot->generation,signedLedger);
         store_.saveGroupKey(offer.groupId,offer.keyGeneration,offer.contentKey);return true;
     }
     bool maySend(const GroupKeyHandoff& offer,const std::string& authenticatedTlsPeer)const{

@@ -25,6 +25,12 @@ struct GroupMember {
     std::string peerId;
     Blob publicKey;
     GroupRole role=GroupRole::Member;
+    // Derived from the admitted signed join/device event, never a new wire field.
+    // Rejoining with the same identity must not revive previous history authority.
+    std::string membershipId;
+    GroupMember()=default;
+    GroupMember(std::uint64_t account,std::wstring label,std::string peer,Blob key,GroupRole permission,std::string membership={})
+        :accountId(account),name(std::move(label)),peerId(std::move(peer)),publicKey(std::move(key)),role(permission),membershipId(std::move(membership)){}
 };
 
 struct GroupState {
