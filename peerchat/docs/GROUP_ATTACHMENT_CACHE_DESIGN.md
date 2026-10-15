@@ -299,6 +299,19 @@ The public descriptor excludes the filename, plaintext digest, key and nonce
 prefix. This storage/codec test is distinct from the authenticated TLS/roster
 fixture; it is not a claim that the client upload/fanout adapter is connected.
 
+Completion verification originally held the global account/roster lock while
+hashing the complete ciphertext. A deterministic paused-hash test blocked an
+unrelated authenticated account lookup. Hashing now runs outside that lock and
+outside the cache lock between bounded reads. Before the durable completion
+commit, admission rechecks current session, original/current membership and the
+same live upload lease. Verification evidence is bound to that lease, object,
+length and immutable digest. Tests pass unrelated lookup responsiveness, real
+member revocation and session invalidation during hashing, rejection of evidence
+from a replaced lease, and successful retry without resetting uploaded bytes.
+This corrects cache concurrency; it is not a measured Android messaging or LAN
+speed improvement. Full runtime/crash tests, real TLS reconnect and the closed
+shipping gate pass afterward. Windows Framework and portable server builds pass.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with

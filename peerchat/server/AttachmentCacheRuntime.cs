@@ -102,11 +102,29 @@ internal sealed class AttachmentCacheRuntime : IDisposable {
   Require(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==0,"cache_immutable_object");Space(0);long next=checked(offset+bytes.Length),now=Now();
   Transaction(()=>{Execute("INSERT INTO chunks VALUES("+Quote(id)+","+offset+","+Blob(bytes)+","+Quote(MailboxProtocol.Digest(bytes))+");");Execute("UPDATE objects SET durable_offset="+next+",expires="+checked(now+options.PartialIdleSeconds)+" WHERE id="+Quote(id)+";UPDATE leases SET expires="+checked(now+120)+" WHERE id="+Quote(lease)+";");});return next;
  }}
- internal void Complete(string lease){lock(gate){Check();string id=Lease(lease,true);var d=Descriptor(id);Require(Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id))==d.CipherBytes,"cache_upload_incomplete");
-  if(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1)return;
-  using(var sha=SHA256.Create()){long offset=0;while(offset<d.CipherBytes){var chunk=ReadChunk(id,offset);sha.TransformBlock(chunk,0,chunk.Length,null,0);offset=checked(offset+chunk.Length);}sha.TransformFinalBlock(new byte[0],0,0);Require(String.Concat(sha.Hash.Select(x=>x.ToString("x2")))==d.CipherDigest,"cache_ciphertext_digest_mismatch");}
+ internal sealed class CompletionEvidence {
+  internal readonly string Lease,Id,Digest;internal readonly long Size;
+  internal CompletionEvidence(string lease,AttachmentCacheDescriptor descriptor){Lease=lease;Id=descriptor.Id;Digest=descriptor.CipherDigest;Size=descriptor.CipherBytes;}
+ }
+ internal CompletionEvidence VerifyCompletion(string lease){
+  AttachmentCacheDescriptor descriptor;
+  lock(gate){Check();string id=Lease(lease,true);descriptor=Descriptor(id);Require(Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id))==descriptor.CipherBytes,"cache_upload_incomplete");if(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1)return new CompletionEvidence(lease,descriptor);}
+  using(var sha=SHA256.Create()){long offset=0;while(offset<descriptor.CipherBytes){byte[] chunk;
+   // Each bounded read owns the cache lock; hashing owns neither the global
+   // roster lock nor the cache lock. Full-prefix chunks cannot be overwritten.
+   lock(gate){Check();Require(Lease(lease,true)==descriptor.Id,"cache_completion_evidence_mismatch");chunk=ReadChunk(descriptor.Id,offset);}
+#if PEERCHAT_CACHE_TESTS
+   if(TestFault!=null)TestFault("completion_hash_chunk");
+#endif
+   sha.TransformBlock(chunk,0,chunk.Length,null,0);offset=checked(offset+chunk.Length);}sha.TransformFinalBlock(new byte[0],0,0);Require(String.Concat(sha.Hash.Select(x=>x.ToString("x2")))==descriptor.CipherDigest,"cache_ciphertext_digest_mismatch");}
+  return new CompletionEvidence(lease,descriptor);
+ }
+ internal void CommitCompletion(string lease,CompletionEvidence evidence){lock(gate){Check();string id=Lease(lease,true);var d=Descriptor(id);
+  Require(evidence!=null&&evidence.Lease==lease&&evidence.Id==id&&evidence.Digest==d.CipherDigest&&evidence.Size==d.CipherBytes,"cache_completion_evidence_mismatch");
+  Require(Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id))==d.CipherBytes,"cache_upload_incomplete");if(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1)return;
   Space(0);long now=Now();Transaction(()=>Execute("UPDATE objects SET complete=1,completed="+now+",expires="+checked(now+options.RetentionSeconds)+" WHERE id="+Quote(id)+";UPDATE leases SET expires="+checked(now+120)+" WHERE id="+Quote(lease)+";"));
  }}
+ internal void Complete(string lease){CommitCompletion(lease,VerifyCompletion(lease));}
  internal byte[] Read(string lease,long offset,int maximum){lock(gate){Check();Require(offset>=0&&maximum>0&&maximum<=65536,"cache_range_invalid");string id=Lease(lease,false);var d=Descriptor(id);Require(offset<=d.CipherBytes,"cache_range_invalid");int count=(int)Math.Min(maximum,d.CipherBytes-offset);var output=new byte[count];int used=0;
   while(used<count){long current=checked(offset+used);var starts=Rows("SELECT offset FROM chunks WHERE object_id="+Quote(id)+" AND offset<="+current+" ORDER BY offset DESC LIMIT 1",1);Require(starts.Count==1,"cache_chunk_missing");long start=Number(starts[0][0]);var chunk=ReadChunk(id,start);int at=checked((int)(current-start));Require(at>=0&&at<chunk.Length,"cache_chunk_missing");int n=Math.Min(count-used,chunk.Length-at);Buffer.BlockCopy(chunk,at,output,used,n);used+=n;}
   Execute("UPDATE leases SET expires="+checked(Now()+120)+" WHERE id="+Quote(lease));return output;
