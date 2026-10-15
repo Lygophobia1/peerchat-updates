@@ -225,4 +225,3 @@ Run the negotiated chunk/window matrix and bandwidth/media-contention checks onl
 No live Raspberry Pi inspection, restart, database mutation or deployment occurred during this completion/recovery pass. No Android worktree edit, phone installation or device-data cleanup occurred. No branch merge, reset, clean, force push or history rewrite occurred.
 
 All 32 recovered source/test/doc changes are committed across the helper, WIP and documentation checkpoints. Source contents were preserved; only this handoff report and a manifest status addendum were written during recovery. Development remains stopped.
-
