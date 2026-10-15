@@ -28,7 +28,7 @@ internal sealed class GroupCiphertextFanout {
     static long Number(byte[] wire,int offset){ulong value=0;for(int i=0;i<8;i++)value=(value<<8)|wire[offset+i];return value>long.MaxValue?0:(long)value;}
     static string Text(byte[] wire,int offset,int length){return Encoding.ASCII.GetString(wire,offset,length);}
     static Dictionary<string,object> Reply(string group,string message,string state,int sessions=0,int accepted=0,int duplicates=0,int rejected=0){return new Dictionary<string,object>{{"type","group_delivery"},{"groupId",group??""},{"messageId",message??""},{"state",state},{"sessionCount",sessions},{"acceptedCount",accepted},{"duplicateCount",duplicates},{"rejectedCount",rejected}};}
-    static bool Route(byte[] wire,string group,long generation,GroupFanoutSession origin,out string id){
+    internal static bool Route(byte[] wire,string group,long generation,GroupFanoutSession origin,out string id){
         id="";if(wire==null||wire.Length<254||wire.Length>MaxEnvelope||Text(wire,0,4)!="PCGE"||wire[4]!=0||wire[5]!=1)return false;
         long length=((long)wire[170]<<24)|((long)wire[171]<<16)|((long)wire[172]<<8)|wire[173];
         id=Text(wire,54,32);

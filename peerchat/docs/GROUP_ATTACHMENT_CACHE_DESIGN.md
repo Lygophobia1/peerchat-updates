@@ -323,6 +323,43 @@ its message ID, and ordinary text still imports afterward. The outer encryption,
 signature, nonce reservation, current-epoch checks and history format are unchanged.
 The body is not yet dispatched by the production UI or offline cache route.
 
+The disabled server adapter now retains the encrypted PCGE announcement after
+ciphertext completion. Its canonical route and actual device signature must
+match the signed descriptor's message, group, epoch, account and device. Replayed
+identical publication is idempotent; conflicting or substituted envelopes fail.
+Pending pages stay below the existing RPC frame bound even for maximum-size
+envelopes. Every read/ACK rechecks original membership, current membership and
+the device-bound session. Revoked or rejoined devices cannot fetch old envelopes.
+
+Announcement ACKs are per device, durable and idempotent; they do not advance
+file bytes or claim plaintext completion. Rollback/restart, independent receipts,
+expiration and cleanup tests pass. Actual native PCGE signatures and encrypted
+attachment bodies also pass managed publication/restart and native decryption
+using protected recipient history. That storage/codec fixture is separate from
+TLS/roster admission and is not a packaged-client delivery test.
+
+A real pinned-TLS fixture uploads a 3-MiB object, publishes its signed envelope,
+signs the source out, and downloads the complete ciphertext as another eligible
+account/device. Each received block is flushed before its progress ACK; repeated
+RPC reconnects preserve the lease and exact final ciphertext. No source login
+is recreated. The device that was not enrolled in the group remains denied.
+Physical Pi/Windows/Android performance and plaintext completion are not inferred
+from that fixture.
+
+The quota ledger now includes pending announcement and receipt metadata. Its
+derived total commits in the same transaction as object/cursor/publication/ACK
+mutations, avoiding a full object scan on each chunk. Startup reconciles it
+against bounded object state; a missing derived ledger can be initialized for
+an owned pre-release cache without changing bytes or recipients. Inconsistent
+existing totals fail closed without resetting uploaded data. Actual process-kill
+upload/cleanup tests pass with the ledger enabled. No physical speedup is claimed.
+
+Production client dispatch, its protected resume adapter, local preparation and
+plaintext-finalization recovery, offline old-epoch proof handling and group UI
+remain gates. Current-epoch group-message checks are not relaxed to accept an
+old cached announcement. Independent cache receipts are not an implementation
+of the deferred Windows-first DM routing policy. Shipping transport remains closed.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with

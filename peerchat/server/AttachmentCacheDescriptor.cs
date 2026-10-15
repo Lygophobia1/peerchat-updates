@@ -17,6 +17,8 @@ internal sealed class AttachmentCacheDescriptor {
  internal long CipherBytes {get;private set;}
  internal string CipherDigest {get;private set;}
  internal byte[] Wire {get;private set;}
+ byte[] signingKey;
+ internal bool MatchesAnnouncement(byte[] wire){string message;return GroupCiphertextFanout.Route(wire,Group,Epoch,new GroupFanoutSession{Account=Account,Device=Sender},out message)&&message==Message&&MailboxProtocol.Verify(wire.Take(wire.Length-64).ToArray(),wire.Skip(wire.Length-64).ToArray(),signingKey,Sender);}
  AttachmentCacheDescriptor(){}
  internal static AttachmentCacheDescriptor Parse(byte[] wire){
   try{
@@ -26,7 +28,7 @@ internal sealed class AttachmentCacheDescriptor {
    ulong account=GroupRosterProof.Number(wire,ref at),epoch=GroupRosterProof.Number(wire,ref at),plain=GroupRosterProof.Number(wire,ref at),cipher=GroupRosterProof.Number(wire,ref at);
    var digest=GroupRosterProof.Bytes(wire,ref at,32);var key=GroupRosterProof.Bytes(wire,ref at,72);int signedEnd=at;var signature=GroupRosterProof.Bytes(wire,ref at,64);
    if(at!=wire.Length||!MailboxProtocol.Id(result.Id,32)||!MailboxProtocol.Id(result.Group,32)||!MailboxProtocol.Id(result.Message,32)||!MailboxProtocol.Id(result.Sender,64)||account==0||account>long.MaxValue||epoch==0||epoch>long.MaxValue||plain>(ulong)MaximumPlainBytes||cipher!=20+plain+Math.Max(1UL,(plain+32767)/32768)*16||digest.Length!=32||key.Length!=72||signature.Length!=64||!MailboxProtocol.Verify(wire.Take(signedEnd).ToArray(),signature,key,result.Sender))throw new InvalidOperationException();
-   result.Account=(long)account;result.Epoch=(long)epoch;result.PlainBytes=(long)plain;result.CipherBytes=(long)cipher;result.CipherDigest=String.Concat(digest.Select(b=>b.ToString("x2")));result.Wire=(byte[])wire.Clone();return result;
+   result.Account=(long)account;result.Epoch=(long)epoch;result.PlainBytes=(long)plain;result.CipherBytes=(long)cipher;result.CipherDigest=String.Concat(digest.Select(b=>b.ToString("x2")));result.Wire=(byte[])wire.Clone();result.signingKey=(byte[])key.Clone();return result;
   }catch(Exception error){if(error is OutOfMemoryException)throw;throw new InvalidOperationException("Invalid signed encrypted attachment descriptor.");}
  }
 }

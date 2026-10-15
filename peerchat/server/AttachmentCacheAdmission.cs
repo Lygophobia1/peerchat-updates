@@ -53,5 +53,21 @@ internal sealed class AttachmentCacheAdmission {
  internal byte[] Read(long account,string device,Func<bool> current,string lease,long offset,int maximum){string id=cache.LeaseObject(lease,device,false);return Authorized(account,device,current,id,d=>cache.Read(lease,offset,maximum));}
  internal bool Release(long account,string device,Func<bool> current,string lease,bool upload){string id=cache.LeaseObject(lease,device,upload);return Authorized(account,device,current,id,d=>{cache.Release(lease);return true;});}
  internal bool Progress(long account,string device,Func<bool> current,string lease,long offset){string id=cache.LeaseObject(lease,device,false);return Authorized(account,device,current,id,d=>{cache.RecipientProgress(lease,offset,false);return true;});}
+ internal bool Publish(long account,string device,Func<bool> current,string id,byte[] wire){return Authorized(account,device,current,id,d=>{Require(d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");cache.Publish(id,wire);return true;});}
+ internal AttachmentCacheRuntime.Announcement Announcement(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>cache.ReadAnnouncement(id));}
+ internal bool AcknowledgeAnnouncement(long account,string device,Func<bool> current,string id,string digest){return Authorized(account,device,current,id,d=>cache.AcknowledgeAnnouncement(id,device,digest));}
+ internal sealed class AnnouncementPage {internal readonly List<AttachmentCacheRuntime.Announcement> Items=new List<AttachmentCacheRuntime.Announcement>();internal string Cursor;internal bool More;}
+ internal AnnouncementPage PendingAnnouncements(long account,string device,Func<bool> current,string after){
+  Require(current(),"cache_session_invalid");var candidates=cache.PendingAnnouncements(account,device,after);var page=new AnnouncementPage{Cursor=after};int bytes=0;
+  foreach(string id in candidates){AttachmentCacheRuntime.Announcement item;
+   try{item=Announcement(account,device,current,id);}catch(InvalidOperationException error){
+    if(error.Message!="cache_group_not_authorized"&&error.Message!="cache_original_membership_required"&&error.Message!="cache_attachment_expired"&&error.Message!="cache_attachment_unavailable")throw;
+    page.Cursor=id;continue;
+   }
+   int cost=checked((item.Wire.Length*4+2)/3+(item.Descriptor.Length*4+2)/3+1024);
+   if(page.Items.Count>=8||bytes+cost>94000){page.More=true;Require(current(),"cache_session_invalid");return page;}page.Items.Add(item);bytes+=cost;page.Cursor=id;
+  }
+  page.More=candidates.Count==64;Require(current(),"cache_session_invalid");return page;
+ }
 }
 }

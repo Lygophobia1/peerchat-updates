@@ -18,7 +18,8 @@ internal sealed class AttachmentCacheRequests {
  // Canonical base64url prevents JSON HTML escaping of '+' from expanding a
  // valid 64 KiB chunk beyond the existing 100000-byte RPC frame bound.
  internal static string Encode(byte[] bytes){return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');}
- internal static byte[] Decode(string text){Require(text.Length<=87382&&text.Length%4!=1&&Regex.IsMatch(text,"^[A-Za-z0-9_-]*$"));var bytes=Convert.FromBase64String(text.Replace('-','+').Replace('_','/')+new string('=',(4-text.Length%4)%4));Require(bytes.Length<=65536&&Encode(bytes)==text);return bytes;}
+ internal static byte[] Decode(string text,int maximum=65536){Require(maximum>0&&maximum<=GroupCiphertextFanout.MaxEnvelope&&text.Length<=(maximum*4+2)/3&&text.Length%4!=1&&Regex.IsMatch(text,"^[A-Za-z0-9_-]*$"));var bytes=Convert.FromBase64String(text.Replace('-','+').Replace('_','/')+new string('=',(4-text.Length%4)%4));Require(bytes.Length<=maximum&&Encode(bytes)==text);return bytes;}
+ static Dictionary<string,object> Announcement(AttachmentCacheRuntime.Announcement value){return new Dictionary<string,object>{{"id",value.Id},{"messageId",value.Message},{"digest",value.Digest},{"envelope",Encode(value.Wire)},{"descriptor",Encode(value.Descriptor)},{"dataEncoding","base64url"}};}
  static void Status(Dictionary<string,object> reply,AttachmentCacheRuntime.Status value){reply["ciphertextSize"]=value.Size;reply["durableOffset"]=value.Offset;reply["ciphertextComplete"]=value.Complete;reply["expiresUtc"]=value.Expires;}
  internal Dictionary<string,object> Execute(long account,string device,Func<bool> current,Dictionary<string,object> request){
   var reply=new Dictionary<string,object>{{"state","cache_malformed_request"},{"cacheVersion",1}};
@@ -40,6 +41,12 @@ internal sealed class AttachmentCacheRequests {
     }
     case "cache_progress":admission.Progress(account,device,current,Id(request,"lease"),Number(request,"offset"));break;
     case "cache_release":admission.Release(account,device,current,Id(request,"lease"),Flag(request,"upload"));break;
+    case "cache_publish":admission.Publish(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",87720),GroupCiphertextFanout.MaxEnvelope));break;
+    case "cache_announcement":reply["announcement"]=Announcement(admission.Announcement(account,device,current,Id(request,"id")));break;
+    case "cache_announcement_ack":reply["newAnnouncementReceipt"]=admission.AcknowledgeAnnouncement(account,device,current,Id(request,"id"),Text(request,"digest",64));break;
+    case "cache_pending":{
+     var page=admission.PendingAnnouncements(account,device,current,Text(request,"after",32));var items=new List<Dictionary<string,object>>();foreach(var item in page.Items)items.Add(Announcement(item));reply["items"]=items;reply["cursor"]=page.Cursor;reply["more"]=page.More;break;
+    }
     default:throw new InvalidOperationException("cache_unsupported_operation");
    }
    reply["state"]="accepted";
