@@ -1,4 +1,4 @@
-param([string]$DotNet='C:\Program Files\dotnet\dotnet.exe')
+param([string]$DotNet='C:\Program Files\dotnet\dotnet.exe',[switch]$CacheCandidate)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if((& $DotNet --version) -ne '10.0.401'){throw 'Pinned SDK 10.0.401 required'}
@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Path $destination | Out-Null
 foreach($rid in @('linux-x64','linux-arm64','linux-arm')){
     $output=Join-Path $destination $rid
     $selfContained=$rid -eq 'linux-arm'
-    & $DotNet publish (Join-Path $root 'server/portable/PeerChat.Server.csproj') -c Release -r $rid --self-contained $selfContained "-p:UseAppHost=$selfContained" -o $output
+    & $DotNet publish (Join-Path $root 'server/portable/PeerChat.Server.csproj') -c Release -r $rid --self-contained $selfContained "-p:UseAppHost=$selfContained" "-p:AttachmentCacheCandidate=$($CacheCandidate.IsPresent.ToString().ToLowerInvariant())" -o $output
     if($LASTEXITCODE){throw "Publish failed: $rid"}
     $files=@(Get-ChildItem -LiteralPath $output -File)
     $allowed=@('PeerChat.Server.dll','PeerChat.Server.deps.json','PeerChat.Server.runtimeconfig.json')
@@ -59,7 +59,7 @@ foreach($rid in @('linux-x64','linux-arm64','linux-arm')){
     $hashes=[ordered]@{}
     foreach($file in $files){$hashes[$file.Name]=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
     $deployment=if($selfContained){'self-contained ARM32 apphost'}else{'framework-dependent, no apphost'}
-    [ordered]@{Version=$version;Rid=$rid;Sdk='10.0.401';Runtime='10.0.12';Deployment=$deployment;LinuxExecution='pending';Files=$hashes} |
+    [ordered]@{Version=$version;Rid=$rid;Sdk='10.0.401';Runtime='10.0.12';Deployment=$deployment;CacheCandidate=$CacheCandidate.IsPresent;CacheEnabledByDefault=$false;LinuxExecution='pending';Files=$hashes} |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $destination "$rid-manifest.json") -Encoding UTF8
     Compress-Archive -LiteralPath $files.FullName -DestinationPath (Join-Path $destination "PeerChat.Server-$version-$rid.zip")
     Write-Host "PASS: $rid build/version/runtime-only package. Linux execution still required."

@@ -12,6 +12,9 @@
     <Deterministic>true</Deterministic>
     <DebugType>none</DebugType>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(AttachmentCacheCandidate)' == 'true'">
+    <DefineConstants>$(DefineConstants);PEERCHAT_CACHE_CANDIDATE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../AttachmentCache*.cs" />
     <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../ArchiveAuthorization.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;../../shared/VersionInfo.cs;PortableJson.cs;PortablePlatform.cs" />

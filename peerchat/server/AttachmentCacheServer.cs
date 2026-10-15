@@ -8,10 +8,10 @@ sealed partial class DiscoveryServer {
  AttachmentCacheRuntime attachmentCache;
  AttachmentCacheRequests attachmentCacheRequests;
  long attachmentCacheCleanupAt;
- // Keep shipping builds closed until client TransferManager and complete
- // encrypted-manifest/offline-delivery validation pass. Test builds exercise
- // the identical authenticated RPC/storage path against disposable fixtures.
-#if PEERCHAT_CACHE_TESTS
+ // Ordinary shipping builds stay closed. The explicitly built candidate is
+ // usable only with administrator-enabled, ownership-checked cache storage.
+ // It includes no PEERCHAT_CACHE_TESTS fault injection.
+#if PEERCHAT_CACHE_TESTS || PEERCHAT_CACHE_CANDIDATE
  const bool AttachmentCacheTransportReady=true;
 #else
  const bool AttachmentCacheTransportReady=false;
