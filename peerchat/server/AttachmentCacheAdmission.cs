@@ -41,6 +41,7 @@ internal sealed class AttachmentCacheAdmission {
   });Require(allowed&&executed,"cache_group_not_authorized");return result;
  }
  internal string Acquire(long account,string device,Func<bool> current,string id,bool upload){return Authorized(account,device,current,id,d=>{Require(!upload||d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");return cache.Acquire(id,device,upload);});}
+ internal AttachmentCacheRuntime.Status Inspect(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>cache.Inspect(id));}
  internal long Append(long account,string device,Func<bool> current,string lease,long offset,byte[] bytes){string id=cache.LeaseObject(lease,device,true);return Authorized(account,device,current,id,d=>cache.Append(lease,offset,bytes));}
  internal bool Complete(long account,string device,Func<bool> current,string lease){string id=cache.LeaseObject(lease,device,true);return Authorized(account,device,current,id,d=>{cache.Complete(lease);return true;});}
  internal byte[] Read(long account,string device,Func<bool> current,string lease,long offset,int maximum){string id=cache.LeaseObject(lease,device,false);return Authorized(account,device,current,id,d=>cache.Read(lease,offset,maximum));}

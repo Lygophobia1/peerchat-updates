@@ -32,6 +32,13 @@ class AttachmentCacheRuntimeTest {
   File.WriteAllText(Path.Combine(path,AttachmentCacheStorage.Marker),new string('a',32));return path;}
  static void Upload(AttachmentCacheRuntime cache,AttachmentCacheDescriptor d,byte[] bytes,int chunk=32768){var lease=cache.Acquire(d.Id,d.Sender,true);long offset=cache.Inspect(d.Id).Offset;while(offset<bytes.Length){int n=(int)Math.Min(chunk,bytes.Length-offset);var block=bytes.Skip((int)offset).Take(n).ToArray();offset=cache.Append(lease,offset,block);}cache.Complete(lease);cache.Complete(lease);cache.Release(lease);}
  static List<CacheRecipient> Readers(){return new List<CacheRecipient>{new CacheRecipient(2,new string('b',64),new string('4',32)),new CacheRecipient(3,new string('c',64),new string('5',32))};}
+ static Dictionary<string,object> Rpc(AttachmentCacheRequests handler,long account,string device,string operation,string state,params object[] fields){
+  var request=new Dictionary<string,object>{{"type",operation},{"requestId",Guid.NewGuid().ToString("N")}};for(int n=0;n<fields.Length;n+=2)request[(string)fields[n]]=fields[n+1];
+  var json=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=100000};
+  var response=handler.Execute(account,device,()=>true,json.Deserialize<Dictionary<string,object>>(json.Serialize(request)));
+  Check(Convert.ToString(response["state"])==state,"RPC "+operation+" state="+Convert.ToString(response["state"]));
+  var wire=json.Serialize(response);Check(wire.Length<100000&&!wire.Contains("private attachment key")&&!wire.Contains("plaintext filename"),"RPC response bounds/privacy");return response;
+ }
  static void RoundTrips(string root){using(var signer=new ECDsaCng(256)){
   var path=Fixture(root,"roundtrips");var options=Options(path);
   foreach(int size in new[]{0,1,32768,1024*1024,3*1024*1024,10*1024*1024}){
@@ -130,6 +137,26 @@ class AttachmentCacheRuntimeTest {
    Reject(()=>admission.Read(2,reader,()=>true,download,0,1024),"cache_original_membership_required");
    var fresh=Descriptor(owner,65536,data,group:group,epoch:8);admission.Admit(1,actor,()=>true,fresh.Wire);Upload(cache,fresh,data);
    var lease=admission.Acquire(2,reader,()=>true,fresh.Id,false);Check(admission.Read(2,reader,()=>true,lease,0,1024).Length==1024,"New membership cannot receive new object");admission.Release(2,reader,()=>true,lease,false);
+   var rpc=new AttachmentCacheRequests(admission);var rpcDescriptor=Descriptor(owner,65536,data,group:group,epoch:8);
+   Rpc(rpc,1,actor,"cache_admit","accepted","descriptor",Convert.ToBase64String(rpcDescriptor.Wire));
+   string rpcUpload=Convert.ToString(Rpc(rpc,1,actor,"cache_acquire","accepted","id",rpcDescriptor.Id,"upload",true)["lease"]);
+   Rpc(rpc,1,actor,"cache_complete","cache_upload_incomplete","lease",rpcUpload);
+   string firstChunk=Convert.ToBase64String(data.Take(65536).ToArray());
+   Check(Convert.ToInt64(Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",0L,"data",firstChunk)["durableOffset"])==65536,"RPC durable prefix");
+   Check(Convert.ToInt64(Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",0L,"data",firstChunk)["durableOffset"])==65536,"RPC duplicate inflation");
+   Rpc(rpc,1,actor,"cache_append","cache_malformed_request","lease",rpcUpload,"offset",-1L,"data",firstChunk);
+   Rpc(rpc,1,actor,"cache_append","cache_malformed_request","lease",rpcUpload,"offset",65536L,"data","not base64");
+   Rpc(rpc,1,actor,"cache_append","accepted","lease",rpcUpload,"offset",65536L,"data",Convert.ToBase64String(data.Skip(65536).ToArray()));
+   var completed=Rpc(rpc,1,actor,"cache_complete","accepted","lease",rpcUpload);Check((bool)completed["ciphertextComplete"]&&!completed.ContainsKey("plaintextVerified"),"Ciphertext commit claimed plaintext verification");
+   Rpc(rpc,1,actor,"cache_release","accepted","lease",rpcUpload,"upload",true);
+   string rpcDownload=Convert.ToString(Rpc(rpc,2,reader,"cache_acquire","accepted","id",rpcDescriptor.Id,"upload",false)["lease"]);
+   Rpc(rpc,1,actor,"cache_read","cache_lease_device_mismatch","lease",rpcDownload,"offset",0L,"maximum",65536L);
+   Rpc(rpc,2,reader,"cache_read","cache_malformed_request","lease",rpcDownload,"offset",0L,"maximum",65537L);
+   var received=Rpc(rpc,2,reader,"cache_read","accepted","lease",rpcDownload,"offset",0L,"maximum",65536L);Check(Convert.FromBase64String((string)received["data"]).SequenceEqual(data.Take(65536)),"RPC ciphertext integrity");
+   Rpc(rpc,2,reader,"cache_progress","accepted","lease",rpcDownload,"offset",65536L);
+   Rpc(rpc,2,reader,"cache_release","accepted","lease",rpcDownload,"upload",false);
+   Rpc(rpc,2,reader,"cache_status","accepted","id",rpcDescriptor.Id);
+   Rpc(rpc,2,reader,"cache_unknown","cache_unsupported_operation");
   }
   using(var db=new AccountDatabase(Path.Combine(root,"admission-accounts.sqlite")))using(var cache=new AttachmentCacheRuntime(options,()=>now)){
    var admission=new AttachmentCacheAdmission(db,cache);Reject(()=>admission.Acquire(2,reader,()=>true,descriptor.Id,false),"cache_original_membership_required");
