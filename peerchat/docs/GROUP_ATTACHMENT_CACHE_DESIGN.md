@@ -382,6 +382,19 @@ immutable object after interruption; never reencrypt changed input under an old
 key/nonce. Cleanup must preserve partials referenced by verified staging records
 and remove only authenticated abandoned temporary files.
 
+The Windows staged-source adapter now wraps the existing FileSink token in the
+protected staging record before rename. Actual process-exit fixtures recover the
+same ciphertext and key before and after rename, preserving exact Unicode content.
+Cleanup can retain IDs from successfully loaded protected staging; its default
+behavior is unchanged. Reopen requires the original volume/file identity, exact
+complete length and header. Substituted files and malformed retained files are
+rejected without truncating or deleting them. The source read handle is checked
+again after rename/open to reject substitution across that boundary. Payload
+corruption still fails AEAD/hash verification; source adoption does not claim
+upload or plaintext completion. Existing transfer/restart and actual mutual-TLS
+session/reconnect tests pass. Production startup and the cache controller do not
+invoke this adapter yet.
+
 Keep cache resume records isolated from the old transfer-journal format while
 using the same TransferManager for credits, hashes, ACKs, retries and aggregate
 limits. The cache route must bind the verified server, profile/device, session

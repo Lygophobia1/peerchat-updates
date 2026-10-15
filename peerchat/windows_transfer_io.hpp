@@ -4,6 +4,7 @@
 #include <bcrypt.h>
 #include <filesystem>
 #include <chrono>
+#include <set>
 #include "platform/windows_record_protection.hpp"
 
 namespace peerchat::transfer::windows {
@@ -43,7 +44,12 @@ public:
         CloseHandle(file);if(!ok){DeleteFileW(path.c_str());throw std::runtime_error("Cannot journal partial file");}
         return path;
     }
-    void recover(){
+    // Only IDs from successfully loaded protected staging may be retained.
+    // Leave their authenticated records intact until the staged file is adopted.
+    // The default preserves ordinary transfer cleanup behavior.
+    void recover(const std::set<std::string>& retained={}){
+        require(retained.size()<=MaxRecords);
+        for(const auto& id:retained)require(protocol::id(id,32));
         size_t count=0;
         for(auto& item:std::filesystem::directory_iterator(root_)){
             require(++count<=MaxRecords);
@@ -58,6 +64,7 @@ public:
             auto volume=record.number(),indexHigh=record.number(),indexLow=record.number();record.end();
             auto path=std::filesystem::path(partial);
             require(record.type()==protocol::FileTransfer&&id==name.substr(0,32)&&path.is_absolute()&&path.filename()==id+".peerchat-part");
+            if(retained.count(id))continue;
             HANDLE owned=CreateFileW(path.c_str(),DELETE|FILE_READ_ATTRIBUTES,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
             if(owned!=INVALID_HANDLE_VALUE){
                 BY_HANDLE_FILE_INFORMATION identity{};FILE_DISPOSITION_INFO disposition{TRUE};
@@ -204,7 +211,8 @@ public:
         require(size<=ChunkBytes);LARGE_INTEGER pos{};pos.QuadPart=offset;require(SetFilePointerEx(handle_,pos,nullptr,FILE_BEGIN));
         Blob b(size);DWORD got=0;require(ReadFile(handle_,b.data(),static_cast<DWORD>(size),&got,nullptr)&&got==size);return b;
     }
-    static std::unique_ptr<FileSink> reopen(const DurableState& d){
+    static std::unique_ptr<FileSink> reopen(const DurableState& d,bool immutableComplete=false){
+        require(!immutableComplete||d.done==d.metadata.size);
         protocol::Reader r(d.location);require(r.type()==protocol::FileTransfer);auto partial=r.text(),final=r.text();
         auto p=std::filesystem::path(partial),f=std::filesystem::path(final);
         require(p.is_absolute()&&f.is_absolute()&&p.parent_path()==f.parent_path()&&p.filename()==d.metadata.id+".peerchat-part"&&
@@ -222,6 +230,7 @@ public:
             require(sink->handle_!=INVALID_HANDLE_VALUE);sink->committed_=true;
         }
         checkIdentity(r,sink->handle_,false);r.end();LARGE_INTEGER size{};require(GetFileSizeEx(sink->handle_,&size)&&size.QuadPart>=0&&static_cast<std::uint64_t>(size.QuadPart)>=d.done);
+        if(immutableComplete)require(static_cast<std::uint64_t>(size.QuadPart)==d.metadata.size);
         if(sink->committed_)require(static_cast<std::uint64_t>(size.QuadPart)==d.metadata.size);
         else{LARGE_INTEGER end{};end.QuadPart=d.done;require(SetFilePointerEx(sink->handle_,end,nullptr,FILE_BEGIN)&&SetEndOfFile(sink->handle_)&&FlushFileBuffers(sink->handle_));}
         return sink;

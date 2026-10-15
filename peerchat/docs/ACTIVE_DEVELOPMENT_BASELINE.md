@@ -65,6 +65,9 @@ are now tested, including distinct same-account devices, revocation/rejoin,
 concurrent quota reservations and actual crash recovery. Shipping cache
 transport stays gated closed even if staged configuration requests enablement.
 Protected immutable client staging and an explicit TransferManager ciphertext
-purpose are tested; the production client adapter, offline announcements and
-group UI remain unfinished. No cache endpoints are enabled and no live server
-data has changed.
+purpose are tested. Signed encrypted announcements, independent durable receipts,
+transactional quota accounting, bounded encryption preparation and protected
+ciphertext-source recovery are now validated in isolated native/managed fixtures.
+The production client controller, historical-epoch offline key recovery and group
+UI remain unfinished. No cache endpoints are enabled and no live server data has
+changed.
