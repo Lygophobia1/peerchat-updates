@@ -8,6 +8,7 @@ namespace peerchat::group_attachments::windows {
 // owner. Caller has loaded protected immutable staging and current authority.
 class PreparedKeys {
  std::filesystem::path root_;std::string device_,server_,context_;HANDLE directory_=INVALID_HANDLE_VALUE,owner_=INVALID_HANDLE_VALUE;
+ std::filesystem::directory_iterator cleanup_{};bool cleanupStarted_=false;
  static void sameManifest(const Manifest& staged,const Manifest& body){
   protocol::check(staged.binding.attachment==body.binding.attachment&&staged.binding.group==body.binding.group&&staged.binding.sender==body.binding.sender&&staged.binding.account==body.binding.account&&staged.binding.epoch==body.binding.epoch&&staged.name==body.name&&staged.size==body.size&&staged.key==body.key&&staged.prefix==body.prefix&&staged.plainDigest==body.plainDigest&&staged.cipherDigest==body.cipherDigest);
  }
@@ -18,6 +19,7 @@ class PreparedKeys {
   protocol::check(descriptor.sender==device_);return Storage::publicKeyId(w.data).substr(0,32);
  }
 public:
+ struct Maintenance {size_t inspected=0,removed=0,protectedRecords=0,unavailable=0;};
  PreparedKeys(const std::wstring& profile,std::string device,std::string serverFingerprint):root_(std::filesystem::absolute(profile)/L"group-attachment-keys"),device_(std::move(device)),server_(std::move(serverFingerprint)){
   protocol::check(protocol::id(device_)&&protocol::id(server_));context_="PeerChat/AttachmentKeyPreparation/v1/"+device_+"/"+server_+"/"+unicode::encode(std::filesystem::absolute(profile).wstring());std::filesystem::create_directory(root_);
   directory_=CreateFileW(root_.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
@@ -28,6 +30,30 @@ public:
  }
  ~PreparedKeys(){if(owner_!=INVALID_HANDLE_VALUE)CloseHandle(owner_);if(directory_!=INVALID_HANDLE_VALUE)CloseHandle(directory_);}
  PreparedKeys(const PreparedKeys&)=delete;PreparedKeys& operator=(const PreparedKeys&)=delete;
+ // Caller supplies IDs from successfully loaded protected staging/active jobs.
+ // Expiration of preparation metadata never removes user/ciphertext files or
+ // creates a delivery receipt. Verify and unlink the same open file handle.
+ Maintenance expire(const std::set<std::string>& protectedObjects,std::uint64_t now,size_t budget=8){
+  protocol::check(protectedObjects.size()<=transfer::MaxRecords&&now>0&&now<=253402300799000ull&&budget>0&&budget<=64);for(const auto& object:protectedObjects)protocol::check(protocol::id(object,32));
+  Maintenance result;if(!cleanupStarted_){cleanup_=std::filesystem::directory_iterator(root_);cleanupStarted_=true;}
+  while(result.inspected<budget&&cleanup_!=std::filesystem::directory_iterator{}){
+   auto path=cleanup_->path();++cleanup_;++result.inspected;auto name=path.filename().string();if(name=="owner.lock")continue;
+   if(name.size()!=55||name.substr(32)!="-key-envelope.protected"||!protocol::id(name.substr(0,32),32))continue;
+   HANDLE file=INVALID_HANDLE_VALUE;
+   try{
+    auto key=name.substr(0,32);file=CreateFileW(path.c_str(),GENERIC_READ|DELETE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);transfer::windows::require(file!=INVALID_HANDLE_VALUE);
+    BY_HANDLE_FILE_INFORMATION info{};LARGE_INTEGER length{};transfer::windows::require(GetFileInformationByHandle(file,&info)&&info.nNumberOfLinks==1&&!(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))&&GetFileSizeEx(file,&length)&&length.QuadPart>0&&length.QuadPart<=16384);
+    Blob encrypted(static_cast<size_t>(length.QuadPart));DWORD count=0;transfer::windows::require(ReadFile(file,encrypted.data(),static_cast<DWORD>(encrypted.size()),&count,nullptr)&&count==encrypted.size());platform::WindowsRecordProtector protection;SecretRecord plain(protection.unprotect(encrypted,context_+"/"+key));protocol::Reader record(plain.bytes);
+    protocol::check(record.type()==protocol::FileTransfer&&record.string()=="PeerChat/PreparedAttachmentKey/v1"&&record.string()==key&&protocol::id(record.string(),64));auto wire=record.bytes();record.end();auto packet=keys::parse(wire);auto descriptor=parseDescriptor(packet.header.descriptor);
+    protocol::check(descriptor.sender==device_&&id(packet.header)==key&&packet.signature.size()==64&&verifyDevicePayload(keys::signingPayload(packet),packet.signature,descriptor.identity));
+    if(protectedObjects.count(descriptor.attachment))++result.protectedRecords;
+    else if(now>=packet.header.expires){FILE_DISPOSITION_INFO disposition{TRUE};transfer::windows::require(SetFileInformationByHandle(file,FileDispositionInfo,&disposition,sizeof(disposition))!=0);++result.removed;}
+    CloseHandle(file);file=INVALID_HANDLE_VALUE;
+   }catch(const std::exception&){if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);++result.unavailable;}
+  }
+  if(cleanup_==std::filesystem::directory_iterator{})cleanupStarted_=false;
+  return result;
+ }
  Blob ensure(const Staged& staged,const keys::Header& requested,const Body& body,const keys::Authority& authority,platform::IdentityProvider& identity,platform::HpkeProvider& hpke,std::uint64_t now,transfer::windows::CleanupJournal* cleanup=nullptr){
   staged.validate(device_);sameManifest(staged.manifest,body.manifest);keys::headerPayload(requested);auto descriptor=keys::authorize(requested,authority,true);protocol::check(descriptor.matches(staged.manifest)&&identity.publicKey()==descriptor.identity&&requested.created<=now&&now<requested.expires);
   const auto key=id(requested);auto final=root_/unicode::decode(key+"-key-envelope.protected");auto plain=encodeBody(body);const auto bodyDigest=Storage::publicKeyId(plain.bytes);auto attributes=GetFileAttributesW(final.c_str());const auto missing=GetLastError();platform::WindowsRecordProtector protection;
