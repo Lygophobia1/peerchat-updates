@@ -1,5 +1,5 @@
 #pragma once
-#include "group_attachment_blob.hpp"
+#include "group_attachment_metadata.hpp"
 #include <set>
 
 namespace peerchat::group_attachments {
@@ -12,13 +12,6 @@ struct Staged {
   manifest.validate();protocol::check(manifest.binding.sender==device&&!location.empty()&&location.size()<=2048&&created&&expires>=created&&expires-created<=transfer::RetentionMilliseconds);
  }
 };
-struct SecretRecord {
- Blob bytes;
- explicit SecretRecord(Blob value={}):bytes(std::move(value)){}
- SecretRecord(const SecretRecord&)=delete;SecretRecord& operator=(const SecretRecord&)=delete;
- SecretRecord(SecretRecord&& other)noexcept:bytes(std::move(other.bytes)){}
- ~SecretRecord(){platform::group_crypto::wipe(bytes.data(),bytes.size());}
-};
 // Immutable sealed objects only. A caller must verify/reopen the ciphertext
 // against the saved digest before resume. This journal grants no group access
 // and cannot imply remote upload or recipient plaintext completion.
@@ -29,14 +22,11 @@ class StagingJournal {
   return x.binding.attachment==y.binding.attachment&&x.binding.group==y.binding.group&&x.binding.sender==y.binding.sender&&x.binding.account==y.binding.account&&x.binding.epoch==y.binding.epoch&&x.name==y.name&&x.size==y.size&&x.key==y.key&&x.prefix==y.prefix&&x.plainDigest==y.plainDigest&&x.cipherDigest==y.cipherDigest&&a.location==b.location&&a.created==b.created&&a.expires==b.expires;
  }
  static void write(protocol::Writer& w,const Staged& value){
-  const auto& m=value.manifest;w.string(m.binding.attachment);w.string(m.binding.group);w.string(m.binding.sender);w.number(m.binding.account);w.number(m.binding.epoch);
-  w.string(m.name);w.number(m.size);w.bytes(m.key);w.bytes(m.prefix);w.bytes(Blob(m.plainDigest.begin(),m.plainDigest.end()));w.bytes(Blob(m.cipherDigest.begin(),m.cipherDigest.end()));
+  writePrivateManifest(w,value.manifest);
   w.bytes(value.location);w.number(value.created);w.number(value.expires);
  }
  static Staged read(protocol::Reader& r){
-  Staged value;auto& m=value.manifest;m.binding.attachment=r.string();m.binding.group=r.string();m.binding.sender=r.string();m.binding.account=r.number();m.binding.epoch=r.number();m.name=r.string();m.size=r.number();m.key=r.bytes();m.prefix=r.bytes();
-  auto plain=r.bytes(),cipher=r.bytes();protocol::check(plain.size()==32&&cipher.size()==32);std::copy(plain.begin(),plain.end(),m.plainDigest.begin());std::copy(cipher.begin(),cipher.end(),m.cipherDigest.begin());
-  value.location=r.bytes();value.created=r.number();value.expires=r.number();return value;
+  return Staged{readPrivateManifest(r),r.bytes(),r.number(),r.number()};
  }
 public:
  StagingJournal(Storage& storage,std::string device):storage_(storage),device_(std::move(device)){protocol::check(protocol::id(device_));}

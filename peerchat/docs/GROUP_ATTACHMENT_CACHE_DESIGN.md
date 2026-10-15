@@ -312,6 +312,17 @@ This corrects cache concurrency; it is not a measured Android messaging or LAN
 speed improvement. Full runtime/crash tests, real TLS reconnect and the closed
 shipping gate pass afterward. Windows Framework and portable server builds pass.
 
+The bounded private attachment body is tested inside the existing signed PCGE
+group envelope, with native CNG and portable AES providers. Its filename, key,
+nonce prefix and plaintext hash remain encrypted to group devices. Body binding
+must match the authenticated envelope's group, account, device and roster/key
+epoch. Actual protected history reopen recovers the original key and exact
+attachment plaintext; duplicate, truncated, oversized and substituted bodies are
+rejected. A legacy text validator rejects the unsupported body before reserving
+its message ID, and ordinary text still imports afterward. The outer encryption,
+signature, nonce reservation, current-epoch checks and history format are unchanged.
+The body is not yet dispatched by the production UI or offline cache route.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with
