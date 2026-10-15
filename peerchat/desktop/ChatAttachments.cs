@@ -44,7 +44,7 @@ public static class ChatAttachmentProjection {
     }
     public static bool Apply(ConversationModel conversation,CoreAdapter.FileTransferData row){
         var message=conversation.Messages.FirstOrDefault(item=>item.Attachment!=null&&LogicalId(item.Attachment)==LogicalId(row));
-        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error&&previous.rateBits==row.rateBits&&previous.durationMs==row.durationMs&&previous.statisticsBytes==row.statisticsBytes&&previous.statisticsKnown==row.statisticsKnown&&previous.etaReliable==row.etaReliable)return false;message.SetAttachment(row);return true;}
+        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error&&previous.rateBits==row.rateBits&&previous.durationMs==row.durationMs&&previous.statisticsBytes==row.statisticsBytes&&previous.statisticsKnown==row.statisticsKnown&&previous.etaReliable==row.etaReliable&&previous.saveState==row.saveState&&previous.savePath==row.savePath&&previous.saveError==row.saveError)return false;message.SetAttachment(row);return true;}
         bool outgoing=row.isArchive?row.originalSending:row.sending;
         message=new MessageModel{Data=new MessageData{id=LogicalId(row),sender=row.senderPeer??"",text="",time=row.time,logical=row.time},Outgoing=outgoing};
         message.SetAttachment(row);
@@ -77,7 +77,7 @@ public static class SafeAttachmentPreview {
         }finally{reads.Release();}
     }
     public static async Task<string> FullTextAsync(string path,long size){
-        if(size>1024*1024)throw new InvalidDataException("Full text viewer is limited to 1 MiB; use Save As for larger files.");
+        if(size>1024*1024)throw new InvalidDataException("Full text viewer is limited to 1 MiB; use Retry Save and an external viewer for larger files.");
         if(!reads.Wait(0))throw new IOException("File viewer busy; try again.");
         try{return await Task.Run(()=>{using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){
             if(stream.Length!=size)throw new InvalidDataException("File changed");var data=new byte[(int)size];int count=0,n;while(count<data.Length&&(n=stream.Read(data,count,data.Length-count))>0)count+=n;if(count!=data.Length)throw new IOException("Incomplete local read");
@@ -110,7 +110,7 @@ public static class SafeAttachmentPreview {
                 int line=1,end=text.Length;for(int i=0;i<text.Length;i++)if(text[i]=='\n'&&++line>Lines){end=i;break;}
                 result.Text=text.Substring(0,end);result.Truncated=stream.Length>Bytes||end<text.Length;return result;
             }
-        }catch{result.Error="Preview unavailable — use Save As or containing folder";return result;}
+        }catch{result.Error="Preview unavailable — use Retry Save or Open Folder";return result;}
     }
 }
 // Shared read-only text surface for files, protected snippets and ordinary long
@@ -155,15 +155,20 @@ public sealed class AttachmentCard:StackPanel {
         Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!String.IsNullOrEmpty(row.saveError))Children.Add(new TextBlock{Text="Save failed: "+row.saveError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!row.sending&&(row.saveState=="pending"||row.saveState=="copying"))Children.Add(new TextBlock{Text=row.saveState=="pending"?"Verifying retained attachment…":"Saving verified attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
         var actions=new WrapPanel();Children.Add(actions);actions.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
         if(row.sending&&row.state!=4)actions.Children.Add(ActionButton("Transfer settings…",()=>Signal(row,"settings")));
         if(row.state==2&&!row.sending)actions.Children.Add(ActionButton("Download…",()=>Signal(row,"accept")));
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
         if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
-        if(row.state!=4||(!row.protectedSource&&String.IsNullOrEmpty(row.path)))return;
-        if(!longMessage)actions.Children.Add(ActionButton("Save As…",()=>Signal(row,"save")));
-        if(!longMessage&&!row.protectedSource)actions.Children.Add(ActionButton("Folder",()=>Signal(row,"folder")));
+        if(row.state!=4)return;
+        if(!row.sending){
+            if(row.saveState=="complete"&&!String.IsNullOrWhiteSpace(row.savePath)&&File.Exists(row.savePath)){actions.Children.Add(ActionButton("Open File",()=>Signal(row,"open-saved")));actions.Children.Add(ActionButton("Open Folder",()=>Signal(row,"folder-saved")));}
+            else if(row.state==4&&row.saveState!="copying"&&row.saveState!="pending")actions.Children.Add(ActionButton("Retry Save…",()=>Signal(row,"retry-save")));
+        }
+        if(!row.protectedSource&&String.IsNullOrEmpty(row.path))return;
         if(preview==null){actions.Children.Add(ActionButton("Preview",()=>LoadPreview(row)));if(IsLoaded&&IsVisible&&!autoPreviewAttempted){autoPreviewAttempted=true;LoadPreview(row);}return;}
         if(preview.Image!=null){var image=new Image{Source=preview.Image,MaxWidth=320,MaxHeight=240,HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,0),Cursor=Cursors.Hand,ToolTip="Open read-only image viewer"};image.MouseLeftButtonUp+=(s,e)=>ShowPreview(row,preview);Children.Add(image);}
         else if(preview.Error.Length==0){Children.Add(new BoundedTextView(preview.Text,!longMessage,longMessage?"Long message":"Text preview",null,()=>OpenFull(row)));if(preview.Truncated)Children.Add(new TextBlock{Text="Preview limited to 32 KiB / 200 lines — Open full to read more",Foreground=Brushes.LightGray});}
@@ -207,9 +212,23 @@ public partial class DesktopApplication {
             }
             if(action.Action=="settings"){ShowTransferSettings(row.id);return;}
             if(action.Action=="cancel"){await FileOperation(3,"",row.id,"");return;}
-            if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Choose folder; original filename is kept",OverwritePrompt=false};if(choose.ShowDialog(window)==true)await FileOperation(2,"",row.id,Path.GetDirectoryName(choose.FileName));return;}
-            if(action.Action=="folder"){try{System.Diagnostics.Process.Start("explorer.exe","/select,\""+row.path+"\"");}catch{}return;}
-            if(action.Action=="save"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Save an attachment copy",OverwritePrompt=false};if(choose.ShowDialog(window)==true){if(!attachmentCopies.Wait(0)){Notify("Two file copies are already running; try again.");return;}string destination=choose.FileName;try{await Task.Run(()=>{if(row.protectedSource){core.FileTransfer(10,"",row.id,destination);return;}using(var input=new FileStream(row.path,FileMode.Open,FileAccess.Read,FileShare.Read))using(var output=new FileStream(destination,FileMode.CreateNew,FileAccess.Write,FileShare.None)){input.CopyTo(output,32768);output.Flush(true);}});}catch(Exception error){Notify("Copy failed: "+error.Message);}finally{attachmentCopies.Release();}}}
+            if(action.Action=="accept"||action.Action=="retry-save"){
+                var selectionOwner=discovery;ulong selectionProfile=profileSessionGeneration;
+                var chosen=AttachmentDownloadTarget.Choose(window,row.name,path=>core.FileTransfer(16,"","",path));if(chosen==null)return;
+                if(closing||selectionOwner!=discovery||selectionProfile!=profileSessionGeneration||model.Groups)return;
+                try{
+                    uint operation=action.Action=="retry-save"?18u:chosen.OverwriteApproved?17u:AttachmentDownloadTarget.DirectOperation;
+                    string target=operation==AttachmentDownloadTarget.DirectOperation?AttachmentDownloadTarget.Validate(chosen.Path):AttachmentDownloadTarget.Wire(chosen);
+                    await FileOperation(operation,"",row.id,target);
+                }catch(IOException error){Notify(error.Message);}
+                return;
+            }
+            if(action.Action=="open-saved"||action.Action=="folder-saved"){
+                if(row.saveState!="complete"||String.IsNullOrWhiteSpace(row.savePath)||!File.Exists(row.savePath)){Notify("Saved attachment is unavailable. Use Retry Save to restore it.");return;}
+                try{if(action.Action=="folder-saved")System.Diagnostics.Process.Start("explorer.exe","/select,\""+row.savePath+"\"");else System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(row.savePath){UseShellExecute=true});}
+                catch{Notify("Saved attachment is unavailable. Use Retry Save to restore it.");}
+                return;
+            }
         }));
         var outline=Find<ScrollViewer>("MessageScroll");var target=(Grid)outline.Parent;target.AllowDrop=true;
         target.PreviewDragEnter+=(s,e)=>{if(!dragTargetCaptured){dragConversation=ChatTarget();dragProfileGeneration=profileSessionGeneration;dragTargetCaptured=true;}SetDrop(e);};
@@ -251,7 +270,7 @@ public partial class DesktopApplication {
                 foreach(var item in page.records??new CoreAdapter.ArchiveAttachment[0]){
                     var conversation=model.FindByPeer(item.peer)??model.Conversations.Values.FirstOrDefault(value=>value.AccountId>0&&value.AccountId==item.account);
                     if(conversation==null)continue;
-                    chatCatalog[item.id]=new CoreAdapter.FileTransferData{id=item.id,peer=conversation.Contact.peer,name=item.name,size=item.size,done=item.size,state=item.protectedSource?4:String.IsNullOrEmpty(item.path)?(item.archiveAttested?9:10):4,path=item.path,sending=item.sending,senderPeer=item.senderPeer,protectedSource=item.protectedSource,time=item.time};
+                    chatCatalog[item.id]=new CoreAdapter.FileTransferData{id=item.id,peer=conversation.Contact.peer,name=item.name,size=item.size,done=item.size,state=item.protectedSource||item.saveState=="complete"&&!String.IsNullOrEmpty(item.savePath)?4:String.IsNullOrEmpty(item.path)?(item.archiveAttested?9:10):4,path=item.path,saveState=item.saveState,savePath=item.savePath,saveError=item.saveError,sending=item.sending,senderPeer=item.senderPeer,protectedSource=item.protectedSource,time=item.time};
                 }
                 chatAttachmentCursor=page.complete?0:page.next;chatCatalogAt=DateTime.UtcNow;
             }

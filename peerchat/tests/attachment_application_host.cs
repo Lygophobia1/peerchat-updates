@@ -15,7 +15,7 @@ using PeerChatDesktop;
 // DiscoveryClient and actual pinned TLS; the bridge never handles file chunks,
 // retries, encryption or native journal state itself.
 class AttachmentApplicationHost {
- static int Main(string[] args){try{AttachmentCacheRuntimeTest.ApplicationHost(Path.GetFullPath(args[0]));return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
+ static int Main(string[] args){try{Console.InputEncoding=new UTF8Encoding(false,true);Console.OutputEncoding=new UTF8Encoding(false,true);AttachmentCacheRuntimeTest.ApplicationHost(Path.GetFullPath(args[0]));return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }
 partial class AttachmentCacheRuntimeTest {
  static byte[] FixturePasswordHash(){using(var derive=new Rfc2898DeriveBytes("fixture-password-only",new byte[16],310000,HashAlgorithmName.SHA256))return derive.GetBytes(32);}

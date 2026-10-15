@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
@@ -12,11 +13,70 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace PeerChatDesktop {
+public static class AttachmentDownloadTarget {
+    public const uint DirectOperation=15,GroupOperation=9;
+    static string lastFolder;
+    public sealed class Selection {public string Path,Approval;public bool OverwriteApproved;}
+    public static string FirstAvailableName(string folder,string originalName,Func<string,bool> occupied=null){
+        string name=Path.GetFileName(originalName);if(String.IsNullOrWhiteSpace(name))name="attachment";
+        occupied=occupied??(path=>File.Exists(path)||Directory.Exists(path));
+        if(!occupied(Path.Combine(folder,name)))return name;
+        string stem=Path.GetFileNameWithoutExtension(name),extension=Path.GetExtension(name);
+        for(int number=1;number<=9999;number++){string candidate=stem+" ("+number+")"+extension;if(!occupied(Path.Combine(folder,candidate)))return candidate;}
+        return name;
+    }
+    static string InitialFolder(){
+        if(!String.IsNullOrEmpty(lastFolder)&&Directory.Exists(lastFolder))return lastFolder;
+        string downloads=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Downloads");
+        return Directory.Exists(downloads)?downloads:Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    }
+    public static Microsoft.Win32.SaveFileDialog Dialog(string originalName){string folder=InitialFolder();return new Microsoft.Win32.SaveFileDialog{InitialDirectory=folder,FileName=FirstAvailableName(folder,originalName),DefaultExt=Path.GetExtension(originalName),AddExtension=true,CheckPathExists=true,ValidateNames=true,Title="Download attachment",OverwritePrompt=false};}
+    // Capture the existing file's native identity before asking for consent.
+    // A declined prompt keeps Save As open; an absent capture callback is closed.
+    public static Selection Choose(Window owner,string originalName,Func<string,string> captureOverwrite=null){
+        var dialog=Dialog(originalName);Selection selected=null;
+        dialog.FileOk+=(sender,args)=>{
+            string path;try{path=ValidatePath(dialog.FileName);}catch(IOException error){MessageBox.Show(owner,error.Message,"Download attachment",MessageBoxButton.OK,MessageBoxImage.Warning);args.Cancel=true;return;}
+            if(Directory.Exists(path)){MessageBox.Show(owner,"Choose a filename, not an existing folder.","Download attachment",MessageBoxButton.OK,MessageBoxImage.Warning);args.Cancel=true;return;}
+            bool overwrite=File.Exists(path);
+            string approval="";
+            if(overwrite){
+                if(captureOverwrite==null){args.Cancel=true;return;}
+                try{approval=captureOverwrite(path);if(String.IsNullOrEmpty(approval)||Convert.FromBase64String(approval).Length==0)throw new InvalidDataException();}
+                catch{MessageBox.Show(owner,"The existing file could not be checked safely. Choose another name or try again.","Download attachment",MessageBoxButton.OK,MessageBoxImage.Warning);args.Cancel=true;return;}
+                if(MessageBox.Show(owner,"Replace the existing file ‘"+System.IO.Path.GetFileName(path)+"’? The current file will be retained for recovery during replacement.","Confirm overwrite",MessageBoxButton.YesNo,MessageBoxImage.Warning,MessageBoxResult.No)!=MessageBoxResult.Yes){args.Cancel=true;return;}
+            }
+            selected=new Selection{Path=path,OverwriteApproved=overwrite,Approval=approval};
+        };
+        if(dialog.ShowDialog(owner)!=true||selected==null)return null;
+        lastFolder=Path.GetDirectoryName(selected.Path);return selected;
+    }
+    static void WriteField(BinaryWriter writer,byte[] bytes){writer.Write((ulong)bytes.Length);writer.Write(bytes);}
+    public static string Wire(Selection selection){
+        if(selection==null)throw new ArgumentNullException("selection");string path=ValidatePath(selection.Path);
+        byte[] approval=String.IsNullOrEmpty(selection.Approval)?new byte[0]:Convert.FromBase64String(selection.Approval);
+        if(selection.OverwriteApproved!=(approval.Length>0)||approval.Length>2048)throw new IOException("Download overwrite approval is invalid.");
+        using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream,Encoding.UTF8)){
+            writer.Write(new byte[]{80,84,1,30});WriteField(writer,Encoding.UTF8.GetBytes("PeerChat/DownloadSelection/v1"));WriteField(writer,Encoding.UTF8.GetBytes(path));WriteField(writer,approval);
+            if(stream.Length>4096)throw new IOException("Download selection is too long.");return Convert.ToBase64String(stream.ToArray());
+        }
+    }
+    static string ValidatePath(string path){
+        string full;try{full=Path.GetFullPath(path);}catch(Exception error)when(error is ArgumentException||error is NotSupportedException||error is PathTooLongException){throw new IOException("Choose a valid download filename and folder.");}
+        if(!Path.IsPathRooted(path)||!String.Equals(full,path,StringComparison.OrdinalIgnoreCase)||String.IsNullOrEmpty(Path.GetFileName(full))||!Directory.Exists(Path.GetDirectoryName(full)))throw new IOException("Choose a valid download filename and folder.");
+        return full;
+    }
+    public static string Validate(string path){
+        string full=ValidatePath(path);
+        if(File.Exists(full)||Directory.Exists(full))throw new IOException("A file with this name already exists. Choose a different name; existing files will not be overwritten.");
+        return full;
+    }
+}
 // Presentation only. Native owns identity, durable progress and verification.
 public sealed partial class CoreAdapter {
     public sealed class GroupAttachmentRecipient {public long account,done;public string device,name,state,error;}
     public sealed class GroupAttachmentData {
-        public string id,logicalId,group,name,path,error,senderPeer,state,exportState,exportPath;
+        public string id,logicalId,group,name,path,error,senderPeer,state,exportState,exportPath,exportError;
         public long size,transferSize,done,time;
         public bool sending,plaintextVerified,sourceVerified,canRetry,canCancel,canOpen,outputPending,preparationRequired;
         public GroupAttachmentRecipient[] recipients;
@@ -75,7 +135,7 @@ public static class GroupAttachmentProjection {
         }
     }
     public static string Status(CoreAdapter.GroupAttachmentData row){
-        if(!row.sending&&row.plaintextVerified)return "Complete — plaintext verified";
+        if(!row.sending&&row.plaintextVerified)return row.exportState=="complete"?"Saved — integrity verified":row.exportState=="failed"?"Verified download — save needs attention":"Verified download — saving";
         if(!row.sending&&row.state=="complete")return "Downloaded — plaintext verification pending";
         return State(row.state,row.sending);
     }
@@ -109,6 +169,7 @@ public sealed class GroupAttachmentCard:StackPanel {
             if(row.transferSize>0)Children.Add(new ProgressBar{Height=4,Maximum=row.transferSize,Value=Math.Min(row.done,row.transferSize),Margin=new Thickness(0,6,0,2)});
         }
         if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!String.IsNullOrEmpty(row.exportError))Children.Add(new TextBlock{Text="Save failed: "+row.exportError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(row.outputPending||row.exportState=="copying")Children.Add(new TextBlock{Text=row.exportState=="copying"?"Saving verified attachment…":"Verifying local attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.recipients!=null&&row.recipients.Length>0){
             var list=new StackPanel();foreach(var recipient in row.recipients){
@@ -123,7 +184,11 @@ public sealed class GroupAttachmentCard:StackPanel {
         if(!row.sending&&row.state=="available"&&!row.plaintextVerified)AddAction(actions,"Download…","accept");
         if(row.canRetry&&row.state!="expired")AddAction(actions,row.preparationRequired?"Prepare again…":row.state=="paused"?"Resume":"Retry","retry");
         if(row.canCancel)AddAction(actions,"Cancel","cancel");
-        if(GroupAttachmentProjection.CanRequestOpen(row)&&!row.outputPending&&row.exportState!="copying"){AddAction(actions,"Preview","preview");AddAction(actions,"Open","open");AddAction(actions,"Save As…","save");}
+        if(GroupAttachmentProjection.CanRequestOpen(row)&&!row.outputPending)AddAction(actions,"Preview","preview");
+        if(!row.sending&&row.plaintextVerified){
+            if(row.exportState=="complete"&&!String.IsNullOrWhiteSpace(row.exportPath)&&File.Exists(row.exportPath)){AddAction(actions,"Open File","open-saved");AddAction(actions,"Open Folder","folder-saved");}
+            else if(row.exportState!="copying"&&row.exportState!="pending")AddAction(actions,"Retry Save…","retry-save");
+        }
     }
 }
 // A clipboard draft stays in memory until native durably accepts its source.
@@ -322,21 +387,36 @@ public partial class DesktopApplication {
             }else await GroupAttachmentOperation(4,row.group,row.id);
             return;
         }
-        if(action.Action=="accept"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=Path.GetFileName(row.name),Title="Download attachment to folder",OverwritePrompt=false};if(choose.ShowDialog(window)==true&&model.Groups&&model.SelectedGroup!=null&&model.SelectedGroup.Id==row.group)await GroupAttachmentOperation(2,row.group,row.id,Path.GetDirectoryName(choose.FileName));return;}
+        if(action.Action=="accept"||action.Action=="retry-save"){
+            var selectionOwner=discovery;ulong selectionProfile=profileSessionGeneration;
+            var chosen=AttachmentDownloadTarget.Choose(window,row.name,path=>core.FileTransfer(16,"","",path));if(chosen==null)return;
+            if(closing||selectionOwner!=discovery||selectionProfile!=profileSessionGeneration||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=row.group)return;
+            try{
+                uint operation=action.Action=="retry-save"?11u:chosen.OverwriteApproved?10u:AttachmentDownloadTarget.GroupOperation;
+                string target=operation==AttachmentDownloadTarget.GroupOperation?AttachmentDownloadTarget.Validate(chosen.Path):AttachmentDownloadTarget.Wire(chosen);
+                await GroupAttachmentOperation(operation,row.group,row.id,target);
+            }catch(IOException error){Notify(error.Message);}
+            return;
+        }
+        if(action.Action=="open-saved"||action.Action=="folder-saved"){
+            if(row.exportState!="complete"||String.IsNullOrWhiteSpace(row.exportPath)||!File.Exists(row.exportPath)){Notify("Saved attachment is unavailable. Use Retry Save to restore it.");return;}
+            try{if(action.Action=="folder-saved")System.Diagnostics.Process.Start("explorer.exe","/select,\""+row.exportPath+"\"");else System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(row.exportPath){UseShellExecute=true});}
+            catch{Notify("Saved attachment is unavailable. Use Retry Save to restore it.");}
+            return;
+        }
         if(!GroupAttachmentProjection.CanRequestOpen(row)){Notify("The local attachment is not available for verification.");return;}
         if(pendingGroupAttachmentActions.ContainsKey(row.id)){Notify("This attachment is being verified.");return;}
         var generation=profileSessionGeneration;var owner=discovery;
         try{
-            string destination="";if(action.Action=="save"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=Path.GetFileName(row.name),Title="Save a verified attachment copy",OverwritePrompt=false};if(choose.ShowDialog(window)!=true)return;destination=choose.FileName;}
+            string destination="";
             if(closing||generation!=profileSessionGeneration||owner!=discovery||!model.Groups||model.SelectedGroup==null||model.SelectedGroup.Id!=row.group)return;
             var pending=new PendingGroupAttachmentAction{Action=action.Action,Destination=destination,Group=row.group,Profile=generation,Owner=owner,Busy=true};
             pendingGroupAttachmentActions[row.id]=pending;
-            string path=await Task.Run(()=>core.GroupAttachment(action.Action=="save"?5u:6u,row.group,row.id,destination));
+            string path=await Task.Run(()=>core.GroupAttachment(6,row.group,row.id,destination));
             pending.Busy=false;
             if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
             if(String.IsNullOrEmpty(path)){Notify("Verifying local attachment…");return;}
             pendingGroupAttachmentActions.Remove(row.id);
-            if(action.Action=="save"){if(path!="ok")throw new IOException("Verified export did not complete.");Notify("Verified attachment saved.");return;}
             await ShowVerifiedGroupAttachment(row,pending,path);
         }catch(Exception error){pendingGroupAttachmentActions.Remove(row.id);if(!closing&&generation==profileSessionGeneration&&owner==discovery)Notify("Attachment unavailable: "+error.Message);}
     }

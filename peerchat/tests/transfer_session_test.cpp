@@ -18,7 +18,9 @@ std::uint64_t processPeakBytes(){PROCESS_MEMORY_COUNTERS counters{};counters.cb=
 int main(int argc,char** argv){
     Node left,right;std::string a,b;std::uint64_t la=0,ra=0;bool readyLeft=false,readyRight=false;
     unsigned mailboxFailures=0;
-    auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/("file-session-"+Storage::newMessageId());
+    // Keep isolated native Win32 fixture paths below MAX_PATH, including the
+    // profile-owned transfer-ID staging directories exercised by this test.
+    auto root=std::filesystem::temp_directory_path()/("peerchat-file-session-"+Storage::newMessageId());
     try{
         left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
         auto poll=[&]{
@@ -131,7 +133,8 @@ int main(int argc,char** argv){
         auto destination=root/L"received";std::filesystem::create_directory(destination);
         auto id=left.fileTransfer(1,b,"",source.wstring());std::string narrow(id.begin(),id.end());
         wait([&]{return right.fileTransfer(0).find(id)!=std::wstring::npos;},"offer not delivered over peer TLS");
-        right.fileTransfer(2,"",narrow,destination.wstring());
+        auto chosen=destination/L"cat2-日本.bin";
+        right.fileTransfer(15,"",narrow,chosen.wstring());
         wait([&]{return right.fileTransfer(0).find(L"\"done\":32768")!=std::wstring::npos||right.fileTransfer(0).find(L"\"done\":65536")!=std::wstring::npos;},"first bounded chunks did not arrive");
         auto originalA=a,originalB=b;
         const auto originalLa=la,originalRa=ra;
@@ -140,7 +143,7 @@ int main(int argc,char** argv){
         wait([&]{return mailboxFailures==1;},"mailbox failure not scoped to local operation");
         require(readyLeft&&readyRight&&la==originalLa&&ra==originalRa,"mailbox validation failure replaced reliable route during file transfer");
         left.stop();right.stop();la=ra=0;readyLeft=readyRight=false;a.clear();b.clear();
-        require(std::filesystem::exists(destination/(id+L".peerchat-received")/(id+L".peerchat-part")),"shutdown deleted resumable partial");
+        require(std::filesystem::exists(root/L"right"/L"attachment-received"/(id+L".peerchat-received")/(id+L".peerchat-part")),"shutdown deleted resumable partial");
         left.start((root/L"left").wstring(),0,L"File left",false);right.start((root/L"right").wstring(),0,L"File right",false);
         wait([&]{return !a.empty()&&!b.empty();},"nodes did not reopen");
         require(a==originalA&&b==originalB,"restart changed device identity");
@@ -158,9 +161,9 @@ int main(int argc,char** argv){
         wait([&]{return readyLeft&&readyRight;},"replacement TLS did not establish");
         try{wait([&]{return left.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&right.fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"file did not resume and complete",30);}
         catch(...){std::cerr<<"sender "<<unicode::encode(left.fileTransfer(0))<<"\nreceiver "<<unicode::encode(right.fileTransfer(0))<<"\n";throw;}
-        auto final=destination/(id+L".peerchat-received")/name;std::ifstream file(final,std::ios::binary);std::vector<char> actual((std::istreambuf_iterator<char>(file)),{});
+        wait([&]{return right.fileTransfer(0).find(L"\"saveState\":\"complete\"")!=std::wstring::npos;},"verified automatic save did not complete",15);auto final=chosen;std::ifstream file(final,std::ios::binary);std::vector<char> actual((std::istreambuf_iterator<char>(file)),{});
         require(actual==bytes,"completed file bytes mismatch");
-        require(!std::filesystem::exists(destination/(id+L".peerchat-received")/(id+L".peerchat-part")),"partial leaked after completion");
+        require(!std::filesystem::exists(root/L"right"/L"attachment-received"/(id+L".peerchat-received")/(id+L".peerchat-part")),"partial leaked after completion");
         auto message=left.send(b,L"Messaging survives file completion");require(!message.empty(),"text enqueue failed");
         bool delivered=false;
         auto end=std::chrono::steady_clock::now()+std::chrono::seconds(5);

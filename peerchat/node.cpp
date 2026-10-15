@@ -19,6 +19,7 @@
 #include "portable/transfer_statistics_storage.hpp"
 #include "windows_mailbox.hpp"
 #include "windows_group_attachment_application.hpp"
+#include "windows_download_save.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
 #include "tls.hpp"
@@ -122,6 +123,7 @@ struct Node::Impl {
     std::uint64_t demandCheckAt=0;
     std::unique_ptr<transfer::TransferManager> transfers;
     std::map<std::string,std::wstring> transferPaths;
+    std::unique_ptr<download_save::Coordinator> downloadSaves;
     std::wstring snippetRoot;
     std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
@@ -169,6 +171,7 @@ struct Node::Impl {
     transfer::windows::TransferTiming transferTiming;
     void serviceTransfers(){
         if(!transfers)return;
+        if(downloadSaves)try{downloadSaves->tick(transfers->completedRecords());}catch(const std::exception&){transferPersistenceFailure();}
         if(groupAttachments)try{groupAttachments->tick();}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}}
         transfers->mediaActive(groupBulkMediaActive||calls.active()||screenShares.active()!=nullptr);
         std::set<std::string> peers;for(const auto& row:transfers->snapshots())if(row.purpose==transfer::Purpose::PeerFile)peers.insert(row.peer);
@@ -234,6 +237,13 @@ struct Node::Impl {
             auto value=transfers->options(command.id);return L"{\"chunkBytes\":"+std::to_wstring(value.chunkBytes)+L",\"window\":"+std::to_wstring(value.window)+L",\"bitsPerSecond\":"+std::to_wstring(value.bitsPerSecond)+L"}";
         }
         if(command.sourceKind==14){protocol::check(command.text==L"0"||command.text==L"1");groupBulkMediaActive=command.text==L"1";return L"ok";}
+        if(command.sourceKind==16)return widenUtf8(group_attachments::rpc::base64(group_attachments::windows::captureOverwriteTarget(command.text),false));
+        auto saveSelection=[&](){auto encoded=group_attachments::rpc::unbase64(utf8(command.text),65536,false);protocol::Reader r(encoded);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DownloadSelection/v1");auto target=r.text();auto approval=r.bytes();r.end();return std::make_pair(target,approval);};
+        if(command.sourceKind==18){
+            protocol::check(downloadSaves!=nullptr);auto records=transfers->completedRecords();auto found=std::find_if(records.begin(),records.end(),[&](const auto& d){return d.metadata.id==command.id&&!d.sending&&d.purpose==transfer::Purpose::PeerFile;});auto selected=saveSelection();
+            if(found!=records.end())downloadSaves->retry(command.id,selected.first,selected.second,&*found);
+            else{archive::AttachmentCatalog catalog(*store);auto a=catalog.find(command.id);protocol::check(a&&!a->location.empty()&&!transfer::windows::protectedSnippetToken(a->location));transfer::DurableState record;record.metadata={a->id,a->name,a->size,a->digest};record.location=a->location;downloadSaves->retry(command.id,selected.first,selected.second,&record,true);}return L"ok";
+        }
         if(command.sourceKind==1||command.sourceKind==7){
             auto contact=contacts.find(command.peer);
             if(!protocol::id(command.peer)||contact==contacts.end()||!contact->second.verified)throw std::runtime_error("Verify the recipient device before sending a file");
@@ -274,12 +284,14 @@ struct Node::Impl {
             for(size_t trim=0;trim<4&&trim<=bytes.size();++trim)try{return unicode::decode(std::string(bytes.begin(),bytes.end()-trim));}catch(const std::exception&){if(command.sourceKind==9)throw;}
             throw std::runtime_error("Snippet preview could not be decoded");
         }
-        if(command.sourceKind==2){
+        if(command.sourceKind==2||command.sourceKind==15||command.sourceKind==17){
             auto snapshots=transfers->snapshots();auto found=std::find_if(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==command.id&&!s.sending&&s.state==transfer::State::AwaitingAcceptance;});
             if(found==snapshots.end())throw std::runtime_error("File offer unavailable");
             for(auto i=transferPaths.begin();i!=transferPaths.end();)if(std::none_of(snapshots.begin(),snapshots.end(),[&](const auto& s){return s.metadata.id==i->first;}))i=transferPaths.erase(i);else ++i;
-            auto sink=std::make_unique<transfer::windows::FileSink>(command.text,found->metadata,nullptr,true,true);auto path=sink->path();
-            transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;return L"ok";
+            bool automatic=command.sourceKind!=2;
+            if(automatic){protocol::check(downloadSaves!=nullptr);auto selected=command.sourceKind==17?saveSelection():std::make_pair(command.text,Blob{});downloadSaves->select(command.id,selected.first,selected.second);}
+            try{auto sink=std::make_unique<transfer::windows::FileSink>(automatic?downloadSaves->staging(mailboxProfileDirectory):command.text,found->metadata,nullptr,true,true);auto path=sink->path();transfers->accept(command.id,std::move(sink),nowMilliseconds());transferPaths[command.id]=path;}
+            catch(...){if(automatic)downloadSaves->abandon(command.id);throw;}return L"ok";
         }
         if(command.sourceKind==3){if(archiveTransfers&&archiveTransfers->owns(command.id))archiveTransfers->cancel(command.id);else transfers->cancel(command.id);return L"ok";}
         if(command.sourceKind==4){
@@ -287,7 +299,7 @@ struct Node::Impl {
             auto through=store->attachmentMetadataWatermark();auto page=store->attachmentMetadataPage(static_cast<std::int64_t>(after),through);
             std::wostringstream out;out<<L"{\"next\":"<<page.next<<L",\"complete\":"<<(page.complete?L"true":L"false")<<L",\"records\":[";bool first=true;
             for(const auto& record:page.records){auto a=archive::decodeLocalAttachment(record.record);bool protectedSource=transfer::windows::protectedSnippetToken(a.location);std::wstring localPath;if(!a.location.empty()&&!protectedSource){try{transfer::DurableState d;d.location=a.location;auto source=transfer::windows::reopenSource(d);protocol::Reader token(a.location);protocol::check(token.type()==protocol::FileTransfer);localPath=token.text();}catch(const std::exception&){}}if(!first)out<<L",";first=false;
-                out<<L"{\"id\":"<<transferQuote(widenUtf8(a.id))<<L",\"name\":"<<transferQuote(widenUtf8(a.name))<<L",\"size\":"<<a.size<<L",\"protectedSource\":"<<(protectedSource?L"true":L"false")<<L",\"senderPeer\":"<<transferQuote(widenUtf8(a.sender))<<L",\"peer\":"<<transferQuote(widenUtf8(a.conversation))<<L",\"account\":"<<(a.conversation==a.sender?a.senderAccount:a.recipientAccount)<<L",\"sending\":"<<((a.sender==profile.peerId||a.senderAccount==authenticatedFriends.localAccount())?L"true":L"false")<<L",\"time\":"<<a.utc<<L",\"path\":"<<transferQuote(localPath)<<L",\"availableLocally\":"<<(!a.location.empty()?L"true":L"false")<<L",\"archiveAttested\":"<<(!a.proof.empty()?L"true":L"false")<<L"}";}
+                out<<L"{\"id\":"<<transferQuote(widenUtf8(a.id))<<L",\"name\":"<<transferQuote(widenUtf8(a.name))<<L",\"size\":"<<a.size<<L",\"protectedSource\":"<<(protectedSource?L"true":L"false")<<L",\"senderPeer\":"<<transferQuote(widenUtf8(a.sender))<<L",\"peer\":"<<transferQuote(widenUtf8(a.conversation))<<L",\"account\":"<<(a.conversation==a.sender?a.senderAccount:a.recipientAccount)<<L",\"sending\":"<<((a.sender==profile.peerId||a.senderAccount==authenticatedFriends.localAccount())?L"true":L"false")<<L",\"time\":"<<a.utc<<L",\"path\":"<<transferQuote(localPath)<<L",\"saveState\":"<<transferQuote(downloadSaves?widenUtf8(downloadSaves->status(a.id,!a.location.empty()).state):L"")<<L",\"savePath\":"<<transferQuote(downloadSaves?downloadSaves->status(a.id,false).path:L"")<<L",\"saveError\":"<<transferQuote(downloadSaves?widenUtf8(downloadSaves->status(a.id,!a.location.empty()).error):L"")<<L",\"availableLocally\":"<<(!a.location.empty()?L"true":L"false")<<L",\"archiveAttested\":"<<(!a.proof.empty()?L"true":L"false")<<L"}";}
             out<<L"]}";return out.str();
         }
         if(command.sourceKind==5){
@@ -301,6 +313,7 @@ struct Node::Impl {
         auto completed=transfers->completedRecords();
         for(auto& s:snapshots){
             if(s.purpose!=transfer::Purpose::PeerFile)continue;
+            auto saved=downloadSaves?downloadSaves->status(s.metadata.id,!s.sending&&s.state==transfer::State::Complete):download_save::Coordinator::Status{};
             auto original=archiveTransfers?archiveTransfers->originalAttachment(s.metadata.id):std::optional<archive::Attachment>{};
             bool protectedSource=std::any_of(completed.begin(),completed.end(),[&](const auto& d){return d.metadata.id==s.metadata.id&&d.sending&&transfer::windows::protectedSnippetToken(d.location);});
             if(!first)out<<L",";
@@ -312,6 +325,7 @@ struct Node::Impl {
                 <<L",\"peer\":"<<transferQuote(widenUtf8(s.peer))<<L",\"name\":"<<transferQuote(widenUtf8(s.metadata.name))
                 <<L",\"time\":"<<(original?original->utc:s.created)<<L",\"size\":"<<s.metadata.size<<L",\"done\":"<<s.done<<L",\"state\":"<<static_cast<unsigned>(s.state)<<L",\"sending\":"<<(s.sending?L"true":L"false")
                 <<L",\"statisticsKnown\":"<<(s.statisticsKnown?L"true":L"false")<<L",\"statisticsBytes\":"<<s.statisticsBytes<<L",\"durationMs\":"<<s.durationMilliseconds<<L",\"rateBits\":"<<s.currentBitsPerSecond<<L",\"etaReliable\":"<<(s.etaReliable?L"true":L"false")
+                <<L",\"saveState\":"<<transferQuote(widenUtf8(saved.state))<<L",\"savePath\":"<<transferQuote(saved.path)<<L",\"saveError\":"<<transferQuote(widenUtf8(saved.error))
                 <<L",\"protectedSource\":"<<(protectedSource?L"true":L"false")<<L",\"error\":"<<transferQuote(widenUtf8(s.error))<<L",\"path\":"<<transferQuote(s.state==transfer::State::Complete&&!protectedSource?transferPaths[s.metadata.id]:L"")<<L"}";
         }
         out<<L"]";return out.str();
@@ -1629,7 +1643,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
-            groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;groupAttachmentPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
+            downloadSaves.reset();groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;groupAttachmentPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
             try{
                 transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
                 transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
@@ -1653,6 +1667,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 for(auto& d:transferJournal->load())if(!d.location.empty()){
                     protocol::Reader location(d.location);auto source=location.text();transferPaths[d.metadata.id]=d.sending?source:location.text();
                 }
+                try{downloadSaves=std::make_unique<download_save::Coordinator>(directory,profile.peerId);}catch(const std::exception&){notice(NodeEvent::Kind::Error,L"Automatic saving unavailable: protected save choices require attention; verified downloads are retained");}
             }
             catch(...){groupAttachments.reset();transfers.reset();cacheJournal.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
             sessionEpoch={nextSessionEpoch++};
@@ -1757,7 +1772,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
         archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}downloadSaves.reset();groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -1807,7 +1822,7 @@ std::wstring Node::fileTransfer(unsigned operation,const std::string& peer,const
     response.reset();return result.get(); // Local bounded operation; desktop calls off its dispatcher.
 }
 std::wstring Node::groupAttachment(unsigned operation,const std::string& group,const std::string& id,const std::wstring& path){
-    protocol::check(operation<=8&&(group.empty()?operation==0:protocol::id(group,32)));
+    protocol::check(operation<=11&&(group.empty()?operation==0:protocol::id(group,32)));
     if(operation==7)protocol::check(transfer::safeName(id)&&path.size()<=((16*1024*1024+2)/3)*4);
     else if(operation==8)protocol::check(id.size()<=19&&std::all_of(id.begin(),id.end(),[](char c){return c>='0'&&c<='9';})&&path.empty());
     else protocol::check((id.empty()||protocol::id(id,32))&&path.size()<=32768);

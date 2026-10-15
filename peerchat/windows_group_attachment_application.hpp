@@ -24,10 +24,11 @@ private:
  struct Job {
   std::string id,local,server,peer,name,state="preparing",error,lease;bool sending=false,accepted=false,verified=false,published=false,keysLoaded=false,admitted=false,outputChecked=false,uploadComplete=false,outputRequested=false;
   std::uint64_t time=0,order=0,expires=0,route=0,retryAt=0,version=1,negotiation=0,readOffset=0,inputSize=0;unsigned failures=0;
-  Blob descriptor,sourceLocation,receipt,receivedEnvelope,outputToken,cipherLocation;std::wstring destination,verifiedPath;std::unique_ptr<Body> body;
+  // outputPath is always the verified internal copy, never a user destination.
+  Blob descriptor,sourceLocation,receipt,receivedEnvelope,outputToken,cipherLocation;std::wstring destination,outputPath;std::unique_ptr<Body> body;
   SecretRecord saved;std::uint64_t revision=0;
   std::unique_ptr<transfer::Source> source;std::unique_ptr<transfer::windows::FileSink> sink;
-  std::unique_ptr<VerifiedOutput> output;std::unique_ptr<OutputExport> exportJob;std::wstring exportDestination;std::string exportError;
+  std::unique_ptr<VerifiedOutput> output;std::unique_ptr<OutputExport> exportJob;std::wstring exportDestination;std::string exportError,exportId,exportState="none";Blob exportApproval,exportToken;bool exportCleaned=false;
   std::unique_ptr<transfer::windows::Sha256> plainHash,cipherHash;std::unique_ptr<Sealer> sealer;std::unique_ptr<ReceiverFinalizer> finalizer;
   std::vector<Recipient> recipients;std::optional<V> context;size_t publishIndex=0;
  };
@@ -44,17 +45,19 @@ private:
  Job& job(const std::string& id){auto p=jobs_.find(id);protocol::check(p!=jobs_.end());return *p->second;}
  bool busy(const std::string& id)const{return std::any_of(requests_.begin(),requests_.end(),[&](const auto& r){return r.job==id;});}
  static bool active(const Job& j){
+  if(j.exportState=="pending"||j.exportState=="copying"||j.exportState=="failed"||(j.exportState=="complete"&&!j.exportCleaned))return true;
   if(j.state=="canceled"||j.state=="expired"||j.state=="failed")return false;
   if(!j.sending)return !j.body||(j.accepted&&!j.verified)||(j.verified&&!j.published);
   return !j.published||std::any_of(j.recipients.begin(),j.recipients.end(),[](const auto& p){return p.state!="verified";});
  }
  void save(){
-  for(auto& pair:jobs_){auto& j=*pair.second;protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/AttachmentJob/v3");w.string(profile_.peerId);
+  for(auto& pair:jobs_){auto& j=*pair.second;protocol::Writer w(protocol::FileTransfer);w.string(j.exportId.empty()?"PeerChat/AttachmentJob/v3":"PeerChat/AttachmentJob/v4");w.string(profile_.peerId);
    w.string(j.id);w.string(j.local);w.string(j.server);w.string(j.name);w.string(j.state);w.string(j.error);
    w.number(j.sending);w.number(j.accepted);w.number(j.verified);w.number(j.published);w.number(j.admitted);w.number(j.uploadComplete);
-   w.number(j.time);w.number(j.order);w.number(j.expires);w.bytes(j.descriptor);w.bytes(j.sourceLocation);w.bytes(j.receipt);w.bytes(j.receivedEnvelope);w.bytes(j.outputToken);w.bytes(j.cipherLocation);w.text(j.destination);w.text(j.verifiedPath);
+   w.number(j.time);w.number(j.order);w.number(j.expires);w.bytes(j.descriptor);w.bytes(j.sourceLocation);w.bytes(j.receipt);w.bytes(j.receivedEnvelope);w.bytes(j.outputToken);w.bytes(j.cipherLocation);w.text(j.destination);w.text(j.outputPath);
    auto body=j.body?encodeBody(*j.body):SecretRecord{};w.bytes(body.bytes);w.number(j.recipients.size());
    for(auto& p:j.recipients){w.number(p.account);w.string(p.device);w.string(p.state);w.string(p.error);w.number(p.done);w.bytes(p.receipt);}w.string(j.lease);w.number(j.inputSize);
+   if(!j.exportId.empty()){w.text(j.exportDestination);w.string(j.exportId);w.string(j.exportState);w.string(j.exportError);w.bytes(j.exportApproval);w.bytes(j.exportToken);w.number(j.exportCleaned);}
    SecretRecord next(std::move(w.data));auto previous=history_->get(j.id);auto indexedTime=previous?previous->binding.time:j.time;
    j.revision=history_->save({j.id,j.local,j.server,indexedTime},j.saved.bytes,next.bytes,active(j),j.revision);j.saved.bytes.swap(next.bytes);
   }
@@ -65,12 +68,14 @@ private:
  }
  void loadRecord(HistoryStore::Record record){
   if(jobs_.count(record.binding.id))return;
-  protocol::Reader r(record.payload.bytes);protocol::check(r.type()==protocol::FileTransfer);auto format=r.string();protocol::check((format=="PeerChat/AttachmentJob/v1"||format=="PeerChat/AttachmentJob/v2"||format=="PeerChat/AttachmentJob/v3")&&r.string()==profile_.peerId);
+  protocol::Reader r(record.payload.bytes);protocol::check(r.type()==protocol::FileTransfer);auto format=r.string();protocol::check((format=="PeerChat/AttachmentJob/v1"||format=="PeerChat/AttachmentJob/v2"||format=="PeerChat/AttachmentJob/v3"||format=="PeerChat/AttachmentJob/v4")&&r.string()==profile_.peerId);
   auto j=std::make_unique<Job>();j->id=r.string();j->local=r.string();j->server=r.string();j->name=r.string();j->state=r.string();j->error=r.string();
   j->sending=r.number()!=0;j->accepted=r.number()!=0;j->verified=r.number()!=0;j->published=r.number()!=0;j->admitted=r.number()!=0;j->uploadComplete=r.number()!=0;
-  j->time=r.number();j->order=r.number();j->expires=r.number();j->descriptor=r.bytes();j->sourceLocation=r.bytes();j->receipt=r.bytes();j->receivedEnvelope=r.bytes();j->outputToken=r.bytes();j->cipherLocation=r.bytes();j->destination=r.text();j->verifiedPath=r.text();
+  j->time=r.number();j->order=r.number();j->expires=r.number();j->descriptor=r.bytes();j->sourceLocation=r.bytes();j->receipt=r.bytes();j->receivedEnvelope=r.bytes();j->outputToken=r.bytes();j->cipherLocation=r.bytes();j->destination=r.text();j->outputPath=r.text();
   SecretRecord body(r.bytes());if(!body.bytes.empty())j->body=std::make_unique<Body>(decodeBody(body.bytes));
-  auto count=r.number();protocol::check(count<=256);while(count--){Recipient p;p.account=r.number();p.device=r.string();p.state=r.string();p.error=r.string();p.done=r.number();p.receipt=r.bytes();j->recipients.push_back(std::move(p));}if(format!="PeerChat/AttachmentJob/v1"){j->lease=r.string();protocol::check(j->lease.empty()||protocol::id(j->lease,32));}if(format=="PeerChat/AttachmentJob/v3")j->inputSize=r.number();else if(j->body)j->inputSize=j->body->manifest.size;r.end();
+  auto count=r.number();protocol::check(count<=256);while(count--){Recipient p;p.account=r.number();p.device=r.string();p.state=r.string();p.error=r.string();p.done=r.number();p.receipt=r.bytes();j->recipients.push_back(std::move(p));}if(format!="PeerChat/AttachmentJob/v1"){j->lease=r.string();protocol::check(j->lease.empty()||protocol::id(j->lease,32));}if(format=="PeerChat/AttachmentJob/v3"||format=="PeerChat/AttachmentJob/v4")j->inputSize=r.number();else if(j->body)j->inputSize=j->body->manifest.size;
+  if(format=="PeerChat/AttachmentJob/v4"){j->exportDestination=r.text();j->exportId=r.string();j->exportState=r.string();j->exportError=r.string();j->exportApproval=r.bytes();j->exportToken=r.bytes();j->exportCleaned=r.number()!=0;protocol::check(protocol::id(j->exportId,32)&&j->exportDestination.size()<=32768&&(j->exportState=="pending"||j->exportState=="copying"||j->exportState=="failed"||j->exportState=="complete"));j->outputRequested=(j->verified||j->sending)&&(j->exportState=="pending"||j->exportState=="copying"||(j->exportState=="complete"&&!j->exportCleaned));}
+  r.end();
   protocol::check(j->id==record.binding.id&&j->local==record.binding.group&&j->server==record.binding.server&&j->name.size()<=1024);
   j->peer=peer(j->server,j->id);
   if(j->body){auto d=parseDescriptor(j->descriptor);protocol::check(d.attachment==j->id&&d.matches(j->body->manifest));}
@@ -131,7 +136,7 @@ private:
    else{protocol::check(!j.cipherLocation.empty());transfer::DurableState d;d.purpose=transfer::Purpose::GroupCacheCiphertext;d.state=transfer::State::Complete;d.metadata=metadata(j);d.done=d.metadata.size;d.location=j.cipherLocation;j.finalizer=std::make_unique<ReceiverFinalizer>(journal_,d,j.body->manifest,j.destination);}
   }
   if(!j.finalizer->step())return;
-  protocol::check(j.finalizer->verified());j.verifiedPath=j.finalizer->path();j.outputToken=j.finalizer->token();
+  protocol::check(j.finalizer->verified());j.outputPath=j.finalizer->path();j.outputToken=j.finalizer->token();
   if(!j.sending){j.verified=true;j.state="complete";if(j.receipt.empty()){protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/group-attachment-verified/v1");w.bytes(j.descriptor);w.number(account_);w.string(profile_.peerId);w.bytes(profile_.publicKey);w.number(wall());w.bytes(signDevicePayload(w.data,profile_));j.receipt=std::move(w.data);}}
   save();journal_.forgetOutput(j.body->manifest,j.outputToken);j.finalizer.reset();j.outputRequested=true;
  }
@@ -140,8 +145,23 @@ private:
   if(!j.output)j.output=std::make_unique<VerifiedOutput>(j.body->manifest,j.outputToken);
   if(!j.output->verified()){j.output->step();return;}
   j.outputRequested=false;j.outputChecked=true;
-  if(j.exportJob&&!j.exportJob->complete())j.exportJob->step();
+  if(j.exportState=="pending"||j.exportState=="copying"||(j.exportState=="complete"&&!j.exportCleaned)){
+   if(!j.exportJob){j.exportJob=std::make_unique<OutputExport>(*j.output,j.exportDestination,j.exportId,j.exportApproval,j.exportToken);j.exportToken=j.exportJob->resumeToken();j.exportState="copying";save();}
+   if(j.exportJob->step()){j.exportState="complete";j.exportError.clear();save();j.exportJob->finishCleanup();j.exportCleaned=true;save();}
+  }else if(j.exportJob&&!j.exportJob->complete())j.exportJob->step();
  }
+
+ void selectExport(Job& j,const std::wstring& path,Blob approval={}){
+  auto selected=std::filesystem::path(path);protocol::check(selected.is_absolute()&&selected==selected.lexically_normal()&&transfer::safeName(unicode::encode(selected.filename().wstring())));
+  output_detail::Directories hold(selected.parent_path());if(!j.exportError.empty()&&j.error==j.exportError)j.error.clear();
+  if(!j.exportToken.empty()&&j.exportState!="complete"&&j.exportDestination==path&&j.exportApproval==approval){j.exportJob.reset();j.exportState="pending";j.exportError.clear();j.outputRequested=j.verified||j.sending;return;}
+  if(!j.exportToken.empty()&&!j.exportCleaned){auto backup=std::filesystem::path(j.exportDestination).parent_path()/unicode::decode(j.exportId+".peerchat-replaced");protocol::check(GetFileAttributesW(backup.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);j.exportJob.reset();cancelPendingExport(j.exportDestination,j.exportId,j.exportApproval,j.exportToken);}
+  if(approval.empty()){auto attributes=GetFileAttributesW(path.c_str());protocol::check(attributes==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);}
+  // Only local protected job state contains this choice. Authenticated metadata
+  // and ciphertext, signed receipts and transfer ACKs are unchanged.
+  j.exportJob.reset();j.exportDestination=path;j.exportApproval=std::move(approval);j.exportToken.clear();j.exportId=Storage::newMessageId();j.exportState="pending";j.exportCleaned=false;j.exportError.clear();j.outputRequested=j.verified||j.sending;
+ }
+ static std::pair<std::wstring,Blob> selection(const std::wstring& encoded){auto bytes=rpc::unbase64(unicode::encode(encoded),65536,false);protocol::Reader r(bytes);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DownloadSelection/v1");auto path=r.text();auto approval=r.bytes();r.end();return {std::move(path),std::move(approval)};}
 
 public:
  Application(Storage& storage,const Profile& profile,transfer::TransferManager& transfers,CacheStateStore& journal,std::wstring directory,ContextLookup context,KeyAccess keys):storage_(storage),profile_(profile),transfers_(transfers),journal_(journal),context_(std::move(context)),keys_(std::move(keys)),directory_(std::move(directory)),staging_(storage,profile.peerId){cipherDirectory_=(std::filesystem::path(directory_)/L"group-attachment-ciphertext").wstring();receivedDirectory_=(std::filesystem::path(directory_)/L"group-attachment-received").wstring();std::filesystem::create_directory(cipherDirectory_);std::filesystem::create_directory(receivedDirectory_);staged_=staging_.load();load();auto preparation=(std::filesystem::path(directory_)/L"group-attachment-preparation").wstring();std::filesystem::create_directory(preparation);preparationCleanup_=std::make_unique<transfer::windows::CleanupJournal>(preparation);std::set<std::string> retained;for(auto& staged:staged_)retained.insert(staged.manifest.binding.attachment);for(auto& pair:jobs_)if(pair.second->sending&&pair.second->body)retained.insert(pair.first);preparationCleanup_->recover(retained);}
@@ -216,8 +236,8 @@ inline void Application::tick(){
  // Only capability probes are expired here. Transfer retries remain owned by
  // TransferManager; late probe responses cannot claim a newer request ID.
  for(auto it=requests_.begin();it!=requests_.end();){if(it->job.empty()&&it->dispatched&&it->dispatchedAt&&now>=it->dispatchedAt&&now-it->dispatchedAt>=30000){it=requests_.erase(it);supported_=false;capabilityStage_="probe_timeout";capabilityCode_="cache_probe_timeout";availability_="Encrypted attachment capability request timed out. Check the server connection and retry Attach.";pollAt_=now+10000;}else ++it;}
- for(auto& pair:jobs_)if(pair.second->server==server_&&(pair.second->sealer||pair.second->state=="verifying"||pair.second->outputRequested||(pair.second->exportJob&&!pair.second->exportJob->complete()&&!pair.second->exportJob->failed())))work.push_back(pair.second.get());
- if(!work.empty()){auto& j=*work[workTurn_++%work.size()];bool preparing=static_cast<bool>(j.sealer);try{if(j.sealer)prepare(j);else if(j.state=="verifying")verify(j);else outputStep(j);}catch(const std::exception&){if(preparing){j.sealer.reset();j.source.reset();j.sink.reset();j.state="failed";j.error="Attachment preparation failed; select the original file to retry";save();}else if(j.state=="verifying"){j.state="failed";j.error="Attachment plaintext verification or commit failed";save();}else if(j.outputRequested||j.exportJob){j.outputRequested=false;j.outputChecked=false;j.finalizer.reset();j.exportError="Local attachment verification or export failed";j.error=j.exportError;}else failure(j,"Attachment preparation or protected storage unavailable");}}
+ for(auto& pair:jobs_)if(pair.second->server==server_&&(pair.second->sealer||pair.second->state=="verifying"||pair.second->outputRequested||(pair.second->verified&&(pair.second->exportState=="pending"||pair.second->exportState=="copying"))||(pair.second->exportJob&&!pair.second->exportJob->complete()&&!pair.second->exportJob->failed())))work.push_back(pair.second.get());
+ if(!work.empty()){auto& j=*work[workTurn_++%work.size()];bool preparing=static_cast<bool>(j.sealer);try{if(j.sealer)prepare(j);else if(j.state=="verifying")verify(j);else outputStep(j);}catch(const std::exception& error){if(preparing){j.sealer.reset();j.source.reset();j.sink.reset();j.state="failed";j.error="Attachment preparation failed; select the original file to retry";save();}else if(j.state=="verifying"){j.state="failed";j.error="Attachment plaintext verification or commit failed";save();}else if(j.outputRequested||j.exportJob||j.exportState=="pending"||j.exportState=="copying"){j.outputRequested=false;j.outputChecked=false;j.finalizer.reset();j.exportError=j.output&&j.output->verified()?saveFailureReason(error):"Retained internal copy could not be reverified; saving is blocked. Retry Save preserves the stored download.";j.exportState="failed";j.error=j.exportError;save();}else failure(j,"Attachment preparation or protected storage unavailable");}}
  for(auto& pair:jobs_){auto& j=*pair.second;
   if(j.server!=server_||j.state=="canceled"||j.state=="expired"||j.state=="failed"||j.sealer||j.state=="verifying")continue;
   try{
@@ -258,7 +278,7 @@ inline void Application::tick(){
  if(now>=pollAt_&&requests_.size()<24&&!busy("")){auto v=V::map();v["after"]=V(cursor_);enqueue(nullptr,"cache_pending_keys",std::move(v));pollAt_=now+5000;}
 }
 
-inline Application::V Application::snapshot(const std::string& local){auto root=V::map();root["supported"]=V(account_&&supported_);root["reason"]=V(account_?availability_:"Sign in to an authenticated device session");auto list=V::list();auto rows=transfers_.snapshots(monotonic());for(auto& pair:jobs_){auto& j=*pair.second;if(!local.empty()&&j.local!=local)continue;auto v=V::map();v["id"]=V(j.id);v["logicalId"]=V(j.id);v["group"]=V(j.local);v["name"]=V(j.name);v["path"]=V(j.output&&j.output->verified()?unicode::encode(j.output->path()):"");v["canOpen"]=V(j.body&&(j.sending?!j.sourceLocation.empty():j.verified));v["outputPending"]=V(j.outputRequested);v["exportState"]=V(!j.exportError.empty()?"failed":j.exportJob?j.exportJob->complete()?"complete":"copying":"none");v["exportPath"]=V(j.exportJob&&j.exportJob->complete()?unicode::encode(j.exportJob->path()):"");v["error"]=V(j.error);v["time"]=V(j.time);v["state"]=V(j.state);v["sending"]=V(j.sending);v["plaintextVerified"]=V(j.verified);v["sourceVerified"]=V(j.sending&&j.output&&j.output->verified());v["transferSize"]=V(j.body?j.body->manifest.cipherSize():0);v["size"]=V(j.body?j.body->manifest.size:j.sealer?j.sealer->size():j.inputSize);v["done"]=V(std::uint64_t(0));v["senderPeer"]=V(j.body?j.body->manifest.binding.sender:profile_.peerId);v["preparationRequired"]=V(j.state=="failed"&&j.sending&&!j.body&&j.descriptor.empty()&&!j.admitted);v["canRetry"]=V(j.state=="paused"||(j.state=="failed"&&j.sending&&!j.body&&j.descriptor.empty()&&!j.admitted));v["canCancel"]=V(!j.verified&&!j.uploadComplete&&j.state!="canceled"&&j.state!="failed"&&j.state!="expired");for(auto& row:rows)if(row.metadata.id==j.id){v["done"]=V(row.done);if(row.state==transfer::State::Suspended){v["state"]=V("paused");v["error"]=V(row.error);}}auto recipients=V::list();for(auto& p:j.recipients){auto x=V::map();x["account"]=V(p.account);x["device"]=V(p.device);x["name"]=V(p.device.substr(0,12));x["state"]=V(p.state);x["done"]=V(p.done);x["error"]=V(p.error);recipients.array.push_back(std::move(x));}v["recipients"]=std::move(recipients);list.array.push_back(std::move(v));}root["items"]=std::move(list);root["historyCursor"]=V(historyCursor_?std::to_string(historyCursor_):"");root["historyMore"]=V(historyMore_);return root;}
+inline Application::V Application::snapshot(const std::string& local){auto root=V::map();root["supported"]=V(account_&&supported_);root["reason"]=V(account_?availability_:"Sign in to an authenticated device session");auto list=V::list();auto rows=transfers_.snapshots(monotonic());for(auto& pair:jobs_){auto& j=*pair.second;if(!local.empty()&&j.local!=local)continue;auto v=V::map();v["id"]=V(j.id);v["logicalId"]=V(j.id);v["group"]=V(j.local);v["name"]=V(j.name);v["path"]=V(j.output&&j.output->verified()?unicode::encode(j.output->path()):"");v["canOpen"]=V(j.body&&(j.sending?!j.sourceLocation.empty():j.verified));v["outputPending"]=V(j.outputRequested);v["exportState"]=V(j.exportState);v["exportPath"]=V(j.exportState=="complete"?unicode::encode(j.exportDestination):"");v["exportError"]=V(j.exportError);v["error"]=V(j.error);v["time"]=V(j.time);v["state"]=V(j.state);v["sending"]=V(j.sending);v["plaintextVerified"]=V(j.verified);v["sourceVerified"]=V(j.sending&&j.output&&j.output->verified());v["transferSize"]=V(j.body?j.body->manifest.cipherSize():0);v["size"]=V(j.body?j.body->manifest.size:j.sealer?j.sealer->size():j.inputSize);v["done"]=V(std::uint64_t(0));v["senderPeer"]=V(j.body?j.body->manifest.binding.sender:profile_.peerId);v["preparationRequired"]=V(j.state=="failed"&&j.sending&&!j.body&&j.descriptor.empty()&&!j.admitted);v["canRetry"]=V(j.state=="paused"||(j.state=="failed"&&j.sending&&!j.body&&j.descriptor.empty()&&!j.admitted));v["canCancel"]=V(!j.verified&&!j.uploadComplete&&j.state!="canceled"&&j.state!="failed"&&j.state!="expired");for(auto& row:rows)if(row.metadata.id==j.id){v["done"]=V(row.done);if(row.state==transfer::State::Suspended){v["state"]=V("paused");v["error"]=V(row.error);}}auto recipients=V::list();for(auto& p:j.recipients){auto x=V::map();x["account"]=V(p.account);x["device"]=V(p.device);x["name"]=V(p.device.substr(0,12));x["state"]=V(p.state);x["done"]=V(p.done);x["error"]=V(p.error);recipients.array.push_back(std::move(x));}v["recipients"]=std::move(recipients);list.array.push_back(std::move(v));}root["items"]=std::move(list);root["historyCursor"]=V(historyCursor_?std::to_string(historyCursor_):"");root["historyMore"]=V(historyMore_);return root;}
 
 inline std::wstring Application::command(unsigned operation,const std::string& group,const std::string& id,const std::wstring& path){
  if(operation==0){visibleHistory(group);auto value=snapshot(group);value["capabilityStage"]=V(capabilityStage_);value["capabilityCode"]=V(capabilityCode_);value["capabilityGeneration"]=V(generation_);return unicode::decode(rpc::json(value));}
@@ -274,7 +294,8 @@ inline std::wstring Application::command(unsigned operation,const std::string& g
   beginPreparation(*j,current,std::move(j->source));auto result=j->id;jobs_.emplace(result,std::move(j));try{save();}catch(...){jobs_.erase(result);throw;}return unicode::decode(result);
  }
  if(!jobs_.count(id)){auto stored=history_->get(id);protocol::check(stored.has_value()&&stored->binding.group==group&&stored->binding.server==server_);loadRecord(std::move(*stored));}auto& j=job(id);protocol::check(j.local==group&&j.server==server_);
- if(operation==2){protocol::check(j.body&&!j.sending&&!j.verified&&!path.empty());j.destination=path;j.accepted=true;j.state="downloading";j.retryAt=0;save();return L"ok";}
+ if(operation==2||operation==9||operation==10){protocol::check(j.body&&!j.sending&&!j.verified&&!j.accepted&&!path.empty());if(operation==9||operation==10){auto chosen=operation==10?selection(path):std::make_pair(path,Blob{});selectExport(j,chosen.first,std::move(chosen.second));j.destination=receivedDirectory_;}else j.destination=path;j.outputPath.clear();j.accepted=true;j.state="downloading";j.retryAt=0;save();return L"ok";}
+ if(operation==11){protocol::check(j.body&&(j.sending||j.verified));auto chosen=selection(path);selectExport(j,chosen.first,std::move(chosen.second));if(j.output&&j.output->failed())j.output.reset();j.outputRequested=true;save();return L"ok";}
  if(operation==3){if(j.sealer)j.sealer->cancel();j.sealer.reset();j.source.reset();j.sink.reset();transfers_.cancel(j.id);j.state="canceled";requests_.erase(std::remove_if(requests_.begin(),requests_.end(),[&](const auto& q){return q.job==j.id;}),requests_.end());if(!j.lease.empty()){auto v=V::map();v["lease"]=V(j.lease);v["upload"]=V(j.sending);enqueue(&j,"cache_release",std::move(v));}save();return L"ok";}
  if(operation==4){
   if(j.state=="failed"&&j.sending&&!j.body&&j.descriptor.empty()&&!j.admitted&&!path.empty()){
@@ -287,7 +308,7 @@ inline std::wstring Application::command(unsigned operation,const std::string& g
   protocol::check(j.body&&(j.sending||j.verified)&&!path.empty());
   if(j.exportJob){if(j.exportDestination!=path&&(j.exportJob->complete()||j.exportJob->failed()))j.exportJob.reset();else{protocol::check(j.exportDestination==path&&!j.exportJob->failed());return j.exportJob->complete()?L"ok":L"";}}
   if(!j.output||!j.output->verified()){j.outputRequested=true;return L"";}
-  j.exportDestination=path;j.exportError.clear();j.exportJob=std::make_unique<OutputExport>(*j.output,path,Storage::newMessageId());return L"";
+  selectExport(j,path);j.outputRequested=true;save();return L"";
  }
  throw std::runtime_error("Unsupported group attachment operation");
 }
