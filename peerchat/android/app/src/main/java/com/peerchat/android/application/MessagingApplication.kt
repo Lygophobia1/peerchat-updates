@@ -22,6 +22,12 @@ interface MessagingApplication:AutoCloseable {
     suspend fun awaitQuiescence(milliseconds:Long):Boolean = true
     suspend fun send(peerId:String,text:String):String
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
+    suspend fun createGroup(name:String){error("Group creation unavailable")}
+    suspend fun inviteGroup(id:String,target:Long){error("Group invitation unavailable")}
+    suspend fun respondGroup(id:String,accept:Boolean){error("Group invitation unavailable")}
+    suspend fun sendGroup(id:String,text:String):String=error("Group send unavailable")
+    suspend fun retryGroup(id:String,message:String){error("Group retry unavailable")}
+    suspend fun groupHistory(id:String,before:Long=Long.MAX_VALUE):List<GroupMessageSnapshot> = error("Group history unavailable")
     suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String = error("File sharing unavailable")
     suspend fun attachmentAction(id:String,accept:Boolean) { error("File sharing unavailable") }
     suspend fun attachmentText(id:String):String = error("Text preview unavailable")

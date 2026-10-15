@@ -10,6 +10,7 @@ import com.peerchat.android.platform.tls.RelayFrames
 internal class AndroidRelayExecution(private val profile: Long,private val request: RelayExecution,
     private val accounts: ServerAccounts,private val remoteAccount: Long) : AutoCloseable {
     val requestPeerId:String get()=request.peerId
+    val groupScope:GroupRelayScope? get()=request.group
     @Volatile private var stopping=false
     @Volatile private var channel: ServerChannel?=null
     @Volatile var attached=false
@@ -28,7 +29,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         var stage="relay_rendezvous"
         try {
             android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
-            val relay=accounts.openRelay(remoteAccount,request.peerId,request.archive?.fields(),request.attempt) {opened->
+            val relay=accounts.openRelay(remoteAccount,request.peerId,request.group?.fields()?:request.archive?.fields(),request.attempt) {opened->
                 channel=opened
                 if(stopping){opened.close();throw java.io.IOException("Relay cancelled before pairing")}
             }

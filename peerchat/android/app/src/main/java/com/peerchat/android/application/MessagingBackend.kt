@@ -51,6 +51,15 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastMailboxAcknowledgedNanos=0L
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
+    private val groupExecution=GroupExecution()
+    private val voiceExecution=VoiceExecution()
+    private val groupNotifications=GroupNotifications(this.context,profileName)
+    private var groupRefreshAt=0L
+    private var groupProjectionAt=0L
+    private var groupPendingAt=0L
+    private var groupPendingMore=true
+    private var groupCompletionAt=0L
+    private val groupCompletionObserved=mutableMapOf<Long,Long>()
     // Profile-local product default is ON only when absent. Explicit OFF persists;
     // unreadable protected preferences fail closed. History policy is separate.
     private val mailboxPreferences=AndroidQolStore(this.context,profileName)
@@ -195,6 +204,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // The same identity, trust, presence/bootstrap and Remember Me path.
             // Server registration rejects an identity already owned by another account.
             val authenticated=if(creating)connection.register(username,password) else connection.login(username,password)
+            if(mutable.value.accountId!=authenticated.accountId){groupExecution.reset();mutable.value=mutable.value.copy(groups=emptyList(),groupInvitations=emptyList())}
             try {
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
@@ -318,6 +328,33 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
         }
     }
+    override suspend fun createGroup(name:String)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed);val s=mutable.value
+        groupExecution.create(checkNotNull(accounts),checkNotNull(profile).handle,s.accountId,generation,name,s.username);groupRefreshAt=0L
+    }}
+    override suspend fun inviteGroup(id:String,target:Long)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);val g=mutable.value.groups.single{it.id==id};require(friends.any{it.accountId==target})
+        groupExecution.invite(checkNotNull(accounts),id,g.epoch,target);groupRefreshAt=0L
+    }}
+    override suspend fun respondGroup(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);groupExecution.respond(checkNotNull(accounts),id,accept);groupRefreshAt=0L
+    }}
+    override suspend fun sendGroup(id:String,text:String):String=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed);require(text.isNotBlank()&&text.length<=4096)
+        val message=groupExecution.send(checkNotNull(profile).handle,mutable.value.accountId,generation,id,text){events?.queueGroup(it)==true}
+        groupPendingMore=true;groupPendingAt=0L
+        try{mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))}catch(_:Exception){}
+        message
+    }}
+    override suspend fun groupHistory(id:String,before:Long):List<GroupMessageSnapshot> = withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled);val page=groupExecution.load(checkNotNull(profile).handle,mutable.value.accountId,generation,id,before,true)
+        mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation));page
+    }}
+    override suspend fun retryGroup(id:String,message:String)=withContext(Dispatchers.IO){synchronized(gate){
+        check(authorizationSnapshotInstalled&&livePeerWorkAllowed)
+        groupExecution.retry(checkNotNull(profile).handle,mutable.value.accountId,generation,id,message){events?.queueGroup(it)==true}
+        mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))
+    }}
     private var transferDiagnosticsAt=0L
     private var attachmentProjectionAt=0L;private var attachmentProjectionHandle=0L;private var attachmentProjectionGeneration=0L
     private var attachmentProjection=emptyList<AttachmentSnapshot>()
@@ -356,6 +393,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
@@ -391,7 +429,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val old=accounts;accounts=null;friends=emptyList();index=null
             pushRegisteredToken=null
             try {profile?.let{revokeSaved(it,checkNotNull(ProfileBridge.publicKey(it.handle)))};old?.logout()}
-            finally {mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
+            finally {groupExecution.reset();mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
             Unit
         }
     }
@@ -412,7 +450,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
         authoritative.forEach {friend->writer.number(friend.accountId);writer.text(friend.peerId);writer.number(friend.knownPeerIds.size.toLong());friend.knownPeerIds.forEach {writer.text(it)}}
         val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
-        if(identityChanged)generation++
+        if(identityChanged){generation++;groupRefreshAt=0L;groupProjectionAt=0L}
         val native=checkNotNull(profile).handle
         if(identityChanged)check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
         authorizationSnapshotInstalled=true
@@ -446,6 +484,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
             events?.let {stream->
                 if(stream.connected&&!eventWasConnected){
                     eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L
+                    groupPendingMore=true;groupPendingAt=0L
+                    try{groupExecution.resetPending(native,mutable.value.accountId,generation)}catch(_:Exception){}
                     android.util.Log.i("PeerChatNetwork","event=connected repair=requested")
                 }
                 if(stream.finished){
@@ -470,6 +510,24 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(failure !is java.io.IOException)throw failure
                 mutable.value=mutable.value.copy(serverPresenceLive=false,status=serverRefreshFailure(failure)+"; local history retained")
             }finally {refreshAt=System.nanoTime()/1_000_000+if(events?.connected==true)900000 else 120000}
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupRefreshAt){
+            try{groupExecution.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation);groupRefreshAt=now+60000;groupProjectionAt=0L;groupPendingMore=true}
+            catch(failure:Exception){
+                if(expiredServerSession(failure))throw failure
+                try{groupExecution.invalidate(native,mutable.value.accountId,generation)}catch(_:Exception){}
+                groupRefreshAt=now+60000;mutable.value=mutable.value.copy(groups=mutable.value.groups.map{it.copy(ready=false)},groupInvitations=emptyList(),groupDiagnostics="Group snapshot unavailable; authorization invalidated (${failure.javaClass.simpleName})")
+            }
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupProjectionAt){
+            groupProjectionAt=now+1000
+            try{mutable.value=mutable.value.copy(voice=voiceExecution.snapshot(native,mutable.value.accountId,generation))}catch(_:Exception){mutable.value=mutable.value.copy(voice=VoiceSnapshot(diagnostic="Voice capability readout unavailable"))}
+            try{mutable.value=mutable.value.copy(groups=groupExecution.snapshot(native,mutable.value.accountId,generation),groupInvitations=groupExecution.invitations,groupDiagnostics=groupExecution.diagnostic)}catch(_:Exception){}
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&events?.connected==true&&groupPendingMore&&now>=groupPendingAt){
+            groupPendingAt=now+1000
+            try{groupPendingMore=groupExecution.submitPending(native,mutable.value.accountId,generation){events?.queueGroup(it)==true}}
+            catch(_:Exception){groupPendingAt=now+30000}
         }
         if(mutable.value.authenticated&&now>=mailboxAt) {
             try {
@@ -509,12 +567,27 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.
         val iterator=executions.iterator()
+        val checkGroupCompletion=now>=groupCompletionAt
+        if(checkGroupCompletion)groupCompletionAt=now+500
         while(iterator.hasNext()) {
             val (attempt,execution)=iterator.next()
-            if(execution.finished){iterator.remove();continue}
+            if(execution.finished){groupCompletionObserved.remove(attempt);iterator.remove();continue}
             if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
             if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();continue}
+            if(checkGroupCompletion&&execution.groupScope!=null){
+                try{
+                    if(groupExecution.controlSettled(native,mutable.value.accountId,generation,attempt)){
+                        val observed=groupCompletionObserved.getOrPut(attempt){System.nanoTime()}
+                        // Writer publishes this timestamp only after prior bytes
+                        // completed their synchronous authenticated socket write.
+                        if(execution.lastOutputIdleNanos>observed){
+                            val finished=groupExecution.finishControl(native,mutable.value.accountId,generation,attempt);groupCompletionObserved.remove(attempt)
+                            if(finished){execution.close();iterator.remove();continue}
+                        }
+                    }else groupCompletionObserved.remove(attempt)
+                }catch(_:Exception){groupCompletionObserved.remove(attempt)}
+            }
             repeat(16) {
                 val event=ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0)) ?: return@repeat
                 if(event.isEmpty())return@repeat
@@ -539,19 +612,37 @@ class MessagingBackend(context: Context,private val profileName: String="default
         for(request in relayExecutions(checkNotNull(ReliableBridge.requests(native)))) {
             val friend=friends.find {it.peerId==request.peerId}
             val archive=request.archive;val session=accounts?.session
-            val admitted=if(archive==null)friend!=null else session!=null&&archive.account==session.accountId&&
+            val group=request.group
+            val admitted=if(group!=null)session!=null&&group.account==session.accountId&&group.authenticationGeneration==generation&&mutable.value.groups.any{it.id==group.group&&it.epoch==group.epoch}
+                else if(archive==null)friend!=null else session!=null&&archive.account==session.accountId&&
                 ((archive.reader==mutable.value.localPeerId&&archive.source==request.peerId)||(archive.source==mutable.value.localPeerId&&archive.reader==request.peerId))
             if(!admitted||executions.size>=32){ReliableBridge.close(native,request.attempt,admitted);continue}
-            val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),archive?.account?:checkNotNull(friend).accountId)
+            val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId)
             executions[request.attempt]=execution;execution.start()
         }
         publish()
     }
     private fun handleServerEvent(event:org.json.JSONObject){
+        if(event.optString("type") in setOf("group_message","group_delivery")){
+            try{groupExecution.event(event,checkNotNull(profile).handle,mutable.value.accountId,generation){events?.queueGroup(it)==true};groupProjectionAt=0L
+                if(event.optString("type")=="group_message"){
+                    mutable.value=mutable.value.copy(groups=groupExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation))
+                    localEndpoint?.let{groupNotifications.publish(it,mutable.value)}
+                }}
+            catch(_:Exception){mutable.value=mutable.value.copy(groupDiagnostics="Group event rejected by native admission or bounded projection")}
+            return
+        }
         when(val kind=event.optString("event")){
+            "group_roster_changed","group_invite_changed"->{groupRefreshAt=0L}
             "mailbox_ready","mailbox_receipt_ready"->{mailboxAt=0L;android.util.Log.i("PeerChatNetwork","mailbox_trigger=$kind")}
             "presence_changed","friend_request","friend_request_updated","friendship_changed"->{contactsDirty=true}
             "relay_demand"->{
+                if(event.optString("purpose")=="group_control"){
+                    if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
+                    try{groupExecution.incomingControl(event,checkNotNull(profile).handle,mutable.value.accountId,generation)}
+                    catch(_:Exception){groupRefreshAt=0L}
+                    return
+                }
                 if(event.optString("purpose")=="archive_history"){
                     if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                     try {
