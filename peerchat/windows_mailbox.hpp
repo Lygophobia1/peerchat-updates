@@ -37,6 +37,9 @@ class WindowsMailbox {
         require(found!=list.end()&&found->verified&&Storage::publicKeyId(found->publicKey)==device);return *found;
     }
 public:
+    // Node-only attachment adapter; the existing device-key registry and HPKE
+    // provider retain key custody and operation leases.
+    void attachmentKeys(const std::function<void(DeviceKeyManager&,platform::HpkeProvider&,platform::IdentityProvider&)>& operation){operation(keys_,*hpke_,identity_);}
     WindowsMailbox(const std::wstring& directory,const Profile& profile):identity_(profile),
         database_(platform::openWindowsSqlDatabase((std::filesystem::path(directory)/L"device-key-registry").wstring())),
         registryStore_(database_),registry_(registryStore_,records_,profile.peerId),

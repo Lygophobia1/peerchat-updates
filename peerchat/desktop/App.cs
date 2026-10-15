@@ -360,7 +360,7 @@ public partial class DesktopApplication {
         BindActions();LoadVoiceDevices();core.SetVoiceVolumes(voicePreferences.InputVolume,voicePreferences.OutputVolume);core.SetVoiceProcessing(voicePreferences.AudioProcessingEnabled,voicePreferences.NoiseSuppressionEnabled,voicePreferences.AutomaticGainEnabled,voicePreferences.NoiseSuppressionStrength,voicePreferences.AutomaticGainStrength,voicePreferences.EchoCancellationEnabled);timer.Tick+=(s,e)=>Poll();voiceTimer.Tick+=(s,e)=>RefreshVoiceUi();networkFingerprint=CurrentNetworkFingerprint();networkChangeTimer.Tick+=(s,e)=>{networkChangeTimer.Stop();HandleNetworkChange();};NetworkChange.NetworkAddressChanged+=NetworkAddressChanged;
         window.Loaded+=async(s,e)=>await Start(port,"");
         window.Loaded+=(s,e)=>{if(startupUncleanOperations.Count>0)window.Dispatcher.BeginInvoke((Action)(()=>ShowFailureNotification(startupUncleanOperations[0])));};
-        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;try{await startupTask;}catch{}if(mailboxExecution!=null)mailboxExecution.Stop();try{await mailboxTask;}catch(OperationCanceledException){}await Task.Run(()=>{if(discovery!=null)discovery.CloseRpc();if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
+        window.Closing+=async(s,e)=>{if(closed)return;e.Cancel=true;if(closing)return;closing=true;NetworkChange.NetworkAddressChanged-=NetworkAddressChanged;networkChangeTimer.Stop();timer.Stop();voiceTimer.Stop();if(incomingVoiceWindow!=null)incomingVoiceWindow.Close();window.IsEnabled=false;StopGroupAttachmentNetwork();await groupAttachmentNetworkTask;try{await startupTask;}catch{}if(mailboxExecution!=null)mailboxExecution.Stop();try{await mailboxTask;}catch(OperationCanceledException){}await Task.Run(()=>{if(discovery!=null)discovery.CloseRpc();if(groupScreen!=null)groupScreen.Dispose();if(groupVoice!=null)groupVoice.Dispose();if(discovery!=null)discovery.StopEventChannel();StopRelays();core.Dispose();});try{if(diagnosticsRetention!=null)diagnosticsRetention.CompleteAllOperations();}catch(Exception error){TraceUi("clean-exit diagnostic marker completion failed: "+error.GetType().Name);}closed=true;window.Close();};
         window.SizeChanged+=(s,e)=>SizeBubbles();
         if(capturePath!=null)window.Loaded+=async(s,e)=>{await Task.Delay(3500);window.UpdateLayout();var content=(FrameworkElement)window.Content;var bitmap=new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth,(int)content.ActualHeight,96,96,PixelFormats.Pbgra32);bitmap.Render(content);var encoder=new System.Windows.Media.Imaging.PngBitmapEncoder();encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));using(var output=File.Create(capturePath))encoder.Save(output);window.Close();};
         Refresh();
@@ -446,7 +446,7 @@ public partial class DesktopApplication {
         foreach(string name in new[]{"AddFriend","QuickAdd"})Click(name,AddFriend);
         Click("FindFriend",FindFriend);Click("FriendRequests",FriendRequestsDialog);Click("AccountRegister",()=>Account(false));Click("AccountLogin",()=>Account(true));Click("AccountSignOut",SignOut);
         foreach(string name in new[]{"CopyId","QuickCopy","CopyCompact"})Click(name,CopyId);
-        Click("Attachment",ChooseChatFiles);BindChatAttachments();BindHistoryIndicator();
+        Click("Attachment",ChooseChatFiles);BindChatAttachments();BindGroupAttachments();BindHistoryIndicator();
         Click("Profile",profileManager==null?(Action)Profile:SwitchLocalProfile);Click("Settings",()=>SettingsPage());
         foreach(string name in new[]{"Manual","QuickManual"})Click(name,Manual);
         Click("DM",()=>Switch(false));Click("Groups",()=>Switch(true));Click("GroupNew",CreateGroup);
@@ -572,7 +572,7 @@ public partial class DesktopApplication {
     void Poll(){
         if(busy||closing)return;
         try{
-            PumpMailbox();PumpArchive();
+            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -1418,6 +1418,7 @@ public partial class DesktopApplication {
         bool flag4=model.CanQueueDirectText(flag3||(accountLink!=null&&accountLink.HasSession),busy);
         ServerGroupRoster sendRoster;
         bool flag5=flag2&&!model.SelectedGroup.Invited&&!busy&&discovery!=null&&discovery.EventChannelConnected&&serverGroupRosters.TryGetValue(model.SelectedGroup.Id,out sendRoster)&&sendRoster.Members.Any(m=>m.State=="member"&&m.AccountId==discovery.AccountId&&m.PeerId==model.OwnId);
+        RefreshGroupImageDraft();
 		Find<Button>("Send").IsEnabled = flag4 || flag5;
         Find<Button>("Emoji").IsEnabled = flag4 || flag5;
 		TextBox textBox = Find<TextBox>("Composer");
@@ -1788,6 +1789,8 @@ public partial class DesktopApplication {
 	{
 		DiscoveryClient signedOut = discovery;
         mailboxContextAccount=0;
+        StopGroupAttachmentNetwork();
+        await groupAttachmentNetworkTask;
         if(mailboxExecution!=null)mailboxExecution.Stop();
         try{await mailboxTask;}catch(OperationCanceledException){}
         mailboxExecution=null;mailboxService=null;
@@ -2788,6 +2791,8 @@ public partial class DesktopApplication {
 		private void StopProfileServices()
 		{
             mailboxContextAccount=0;
+            StopGroupAttachmentNetwork();
+            groupAttachmentNetworkTask.GetAwaiter().GetResult();
             if(mailboxExecution!=null)mailboxExecution.Stop();
             try{mailboxTask.GetAwaiter().GetResult();}catch(OperationCanceledException){}
             if(discovery!=null)discovery.CloseRpc();
@@ -4491,6 +4496,7 @@ public partial class DesktopApplication {
     bool directSendInFlight;
     async void Send(){
         if(!Find<Button>("Send").IsEnabled||directSendInFlight)return;
+        if(await SendGroupImageDraft())return;
         string text=Find<TextBox>("Composer").Text;if(String.IsNullOrWhiteSpace(text))return;
         if(ChatAttachmentProjection.RequiresSnippet(text)){directSendInFlight=true;try{await SendChatSnippet(text);}finally{directSendInFlight=false;}return;}
         if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}

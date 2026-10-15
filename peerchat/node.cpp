@@ -18,6 +18,7 @@
 #include "windows_transfer_timing.hpp"
 #include "portable/transfer_statistics_storage.hpp"
 #include "windows_mailbox.hpp"
+#include "windows_group_attachment_application.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
 #include "tls.hpp"
@@ -92,7 +93,7 @@ std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof
 }
 using namespace node_detail;
 struct Node::Impl {
-    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,FileTransfer,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
+    enum class Action { Connect,Candidates,PrepareScopedP2p,ScopedP2pProbe,PromoteScopedP2p,CancelScopedP2p,RelayReady,RelayReceive,RelayClosed,InvalidateRoute,NetworkContext,AuthenticatedFriends,PinInitialAuthenticatedFriendIdentity,SaveContact,RemoveContact,Approve,FileTransfer,GroupAttachment,GroupAttachmentNetwork,Send,History,EraseHistory,Name,GroupAccount,AuthenticatedGroupRoster,ClearGroupRosters,BeginGroupControl,GroupCreate,GroupCreationProof,GroupRename,GroupInvite,GroupRespond,GroupLeave,GroupRemove,GroupRole,GroupSend,GroupReceiveCiphertext,GroupMessageStatus,Groups,GroupHistoryPage,MediaIceConfiguration,VoiceStart,VoiceAnswer,VoiceDecline,VoiceEnd,VoiceMute,VoiceDeafen,VoiceDevices,VoiceLevels,VoiceProcessing,VoiceDiagnostics,ScreenBackend,ScreenStart,ScreenAnswer,ScreenDecline,ScreenEnd,ScreenDiagnostics };
     struct Command{Action action;std::string peer,id,group;std::wstring text,name,source,route;std::uint16_t port=0;bool accepted=false,forceImmediate=false;std::int64_t before=INT64_MAX;std::uint64_t accountId=0,sourceHandle=0,generation=0;std::uint32_t sourceKind=0,fps=0,bitrate=0,noiseSuppressionStrength=1,automaticGainStrength=1;screen::Backend screenBackend=screen::Backend::NativeWindows;Contact contact;MediaIceConfiguration ice;Blob bytes;std::vector<AuthenticatedFriend> friends;group_keys::RosterSnapshot roster;std::shared_ptr<std::promise<std::wstring>> response;
         bool mailbox=false,archive=false;std::shared_ptr<std::promise<Blob>> bytesResponse;
     };
@@ -124,6 +125,9 @@ struct Node::Impl {
     std::wstring snippetRoot;
     std::unique_ptr<transfer::windows::CleanupJournal> transferCleanup;
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
+    std::unique_ptr<group_attachments::windows::CacheStateStore> cacheJournal;
+    std::unique_ptr<group_attachments::windows::Application> groupAttachments;
+    bool groupAttachmentPersistenceReported=false;
     std::unique_ptr<transfer::ProtectedStatisticsStore> transferStatistics;
     bool transferPersistenceReported=false;
     bool groupBulkMediaActive=false;
@@ -134,7 +138,7 @@ struct Node::Impl {
         archive::AttachmentCatalog catalog(*store);
         for(auto d:transfers->completedRecords()){
             try{
-                if(cataloguedTransfers.count(d.metadata.id)||(archiveTransfers&&archiveTransfers->wasArchiveTransfer(d.metadata.id))||!store->historicalDeviceAccount(profile.peerId)||!store->historicalDeviceAccount(d.peer))continue;
+                if(d.purpose!=transfer::Purpose::PeerFile||cataloguedTransfers.count(d.metadata.id)||(archiveTransfers&&archiveTransfers->wasArchiveTransfer(d.metadata.id))||!store->historicalDeviceAccount(profile.peerId)||!store->historicalDeviceAccount(d.peer))continue;
                 if(!d.sending){
                     // Normalize a committed receive token into a read-only source
                     // token. No path from an archive peer is ever opened here.
@@ -165,14 +169,19 @@ struct Node::Impl {
     transfer::windows::TransferTiming transferTiming;
     void serviceTransfers(){
         if(!transfers)return;
+        if(groupAttachments)try{groupAttachments->tick();}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}}
         transfers->mediaActive(groupBulkMediaActive||calls.active()||screenShares.active()!=nullptr);
-        for(auto& peer:transfers->demandedPeers()){auto c=transferConnection(peer);transfers->capability(peer,c?c->attemptId:0,c&&!c->authorization.permitsArchiveControl()&&(c->remoteCapabilities&protocol::CapabilityTransferPipeline));}
-        for(auto& peer:transfers->demandedPeers()){
+        std::set<std::string> peers;for(const auto& row:transfers->snapshots())if(row.purpose==transfer::Purpose::PeerFile)peers.insert(row.peer);
+        for(auto& peer:peers){auto c=transferConnection(peer);transfers->capability(peer,c?c->attemptId:0,c&&!c->authorization.permitsArchiveControl()&&(c->remoteCapabilities&protocol::CapabilityTransferPipeline));}
+        for(auto& peer:peers){
             auto state=sessionTransports->snapshot(peer);if(!state||!state->connected)continue;
             for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->online&&!c->dead&&!(c->remoteCapabilities&protocol::CapabilityFileTransfer))transfers->unsupportedPeer(peer);
         }
-        try{transfers->tick(nowMilliseconds(),[&](const std::string& peer){auto c=transferConnection(peer);return c?c->attemptId:0;},
-            [&](const std::string& peer,const Blob& bytes){
+        try{transfers->tickScoped(nowMilliseconds(),[&](const transfer::Snapshot& row){if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->route(row):0;auto c=transferConnection(row.peer);return c?c->attemptId:0;},
+            [&](const transfer::Snapshot& row,const Blob& bytes){
+                if(row.purpose==transfer::Purpose::GroupCacheCiphertext){try{return groupAttachments&&groupAttachments->send(row,bytes);}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}return false;}}
+                if(row.purpose!=transfer::Purpose::PeerFile)return false;
+                const auto& peer=row.peer;
                 auto c=transferConnection(peer);if(!c||c->output.size()-c->sent>MaxQueue/4)return false;
                 // A revoked archive transfer may never escape its purpose by
                 // falling through to a coincident ordinary friend route.
@@ -216,6 +225,8 @@ struct Node::Impl {
     }
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
+        // Legacy DM/archive actions cannot target the separate cache purpose.
+        if(!command.id.empty())for(const auto& row:transfers->snapshots())if(row.metadata.id==command.id&&row.purpose!=transfer::Purpose::PeerFile)throw std::runtime_error("Use the group attachment operation for this object");
         if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds())){auto id=row.substr(9,32);result+=widenUtf8(row+transferTiming.diagnostics(id)+(transferJournal?transferJournal->diagnostics(id):std::string{}))+L"\n";}return result;}
         if(command.sourceKind==12||command.sourceKind==13){
             protocol::check(command.id.empty()||protocol::id(command.id,32));
@@ -289,6 +300,7 @@ struct Node::Impl {
         auto snapshots=transfers->snapshots(nowMilliseconds());if(archiveTransfers){auto pending=archiveTransfers->pending();snapshots.insert(snapshots.end(),pending.begin(),pending.end());}
         auto completed=transfers->completedRecords();
         for(auto& s:snapshots){
+            if(s.purpose!=transfer::Purpose::PeerFile)continue;
             auto original=archiveTransfers?archiveTransfers->originalAttachment(s.metadata.id):std::optional<archive::Attachment>{};
             bool protectedSource=std::any_of(completed.begin(),completed.end(),[&](const auto& d){return d.metadata.id==s.metadata.id&&d.sending&&transfer::windows::protectedSnippetToken(d.location);});
             if(!first)out<<L",";
@@ -310,6 +322,36 @@ struct Node::Impl {
     GroupAccount groupAccount;
     std::unique_ptr<group_keys::GroupKeyManager> groupKeys;
     std::uint64_t groupRosterDiscoveryGeneration=0;
+    void clearGroupAttachmentSession(){
+        if(!groupAttachments)return;
+        protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/AttachmentSession/v1");w.number(0);w.number(0);w.string("");groupAttachments->network(0,w.data);
+    }
+    static bool sameAttachmentRoster(const group_keys::RosterSnapshot& a,const group_keys::RosterSnapshot& b){
+        if(a.legacyGroupId!=b.legacyGroupId||a.serverGroupId!=b.serverGroupId||a.generation!=b.generation||a.distributorPeerId!=b.distributorPeerId||a.creationProof!=b.creationProof||a.devices.size()!=b.devices.size())return false;
+        for(size_t i=0;i<a.devices.size();++i){const auto& x=a.devices[i];const auto& y=b.devices[i];if(x.accountId!=y.accountId||x.peerId!=y.peerId||x.role!=y.role||x.invited!=y.invited)return false;}
+        return true;
+    }
+    group_attachments::windows::Application::Context attachmentContext(const std::string& group,const group_keys::RosterSnapshot* historical){
+        protocol::check(groupKeys&&authenticatedFriends.localAccount()>0&&authenticatedFriends.localAccount()==groupAccount.accountId);
+        const auto* current=groupKeys->roster(group);if(!current)current=groupKeys->rosterForLegacy(group);
+        protocol::check(current&&group_keys::GroupKeyManager::currentMember(*current,groupAccount.accountId,profile.peerId));
+        auto found=groups.find(current->legacyGroupId);protocol::check(found!=groups.end()&&group_keys::GroupKeyManager::matchesSignedLedger(*current,found->second.state()));
+        if(!historical)return {*current,found->second.state()};
+        protocol::check(historical->serverGroupId==current->serverGroupId&&historical->legacyGroupId==current->legacyGroupId&&historical->generation>0&&historical->generation<=current->generation&&historical->creationProof==current->creationProof);
+        if(historical->generation==current->generation){protocol::check(sameAttachmentRoster(*historical,*current));return {*historical,found->second.state()};}
+        // Replay only events admitted by the existing verified ledger. Never
+        // enable device enrollment to manufacture an historical prefix: device
+        // events require their own supported protected-receipt replay boundary.
+        GroupLedger prefix;size_t scanned=0,rosterEvents=0;
+        for(const auto& event:found->second.events()){
+            if(++scanned>4096)break;
+            if(!found->second.accepted(event.eventId)||event.kind==GroupEventKind::Message)continue;
+            if(event.kind==GroupEventKind::AuthorizeDevice||event.kind==GroupEventKind::RevokeDevice||++rosterEvents>256)break;
+            protocol::check(prefix.append(event));
+            if(group_keys::GroupKeyManager::matchesSignedLedger(*historical,prefix.state()))return {*historical,prefix.state()};
+        }
+        throw std::runtime_error("Verified historical group roster evidence unavailable");
+    }
     std::vector<std::unique_ptr<Connection>> connections;
     std::vector<std::unique_ptr<Resolver>> resolvers;
     std::mutex relayMutex;std::map<std::uint64_t,std::shared_ptr<RelayPipe>> relayPipes;
@@ -1311,6 +1353,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 mediaIce=std::move(command.ice);
             }
             else if(command.action==Action::AuthenticatedFriends){
+                if(command.accountId!=authenticatedFriends.localAccount())clearGroupAttachmentSession();
                 if(archiveApplication&&(command.accountId!=authenticatedFriends.localAccount()||
                    command.sourceHandle!=authenticatedFriends.generation()))archiveApplication->invalidate();
                 archiveAuthenticated=command.accountId>0;
@@ -1374,6 +1417,16 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 contacts[c->peerId]=contact;publishContacts();approve(*c);
             }}
             else if(command.action==Action::FileTransfer){if(command.response)command.response->set_value(transferOperation(command));}
+            else if(command.action==Action::GroupAttachment){
+                if(!groupAttachments){if(command.sourceKind==0){if(command.response)command.response->set_value(L"{\"supported\":false,\"reason\":\"Protected group attachment storage is unavailable\",\"items\":[]}");continue;}throw std::runtime_error("Protected group attachment storage unavailable");}
+                if(command.response)command.response->set_value(groupAttachments->command(command.sourceKind,command.group,command.id,command.text));
+                if(command.sourceKind==7&&!command.text.empty())SecureZeroMemory(command.text.data(),command.text.size()*sizeof(wchar_t));
+            }
+            else if(command.action==Action::GroupAttachmentNetwork){
+                protocol::check(groupAttachments!=nullptr);
+                if(command.sourceKind==0){protocol::Reader r(command.bytes);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/AttachmentSession/v1");auto account=r.number();r.number();r.string();r.end();protocol::check(!account||(account==authenticatedFriends.localAccount()&&account==groupAccount.accountId));}
+                auto output=groupAttachments->network(command.sourceKind,command.bytes);if(command.bytesResponse)command.bytesResponse->set_value(std::move(output));
+            }
             else if(command.action==Action::Send){
                 const auto requested=command.peer;
                 command.peer=reliable::queueRecipient(requested,store->contacts(),authenticatedFriends);
@@ -1534,7 +1587,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 else throw std::runtime_error("Unsupported group action");
                 commitLocalGroupEvent(ledger,std::move(event),peers,command.action==Action::GroupInvite);
             }
-        }catch(const std::exception& error){if(command.bytesResponse)try{command.bytesResponse->set_exception(std::current_exception());}catch(const std::future_error&){}if(command.response)try{command.response->set_exception(std::current_exception());}catch(const std::future_error&){}if(command.archive){std::string reason=error.what();notice(NodeEvent::Kind::Error,L"Archive operation rejected: "+std::wstring(reason.begin(),reason.end()),"archive-control:operation");continue;}if(command.mailbox){std::string reason=error.what();notice(NodeEvent::Kind::Error,L"Mailbox operation "+std::to_wstring(command.sourceKind)+L" rejected: "+std::wstring(reason.begin(),reason.end()),"mailbox-control:operation");continue;}if(command.action==Action::FileTransfer)continue;std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
+        }catch(const std::exception& error){if(command.bytesResponse)try{command.bytesResponse->set_exception(std::current_exception());}catch(const std::future_error&){}if(command.response)try{command.response->set_exception(std::current_exception());}catch(const std::future_error&){}if(command.archive){std::string reason=error.what();notice(NodeEvent::Kind::Error,L"Archive operation rejected: "+std::wstring(reason.begin(),reason.end()),"archive-control:operation");continue;}if(command.mailbox){std::string reason=error.what();notice(NodeEvent::Kind::Error,L"Mailbox operation "+std::to_wstring(command.sourceKind)+L" rejected: "+std::wstring(reason.begin(),reason.end()),"mailbox-control:operation");continue;}if(command.action==Action::GroupAttachment&&command.sourceKind==7&&!command.text.empty())SecureZeroMemory(command.text.data(),command.text.size()*sizeof(wchar_t));if(command.action==Action::FileTransfer||command.action==Action::GroupAttachment||command.action==Action::GroupAttachmentNetwork)continue;std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()),command.peer);}
     }
     void reapDeadConnections(){
         for(auto it=connections.begin();it!=connections.end();)if((*it)->dead){
@@ -1576,18 +1629,32 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
-            transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
+            groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;groupAttachmentPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
             try{
                 transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
                 transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
                 transferStatistics=std::make_unique<transfer::ProtectedStatisticsStore>(*store,profile.peerId);
-                transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get(),transferStatistics.get());
-                transfers->restore(nowMilliseconds());
+                try{
+                    cacheJournal=std::make_unique<group_attachments::windows::CacheStateStore>(directory,profile.peerId,*transferJournal,[this](const transfer::DurableState& d){protocol::check(groupAttachments!=nullptr);return groupAttachments->reopen(d);});
+                    cacheJournal->load(); // Application metadata must be verified before reopening cache sources.
+                    transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},cacheJournal.get(),transferStatistics.get());
+                    groupAttachments=std::make_unique<group_attachments::windows::Application>(*store,profile,*transfers,*cacheJournal,directory,
+                        [this](const std::string& group,const group_keys::RosterSnapshot* historical){return attachmentContext(group,historical);},
+                        [this](const auto& operation){if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);mailboxApplication->attachmentKeys(operation);});
+                    transfers->restore(nowMilliseconds());
+                }catch(const std::exception&){
+                    // A cache-only recovery failure never resets protected cache
+                    // data or disables otherwise valid direct-file transfers.
+                    groupAttachments.reset();transfers.reset();cacheJournal.reset();
+                    transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get(),transferStatistics.get());
+                    transfers->restore(nowMilliseconds());
+                    notice(NodeEvent::Kind::Error,L"Group attachments unavailable: protected recovery metadata requires attention","group-attachment:storage");
+                }
                 for(auto& d:transferJournal->load())if(!d.location.empty()){
                     protocol::Reader location(d.location);auto source=location.text();transferPaths[d.metadata.id]=d.sending?source:location.text();
                 }
             }
-            catch(...){transfers.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
+            catch(...){groupAttachments.reset();transfers.reset();cacheJournal.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
@@ -1627,7 +1694,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                         if(contact==contacts.end()||!contact->second.verified){++it;continue;} // Verification has a bounded demand window.
                         sessionTransports->demandLiveRoute(*it,now+2000,now);++it;
                     }
-                    if(transfers)for(auto& peer:transfers->demandedPeers()){auto contact=contacts.find(peer);if(contact!=contacts.end()&&contact->second.verified)sessionTransports->demandLiveRoute(peer,now+2000,now);}
+                    if(transfers){std::set<std::string> directPeers;for(const auto& row:transfers->snapshots())if(row.purpose==transfer::Purpose::PeerFile)directPeers.insert(row.peer);for(const auto& peer:transfers->demandedPeers())if(directPeers.count(peer)){auto contact=contacts.find(peer);if(contact!=contacts.end()&&contact->second.verified)sessionTransports->demandLiveRoute(peer,now+2000,now);}}
                     if(calls.active())sessionTransports->demandLiveRoute(calls.peer(),now+2000);
                     if(screenShares.active())sessionTransports->demandLiveRoute(screenShares.active()->peer,now+2000);
                     auto retired=sessionTransports->retireIdleRoutes(now);
@@ -1690,7 +1757,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
         archiveTransfers.reset();archiveExecution.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
-        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}transfers.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
+        clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };
 Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
@@ -1738,6 +1805,22 @@ std::wstring Node::fileTransfer(unsigned operation,const std::string& peer,const
     Impl::Command c{};c.action=Impl::Action::FileTransfer;c.sourceKind=operation;c.peer=peer;c.id=(operation==1||operation==7)?Storage::newMessageId():id;c.text=path;c.response=response;
     if(!impl_->command(std::move(c)))throw std::runtime_error("Peer node unavailable");
     response.reset();return result.get(); // Local bounded operation; desktop calls off its dispatcher.
+}
+std::wstring Node::groupAttachment(unsigned operation,const std::string& group,const std::string& id,const std::wstring& path){
+    protocol::check(operation<=7&&(group.empty()?operation==0:protocol::id(group,32)));
+    if(operation==7)protocol::check(transfer::safeName(id)&&path.size()<=((16*1024*1024+2)/3)*4);
+    else protocol::check((id.empty()||protocol::id(id,32))&&path.size()<=32768);
+    auto response=std::make_shared<std::promise<std::wstring>>();auto result=response->get_future();
+    Impl::Command c{};c.action=Impl::Action::GroupAttachment;c.sourceKind=operation;c.group=group;c.id=id;c.text=path;c.response=response;
+    if(!impl_->command(std::move(c)))throw std::runtime_error("Native profile unavailable");
+    response.reset();return result.get();
+}
+Blob Node::groupAttachmentNetwork(unsigned operation,const Blob& input){
+    protocol::check(operation<=3&&input.size()<=100000);
+    auto response=std::make_shared<std::promise<Blob>>();auto result=response->get_future();
+    Impl::Command c{};c.action=Impl::Action::GroupAttachmentNetwork;c.sourceKind=operation;c.bytes=input;c.bytesResponse=response;
+    if(!impl_->command(std::move(c)))throw std::runtime_error("Native profile unavailable");
+    response.reset();return result.get();
 }
 std::string Node::send(const std::string& peer,const std::wstring& text){
     if(!protocol::id(peer)||text.empty()||text.size()>protocol::MaxChatCharacters)return {};

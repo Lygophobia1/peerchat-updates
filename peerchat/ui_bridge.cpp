@@ -29,6 +29,8 @@ UI_API int ui_mailbox(void* handle,unsigned operation,const unsigned char* bytes
 UI_API int ui_mailbox_supported(){
     return 1;
 }
+UI_API const wchar_t* ui_group_attachment(void* handle,unsigned operation,const wchar_t* group,const wchar_t* id,const wchar_t* path){try{if(!handle)return nullptr;auto& bridge=*static_cast<UiBridge*>(handle);bridge.transferOutput=bridge.node.groupAttachment(operation,identity(group),identity(id),path?path:L"");return bridge.transferOutput.c_str();}catch(...){return nullptr;}}
+UI_API int ui_group_attachment_network(void* handle,unsigned operation,const unsigned char* input,unsigned length,unsigned char* output,unsigned capacity){try{if(!handle||length>100000||(!input&&length)||!output||capacity>100000)return -1;peerchat::Blob bytes;if(length)bytes.assign(input,input+length);auto result=static_cast<UiBridge*>(handle)->node.groupAttachmentNetwork(operation,bytes);if(result.size()>capacity)return -1;if(!result.empty())memcpy(output,result.data(),result.size());return static_cast<int>(result.size());}catch(...){return -1;}}
 UI_API const wchar_t* ui_microphone_test(void* handle,int operation,int input,int output,int volume,int enabled,int ns,int agc,unsigned noise,unsigned gain){
     if(!handle)return L"{\"error\":\"Local backend closed\"}";
     auto& bridge=*static_cast<UiBridge*>(handle);

@@ -190,10 +190,11 @@ public partial class DesktopApplication {
     string AttachmentDiagnostics(){return discovery!=null&&attachmentTelemetryAccount==discovery.AccountId&&attachmentTelemetryGeneration==authenticatedFriendSnapshotGeneration?attachmentTelemetry:"No current profile/account transfer snapshot.";}
     readonly SemaphoreSlim attachmentCopies=new SemaphoreSlim(2,2);
     readonly Dictionary<string,CoreAdapter.FileTransferData> chatCatalog=new Dictionary<string,CoreAdapter.FileTransferData>();
-    string dragConversation;bool dragTargetCaptured;
-    string ChatTarget(){return model.Groups||model.Selected==null?null:model.Selected.ConversationId;}
+    string dragConversation;bool dragTargetCaptured;ulong dragProfileGeneration;
+    string ChatTarget(){return model.Groups?(model.SelectedGroup==null?null:"group:"+model.SelectedGroup.Id):model.Selected==null?null:"direct:"+model.Selected.ConversationId;}
+    bool ValidChatDrop(string captured,string[] files){return dragProfileGeneration==profileSessionGeneration&&(model.Groups?GroupAttachmentProjection.ValidDrop(captured,ChatTarget(),GroupAttachmentsAvailable()&&model.SelectedGroup!=null&&!model.SelectedGroup.Invited,files):ChatAttachmentProjection.ValidDrop(captured,ChatTarget(),false,files));}
     void BindChatAttachments(){
-        var refresh=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};refresh.Tick+=async(s,e)=>await RefreshChatAttachments();refresh.Start();window.Closed+=(s,e)=>{refresh.Stop();chatCatalog.Clear();};
+        var refresh=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};refresh.Tick+=async(s,e)=>{await RefreshChatAttachments();await RefreshGroupAttachments();};refresh.Start();window.Closed+=(s,e)=>{refresh.Stop();chatCatalog.Clear();};
         Find<Button>("Attachment").ToolTip="Attach file to this conversation";
         window.AddHandler(AttachmentCard.ActionEvent,new RoutedEventHandler(async(s,e)=>{
             var action=(AttachmentActionEventArgs)e;var row=action.Transfer;e.Handled=true;if(action.Action=="diagnostics"){OpenTransferDiagnostics(row);return;}
@@ -211,15 +212,16 @@ public partial class DesktopApplication {
             if(action.Action=="save"){var choose=new Microsoft.Win32.SaveFileDialog{FileName=row.name,Title="Save an attachment copy",OverwritePrompt=false};if(choose.ShowDialog(window)==true){if(!attachmentCopies.Wait(0)){Notify("Two file copies are already running; try again.");return;}string destination=choose.FileName;try{await Task.Run(()=>{if(row.protectedSource){core.FileTransfer(10,"",row.id,destination);return;}using(var input=new FileStream(row.path,FileMode.Open,FileAccess.Read,FileShare.Read))using(var output=new FileStream(destination,FileMode.CreateNew,FileAccess.Write,FileShare.None)){input.CopyTo(output,32768);output.Flush(true);}});}catch(Exception error){Notify("Copy failed: "+error.Message);}finally{attachmentCopies.Release();}}}
         }));
         var outline=Find<ScrollViewer>("MessageScroll");var target=(Grid)outline.Parent;target.AllowDrop=true;
-        target.PreviewDragEnter+=(s,e)=>{if(!dragTargetCaptured){dragConversation=ChatTarget();dragTargetCaptured=true;}SetDrop(e);};
+        target.PreviewDragEnter+=(s,e)=>{if(!dragTargetCaptured){dragConversation=ChatTarget();dragProfileGeneration=profileSessionGeneration;dragTargetCaptured=true;}SetDrop(e);};
         target.PreviewDragOver+=(s,e)=>SetDrop(e);
         target.PreviewDragLeave+=(s,e)=>{var point=e.GetPosition(target);if(point.X<0||point.Y<0||point.X>target.ActualWidth||point.Y>target.ActualHeight){dragConversation=null;dragTargetCaptured=false;outline.ToolTip=null;outline.BorderThickness=new Thickness(0);}};
-        target.PreviewDrop+=async(s,e)=>{e.Handled=true;outline.ToolTip=null;outline.BorderThickness=new Thickness(0);var files=e.Data.GetData(DataFormats.FileDrop) as string[];string captured=dragConversation;dragConversation=null;dragTargetCaptured=false;if(!ChatAttachmentProjection.ValidDrop(captured,ChatTarget(),model.Groups,files)){Notify("Drop canceled: choose a direct conversation and up to four regular files. The conversation must not change during the drag.");return;}await SendChatFiles(model.Selected,files);};
+        target.PreviewDrop+=async(s,e)=>{e.Handled=true;outline.ToolTip=null;outline.BorderThickness=new Thickness(0);var files=e.Data.GetData(DataFormats.FileDrop) as string[];string captured=dragConversation;dragConversation=null;dragTargetCaptured=false;if(!ValidChatDrop(captured,files)){Notify("Drop canceled: choose a supported conversation and up to four regular files. The conversation must not change during the drag.");return;}if(model.Groups)await SendGroupFiles(model.SelectedGroup,files);else await SendChatFiles(model.Selected,files);};
     }
-    void SetDrop(DragEventArgs e){var files=e.Data.GetDataPresent(DataFormats.FileDrop)?e.Data.GetData(DataFormats.FileDrop) as string[]:null;bool valid=ChatAttachmentProjection.ValidDrop(dragConversation,ChatTarget(),model.Groups,files);e.Effects=valid?DragDropEffects.Copy:DragDropEffects.None;e.Handled=true;var target=Find<ScrollViewer>("MessageScroll");target.BorderBrush=new SolidColorBrush(Color.FromRgb(131,204,252));target.BorderThickness=new Thickness(valid?2:0);target.ToolTip=valid?"Drop files into "+model.Selected.Name:"Choose a direct conversation; group attachment fanout is not available";}
+    void SetDrop(DragEventArgs e){var files=e.Data.GetDataPresent(DataFormats.FileDrop)?e.Data.GetData(DataFormats.FileDrop) as string[]:null;bool valid=ValidChatDrop(dragConversation,files);e.Effects=valid?DragDropEffects.Copy:DragDropEffects.None;e.Handled=true;var target=Find<ScrollViewer>("MessageScroll");target.BorderBrush=new SolidColorBrush(Color.FromRgb(131,204,252));target.BorderThickness=new Thickness(valid?2:0);target.ToolTip=valid?"Drop files into "+(model.Groups?model.SelectedGroup.Name:model.Selected.Name):model.Groups?GroupAttachmentUnavailable():"Choose a verified direct conversation and up to four files";}
     async void ChooseChatFiles(){
+        if(model.Groups){await ChooseGroupFiles();return;}
         var selected=model.Groups?null:model.Selected;
-        if(selected==null||selected.Contact==null||!selected.Contact.verified){Notify("Select a verified direct conversation. Group attachments are not available yet.");return;}
+        if(selected==null||selected.Contact==null||!selected.Contact.verified){Notify("Select a verified direct conversation.");return;}
         var choose=new Microsoft.Win32.OpenFileDialog{Title="Attach files to "+selected.Name,CheckFileExists=true,Multiselect=true};
         if(choose.ShowDialog(window)==true)await SendChatFiles(selected,choose.FileNames);
     }

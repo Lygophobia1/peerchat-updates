@@ -149,6 +149,8 @@ public:
     std::vector<NodeEvent> poll();
     Blob mailbox(unsigned operation,const Blob& input={},const std::string& messageId={},bool storageAllowed=false);
     Blob archive(unsigned operation,const Blob& input);
+    std::wstring groupAttachment(unsigned operation,const std::string& group,const std::string& id,const std::wstring& path);
+    Blob groupAttachmentNetwork(unsigned operation,const Blob& input);
 private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };

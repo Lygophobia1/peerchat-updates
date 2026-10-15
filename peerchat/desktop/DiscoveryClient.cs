@@ -32,9 +32,11 @@ public sealed class DiscoveryClient {
     internal int RpcConnectionsOpened {get;private set;}
     void CloseRpcLocked(){if(rpcIdle!=null){rpcIdle.Dispose();rpcIdle=null;}try{if(rpcTcp!=null)rpcTcp.Close();}catch{}try{if(rpcTls!=null)rpcTls.Dispose();}catch{}rpcTcp=null;rpcTls=null;rpcBinding="";}
     public void CloseRpc(){lock(rpcGate)CloseRpcLocked();}
-    Dictionary<string,object> Rpc(string type,string device,Dictionary<string,object> fields){
+    Dictionary<string,object> Rpc(string type,string device,Dictionary<string,object> fields,string expectedSession=null,string expectedCertificate=null,long expectedAccount=0){
         if(!Monitor.TryEnter(rpcGate,10000))throw new IOException("RPC serialization deadline");
         try {
+            Action validateAttachment=()=>{if(expectedSession!=null&&(SessionToken!=expectedSession||AccountId!=expectedAccount||!String.Equals(CertificateSha256,expectedCertificate,StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("Attachment authenticated context changed.");};
+            validateAttachment();
             long now=System.Diagnostics.Stopwatch.GetTimestamp();long frequency=System.Diagnostics.Stopwatch.Frequency;
             string binding=Host+"|"+Port+"|"+CertificateSha256+"|"+SessionToken+"|"+device;
             if(rpcTls!=null&&(binding!=rpcBinding||now-rpcUsed>=10*frequency||now-rpcOpened>=100*frequency||rpcCount>=60||
@@ -43,7 +45,8 @@ public sealed class DiscoveryClient {
                 if(rpcTls==null){
                     using(var opening=new Timer(_=>{try{if(rpcTcp!=null)rpcTcp.Close();}catch{}},null,10000,Timeout.Infinite))rpcTls=OpenAuthenticatedStream(out rpcTcp);RpcConnectionsOpened++;
                     rpcTls.ReadTimeout=10000;rpcTls.WriteTimeout=10000;
-                    WriteFrame(rpcTls,Encoding.UTF8.GetBytes(channelJson.Serialize(new Dictionary<string,object>{{"version",1},{"type","rpc_open"},{"sessionToken",SessionToken},{"publicIdentity",device}})));
+                    validateAttachment();
+                    WriteFrame(rpcTls,Encoding.UTF8.GetBytes(channelJson.Serialize(new Dictionary<string,object>{{"version",1},{"type","rpc_open"},{"sessionToken",expectedSession??SessionToken},{"publicIdentity",device}})));
                     var ready=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(rpcTls)));
                     if(Text(ready,"type")!="rpc_ready"||Number(ready,"rpcVersion")!=1)throw new IOException("RPC authorization rejected");
                     rpcBinding=binding;rpcOpened=System.Diagnostics.Stopwatch.GetTimestamp();rpcCount=0;
@@ -51,10 +54,11 @@ public sealed class DiscoveryClient {
                 if(rpcIdle!=null)rpcIdle.Change(Timeout.Infinite,Timeout.Infinite);
                 // A bounded socket abort covers blocked writes as well as reads.
                 var socket=rpcTcp;using(var deadline=new Timer(_=>{try{socket.Close();}catch{}},null,10000,Timeout.Infinite)){
+                    validateAttachment();
                     string id=Guid.NewGuid().ToString("N");var request=new Dictionary<string,object>(fields);
-                    request["version"]=1;request["type"]=type;request["rpcRequestId"]=id;if(type.StartsWith("mailbox_",StringComparison.Ordinal))request["requestId"]=id;request["sessionToken"]=SessionToken;request["publicIdentity"]=device;
+                    request["version"]=1;request["type"]=type;request["rpcRequestId"]=id;if(type.StartsWith("mailbox_",StringComparison.Ordinal))request["requestId"]=id;request["sessionToken"]=expectedSession??SessionToken;request["publicIdentity"]=device;
                     var bytes=Encoding.UTF8.GetBytes(channelJson.Serialize(request));
-                    if(bytes.Length>(type.StartsWith("mailbox_",StringComparison.Ordinal)?100000:4096))throw new InvalidDataException("RPC request exceeds bound");
+                    if(bytes.Length>(type.StartsWith("mailbox_",StringComparison.Ordinal)||AttachmentCacheOperation(type)?100000:4096))throw new InvalidDataException("RPC request exceeds bound");
                     WriteFrame(rpcTls,bytes);
                     var reply=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(rpcTls,100000)));
                     if(Text(reply,"type")!="rpc_result"||Text(reply,"rpcRequestId")!=id||Text(reply,"operation")!=type)throw new InvalidDataException("RPC correlation failed");
@@ -62,7 +66,7 @@ public sealed class DiscoveryClient {
                     rpcUsed=System.Diagnostics.Stopwatch.GetTimestamp();rpcCount++;
                     if(!reply.ContainsKey("more")||!Boolean.Equals(reply["more"],true))CloseRpcLocked();
                     else {if(rpcIdle==null)rpcIdle=new Timer(_=>{lock(rpcGate)CloseRpcLocked();},null,10000,Timeout.Infinite);else rpcIdle.Change(10000,Timeout.Infinite);}
-                    return body;
+                    validateAttachment();return body;
                 }
             }catch{CloseRpcLocked();throw;} // Never replay an ambiguous operation.
         }finally{Monitor.Exit(rpcGate);}
@@ -247,6 +251,14 @@ public sealed class DiscoveryClient {
         if(!new[]{"archive_descriptor_register","archive_grant_register","archive_authorization_state"}.Contains(operation))throw new ArgumentException("Unsupported archive operation.");
         if(!supportsRpc||AccountId<=0||String.IsNullOrEmpty(SessionToken))throw new InvalidOperationException("Archive requires authenticated RPC support.");
         return Rpc(operation,device,payload);
+    }
+    internal static bool AttachmentCacheOperation(string operation){return new[]{"cache_admit","cache_status","cache_context","cache_acquire","cache_append","cache_complete","cache_read","cache_progress","cache_release","cache_publish","cache_announcement","cache_announcement_ack","cache_recipient_keys","cache_publish_key","cache_key","cache_key_ack","cache_pending_keys","cache_pending","cache_verified","cache_receipts"}.Contains(operation);}
+    public Dictionary<string,object> AttachmentCache(string device,Dictionary<string,object> payload,long expectedAccount,string expectedSession,string expectedCertificate){
+        object rawType,rawId;string operation;
+        if(payload==null||!payload.TryGetValue("type",out rawType)||(operation=rawType as string)==null||!AttachmentCacheOperation(operation)||!payload.TryGetValue("requestId",out rawId)||!(rawId is string)||((string)rawId).Length!=32)throw new ArgumentException("Unsupported attachment cache request.");
+        if(!supportsRpc||AccountId<=0||String.IsNullOrEmpty(SessionToken)||String.IsNullOrEmpty(device)||CertificateSha256==null||CertificateSha256.Length!=64)throw new InvalidOperationException("Group attachments require pinned authenticated RPC support.");
+        if(expectedAccount<=0||AccountId!=expectedAccount||String.IsNullOrEmpty(expectedSession)||SessionToken!=expectedSession||expectedCertificate==null||expectedCertificate.Length!=64||!String.Equals(CertificateSha256,expectedCertificate,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Attachment authenticated context changed.");
+        return Rpc(operation,device,payload,expectedSession,expectedCertificate,expectedAccount);
     }
     public Dictionary<string,object> Mailbox(string operation,string device,Dictionary<string,object> payload){
         if(!new[]{"mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"}.Contains(operation))throw new ArgumentException("Unsupported mailbox operation.");
