@@ -21,6 +21,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val gate=Any()
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val mutable=MutableStateFlow(MessagingSnapshot())
+    private val peerAuthenticationDiagnostics=linkedMapOf<String,String>()
     override val state: StateFlow<MessagingSnapshot> = mutable.asStateFlow()
     private var profile: NativeProfile?=null
     private var accounts: ServerAccounts?=null
@@ -355,6 +356,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
         mailboxExecution.reset();lastMailboxAcknowledgedNanos=0L;mailboxAt=0L
@@ -422,7 +424,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(incomingRequests=requests.toList())
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
         val presenceLive=!livePeerWorkAllowed||events?.connected==true
-        mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated device presence live; native delivery state active" else "Connecting authenticated server events; local history available")
+        mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated server presence available; message delivery requires a verified peer or mailbox ACK" else "Connecting authenticated server events; local history available")
         // Complete application projection as part of backend bootstrap, not a
         // later UI collector/tick or optional vendor registration side effect.
         publish()
@@ -482,7 +484,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(expiredServerSession(failure))throw failure
                 // No plaintext/error message. An unavailable/rejected mailbox
                 // does not manufacture a peer route or invalidate local history.
-                android.util.Log.i("PeerChatWake","stage=mailbox_service_pending result=${failure.javaClass.simpleName}")
+                android.util.Log.i("PeerChatWake","stage=mailbox_service_pending ${mailboxExecution.diagnostic}")
             } finally {mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000}
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
@@ -525,6 +527,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(kind==3L)android.util.Log.i("PeerChatWake","stage=delivery_ack_received")
                 if(kind==0L) {
                     val accepted=ReliableBridge.exchange(native,attempt,ReliableBridge.INITIAL_AUTHENTICATED_FRIEND_PIN,ByteArray(0))
+                    val outcome=initialFriendPinResult(accepted)
+                    val detail="peer=${execution.requestPeerId} attempt=$attempt authentication_generation=$generation initial_pin=$outcome"
+                    peerAuthenticationDiagnostics[execution.requestPeerId]=detail
+                    while(peerAuthenticationDiagnostics.size>32)peerAuthenticationDiagnostics.remove(peerAuthenticationDiagnostics.keys.first())
+                    android.util.Log.i("PeerChatWake",detail)
                     if(accepted?.firstOrNull()?.toInt()!=1)mutable.value=mutable.value.copy(status="Device verification required; automatic replacement refused")
                 }
             }
@@ -573,6 +580,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
     }
     private fun publish() {
+        mutable.value=mutable.value.copy(messagingDiagnostics=buildString {
+            appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
+            appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
+            peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
+        })
         val native=checkNotNull(profile).handle
         val conversations=nativeConversationProjection(friends,
             {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},

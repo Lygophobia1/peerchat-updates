@@ -17,7 +17,24 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     // Authentication alone is not evidence of a currently refreshed device lease.
     val serverPresenceLive:Boolean=false,val mailboxStorageAllowed:Boolean=false,
     val localHistoryReady:Boolean=false,val archiveProgress:ArchiveSyncProgress=ArchiveSyncProgress(),
-    val archiveAuthorizationDiagnostics:String="No authenticated History Sync snapshot yet.",val transferDiagnostics:String="")
+    val archiveAuthorizationDiagnostics:String="No authenticated History Sync snapshot yet.",val transferDiagnostics:String="",
+    val messagingDiagnostics:String="")
+
+// Fixed native decision codes only: never format provider exception messages,
+// server payloads, credentials or key material into the diagnostic projection.
+internal fun initialFriendPinResult(result:ByteArray?):String {
+    if(result==null||result.size!=2)return "decision_unavailable"
+    val code=result[1].toInt()
+    if(result[0].toInt()==1)return if(code==0)"accepted" else "decision_unavailable"
+    if(result[0].toInt()!=0)return "decision_unavailable"
+    return when(code){
+        1->"stale_identity_or_attempt"
+        2->"no_current_authenticated_friendship"
+        3->"existing_verified_account_device_requires_explicit_verification"
+        4->"stored_key_mismatch"
+        else->"decision_unavailable"
+    }
+}
 
 internal fun expiredServerSession(failure:Exception):Boolean = failure is com.peerchat.android.platform.ServerRejected &&
     failure.code in setOf("session_invalid","session_superseded","event_session_superseded")

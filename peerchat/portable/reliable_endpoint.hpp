@@ -195,11 +195,13 @@ public:
             if(!live)close(true);
         }catch(...){close(false);throw;}
     }
-    bool initialPin(std::uint64_t generation,std::uint64_t now){
+    bool initialPin(std::uint64_t generation,std::uint64_t now,reliable::InitialPinDecision* result=nullptr){
+        if(result)*result=reliable::InitialPinDecision::StaleIdentity;
         if(archive_)return false;
         now_=now;auto key=tls_->ready()?tls_->remotePublicKey():Blob{};
         auto pins=contacts();
         auto decision=friends_.initialPin(&runtime_,!closed_,runtime_.expected,generation,tls_->ready()?&key:nullptr,pins);
+        if(result)*result=decision;
         if(decision!=reliable::InitialPinDecision::Allowed)return false;
         approve();return true;
     }

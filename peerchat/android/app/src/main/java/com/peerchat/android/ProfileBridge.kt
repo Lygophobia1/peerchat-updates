@@ -18,6 +18,7 @@ class NativeProfile(context: Context, profile: String = "default") : AutoCloseab
     val handle = NativeBridge.create()
     private var platform: AndroidStoragePlatform? = null
     private var closed = false
+    internal fun recipientDiagnostics():String=platform?.recipientDiagnostic ?: "stage=profile_closed"
     init {
         check(handle != 0L) { "Native instance unavailable" }
         try {

@@ -39,6 +39,16 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
     private val file = File(directory, if (registryOnly) "device-key-registry.sqlite" else "peerchat.sqlite")
     private val recipient by lazy { AndroidRecipientKeyProvider(applicationContext, profile) }
+    var recipientDiagnostic:String="stage=recipient_not_requested"
+        private set
+    private fun <T> recipientOperation(stage:String,operation:()->T):T {
+        recipientDiagnostic="stage=$stage"
+        try{return operation().also{recipientDiagnostic="stage=$stage result=ready"}}
+        catch(failure:Exception){
+            recipientDiagnostic="stage=$stage reason="+recipientFailureCode(failure)
+            throw failure
+        }
+    }
     private val identity: AndroidIdentityProvider
     private val records: AndroidRecordProtector
     private val database: SQLiteDatabase
@@ -84,11 +94,15 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         checkOpen(); invalid(alias.size in 1..256)
         return text(alias)
     }
-    fun recipientSupported(): Boolean { checkOpen(); return recipient.supported() }
-    fun recipientAlias(generation: Int): ByteArray { checkOpen(); return recipient.alias(generation).toByteArray(Charsets.US_ASCII) }
-    fun recipientExists(alias: ByteArray): Boolean = recipient.exists(recipientAliasText(alias))
-    fun recipientCreate(alias: ByteArray): ByteArray = recipient.create(recipientAliasText(alias))
-    fun recipientPublic(alias: ByteArray): ByteArray = recipient.publicKey(recipientAliasText(alias))
+    fun recipientSupported(): Boolean {
+        val supported=recipientOperation("recipient_supported") {checkOpen();recipient.supported()}
+        if(!supported)recipientDiagnostic="stage=recipient_supported reason=RECIPIENT_KEY_UNSUPPORTED"
+        return supported
+    }
+    fun recipientAlias(generation: Int): ByteArray = recipientOperation("recipient_alias") {checkOpen();recipient.alias(generation).toByteArray(Charsets.US_ASCII)}
+    fun recipientExists(alias: ByteArray): Boolean = recipientOperation("recipient_exists") {recipient.exists(recipientAliasText(alias))}
+    fun recipientCreate(alias: ByteArray): ByteArray = recipientOperation("recipient_create") {recipient.create(recipientAliasText(alias))}
+    fun recipientPublic(alias: ByteArray): ByteArray = recipientOperation("recipient_public") {recipient.publicKey(recipientAliasText(alias))}
     fun recipientAgree(alias: ByteArray, point: ByteArray): ByteArray = recipient.agreeP256(recipientAliasText(alias), point)
     fun hpkeSeal(publicKey: ByteArray, info: ByteArray, aad: ByteArray, plaintext: ByteArray): ByteArray {
         checkOpen(); invalid(plaintext.size <= 1048495)

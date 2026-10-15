@@ -508,7 +508,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                 if(operation==1){instance->serviceTransfers(runtimeNow());output=endpoint.takeOutput();}
                 else if(operation==2)output={static_cast<unsigned char>(endpoint.ready()),static_cast<unsigned char>(endpoint.closed())};
                 else if(operation==3){
-                    output={static_cast<unsigned char>(endpoint.initialPin(instance->friends.generation(),runtimeNow()))};retireEndpoints(*instance,endpoint);
+                    peerchat::reliable::InitialPinDecision decision;
+                    const bool accepted=endpoint.initialPin(instance->friends.generation(),runtimeNow(),&decision);
+                    // Local JNI diagnostic extension; byte zero and all trust
+                    // policy remain unchanged. No network/protocol field.
+                    output={static_cast<unsigned char>(accepted),static_cast<unsigned char>(decision)};retireEndpoints(*instance,endpoint);
                 }else if(operation==4){
                     if(auto event=endpoint.poll()){
                         peerchat::protocol::Writer value(peerchat::protocol::Ack);value.number(static_cast<std::uint64_t>(event->kind));value.string(event->peer);value.string(event->id);value.number(event->message?1:0);

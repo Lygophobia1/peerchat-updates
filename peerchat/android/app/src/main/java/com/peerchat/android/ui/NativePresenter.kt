@@ -47,15 +47,23 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         appendLine(snapshot.status)
         appendLine("Authenticated=${snapshot.authenticated} Server presence live=${snapshot.serverPresenceLive}")
         appendLine("Profile identity: ${snapshot.localPeerId}")
+        appendLine("Messaging execution:")
+        appendLine(snapshot.messagingDiagnostics)
         appendLine("History Sync admission:")
         appendLine(snapshot.archiveAuthorizationDiagnostics)
         appendLine("File transfer measurements (native, confirmed/durable bytes):")
         appendLine(snapshot.transferDiagnostics)
         for(c in snapshot.conversations) {
             appendLine("${c.friend.username}:${c.friend.accountId} · Server Relay")
+            appendLine("Resolved account=${c.friend.accountId} current_device=${c.friend.peerId} known_devices=${c.friend.knownPeerIds.joinToString(",")}")
             appendLine("Ready=${c.connection.ready} Pending=${c.connection.pending} Retrying=${c.connection.retrying}")
             appendLine("Network revision=${c.connection.networkRevision} Retry delay=${c.connection.retryDelayMs} ms")
             appendLine("Failure=${c.connection.failure}")
+            // Already-retained native rows only, not a new history/outbox scan.
+            // IDs/attribution/state are enough to correlate a controlled send.
+            for(message in c.messages.takeLast(3))if(message.id.matches(Regex("[0-9a-f]{32}"))&&
+                message.senderDevice.matches(Regex("[0-9a-f]{64}"))&&message.recipientDevice.matches(Regex("[0-9a-f]{64}")))
+                appendLine("recent_native_row message_id=${message.id} sender_device=${message.senderDevice} recipient_device=${message.recipientDevice} delivery=${message.delivery}")
         }
     }
     return previous.copy(demo=false,conversations=conversations,diagnostics=diagnostics,

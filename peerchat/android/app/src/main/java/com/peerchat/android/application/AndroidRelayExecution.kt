@@ -9,6 +9,7 @@ import com.peerchat.android.platform.tls.RelayFrames
 // TLS/Hello/trust, route selection, retry, ACK/dedupe/history. No reconnect loop.
 internal class AndroidRelayExecution(private val profile: Long,private val request: RelayExecution,
     private val accounts: ServerAccounts,private val remoteAccount: Long) : AutoCloseable {
+    val requestPeerId:String get()=request.peerId
     @Volatile private var stopping=false
     @Volatile private var channel: ServerChannel?=null
     @Volatile var attached=false

@@ -29,7 +29,10 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     std::uint64_t now=1;unsigned received=0,delivered=0;
     auto route=[](std::uint64_t token,bool incoming){return session::RouteObservation{{token},"relay:fixture","authenticated server","opaque relay",incoming,1,session::TransportKind::Relay,session::RouteClass::ServerRelay};};
     auto drain=[&](ReliableEndpoint& endpoint){while(auto event=endpoint.poll()){
-        if(event->kind==ReliableEndpoint::EventKind::TrustRequired)require(endpoint.initialPin(1,++now),"Authenticated initial pin rejected");
+        if(event->kind==ReliableEndpoint::EventKind::TrustRequired){
+            reliable::InitialPinDecision decision=reliable::InitialPinDecision::StoredKeyMismatch;
+            require(endpoint.initialPin(1,++now,&decision)&&decision==reliable::InitialPinDecision::Allowed,"Authenticated initial pin/diagnostic rejected");
+        }
         if(event->kind==ReliableEndpoint::EventKind::Message){++received;require(event->message&&event->message->sender==alice.peerId&&event->message->text==L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600","Message attribution/payload changed");}
         if(event->kind==ReliableEndpoint::EventKind::Delivered)++delivered;
     }};
