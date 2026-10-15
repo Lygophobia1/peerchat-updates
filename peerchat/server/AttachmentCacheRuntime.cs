@@ -47,6 +47,7 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
  long CalculatedReservations(){return Scalar("SELECT COALESCE(SUM("+ReservationExpression+"),0) FROM objects o");}
  long ObjectReservation(string id){return Scalar("SELECT COALESCE((SELECT "+ReservationExpression+" FROM objects o WHERE id="+Quote(id)+"),0)");}
  long Reserved(){return Scalar("SELECT amount FROM reservation_total WHERE id=1");}
+ void ValidateInstance(){Require(Scalar("PRAGMA application_id")==1346585409&&Scalar("PRAGMA page_size")==4096&&Scalar("SELECT count(*) FROM settings WHERE version=1 AND instance="+Quote(options.InstanceId))==1&&Scalar("SELECT count(*) FROM settings")==1,"cache_instance_or_schema_mismatch");}
  void InitializeReservationLedger(){
   Execute("CREATE TABLE IF NOT EXISTS reservation_total(id INTEGER PRIMARY KEY CHECK(id=1),amount INTEGER NOT NULL CHECK(typeof(amount)='integer' AND amount>=0));");
   // Additive initialization for an owned pre-release cache. Reconstruct only a
@@ -68,6 +69,10 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
    if(existing){var header=new byte[100];using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)){Require(file.Read(header,0,header.Length)==header.Length,"cache_index_header_invalid");}Require(System.Text.Encoding.ASCII.GetString(header,0,16)=="SQLite format 3\0"&&header[68]==80&&header[69]==67&&header[70]==67&&header[71]==65,"cache_index_not_owned");}
    long allocated=directory.AllocatedBytes();var storage=directory.Evidence();long percent=checked(storage.FilesystemBytes/100*options.MinimumFreePercent+(storage.FilesystemBytes%100*options.MinimumFreePercent+99)/100);Require((existing||allocated<=options.MaximumBytes&&OperationHeadroom<=options.MaximumBytes-allocated)&&storage.AvailableBytes>=Math.Max(options.MinimumFreeBytes,percent)+OperationHeadroom,"cache_startup_space_protected");
    Require(Sqlite.sqlite3_open16(path,out database)==0,"cache_index_open_failed");
+   // Validate an existing owner's immutable binding before PRAGMA/schema
+   // updates. A matching filesystem marker alone cannot authorize another
+   // cache index's additive initialization.
+   if(existing)ValidateInstance();
    Execute("PRAGMA busy_timeout=5000;PRAGMA foreign_keys=ON;PRAGMA temp_store=MEMORY;PRAGMA cache_size=-2048;PRAGMA journal_mode=TRUNCATE;PRAGMA synchronous=FULL;PRAGMA locking_mode=EXCLUSIVE;");
    if(!existing)Execute("PRAGMA page_size=4096;PRAGMA auto_vacuum=INCREMENTAL;PRAGMA application_id=1346585409;");
    if(existing){var checkedRows=Rows("PRAGMA quick_check",1);Require(checkedRows.Count==1&&checkedRows[0][0]=="ok","cache_index_corrupt");}
@@ -80,7 +85,7 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
     "CREATE TABLE IF NOT EXISTS announcements(object_id TEXT PRIMARY KEY REFERENCES objects(id),wire BLOB NOT NULL,digest TEXT NOT NULL);"+
     "CREATE TABLE IF NOT EXISTS announcement_acks(object_id TEXT NOT NULL REFERENCES objects(id),device TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(object_id,device));");
    if(!existing)Execute("INSERT INTO settings VALUES(1,"+Quote(options.InstanceId)+");");
-   Require(Scalar("PRAGMA application_id")==1346585409&&Scalar("PRAGMA page_size")==4096&&Scalar("SELECT count(*) FROM settings WHERE version=1 AND instance="+Quote(options.InstanceId))==1&&Scalar("SELECT count(*) FROM settings")==1,"cache_instance_or_schema_mismatch");
+   ValidateInstance();
    // Exclusive owner has been acquired. Every old process lease is now stale;
    // durable byte offsets/reservations remain authoritative and are NOT reset.
    InitializeReservationLedger();Transaction(()=>Execute("DELETE FROM leases;"));Reconcile();

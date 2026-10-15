@@ -360,6 +360,40 @@ remain gates. Current-epoch group-message checks are not relaxed to accept an
 old cached announcement. Independent cache receipts are not an implementation
 of the deferred Windows-first DM routing policy. Shipping transport remains closed.
 
+A mismatched cache index previously received additive schema changes before its
+instance binding was checked. A fixture reproduced that mutation. Existing index
+identity is now checked before schema/PRAGMA updates; the wrong-instance fixture
+is rejected with unchanged index bytes. The complete upload, announcement,
+ledger, ownership, revocation and actual process-kill recovery suite passes.
+
+### Remaining client integration sequence
+
+Prepare encrypted objects in bounded worker steps, not a whole-file blocking
+operation on the profile worker. Flush complete ciphertext and durably protect
+its manifest and owned sink token before the final rename. Resume the same
+immutable object after interruption; never reencrypt changed input under an old
+key/nonce. Cleanup must preserve partials referenced by verified staging records
+and remove only authenticated abandoned temporary files.
+
+Keep cache resume records isolated from the old transfer-journal format while
+using the same TransferManager for credits, hashes, ACKs, retries and aggregate
+limits. The cache route must bind the verified server, profile/device, session
+and attempt generation. An old response must not mutate a newer route, and a
+cache failure must not invalidate the main messaging login.
+
+Persist the exact encrypted group envelope and its message/object binding before
+publication. Retry that envelope, not a newly encrypted replacement. After a
+complete ciphertext download, verify AEAD and plaintext hash before committing
+the user file. Protect full-file readiness before rename so a restart can adopt
+the already verified destination without overwriting it. Announcement ACK,
+ciphertext durability and plaintext completion remain separate states.
+
+Old-epoch offline announcements require verified historical roster/key evidence;
+the current-epoch MessageLayer check stays fail-closed until that path is tested.
+An expired/evicted object reports unavailable; reconnect must not silently renew
+its lifetime. A deliberate resend creates a fresh logical attachment. Add the
+group bubble/clipboard entry points only after these production paths pass.
+
 ### Earlier DM pipeline baseline
 
 The bounded DM pipeline is implemented in the existing TransferManager, with
