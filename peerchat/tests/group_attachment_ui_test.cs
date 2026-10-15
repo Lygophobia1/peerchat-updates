@@ -66,6 +66,11 @@ class GroupAttachmentUiTest {
         }
         File.WriteAllText(chosen,"preserve");bool collision=false;try{AttachmentDownloadTarget.Validate(chosen);}catch(IOException){collision=true;}Check(collision&&File.ReadAllText(chosen)=="preserve","existing download target changed");
         var group=new GroupModel{Data=new GroupData{id="group-one",name="Attachment checks"}};
+        var referenceGroup=new GroupModel{Data=new GroupData{id="reference-group",name="Reference checks"}};
+        var referenceMessage=new MessageModel{Data=new MessageData{id="reference-id",sender="sender",text="Encrypted attachment reference",status="attachment_reference"},IsGroupMessage=true};
+        referenceGroup.Messages.Add(referenceMessage);Check(referenceMessage.Stamp.Contains("unavailable")&&referenceMessage.ShortTime=="Time unavailable","reference invented original date/order");
+        Check(GroupAttachmentProjection.Apply(referenceGroup,new CoreAdapter.GroupAttachmentData{id="reference-id",group=referenceGroup.Id,name="authorized.png",time=12345,state="available",senderPeer="sender"}),"authorized metadata did not upgrade reference");
+        Check(referenceGroup.Messages.Count==1&&referenceMessage.GroupAttachment.name=="authorized.png"&&referenceMessage.Data.time==12345&&referenceMessage.Data.status!="attachment_reference","reference duplicated or replaced authorized metadata with placeholder");
         foreach(string state in new[]{"preparing","uploading","available","downloading","verifying","paused","failed","expired","complete"}){
             var row=new CoreAdapter.GroupAttachmentData{id="attempt-"+state,logicalId="one-message",group=group.Id,name="日本 👩🏽‍💻.png",size=100,transferSize=200,done=50,state=state,sending=false,time=100};
             Check(GroupAttachmentProjection.Apply(group,row)&&group.Messages.Count==1,"retry duplicate bubble");Check(!GroupAttachmentProjection.Apply(group,row),"unchanged snapshot redraw");Check(group.Messages[0].TextVisibility==Visibility.Collapsed,"attachment showed extra text bubble");

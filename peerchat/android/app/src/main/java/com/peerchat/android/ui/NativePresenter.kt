@@ -47,10 +47,10 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
     }+snapshot.groups.map {g->
         val messages=g.messages.map{m->val outgoing=m.device==snapshot.localPeerId
             MessageUi(m.id,m.device,if(outgoing)snapshot.username else accountName(m.account),m.text,outgoing,
-                SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
-                SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
-                if(!outgoing)MessageStatus.Received else if(m.status.startsWith("Recipients:")||m.status.startsWith("Server accepted"))MessageStatus.Sent else if(m.status.startsWith("Not submitted")||m.status.contains("unknown")||m.status.contains("rejected"))MessageStatus.Failed else MessageStatus.Queued,
-                m.timestamp,m.order,retryAvailable=outgoing&&!m.status.startsWith("Recipients:"),deliveryDetail=if(outgoing)m.status else "")
+                if(m.status=="attachment_reference")"Time unavailable" else SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
+                if(m.status=="attachment_reference")"Attachment references · original order unavailable" else SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
+                if(!outgoing||m.status=="attachment_reference")MessageStatus.Received else if(m.status.startsWith("Recipients:")||m.status.startsWith("Server accepted"))MessageStatus.Sent else if(m.status.startsWith("Not submitted")||m.status.contains("unknown")||m.status.contains("rejected"))MessageStatus.Failed else MessageStatus.Queued,
+                m.timestamp,m.order,retryAvailable=outgoing&&m.status!="attachment_reference"&&!m.status.startsWith("Recipients:"),deliveryDetail=if(m.status=="attachment_reference")"Authenticated public reference; no download authorization" else if(outgoing)m.status else "")
         }
         ConversationUi("group:${g.id}",g.name,ChatKind.Group,g.ready,messages.lastOrNull()?.text?:if(g.ready)"Encrypted group text" else "Waiting for signed membership and current group key",
             messages.lastOrNull()?.time?:"",unread=g.unread,messages=messages,hasOlder=g.hasOlder,

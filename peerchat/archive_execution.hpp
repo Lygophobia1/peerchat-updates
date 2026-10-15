@@ -94,13 +94,14 @@ public:
     }
     void sourceQueued(const session::ReliableAuthorization& scope,const Blob& response)noexcept{
         try{if(scope.archive.source!=local_.peerId||!currentSessionAuthorization(policy_,scope))return;
+            protocol::Reader domain(response);if(domain.type()==protocol::ArchiveControl&&groupHistoryDomain(domain.string())){auto page=decodeGroupHistoryPage(response);std::uint64_t count=0;for(const auto& row:page.items)if(row.state==0)++count;if(providedQueued_<=INT64_MAX-count)providedQueued_+=count;return;}
             protocol::Reader r(response);if(r.type()!=protocol::ArchiveControl||r.string()!="PeerChat/ArchiveHistory/v1"||r.number()!=1||r.number()!=3)return;
             // Count only the already validated response header. Diagnostics must
             // not reparse message bodies or repeat signature verification.
             (void)historyRequestFields(r);r.number();r.number();auto count=r.number();if(count<=HistoryPageRecords&&providedQueued_<=INT64_MAX-count)providedQueued_+=count;
         }catch(...){/* Supplemental counters cannot affect transport. */}
     }
-    std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark())+static_cast<std::uint64_t>(storage_.groupArchiveWatermark());}
+    std::uint64_t historyRevision()const{return static_cast<std::uint64_t>(storage_.archiveHistoryWatermark())+static_cast<std::uint64_t>(storage_.groupArchiveWatermark())+static_cast<std::uint64_t>(storage_.groupReferenceWatermark());}
     // Read-only application diagnostics; holding a route does not imply pages
     // have transferred. No fabricated provider counters or percentage.
     std::vector<std::string> providingDevices(std::uint64_t now)const{

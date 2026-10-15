@@ -13,6 +13,7 @@ class SyncReader {
     std::unique_ptr<HistoryReader> history_;
     std::unique_ptr<AttachmentReader> attachments_;
     std::unique_ptr<GroupHistoryReader> groups_;
+    std::unique_ptr<GroupHistoryReader> references_;
     bool groupsUnsupported_=false;
     std::uint64_t processed_=0,conversations_=0,deferred_=0;
     bool complete_=false,pending_=false,cancelled_=false;
@@ -45,15 +46,16 @@ public:
             auto complete=r.number();require(complete<=1);complete_=complete!=0;bool legacy=!r.remaining();if(!legacy)deferred_=r.number();r.end();auto canonical=state();if(legacy)canonical.resize(canonical.size()-8);require(canonical==saved_&&(!complete_||position_.after==position_.through));
         }
         attachments_=std::make_unique<AttachmentReader>(storage_,authorization_,scope_,directory_);
-        if(groups)groups_=std::make_unique<GroupHistoryReader>(storage_,authorization_,scope_,*groups);
+        if(groups){groups_=std::make_unique<GroupHistoryReader>(storage_,authorization_,scope_,*groups);references_=std::make_unique<GroupHistoryReader>(storage_,authorization_,scope_,*groups,true);}
     }
     // Explicit new scan preserves every per-conversation resume cursor. A
     // completed scan is never silently restarted by a transport poll.
-    void rescan(){current();require(!pending_&&complete_&&attachments_->snapshot().complete);attachments_->rescan();if(groups_&&groups_->complete())groups_->rescan();groupsUnsupported_=false;position_.after=position_.through=0;processed_=conversations_=deferred_=0;complete_=false;persist();}
+    void rescan(){current();require(!pending_&&complete_&&attachments_->snapshot().complete);attachments_->rescan();if(groups_&&groups_->complete())groups_->rescan();if(references_&&references_->complete())references_->rescan();groupsUnsupported_=false;position_.after=position_.through=0;processed_=conversations_=deferred_=0;complete_=false;persist();}
     Blob nextRequest(bool allowDeferred=false,bool allowGroups=false){
         current();require(!pending_);if(complete_){
             if(!attachments_->snapshot().complete)return attachments_->nextRequest();
             if(groups_&&!groups_->complete()){if(!allowGroups){groupsUnsupported_=true;return {};}return groups_->request();}
+            if(references_&&!references_->complete()){if(!allowGroups){groupsUnsupported_=true;return {};}return references_->request();}
             return {};
         }
         Blob request;
@@ -67,7 +69,8 @@ public:
     size_t accept(const Blob& bytes){
         acceptStage_="sync_current_authorization";current();if(complete_){
             if(!attachments_->snapshot().complete){acceptStage_="attachment_page_accept";attachments_->accept(bytes);return 0;}
-            require(groups_&&groups_->pending());acceptStage_="group_history_page_accept";return groups_->accept(bytes,committed_);
+            if(groups_&&groups_->pending()){acceptStage_="group_history_page_accept";return groups_->accept(bytes,committed_);}
+            require(references_&&references_->pending());acceptStage_="group_reference_page_accept";return references_->accept(bytes,committed_);
         }require(pending_);
         if(history_){
             protocol::Reader header(bytes);require(header.type()==protocol::ArchiveControl&&header.string()=="PeerChat/ArchiveHistory/v1"&&header.number()==1);if(header.number()==10){auto count=history_->defer(bytes);require(deferred_<=UINT64_MAX-count);deferred_+=count;pending_=false;advance(true);return 0;}
@@ -86,17 +89,17 @@ public:
         else{page_=std::move(page);index_=0;persist();}
         return 0;
     }
-    void disconnected(){pending_=false;if(history_)history_->disconnected();attachments_->disconnected();if(groups_)groups_->disconnected();}
+    void disconnected(){pending_=false;if(history_)history_->disconnected();attachments_->disconnected();if(groups_)groups_->disconnected();if(references_)references_->disconnected();}
     const char* acceptStage()const{return history_?history_->acceptStage():acceptStage_;}
     void cancel(){cancelled_=true;disconnected();if(history_)history_->cancel();attachments_->cancel();}
-    Snapshot snapshot()const{auto media=attachments_->snapshot();return {processed_+(groups_?groups_->processed():0),conversations_,complete_&&media.complete&&(!groups_||groups_->complete()||groupsUnsupported_),complete_?(media.pending||(groups_&&groups_->pending())):pending_,cancelled_,media.processed,deferred_+(groups_?groups_->deferred():0),groupsUnsupported_};}
+    Snapshot snapshot()const{auto media=attachments_->snapshot();std::set<std::string> completedGroups;if(groups_&&groups_->complete()&&!groups_->deferred()&&references_&&references_->complete()&&!references_->deferred()){completedGroups=groups_->conversations();completedGroups.insert(references_->conversations().begin(),references_->conversations().end());}return {processed_+(groups_?groups_->processed():0)+(references_?references_->processed():0),conversations_+completedGroups.size(),complete_&&media.complete&&(!groups_||groups_->complete()||groupsUnsupported_)&&(!references_||references_->complete()||groupsUnsupported_),complete_?(media.pending||(groups_&&groups_->pending())||(references_&&references_->pending())):pending_,cancelled_,media.processed,deferred_+(groups_?groups_->deferred():0)+(references_?references_->deferred():0),groupsUnsupported_};}
 };
 inline Blob serveSyncControl(Storage& storage,const Profile& local,Authorization& authorization,
     const session::ReliableAuthorization& scope,const Blob& request,DeviceAccounts directory,std::uint64_t now,const char** stage=nullptr,GroupHistoryAccess* groups=nullptr){
     if(stage)*stage="source_control_decode";
     validateHistoryControl(request);protocol::Reader r(request);require(r.type()==protocol::ArchiveControl);auto domain=r.string();
     if(domain==AttachmentDomain){if(stage)*stage="source_attachment_catalog";return serveAttachmentPage(storage,local,authorization,scope,request,directory);}
-    if(domain==GroupHistoryDomain){if(stage)*stage="source_group_history";require(groups);return serveGroupHistory(storage,local,authorization,scope,request,*groups);}
+    if(groupHistoryDomain(domain)){if(stage)*stage="source_group_history";require(groups);return serveGroupHistory(storage,local,authorization,scope,request,*groups);}
     r.number();auto kind=r.number();
     if(kind==4){if(stage)*stage="source_history_manifest";return serveManifestPage(storage,local,authorization,scope,request);}
     require(kind==2||kind==11);return serveHistoryPage(storage,local,authorization,scope,request,std::move(directory),now,stage);

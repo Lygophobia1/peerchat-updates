@@ -247,6 +247,7 @@ struct Storage::Impl {
             // Additive index only; names, paths, digests and provenance remain
             // in the existing platform-protected object backend.
             execute("CREATE TABLE IF NOT EXISTS attachment_history_index(sequence INTEGER PRIMARY KEY AUTOINCREMENT,attachment_id TEXT UNIQUE NOT NULL);");
+            execute("CREATE TABLE IF NOT EXISTS group_reference_index_v1(sequence INTEGER PRIMARY KEY AUTOINCREMENT,server_group TEXT NOT NULL,local_group TEXT NOT NULL,message_id TEXT NOT NULL,UNIQUE(server_group,message_id));");
             // Separate outbox index contains identifiers only, never message text.
             execute("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS group_events(event_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,logical_order INTEGER NOT NULL,b BLOB NOT NULL);"
@@ -723,6 +724,7 @@ bool Storage::appendAuthenticatedGroupMessage(const std::string& group,const std
         "Invalid authenticated group message");
     const std::string record="authenticated-group-message/"+group+"/"+id;
     Transaction transaction(impl_->sql);Secret old{impl_->get(record)};
+    require(impl_->get("group-history-reference/v1/"+group+"/"+id).empty(),"Conflicting group history record type");
     if(!old.data.empty()){
         Reader reader(old.data);auto previous=reader.bytes();Secret previousText{reader.bytes()};reader.end();
         require(previous==envelope&&previousText.data==plaintext,"Conflicting authenticated group message ID");
@@ -807,6 +809,24 @@ GroupArchivePage Storage::groupArchivePage(std::int64_t after,std::int64_t throu
     Statement more(impl_->sql,group.empty()?"SELECT 1 FROM group_message_index WHERE sequence>? AND sequence<=? LIMIT 1":"SELECT 1 FROM group_message_index WHERE sequence>? AND sequence<=? AND server_group=? LIMIT 1");more.number(1,page.next);more.number(2,through);if(!group.empty())more.text(3,group);page.complete=!more.row();
     if(page.complete)page.next=through;
     return page;
+}
+bool Storage::appendGroupHistoryReference(const std::string& group,const std::string& local,const std::string& id,const Blob& descriptor){
+    require(identifier(group,32)&&identifier(local,32)&&identifier(id,32)&&!descriptor.empty()&&descriptor.size()<=2048,"Invalid group reference");
+    Transaction tx(impl_->sql);require(impl_->get("authenticated-group-message/"+group+"/"+id).empty(),"Conflicting group history record type");const auto key="group-history-reference/v1/"+group+"/"+id;auto old=impl_->get(key);
+    if(!old.empty()){require(old==descriptor,"Conflicting group reference identity");tx.commit();return false;}
+    impl_->put(key,descriptor);Statement q(impl_->sql,"INSERT INTO group_reference_index_v1(server_group,local_group,message_id) VALUES(?,?,?)");q.text(1,group);q.text(2,local);q.text(3,id);q.row();tx.commit();return true;
+}
+Blob Storage::groupHistoryReference(const std::string& group,const std::string& id){
+    require(identifier(group,32)&&identifier(id,32),"Invalid group reference identity");auto value=impl_->get("group-history-reference/v1/"+group+"/"+id);require(value.size()<=2048,"Invalid group reference record");return value;
+}
+std::int64_t Storage::groupReferenceWatermark(const std::string& group){
+    require(group.empty()||identifier(group,32),"Invalid group reference scope");Statement q(impl_->sql,group.empty()?"SELECT COALESCE(MAX(sequence),0) FROM group_reference_index_v1":"SELECT COALESCE(MAX(sequence),0) FROM group_reference_index_v1 WHERE server_group=?");if(!group.empty())q.text(1,group);require(q.row(),"Missing reference watermark");return q.number(0);
+}
+GroupArchivePage Storage::groupReferencePage(std::int64_t after,std::int64_t through,int limit,const std::string& group){
+    require(after>=0&&through>=after&&through<=groupReferenceWatermark(group)&&limit>0&&limit<=8,"Invalid reference page");
+    Statement q(impl_->sql,group.empty()?"SELECT server_group,message_id,sequence FROM group_reference_index_v1 WHERE sequence>? AND sequence<=? ORDER BY sequence LIMIT ?":"SELECT server_group,message_id,sequence FROM group_reference_index_v1 WHERE sequence>? AND sequence<=? AND server_group=? ORDER BY sequence LIMIT ?");q.number(1,after);q.number(2,through);if(group.empty())q.number(3,limit);else{q.text(3,group);q.number(4,limit);}
+    GroupArchivePage page;page.next=after;while(q.row()){AuthenticatedGroupMessage row;row.envelope=groupHistoryReference(q.text(0),q.text(1));require(!row.envelope.empty(),"Missing protected reference");row.sequence=q.number(2);page.next=row.sequence;page.records.push_back(std::move(row));}
+    Statement more(impl_->sql,group.empty()?"SELECT 1 FROM group_reference_index_v1 WHERE sequence>? AND sequence<=? LIMIT 1":"SELECT 1 FROM group_reference_index_v1 WHERE sequence>? AND sequence<=? AND server_group=? LIMIT 1");more.number(1,page.next);more.number(2,through);if(!group.empty())more.text(3,group);page.complete=!more.row();if(page.complete)page.next=through;return page;
 }
 bool Storage::reserveGroupNonce(const std::string& fingerprint,const Blob& nonce){
     require(identifier(fingerprint)&&nonce.size()==12,"Invalid group nonce reservation");

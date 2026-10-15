@@ -7,7 +7,7 @@ import java.util.Base64
 
 data class GroupMessageSnapshot(val id:String,val device:String,val account:Long,val timestamp:Long,val order:Long,val sequence:Long,val status:String,val text:String)
 internal val groupMessageOrder=compareBy<GroupMessageSnapshot>{it.order}.thenBy{it.device}.thenBy{it.id}
-internal fun groupHistoryBefore(messages:List<GroupMessageSnapshot>):Long=messages.minWithOrNull(groupMessageOrder)?.sequence?:Long.MAX_VALUE
+internal fun groupHistoryBefore(messages:List<GroupMessageSnapshot>):Long=messages.filter{it.sequence>0}.minWithOrNull(groupMessageOrder)?.sequence?:Long.MAX_VALUE
 data class GroupMemberSnapshot(val account:Long,val device:String,val role:Long,val invited:Boolean)
 data class GroupConversationSnapshot(val id:String,val legacyId:String,val epoch:Long,val name:String,val ready:Boolean,val members:Long,
     val messages:List<GroupMessageSnapshot> = emptyList(),val unread:Int=0,val memberRows:List<GroupMemberSnapshot> = emptyList(),val hasOlder:Boolean=true)
@@ -21,6 +21,7 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
     private val history=mutableMapOf<String,List<GroupMessageSnapshot>>()
     private val unread=mutableMapOf<String,Int>()
     private val older=mutableMapOf<String,Boolean>()
+    private val referenceCursors=mutableMapOf<String,Long>()
     private var historyRevision=-1L
     private val historyRefresh=linkedSetOf<String>()
     private fun command(handle:Long,op:Int,account:Long,generation:Long,write:(NativeRecordWriter)->Unit={}):NativeRecord{
@@ -53,7 +54,7 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
                 require(r.text()=="PeerChat/GroupHistoryRevision/v1");val revision=r.number()
                 if(revision!=historyRevision){historyRefresh.addAll(ids);historyRevision=revision}
             }
-            r.end();history.keys.retainAll(ids);unread.keys.retainAll(ids);older.keys.retainAll(ids);historyRefresh.retainAll(ids)
+            r.end();history.keys.retainAll(ids);unread.keys.retainAll(ids);older.keys.retainAll(ids);referenceCursors.keys.retainAll(ids);historyRefresh.retainAll(ids)
         }
         // Bounded preview/history readout from native storage, four new groups
         // per pass. No unbounded eager history load and no membership cache DB.
@@ -61,13 +62,19 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
         return groups.map{it.copy(messages=history[it.id]?:emptyList(),hasOlder=older[it.id]?:true)}
     }
     fun load(handle:Long,account:Long,generation:Long,id:String,before:Long=Long.MAX_VALUE,markRead:Boolean=false):List<GroupMessageSnapshot>{
-        val r=command(handle,3,account,generation){it.text(id);it.number(before)};val count=r.number();require(count<=8)
-        val page=List(count.toInt()){GroupMessageSnapshot(r.text(),r.text(),r.number(),r.number(),r.number(),r.number(),r.text(),r.text())}
-        val ready=if(r.hasRemaining()){require(r.text()=="PeerChat/GroupHistoryPage/v1");r.number().also{require(it<=1)}==1L}else true;r.end()
+        val r=command(handle,3,account,generation){it.text(id);it.number(before);it.text("PeerChat/GroupReferencePage/v1");it.number(referenceCursors[id]?:0)};val count=r.number();require(count<=8)
+        val page=List(count.toInt()){GroupMessageSnapshot(r.text(),r.text(),r.number(),r.number(),r.number(),r.number(),r.text(),r.text())}.toMutableList()
+        val ready=if(r.hasRemaining()){require(r.text()=="PeerChat/GroupHistoryPage/v1");r.number().also{require(it<=1)}==1L}else true
+        var referenceMore=false
+        if(r.hasRemaining()){require(r.text()=="PeerChat/GroupReferencePage/v1");val cursor=r.number();val more=r.number();val references=r.number();require(cursor>=(referenceCursors[id]?:0)&&more<=1&&references<=8);referenceMore=more==1L
+            repeat(references.toInt()){val message=r.text();val attachment=r.text();val device=r.text();val sender=r.number();val epoch=r.number();val size=r.number();require(message.matches(Regex("[0-9a-f]{32}"))&&attachment.matches(Regex("[0-9a-f]{32}"))&&device.matches(Regex("[0-9a-f]{64}"))&&sender>0&&epoch>0&&size>=0)
+                page.add(GroupMessageSnapshot(message,device,sender,0,0,0,"attachment_reference","Encrypted attachment reference\nPrivate metadata and original time/order unavailable. Download requires existing device authorization; cached data may have expired."))}
+            referenceCursors[id]=cursor
+        };r.end()
         if(!ready){older[id]=true;historyRefresh.add(id);diagnostic="Preparing protected group history ordering";return emptyList()}
         val merged=(page+(history[id]?:emptyList())).distinctBy{it.id}.sortedWith(groupMessageOrder)
         history[id]=if(before==Long.MAX_VALUE)merged.takeLast(200)else merged.take(200)
-        older[id]=page.size==8;if(markRead)unread[id]=0;return page
+        older[id]=count==8L||referenceMore;if(markRead)unread[id]=0;return page
     }
     fun create(owner:ServerAccounts,handle:Long,account:Long,generation:Long,name:String,username:String){
         val r=command(handle,4,account,generation){it.text(name);it.text(username)};val proof=r.bytes();r.end()
@@ -125,7 +132,7 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
             return more
         }catch(failure:Exception){try{resetPending(handle,account,generation)}catch(_:Exception){};throw failure}
     }
-    fun reset(){invitations=emptyList();history.clear();unread.clear();older.clear();historyRefresh.clear();historyRevision=-1;diagnostic="Group authorization not loaded"}
+    fun reset(){invitations=emptyList();history.clear();unread.clear();older.clear();referenceCursors.clear();historyRefresh.clear();historyRevision=-1;diagnostic="Group authorization not loaded"}
     fun controlSettled(handle:Long,account:Long,generation:Long,attempt:Long):Boolean{
         val r=command(handle,9,account,generation){it.number(attempt)};val settled=r.number()==1L;r.end();return settled
     }

@@ -609,14 +609,16 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_re
                     auto key=instance->storage->groupKey(row->legacyGroupId,row->generation);out.number(key.size()==32&&ledger&&group_keys::GroupKeyManager::matchesSignedLedger(*row,ledger->state()));platform::group_crypto::wipe(key.data(),key.size());out.number(row->devices.size());
                     for(const auto& d:row->devices){out.number(d.accountId);out.string(d.peerId);out.number(static_cast<unsigned>(d.role));out.number(d.invited);}
                 }
-                out.string("PeerChat/GroupHistoryRevision/v1");out.number(instance->storage->groupArchiveWatermark()+instance->storage->groupHistoryOrderRevision());
+                out.string("PeerChat/GroupHistoryRevision/v1");out.number(instance->storage->groupArchiveWatermark()+instance->storage->groupHistoryOrderRevision()+instance->storage->groupReferenceWatermark());
             }else if(operation==3){
-                auto id=r.string();auto before=r.number();r.end();auto row=groups.roster(id);protocol::check(row&&before>0&&before<=INT64_MAX);
+                auto id=r.string();auto before=r.number();std::uint64_t referenceAfter=0;if(r.remaining()){protocol::check(r.string()=="PeerChat/GroupReferencePage/v1");referenceAfter=r.number();}r.end();auto row=groups.roster(id);protocol::check(row&&before>0&&before<=INT64_MAX&&referenceAfter<=INT64_MAX);
                 const bool ready=instance->storage->groupHistoryOrderingReady(row->legacyGroupId);
                 auto records=ready?instance->storage->authenticatedGroupHistory(row->legacyGroupId,8,before):std::vector<AuthenticatedGroupMessage>{};out.number(records.size());
                 for(auto& record:records){group_messages::Envelope e;protocol::check(group_messages::parse(record.envelope,e)==group_messages::Result::Accepted);
                     auto body=group_text::decode(record.plaintext);out.string(e.messageId);out.string(e.senderDevice);out.number(e.senderAccount);out.number(body.time);out.number(body.order);out.number(record.sequence);out.string(record.status);out.text(body.text);platform::group_crypto::wipe(record.plaintext.data(),record.plaintext.size());}
                 out.string("PeerChat/GroupHistoryPage/v1");out.number(ready);
+                archive::GroupHistoryAccess referenceAccess(*instance->storage,instance->profile,account,[&groups](const std::string& server){return groups.historyContext(server);});
+                auto references=referenceAccess.visibleReferences(id,referenceAfter);out.string("PeerChat/GroupReferencePage/v1");out.number(references.next);out.number(!references.complete);out.number(references.records.size());for(const auto& item:references.records){auto d=group_attachments::parseDescriptor(item.envelope);out.string(d.message);out.string(d.attachment);out.string(d.sender);out.number(d.account);out.number(d.epoch);out.number(d.cipherSize);}
             }else if(operation==4){auto name=r.text(),user=r.text();r.end();out.bytes(groups.create(name,user,mailboxNow()));
             }else if(operation==5){auto id=r.string();auto text=r.text();r.end();auto created=groups.send(id,text,mailboxNow());out.string(group_messages::resultName(created.result));if(created.result==group_messages::Result::Accepted){if(instance->groupPending)instance->groupPending->changed();out.string(created.envelope.messageId);out.number(created.envelope.rosterGeneration);out.bytes(created.wire);}
             }else if(operation==6){auto expectedGroup=r.string(),expectedMessage=r.string();auto wire=r.bytes();r.end();group_messages::Envelope envelope;

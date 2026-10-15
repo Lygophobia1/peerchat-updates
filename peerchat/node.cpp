@@ -175,6 +175,7 @@ struct Node::Impl {
         if(!transfers)return;
         if(downloadSaves)try{downloadSaves->tick(transfers->completedRecords());}catch(const std::exception&){transferPersistenceFailure();}
         if(groupAttachments)try{groupAttachments->tick();}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}}
+        if(groupAttachments&&archiveGroups&&nowMilliseconds()>=groupReferenceScanAt){groupReferenceScanAt=nowMilliseconds()+1000;try{groupAttachments->visitPublicReferences([this](const Blob& wire){archiveGroups->rememberReference(wire);});}catch(...){/* Reference indexing cannot interrupt accepted transfers. */}}
         transfers->mediaActive(groupBulkMediaActive||calls.active()||screenShares.active()!=nullptr);
         std::set<std::string> peers;for(const auto& row:transfers->snapshots())if(row.purpose==transfer::Purpose::PeerFile)peers.insert(row.peer);
         for(auto& peer:peers){auto c=transferConnection(peer);transfers->capability(peer,c?c->attemptId:0,c&&!c->authorization.permitsArchiveControl()&&(c->remoteCapabilities&protocol::CapabilityTransferPipeline));}
@@ -339,6 +340,7 @@ struct Node::Impl {
     std::unique_ptr<group_keys::GroupKeyManager> groupKeys;
     std::uint64_t groupRosterDiscoveryGeneration=0;
     std::map<std::string,std::int64_t> groupHistoryRefreshes;
+    std::map<std::string,std::uint64_t> groupReferenceUiCursors;std::uint64_t groupReferenceScanAt=0;
     std::uint64_t groupHistoryRefreshAt=0;
     std::optional<archive::GroupHistoryContext> historyContext(const std::string& server){
         if(!groupKeys||groupAccount.accountId!=authenticatedFriends.localAccount()||groupRosterDiscoveryGeneration!=authenticatedFriends.generation())return {};
@@ -477,6 +479,10 @@ struct Node::Impl {
         if(!records.empty()||(groupKeys&&groupKeys->isAuthoritativeGroup(groupId))){
             NodeEvent history;history.kind=NodeEvent::Kind::GroupHistory;history.peerId=groupId;
             for(auto& record:records){history.groupEvents.push_back(groupMessageProjection(groupId,record));SecureZeroMemory(record.plaintext.data(),record.plaintext.size());}
+            if(archiveGroups){auto roster=groupKeys->rosterForLegacy(groupId);auto context=roster?historyContext(roster->serverGroupId):std::optional<archive::GroupHistoryContext>{};
+                if(context){auto refs=archiveGroups->visibleReferences(context->roster.serverGroupId,groupReferenceUiCursors[groupId]);groupReferenceUiCursors[groupId]=refs.next;
+                    for(const auto& row:refs.records){auto d=group_attachments::parseDescriptor(row.envelope);GroupEvent event;event.groupId=groupId;event.eventId=d.message;event.actorPeerId=d.sender;event.actorAccountId=d.account;event.kind=GroupEventKind::Message;event.deliverySummary="attachment_reference";event.message=L"Encrypted attachment reference\nPrivate metadata and original order unavailable. Downloads require existing device authorization; cached data may have expired.";history.groupEvents.push_back(std::move(event));}
+                    if(!refs.complete||records.size()==100)history.text=L"More group history available";}}
             emit(std::move(history));return;
         }
         std::vector<const GroupEvent*> eligible;
@@ -1690,7 +1696,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         try {
             if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Windows sockets unavailable");
             winsock=true;
-            archiveTransfers.reset();archiveExecution.reset();archiveGroups.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+            archiveTransfers.reset();archiveExecution.reset();archiveGroups.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;groupReferenceUiCursors.clear();groupReferenceScanAt=0;
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);

@@ -36,6 +36,8 @@ private:
  Storage& storage_;const Profile& profile_;transfer::TransferManager& transfers_;CacheStateStore& journal_;ContextLookup context_;KeyAccess keys_;
  std::wstring directory_,cipherDirectory_,receivedDirectory_;StagingJournal staging_;std::vector<Staged> staged_;std::unique_ptr<HistoryStore> history_;std::unique_ptr<transfer::windows::CleanupJournal> preparationCleanup_;std::uint64_t maintenanceAt_=0;
  std::map<std::string,std::unique_ptr<Job>> jobs_;std::deque<Request> requests_;std::unique_ptr<PreparedKeys> prepared_;
+ std::string referenceVisit_;
+ std::uint64_t referenceBackfillBefore_=INT64_MAX,referenceBackfillAt_=0;
  std::string visibleGroup_,server_,cursor_,availability_="Waiting for authenticated cache capability",capabilityStage_="waiting",capabilityCode_;std::uint64_t account_=0,generation_=0,nextRoute_=1,pollAt_=0;size_t workTurn_=0;bool supported_=false;std::uint64_t historyCursor_=0;bool historyMore_=false;
  static std::uint64_t wall(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
  static Blob bytes(const std::string& s){return Blob(s.begin(),s.end());}
@@ -164,6 +166,16 @@ private:
  static std::pair<std::wstring,Blob> selection(const std::wstring& encoded){auto bytes=rpc::unbase64(unicode::encode(encoded),65536,false);protocol::Reader r(bytes);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DownloadSelection/v1");auto path=r.text();auto approval=r.bytes();r.end();return {std::move(path),std::move(approval)};}
 
 public:
+ void visitPublicReferences(const std::function<void(const Blob&)>& visit){
+  if(!account_)return;
+  if(!jobs_.empty()){auto it=jobs_.upper_bound(referenceVisit_);if(it==jobs_.end())it=jobs_.begin();
+   for(size_t n=0;n<8&&n<jobs_.size();++n){auto& j=*it->second;referenceVisit_=it->first;if(!j.descriptor.empty()){auto d=parseDescriptor(j.descriptor);if(storage_.groupHistoryReference(d.group,d.message).empty())visit(j.descriptor);}if(++it==jobs_.end())it=jobs_.begin();}}
+  if(wall()<referenceBackfillAt_)return;
+  // Read existing completed attachment history in bounded pages, without loading
+  // jobs, reopening downloads, or copying any private body into the reference.
+  auto page=history_->page({},referenceBackfillBefore_,8);for(const auto& item:page.items){auto record=history_->get(item.binding.id);protocol::check(record.has_value());protocol::Reader r(record->payload.bytes);protocol::check(r.type()==protocol::FileTransfer);auto format=r.string();protocol::check((format=="PeerChat/AttachmentJob/v1"||format=="PeerChat/AttachmentJob/v2"||format=="PeerChat/AttachmentJob/v3"||format=="PeerChat/AttachmentJob/v4")&&r.string()==profile_.peerId);protocol::check(r.string()==item.binding.id&&r.string()==item.binding.group&&r.string()==item.binding.server);for(unsigned n=0;n<3;++n)r.string();for(unsigned n=0;n<9;++n)r.number();auto descriptor=r.bytes();if(!descriptor.empty()){auto d=parseDescriptor(descriptor);if(storage_.groupHistoryReference(d.group,d.message).empty())visit(descriptor);}}
+  referenceBackfillBefore_=page.more?page.cursor:INT64_MAX;if(!page.more)referenceBackfillAt_=wall()+60000;
+ }
  Application(Storage& storage,const Profile& profile,transfer::TransferManager& transfers,CacheStateStore& journal,std::wstring directory,ContextLookup context,KeyAccess keys):storage_(storage),profile_(profile),transfers_(transfers),journal_(journal),context_(std::move(context)),keys_(std::move(keys)),directory_(std::move(directory)),staging_(storage,profile.peerId){cipherDirectory_=(std::filesystem::path(directory_)/L"group-attachment-ciphertext").wstring();receivedDirectory_=(std::filesystem::path(directory_)/L"group-attachment-received").wstring();std::filesystem::create_directory(cipherDirectory_);std::filesystem::create_directory(receivedDirectory_);staged_=staging_.load();load();auto preparation=(std::filesystem::path(directory_)/L"group-attachment-preparation").wstring();std::filesystem::create_directory(preparation);preparationCleanup_=std::make_unique<transfer::windows::CleanupJournal>(preparation);std::set<std::string> retained;for(auto& staged:staged_)retained.insert(staged.manifest.binding.attachment);for(auto& pair:jobs_)if(pair.second->sending&&pair.second->body)retained.insert(pair.first);preparationCleanup_->recover(retained);}
  std::unique_ptr<transfer::Source> reopen(const transfer::DurableState& d){if(!jobs_.count(d.metadata.id)){auto record=history_->get(d.metadata.id);protocol::check(record.has_value());loadRecord(std::move(*record));}auto& j=job(d.metadata.id);protocol::check(j.body&&j.sending);auto copy=decodeBody(encodeBody(*j.body).bytes);Staged staged{std::move(copy.manifest),j.sourceLocation,j.time,j.time+transfer::RetentionMilliseconds};return StagedCipherSource::reopen(staged,profile_.peerId);}
  std::uint64_t route(const transfer::Snapshot& s)const{auto j=jobs_.find(s.metadata.id);return j!=jobs_.end()&&j->second->server==server_&&account_&&!j->second->lease.empty()?j->second->route:0;}

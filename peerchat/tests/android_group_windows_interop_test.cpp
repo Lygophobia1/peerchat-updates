@@ -87,9 +87,16 @@ int main(int argc,char** argv){Node windows;try{
     attached[0]=false;bOffline=true;windows.relayClosed(attempts[0],L"Isolated group history interruption");b.endpoint->close(false);b.endpoint.reset();attempts[0]=0;
     for(unsigned n=0;n<7;++n){windowsWire.clear();check(windows.sendGroup(legacy,text),"Offline Windows group send");wait([&]{return !windowsWire.empty();},"Offline group message was not created");}
     for(unsigned n=0;n<5;++n)check(b.app.send(roster.serverGroupId,text,4000+n).result==group_messages::Result::Accepted,"Offline Android durable creation");
+    // Public-only evidence travels through the same real peer TLS route. No
+    // fixture file, private metadata, cache admission or key packet is supplied.
+    auto reference=[&](Storage& store,const Profile& identity,std::uint64_t account){group_attachments::Manifest m;m.binding={Storage::newMessageId(),roster.serverGroupId,identity.peerId,account,roster.generation};m.name="private-not-in-history.png";m.size=23;m.key=Blob(32,51);m.prefix=Blob(4,71);m.cipherDigest.fill(83);auto wire=group_attachments::uploadDescriptor(m,m.binding.attachment,identity);archive::GroupHistoryAccess access(store,identity,account,[&](const std::string& group){return b.app.historyContext(group);});check(access.rememberReference(wire),"Fixture reference admission failed");return m.binding.attachment;};
+    const auto androidReference=reference(b.store,b.profile,2);std::string windowsReference;
+    {Storage source((root/"windows").wstring());auto identity=source.profile();windowsReference=reference(source,identity,1);}
     check(b.store.groupArchiveWatermark()==8,"Offline messages leaked through live fanout");
     check(windows.beginGroupControl(roster.serverGroupId,2,b.profile.peerId,1),"History reconnect rejected");wait([&]{return attempts[0]!=0;},"History relay request missing");b.connect(roster,104);check(windows.relayReady(attempts[0],false),"History relay attach failed");attached[0]=true;
     wait([&]{return b.store.groupArchiveWatermark()==15;},"Windows-to-Android nonempty TLS history import failed");
+    wait([&]{return !b.store.groupHistoryReference(roster.serverGroupId,windowsReference).empty();},"Windows-to-Android reference TLS import failed");
+    wait([&]{Storage source((root/"windows").wstring());return !source.groupHistoryReference(roster.serverGroupId,androidReference).empty();},"Android-to-Windows reference TLS import failed");
     // A selected Windows history read is the real Node projection, not a direct
     // test import or fabricated receiver acknowledgment.
     windows.loadGroupHistory(legacy,INT64_MAX);
@@ -100,13 +107,14 @@ int main(int argc,char** argv){Node windows;try{
     // reconcile through the same group-scoped native TLS adapter without it.
     b.connect(roster,201,c.profile.peerId,false);c.connect(roster,202,b.profile.peerId,true);
     auto fallbackUntil=std::chrono::steady_clock::now()+std::chrono::seconds(25);
-    while(std::chrono::steady_clock::now()<fallbackUntil&&c.store.groupArchiveWatermark()!=15){
+    while(std::chrono::steady_clock::now()<fallbackUntil&&(c.store.groupArchiveWatermark()!=15||c.store.groupHistoryReference(roster.serverGroupId,androidReference).empty())){
         auto left=b.endpoint->takeOutput(),right=c.endpoint->takeOutput();
         if(!left.empty())c.endpoint->receive(left,++tick);
         if(!right.empty())b.endpoint->receive(right,++tick);
         b.endpoint->pump();c.endpoint->pump();std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
     check(c.store.groupArchiveWatermark()==15,"Fallback group source did not recover history while original source was offline");
+    check(!c.store.groupHistoryReference(roster.serverGroupId,androidReference).empty(),"Alternate-source attachment reference missing after bounded completion wait");
     b.endpoint.reset();c.endpoint.reset();owner.clear();windows.start((root/"windows").wstring(),0,L"Isolated Windows owner",false);
     wait([&]{return !owner.empty();},"Windows source restart timed out");check(windows.setAuthenticatedGroupRoster(1,1,roster),"Reopened source roster rejected");
     // Recreate the adapter using durable protected membership/history. Neither
@@ -125,6 +133,7 @@ int main(int argc,char** argv){Node windows;try{
     check(c.store.groupKey(legacy,4).empty(),"Removed Android obtained future key");check(c.app.receive(windowsWire)==group_messages::Result::RosterUnavailable,"Revoked Android retained ingress authority");
     windows.stop();Storage ownerStore((root/"windows").wstring());check(ownerStore.contacts().empty(),"Windows added friend trust");
     check(ownerStore.authenticatedGroupHistory(legacy).size()==15,"Android-to-Windows protected history import/reopen failed");
+    check(!ownerStore.groupHistoryReference(roster.serverGroupId,androidReference).empty(),"Android-to-Windows reference durable import failed");
     check(ownerStore.groupKey(legacy,4)==b.store.groupKey(legacy,4),"Windows and Android rotated keys differ");
     check(!ownerStore.hasGroupKeyReceipt(legacy,4,c.profile.peerId),"Removed device has future key receipt");
     std::cout<<"PASS: Windows Node and Android native adapters over real Schannel TLS; signed key ACK, Unicode PCGE, 7 missed Windows and 5 missed Android messages recovered without live fanout, member-source fallback with Windows stopped, durable history/reopen, removal rotation and no friend auto-trust. HOST ONLY\n";return 0;

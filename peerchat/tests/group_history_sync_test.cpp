@@ -33,6 +33,17 @@ int main(){const char* stage="setup";try{
     auto third=mc.create(local,ledger.state(),group_text::encode({200,74,L"Third participant"}));need(third.result==group_messages::Result::Accepted,"Third participant create");need(ma.receive(local,ledger.state(),third.wire,group_text::valid).result==group_messages::Result::Accepted,"Third participant receive");
     bool active=true;auto context=[&](const std::string& group)->std::optional<archive::GroupHistoryContext>{if(!active||group!=server)return {};return archive::GroupHistoryContext{roster,ledger.state()};};
     archive::GroupHistoryAccess aa(a,pa,1,context),ab(b,pb,1,context);
+    stage="reference_admission";group_attachments::Manifest attachment;attachment.binding={Storage::newMessageId(),server,pa.peerId,1,1};attachment.name="never-public-private-filename.png";attachment.size=17;attachment.key=Blob(32,31);attachment.prefix=Blob(4,47);attachment.cipherDigest.fill(93);
+    const auto referenceId=Storage::newMessageId();const auto reference=group_attachments::uploadDescriptor(attachment,referenceId,pa);
+    need(std::search(reference.begin(),reference.end(),attachment.name.begin(),attachment.name.end())==reference.end(),"Private filename escaped descriptor");
+    need(aa.rememberReference(reference)&&!aa.rememberReference(reference),"Reference admission/replay");
+    need(a.authenticatedGroupMessage(server,referenceId).envelope.empty(),"Reference entered PCGE storage");
+    auto badReference=reference;badReference.back()^=1;denied([&]{aa.rememberReference(badReference);});
+    denied([&]{aa.reference(reference,1,pa.peerId,1,pb.peerId,newGroupId());});
+    need(aa.reference(reference,99,pa.peerId,1,pb.peerId).state==2,"Wrong account reference authority");
+    for(unsigned n=0;n<16;++n){attachment.binding.attachment=Storage::newMessageId();need(aa.rememberReference(group_attachments::uploadDescriptor(attachment,Storage::newMessageId(),pa)),"Reference paging fixture insert");}
+    group_messages::Envelope originalText;need(group_messages::parse(first,originalText)==group_messages::Result::Accepted,"Reference collision fixture parse");denied([&]{aa.rememberReference(group_attachments::uploadDescriptor(attachment,originalText.messageId,pa));});
+    denied([&]{aa.rememberReference(group_attachments::uploadDescriptor(attachment,referenceId,pa));});
     std::map<std::string,archive::CurrentGrant> grants;std::set<std::string> devices{pa.peerId,pb.peerId,pd.peerId};
     auto current=[&](std::uint64_t account,const std::string& peer){return account==1&&devices.count(peer)!=0;};
     auto published=[&](std::uint64_t account,const std::string& issuer,const std::string& peer)->std::optional<archive::CurrentGrant>{if(account!=1||issuer!=pa.peerId||!grants.count(peer))return {};return grants.at(peer);};
@@ -51,8 +62,13 @@ int main(){const char* stage="setup";try{
             if(restart&&pages==6){reader->disconnected();reader=std::make_unique<archive::SyncReader>(b,pb,authB,db,scopeB,directory,std::function<void()>{},&ab);}}
     };
     run(false);stage="missing_key_result";need(reader->snapshot().deferred==74&&b.groupArchiveWatermark()==0,"Missing historical key was not retained unresolved");
+    need(b.groupReferenceWatermark()==17&&b.groupHistoryReference(server,referenceId)==reference&&b.groupKey(local,1).empty(),"Reference granted a private key or failed durable import");
+    {std::uint64_t after=0;size_t seen=0,pages=0;for(;;){auto page=ab.visibleReferences(server,after);need(page.records.size()<=8&&++pages<=3,"Reference projection exceeded page bound");seen+=page.records.size();after=page.next;if(page.complete)break;}need(seen==17&&pages==3,"Reference projection omitted bounded history");}
+    denied([&]{reader->accept(archive::encodeGroupHistoryPage({{Storage::newMessageId(),a.archiveStoreId(),0,1,true},1,true,{{1,0,badReference}}}));});
+    need(b.groupReferenceWatermark()==17,"Unrequested/replayed reference mutated durable storage");
     offers=a.pendingGroupKeyHandoffs(pb.peerId);need(offers.size()==1&&kb.accept(offers[0],pa.peerId,ledger.state()),"Delayed recipient key");reader->rescan();run(true);
     need(reader->snapshot().deferred==0&&b.groupArchiveWatermark()==74,"Nonempty durable group import");
+    need(reader->snapshot().conversations==1,"Text/reference lanes double-counted completed group");
     need(pageTampered,"Tamper/request-binding cases did not execute");
     reader->rescan();run(false);need(b.groupArchiveWatermark()==74,"Repeated scan duplicated history");
     // A whole page is verified before any new record is committed.
@@ -75,10 +91,13 @@ int main(){const char* stage="setup";try{
     need(!group_history::continuousMember(*epoch,changed,1,pb.peerId),"Rejoined identity revived old history authority");
     append(GroupEventKind::AuthorizeDevice,pa,1,pd,1);++roster.generation;roster.devices.push_back({1,pd.peerId,GroupRole::Owner,false});ka.apply(roster);kb.apply(roster);
     auto otherScope=archive::sessionAuthorization(authA,pa.peerId,pa.peerId,pd.peerId);need(aa.check(first,otherScope).state==2&&d.groupKey(local,1).empty(),"New device inherited old history/key");
+    need(aa.checkReference(reference,otherScope).state==2,"New device inherited historical reference authority");
     append(GroupEventKind::RevokeDevice,pa,1,pb,1);++roster.generation;roster.devices.erase(std::remove_if(roster.devices.begin(),roster.devices.end(),[&](const auto& m){return m.peerId==pb.peerId;}),roster.devices.end());ka.apply(roster);
     need(aa.check(first,scopeA).state==2,"Revoked device accessed retained history");
+    need(aa.checkReference(reference,scopeA).state==2,"Revoked device accessed historical reference");
     auto revoked=authA.issue(pb.publicKey,0,true,600,true);grants[pb.peerId]={revoked.generation,0,revoked.issuanceId,true};denied([&]{archive::serveGroupHistory(a,pa,authA,scopeA,request,aa);});
     Storage reopened((root/L"b").wstring());need(reopened.profile().peerId==pb.peerId&&reopened.groupArchiveWatermark()==75&&reopened.authenticatedGroupHistory(local).size()==75,"Restart lost protected group history");
+    need(reopened.groupReferenceWatermark()==17&&reopened.groupHistoryReference(server,referenceId)==reference,"Reference restart/deduplication lost stable descriptor");
     // Commit arrival is intentionally the reverse of authenticated order.
     // An opaque local sequence identifies the boundary but is not sort order.
     Storage ordered((root/L"ordered").wstring());auto original=a.authenticatedGroupHistory(local);need(original.size()==75,"Ordering fixture source");

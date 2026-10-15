@@ -130,7 +130,7 @@ inline void validateHistoryControl(const Blob& bytes){
     require(bytes.size()<=protocol::MaxPacket);protocol::Reader r(bytes);
     if(r.type()==protocol::ArchiveControl&&r.string()==AttachmentDomain){validateAttachmentControl(bytes);return;}
     protocol::Reader group(bytes);
-    if(group.type()==protocol::ArchiveControl&&group.string()==GroupHistoryDomain){
+    if(group.type()==protocol::ArchiveControl&&groupHistoryDomain(group.string())){
         require(group.number()==1);auto kind=group.number();if(kind==1)decodeGroupHistoryRequest(bytes);else{require(kind==2);decodeGroupHistoryPage(bytes);}return;
     }
     protocol::Reader history(bytes);

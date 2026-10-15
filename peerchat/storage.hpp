@@ -157,6 +157,11 @@ public:
     GroupArchivePage groupArchivePage(std::int64_t after,std::int64_t through,int limit=8,const std::string& serverGroup={});
     bool groupHistoryOrderingReady(const std::string& localGroup,int batch=64);
     std::uint64_t groupHistoryOrderRevision();
+    // Public signed evidence only. Never PCGE, HPKE or private attachment bodies.
+    bool appendGroupHistoryReference(const std::string& serverGroup,const std::string& localGroup,const std::string& message,const Blob& descriptor);
+    Blob groupHistoryReference(const std::string& serverGroup,const std::string& message);
+    std::int64_t groupReferenceWatermark(const std::string& serverGroup={});
+    GroupArchivePage groupReferencePage(std::int64_t after,std::int64_t through,int limit=8,const std::string& serverGroup={});
     bool setGroupMessageStatus(const std::string& groupId,const std::string& messageId,const std::string& status,std::uint32_t stage=0);
     // Durable local nonce reservation, scoped to the actual key fingerprint (not the group name).
     bool reserveGroupNonce(const std::string& keyFingerprint,const Blob& nonce);

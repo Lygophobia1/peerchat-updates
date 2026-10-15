@@ -141,9 +141,9 @@ public static class GroupAttachmentProjection {
     }
     public static bool Apply(GroupModel group,CoreAdapter.GroupAttachmentData row){
         if(row==null||String.IsNullOrEmpty(row.id)||String.IsNullOrEmpty(LogicalId(row))||row.group!=group.Id||row.size<0||row.transferSize<0||row.done<0)return false;
-        var message=group.Messages.FirstOrDefault(item=>item.GroupAttachment!=null&&LogicalId(item.GroupAttachment)==LogicalId(row));
+        var message=group.Messages.FirstOrDefault(item=>(item.GroupAttachment!=null&&LogicalId(item.GroupAttachment)==LogicalId(row))||(item.Data.id==LogicalId(row)&&item.Data.status=="attachment_reference"));
         string revision=new JavaScriptSerializer().Serialize(row);
-        if(message!=null){if(message.GroupAttachmentRevision==revision)return false;message.SetGroupAttachment(row,revision);group.Refresh();return true;}
+        if(message!=null){if(message.GroupAttachmentRevision==revision)return false;if(message.Data.status=="attachment_reference"){message.Data.time=row.time;message.Data.logical=row.time;message.Data.status="";message.Data.sender=row.senderPeer??"";message.Outgoing=row.sending;}message.SetGroupAttachment(row,revision);group.Refresh();return true;}
         message=new MessageModel{Data=new MessageData{id=LogicalId(row),sender=row.senderPeer??"",text="",time=row.time,logical=row.time},Outgoing=row.sending};
         message.SetGroupAttachment(row,revision);
         int at=0;while(at<group.Messages.Count&&(group.Messages[at].Data.time<=row.time||row.time==0))at++;
