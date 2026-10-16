@@ -77,7 +77,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             requireMailboxConsentChangeAllowed(MailboxBridge.hasScopedEnrollment(native.handle))
         }
         mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
-        OpaquePushWake.maintainPeriodic(context,allowed&&remembered.load()?.revocationPending==false)
+        OpaquePushWake.refreshPeriodic(context)
         mailboxExecution.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
     private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
@@ -266,7 +266,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 refresh();refreshAt=System.nanoTime()/1_000_000+900000
                 if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
                     try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}
-                    if(mailboxAllowed())OpaquePushWake.maintainPeriodic(context,true)
+                    OpaquePushWake.refreshPeriodic(context)
                     // Enrollment leaves the password-login bearer unbound. Push
                     // registration requires the signed device-bound resume token
                     // immediately, not only after the next process restart.
@@ -283,13 +283,13 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
     }
     private fun revokeSaved(native:NativeProfile,key:ByteArray) {
-        val saved=remembered.load() ?: return
+        val saved=remembered.load() ?: run{OpaquePushWake.maintainPeriodic(context,false);return}
         check(saved.device==PeerIdentityFormat.peerId(key))
         remembered.save(saved.pendingRevocation())
+        OpaquePushWake.maintainPeriodic(context,false)
         try{ServerAccounts(saved.endpoint,saved.device,operations).revoke(saved,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}
         catch(failure:ServerRejected){if(failure.code!="remember_revoked")throw failure}
         remembered.clear()
-        OpaquePushWake.maintainPeriodic(context,false)
     }
     override suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean = withContext(Dispatchers.IO) {
         val start=System.nanoTime()
@@ -352,7 +352,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
             friends=friends.map{it.copy(online=false)}
             mutable.value=localOfflineSnapshot(mutable.value,if(rememberedRetryEndpoint!=null)"Reconnecting; saved authorization retained" else "Saved authentication failed; sign in again").copy(localPeerId=saved.device)
-            if(isRememberedCredentialRejected(failure))remembered.clear()
+            if(isRememberedCredentialRejected(failure)){remembered.clear();OpaquePushWake.refreshPeriodic(context)}
             throw failure
         }
     }
@@ -477,6 +477,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     override suspend fun signOut():Unit = withContext(Dispatchers.IO) {
         synchronized(gate) {
+            OpaquePushWake.maintainPeriodic(context,false)
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000
             generation++;clearAuthorization()
             val old=accounts;accounts=null;friends=emptyList();index=null

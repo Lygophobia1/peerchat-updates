@@ -44,6 +44,19 @@ object OpaquePushWake {
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPersisted(true)
             .setPeriodic(6*60*60*1000L,60*60*1000L).build())==JobScheduler.RESULT_SUCCESS
     }
+    internal fun periodicEligible(config:ServerEndpoint?,credential:RememberedLogin?,allowed:Boolean):Boolean =
+        config!=null&&credential!=null&&!credential.revocationPending&&credential.endpoint==config&&allowed
+    /** Recheck protected authorization after credential/consent transitions.
+     * Scheduling is best effort and never changes the underlying login result. */
+    internal fun refreshPeriodic(context:Context):Boolean = try {
+        val config=AndroidServerConfigurationStore(context).load()
+        val credential=AndroidRememberedLoginStore(context).load()
+        val allowed=AndroidQolStore(context).load().mailboxStorageAllowed
+        maintainPeriodic(context,periodicEligible(config,credential,allowed))
+    }catch(_:Exception){
+        try{maintainPeriodic(context,false)}catch(_:Exception){}
+        false
+    }
     fun valid(data:Map<String,String>)=data==mapOf("event" to "peerchat_pending","version" to "1")
     @Synchronized fun schedule(context:Context,data:Map<String,String>):Boolean {
         if(!valid(data))return false

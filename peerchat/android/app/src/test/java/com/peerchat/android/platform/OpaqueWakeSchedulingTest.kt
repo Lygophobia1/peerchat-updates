@@ -31,6 +31,16 @@ class OpaqueWakeSchedulingTest {
         assertTrue(OpaquePushWake.maintainPeriodic(context,false))
         assertNull(scheduler.getPendingJob(OpaquePushWake.PERIODIC_JOB_ID))
     }
+    @Test fun periodicEligibilityTracksRememberedCredentialConsentAndRevocation(){
+        val endpoint=ServerEndpoint("peerchat.example",443,"a".repeat(64))
+        val remembered=RememberedLogin(endpoint,4,"b".repeat(64),"c".repeat(43))
+        assertTrue(OpaquePushWake.periodicEligible(endpoint,remembered,true))
+        assertFalse(OpaquePushWake.periodicEligible(endpoint,remembered,false))
+        assertFalse(OpaquePushWake.periodicEligible(endpoint,remembered.pendingRevocation(),true))
+        assertFalse(OpaquePushWake.periodicEligible(endpoint,null,true))
+        assertFalse(OpaquePushWake.periodicEligible(null,remembered,true))
+        assertFalse(OpaquePushWake.periodicEligible(endpoint.copy(host="other.example"),remembered,true))
+    }
     @Test fun freshWakeIsImmediateExpedited(){
         assertTrue(OpaquePushWake.schedule(context,hint))
         val job=checkNotNull(scheduler.getPendingJob(OpaquePushWake.JOB_ID))
