@@ -32,15 +32,29 @@ import kotlinx.coroutines.delay
     var sending by remember(c.id) { mutableStateOf(false) }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
     val timeline=remember(c.messages,c.attachments){conversationTimeline(c)}
+    var followingLatest by remember(c.id){mutableStateOf(true)}
+    var initialScroll by remember(c.id){mutableStateOf(true)}
+    var positioning by remember(c.id){mutableStateOf(false)}
+    var scrollRequest by remember(c.id){mutableIntStateOf(0)}
+    val viewportHeight by remember(list){derivedStateOf{list.layoutInfo.viewportSize.height}}
     val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
         if(uri!=null)dispatch(UiAction.SendAttachment(uri))
     }
     LaunchedEffect(c.id,state.drafts[c.id]){if(!sending&&!state.demo)draft=state.drafts[c.id] ?: ""}
-    LaunchedEffect(c.id, timeline.lastOrNull()?.key,timeline.size) {
-        val nearBottom=(list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)>=list.layoutInfo.totalItemsCount-3
-        if (timeline.isNotEmpty()&&nearBottom) {
+    LaunchedEffect(c.id) {
+        // Observe the anchored row, not total row count: appending/importing
+        // messages must not reinterpret an unchanged viewport as user scrolling.
+        snapshotFlow{list.layoutInfo.visibleItemsInfo.firstOrNull()?.key to list.firstVisibleItemScrollOffset}.collect {
+            if(!initialScroll&&!positioning)followingLatest=conversationNearLatest(
+                list.layoutInfo.visibleItemsInfo.lastOrNull()?.index,list.layoutInfo.totalItemsCount)
+        }
+    }
+    LaunchedEffect(c.id,timeline.lastOrNull()?.key,timeline.size,viewportHeight,scrollRequest) {
+        if(timeline.isNotEmpty()&&(initialScroll||followingLatest)) {
             val dateSeparators = timeline.indices.count { it == 0 || timeline[it - 1].date != timeline[it].date }
-            list.scrollToItem(timeline.size + dateSeparators) // + older item, then -1 for last index
+            positioning=true
+            try{list.scrollToItem(timeline.size+dateSeparators);followingLatest=true;initialScroll=false}
+            finally{positioning=false}
         }
     }
     LaunchedEffect(sending) {
@@ -83,7 +97,7 @@ import kotlinx.coroutines.delay
                 OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
-                IconButton({ sending = true }, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
+                IconButton({followingLatest=true;scrollRequest++;sending=true}, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
                     if (sending) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                     else Icon(Icons.AutoMirrored.Filled.Send, if(state.demo) "Send local preview" else "Send message", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -106,7 +120,11 @@ import kotlinx.coroutines.delay
             c.shareRooms.firstOrNull()?.let { share -> TextButton({ dispatch(UiAction.Navigate(Route.Details)) }, Modifier.fillMaxWidth()) {
                 Text("${share.sharer} is sharing · ${if (share.watching) "Watching" else "Watch"} (preview)")
             } }
-            LazyColumn(Modifier.fillMaxSize().testTag("messages"), state = list, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            if(!followingLatest)TextButton({followingLatest=true;scrollRequest++},Modifier.align(Alignment.CenterHorizontally).testTag("jump-to-latest")){
+                Icon(Icons.Default.KeyboardArrowDown,contentDescription=null)
+                Text("Jump to latest")
+            }
+            LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("messages"), state = list, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 item(key = "older") { if (c.hasOlder) TextButton({ dispatch(UiAction.BeginOlder) }, enabled = !state.olderLoading, modifier = Modifier.fillMaxWidth()) {
                     Text(if(state.demo) {if (state.olderLoading) "Loading older preview…" else "Load older preview messages"} else if (state.olderLoading) "Loading older messages…" else "Load older messages")
