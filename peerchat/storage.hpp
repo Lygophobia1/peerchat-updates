@@ -7,6 +7,7 @@
 #include <utility>
 
 namespace peerchat {
+namespace delivery { class DeliveryManager; }
 namespace platform { class IdentityProvider; class StoragePlatform; class SqlDatabase; class RecordProtector; }
 using Blob = std::vector<unsigned char>;
 struct GroupEvent;
@@ -50,6 +51,21 @@ struct StoredMessage {
     // queued/retried messages retain their original order across reconnects and restarts.
     std::uint64_t logicalOrder=0;
 };
+// Read-only projection of the protected, immutable per-message target set.
+// Unavailable is a terminal/actionable delivery failure, never an ACK.
+enum class DeliveryTargetStatus : unsigned char { Pending=0, Acknowledged=1, Unavailable=2 };
+struct DeliveryTargetState {
+    std::string device,bindingKeyId;
+    std::uint64_t bindingGeneration=0;
+    DeliveryTargetStatus status=DeliveryTargetStatus::Pending;
+};
+struct DeliveryTargetManifest {
+    std::string messageId,canonicalRecipient,snapshotId;
+    std::uint64_t senderAccount=0,recipientAccount=0,snapshotSequence=0,issuedUtcMs=0,freshUntilUtcMs=0;
+    bool selectionUnresolved=false;
+    std::vector<DeliveryTargetState> targets;
+};
+struct DeliveryTargetRetry { std::string reason; std::uint64_t retryUtcMs=0; };
 struct ArchiveHistoryPage {
     std::vector<StoredMessage> messages;
     std::vector<std::int64_t> cursors; // Archive positions, never message identities or UI history cursors.
@@ -88,6 +104,8 @@ public:
     // False means an identical ID/payload is already durable; mismatched reuse throws.
     bool append(const std::string& conversation, const StoredMessage& message);
     std::optional<StoredMessage> message(const std::string& messageId);
+    std::optional<DeliveryTargetManifest> deliveryTargets(const std::string& messageId);
+    std::optional<DeliveryTargetRetry> targetRetry(const std::string& messageId,const std::string& device);
     // Called only after DeliveryManager validates current archive authorization
     // and provenance. Does not authorize transport, generate ACKs or queue sends.
     bool appendArchiveHistory(const std::string& conversation,const StoredMessage& original,
@@ -137,6 +155,7 @@ public:
     // identity remain intact so a later message starts a fresh conversation safely.
     void eraseHistory(const std::string& conversation);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
+    std::vector<std::string> pendingTargetDevices(int limit=256);
     bool appendGroupEvent(const GroupEvent& event);
     Blob groupReplicaReceipt(const std::string& groupId,const std::string& eventId);
     void commitGroupReplicaReceipt(const GroupEvent& event,const Blob& receipt);
@@ -184,6 +203,13 @@ public:
     Blob archiveAuthorizationState();
     void saveArchiveAuthorizationState(const Blob& expected,const Blob& next);
 private:
+    friend class delivery::DeliveryManager;
+    bool appendWithTargets(const std::string& conversation,const StoredMessage& message,const DeliveryTargetManifest& manifest);
+    bool settleTarget(const std::string& messageId,const std::string& authenticatedDevice);
+    bool unavailableTarget(const std::string& messageId,const std::string& device);
+    bool saveTargetRetry(const std::string& messageId,const std::string& device,const Blob& exactEnvelope,
+                         const DeliveryTargetRetry& retry);
+    void saveAuthenticatedMailboxReceipt(const StoredMessage& received,std::uint64_t localAccount,const Blob& receipt);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

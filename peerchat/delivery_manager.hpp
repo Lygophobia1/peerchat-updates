@@ -15,6 +15,9 @@
 #include <utility>
 #include <vector>
 #include <chrono>
+#include <algorithm>
+#include <functional>
+#include <optional>
 
 namespace peerchat::delivery {
 
@@ -40,6 +43,124 @@ public:
     DeliveryManager(Storage& storage, std::string localDeviceId)
         : storage_(storage), localDeviceId_(std::move(localDeviceId)) {
         if (localDeviceId_.empty()) throw std::invalid_argument("Local delivery identity is required");
+    }
+
+    // Call only on the existing authenticated account-service response path.
+    // Bytes are parsed here but their server/TLS provenance belongs to that
+    // owner; a peer frame or local cache is not an eligibility capability.
+    bool installEligibility(const Blob& wire,std::uint64_t localAccount,std::uint64_t friendGeneration,
+                            const std::function<std::uint64_t(const std::string&)>& accountFor,
+                            const std::vector<Contact>& pinnedContacts,std::uint64_t nowUtcMs,
+                            std::uint64_t monotonicNowMs){
+        mailbox::Reader reader(wire,"PeerChat/mailbox-eligibility-snapshot/v1");
+        mailbox::require(reader.number(8)==localAccount&&reader.number(8)==friendGeneration&&
+            reader.text(64)==localDeviceId_);
+        const auto recipientAccount=reader.number(8),version=reader.number(4);
+        const auto id=reader.text(32);const auto sequence=reader.number(8),issued=reader.number(8),fresh=reader.number(8);
+        mailbox::require(mailbox::account(recipientAccount)&&version==1&&mailbox::id(id,32)&&sequence>0&&
+            issued>0&&issued<=nowUtcMs&&fresh>nowUtcMs&&fresh>issued&&fresh-issued<=120000&&monotonicNowMs>0);
+        const auto count=reader.number(1);mailbox::require(count<=32);
+        EligibilitySnapshot incoming;incoming.id=id;incoming.sequence=sequence;incoming.account=recipientAccount;incoming.raw=wire;
+        incoming.issued=issued;incoming.fresh=fresh;incoming.installedMonotonic=monotonicNowMs;
+        std::string previous;
+        for(std::uint64_t i=0;i<count;++i){
+            const auto device=reader.text(64);
+            const auto online=reader.number(1);
+            const auto proof=reader.field(4096);
+            mailbox::require(mailbox::id(device,64)&&device>previous&&online<=1);previous=device;
+            auto pinned=std::find_if(pinnedContacts.begin(),pinnedContacts.end(),[&](const Contact& contact){
+                return contact.peerId==device&&contact.verified&&!contact.publicKey.empty()&&
+                    Storage::publicKeyId(contact.publicKey)==device;});
+            if(pinned==pinnedContacts.end()||accountFor(device)!=recipientAccount)continue;
+            EligibleDevice target;target.device=device;target.publicKey=pinned->publicKey;target.online=online!=0;
+            if(!proof.empty()){
+                auto binding=mailbox::parseBinding(proof);
+                mailbox::require(binding.storageAllowed&&mailbox::verifyBinding(binding,recipientAccount,device,
+                    pinned->publicKey,verifyDevicePayload,Storage::publicKeyId));
+                target.binding=std::move(binding);
+            }
+            if(target.online||target.binding)incoming.devices.push_back(std::move(target));
+        }
+        reader.end();
+        if(cacheFriendGeneration_!=friendGeneration||cacheLocalAccount_!=localAccount){
+            eligibility_.clear();cacheFriendGeneration_=friendGeneration;cacheLocalAccount_=localAccount;
+        }
+        auto old=eligibility_.find(recipientAccount);
+        if(old!=eligibility_.end()){
+            mailbox::require(sequence>=old->second.sequence);
+            if(sequence==old->second.sequence){mailbox::require(wire==old->second.raw);return true;}
+        }
+        eligibility_[recipientAccount]=std::move(incoming);return true;
+    }
+
+    // Call at every authoritative friendship/account generation change, not
+    // only when a new eligibility response arrives.
+    void invalidateEligibility(std::uint64_t localAccount,std::uint64_t friendGeneration){
+        if(localAccount!=cacheLocalAccount_||friendGeneration!=cacheFriendGeneration_){
+            eligibility_.clear();cacheLocalAccount_=localAccount;cacheFriendGeneration_=friendGeneration;
+        }
+    }
+
+    bool queueMessageWithCachedSnapshot(const StoredMessage& message,std::uint64_t localAccount,std::uint64_t recipientAccount,
+                                        std::uint64_t friendGeneration,std::uint64_t nowUtcMs,
+                                        std::uint64_t monotonicNowMs){
+        mailbox::require(message.sender==localDeviceId_&&mailbox::id(message.id,32)&&
+            mailbox::id(message.recipient,64)&&localAccount>0&&recipientAccount>0&&
+            localAccount!=recipientAccount&&message.delivery==Delivery::Queued);
+        invalidateEligibility(localAccount,friendGeneration);
+        DeliveryTargetManifest manifest;manifest.messageId=message.id;manifest.canonicalRecipient=message.recipient;
+        manifest.senderAccount=localAccount;manifest.recipientAccount=recipientAccount;manifest.selectionUnresolved=true;
+        manifest.targets.push_back({message.recipient,{ },0,DeliveryTargetStatus::Pending});
+        auto cached=eligibility_.find(recipientAccount);
+        if(cacheLocalAccount_==localAccount&&cacheFriendGeneration_==friendGeneration&&cached!=eligibility_.end()&&
+            nowUtcMs>=cached->second.issued&&nowUtcMs<=cached->second.fresh&&
+            monotonicNowMs>=cached->second.installedMonotonic&&
+            monotonicNowMs-cached->second.installedMonotonic<=cached->second.fresh-cached->second.issued){
+            const auto contacts=storage_.contacts();std::vector<DeliveryTargetState> eligible;
+            for(const auto& candidate:cached->second.devices){
+                auto pinned=std::find_if(contacts.begin(),contacts.end(),[&](const Contact& contact){
+                    return contact.peerId==candidate.device&&contact.verified&&contact.publicKey==candidate.publicKey&&
+                        Storage::publicKeyId(contact.publicKey)==candidate.device;});
+                if(pinned==contacts.end())continue;
+                DeliveryTargetState target;target.device=candidate.device;
+                if(candidate.binding){target.bindingKeyId=candidate.binding->keyId;target.bindingGeneration=candidate.binding->generation;}
+                eligible.push_back(std::move(target));
+            }
+            if(!eligible.empty()){
+                manifest.selectionUnresolved=false;manifest.snapshotId=cached->second.id;
+                manifest.snapshotSequence=cached->second.sequence;manifest.issuedUtcMs=cached->second.issued;
+                manifest.freshUntilUtcMs=cached->second.fresh;manifest.targets=std::move(eligible);
+            }
+        }
+        return storage_.appendWithTargets(message.recipient,message,manifest);
+    }
+
+    bool eligibleForMailbox(const std::string& id,const std::string& device,
+                            const mailbox::RecipientBinding& binding,std::uint64_t nowUtcMs) {
+        auto manifest=storage_.deliveryTargets(id);if(!manifest)return true; // Legacy policy stays unchanged.
+        if(cacheLocalAccount_!=manifest->senderAccount)return false;
+        if(!storage_.mailboxUploadAccepted(id,device))if(auto retry=storage_.targetRetry(id,device))
+            if(nowUtcMs<retry->retryUtcMs)return false;
+        if(manifest->selectionUnresolved){
+            // Preserve the preexisting single-device offline route. It can
+            // prove a canonical receipt but can never resolve the unknown
+            // sibling set or claim aggregate Delivered.
+            return device==manifest->canonicalRecipient&&binding.device==device&&
+                binding.accountId==manifest->recipientAccount&&
+                manifest->targets.size()==1&&manifest->targets.front().status==DeliveryTargetStatus::Pending;
+        }
+        auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& value){return value.device==device;});
+        if(target==manifest->targets.end()||target->status!=DeliveryTargetStatus::Pending||
+           target->bindingKeyId!=binding.keyId||target->bindingGeneration!=binding.generation)return false;
+        const auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        if(!currentTargetEligible(*manifest,device,nowUtcMs,monotonic))return false;
+        auto cached=eligibility_.find(manifest->recipientAccount);
+        if(cached==eligibility_.end())return false;
+        auto current=std::find_if(cached->second.devices.begin(),cached->second.devices.end(),[&](const auto& value){
+            return value.device==device&&value.binding&&value.binding->keyId==binding.keyId&&
+                value.binding->generation==binding.generation;});
+        return current!=cached->second.devices.end();
     }
 
     bool authorizeTransport(session::TransportInstanceId instance,
@@ -75,7 +196,17 @@ public:
 
     std::vector<StoredMessage> pendingMessages(const std::string& destination,
                                                 int limit = 100) {
-        return storage_.pending(destination, limit);
+        auto pending=storage_.pending(destination,limit);
+        const auto nowUtc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        pending.erase(std::remove_if(pending.begin(),pending.end(),[&](const StoredMessage& message){
+            auto manifest=storage_.deliveryTargets(message.id);
+            return manifest&&(manifest->senderAccount!=cacheLocalAccount_||
+                (!manifest->selectionUnresolved&&!currentTargetEligible(*manifest,destination,nowUtc,monotonic)));
+        }),pending.end());
+        return pending;
     }
     std::vector<StoredMessage> mailboxCandidates(){
         auto page=storage_.mailboxCandidates(mailboxCursor_);
@@ -100,6 +231,9 @@ public:
             (message->recipient==verifiedRecipient.peerId||(canonicalRecipient&&canonicalRecipient->verified&&canonicalRecipient->peerId==message->recipient&&Storage::publicKeyId(canonicalRecipient->publicKey)==message->recipient))&&
             verifiedRecipient.verified&&Storage::publicKeyId(verifiedRecipient.publicKey)==verifiedRecipient.peerId&&
             identity.publicKey().size()>0&&Storage::publicKeyId(identity.publicKey())==localDeviceId_);
+        if(auto manifest=storage_.deliveryTargets(id))mailbox::require(
+            manifest->senderAccount==localAccount&&manifest->recipientAccount==recipientAccount);
+        if(!eligibleForMailbox(id,verifiedRecipient.peerId,binding,now))return {};
         mailbox::require(mailbox::verifyBinding(binding,recipientAccount,verifiedRecipient.peerId,verifiedRecipient.publicKey,verifyDevicePayload,Storage::publicKeyId)&&binding.storageAllowed);
         auto existing=storage_.mailboxEnvelope(id,verifiedRecipient.peerId);
         if(!existing.empty()) {
@@ -126,6 +260,19 @@ public:
     void mailboxStored(const std::string& id,const std::string& destination,const Blob& exactSubmittedEnvelope) {
         storage_.mailboxStored(id,destination,exactSubmittedEnvelope);
     }
+    bool noteMailboxStoreFailure(const Blob& exactDurableEnvelope,const std::string& reason,
+                                 std::uint64_t retryUtcMs,std::uint64_t nowUtcMs){
+        mailbox::require(!exactDurableEnvelope.empty()&&reason.size()>0&&reason.size()<=64&&
+            nowUtcMs>0&&retryUtcMs>=nowUtcMs&&retryUtcMs-nowUtcMs<=900000);
+        const auto header=mailbox::parse(exactDurableEnvelope).header;
+        mailbox::require(header.senderDevice==localDeviceId_);
+        auto manifest=storage_.deliveryTargets(header.messageId);
+        mailbox::require(manifest&&manifest->senderAccount==cacheLocalAccount_&&
+            manifest->senderAccount==header.senderAccount&&manifest->recipientAccount==header.recipientAccount&&
+            storage_.mailboxEnvelope(header.messageId,header.recipientDevice)==exactDurableEnvelope);
+        return storage_.saveTargetRetry(header.messageId,header.recipientDevice,exactDurableEnvelope,
+            DeliveryTargetRetry{reason,retryUtcMs});
+    }
     static Blob mailboxDigest(const Blob& wire) {
         const auto text=Storage::publicKeyId(wire);Blob digest;
         for(std::size_t i=0;i<text.size();i+=2)digest.push_back(static_cast<unsigned char>(std::stoul(text.substr(i,2),nullptr,16)));
@@ -142,7 +289,10 @@ public:
         if(!message||message->sender!=localDeviceId_)return false;
         if(authenticatedReceipt)*authenticatedReceipt=true;
         if(message->delivery==Delivery::Delivered)return false;
-        storage_.acknowledge(receipt.messageId,Delivery::Delivered);submissions_.erase(Key{Kind::Message,message->recipient,receipt.messageId});return true;
+        const bool settled=storage_.deliveryTargets(receipt.messageId)?
+            storage_.settleTarget(receipt.messageId,verifiedRecipient.peerId):
+            (storage_.acknowledge(receipt.messageId,Delivery::Delivered),true);
+        submissions_.erase(Key{Kind::Message,verifiedRecipient.peerId,receipt.messageId});return settled;
     }
     struct MailboxReceive {bool inserted=false;Blob receipt;};
     MailboxReceive acceptMailbox(const Blob& wire,std::uint64_t verifiedSenderAccount,const Contact& verifiedSender,
@@ -185,7 +335,7 @@ private:
                 mailbox::Receipt receipt;receipt.recipientAccount=localBinding.accountId;receipt.recipientDevice=localDeviceId_;
                 receipt.senderDevice=verifiedSender.peerId;receipt.messageId=message.id;receipt.envelopeDigest=digest;
                 receipt.signature=identity.sign(mailbox::receiptPayload(receipt));result.receipt=mailbox::serializeReceipt(receipt);
-                storage_.saveMailboxReceipt(message.id,verifiedSender.peerId,result.receipt);
+                storage_.saveAuthenticatedMailboxReceipt(message,localBinding.accountId,result.receipt);
             }
         });return result;
     }
@@ -206,6 +356,18 @@ public:
 
     bool submittedMessage(const std::string& destination, const std::string& messageId,
                           session::TransportInstanceId instance,std::uint64_t now=0) {
+        if(auto manifest=storage_.deliveryTargets(messageId)){
+            if(manifest->senderAccount!=cacheLocalAccount_)return false;
+            auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& value){return value.device==destination;});
+            if(target==manifest->targets.end()||target->status!=DeliveryTargetStatus::Pending)return false;
+            if(!manifest->selectionUnresolved){
+                const auto nowUtc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+                const auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+                if(!currentTargetEligible(*manifest,destination,nowUtc,monotonic))return false;
+            }
+        }
         if(!now)now=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         return submitted(Kind::Message, destination, messageId, instance,now);
     }
@@ -250,9 +412,11 @@ public:
                             const std::string& messageId) {
         if (!acknowledges(Kind::Message, authenticatedDestination, messageId, instance))
             return false;
-        storage_.acknowledge(messageId, Delivery::Delivered);
+        const bool settled=storage_.deliveryTargets(messageId)?
+            storage_.settleTarget(messageId,authenticatedDestination):
+            (storage_.acknowledge(messageId,Delivery::Delivered),true);
         submissions_.erase(Key{Kind::Message, authenticatedDestination, messageId});
-        return true;
+        return settled;
     }
 
     bool acknowledgeGroupEvent(const std::string& authenticatedDestination,
@@ -337,6 +501,31 @@ public:
     }
 
 private:
+    bool currentTargetEligible(const DeliveryTargetManifest& manifest,const std::string& device,
+                               std::uint64_t nowUtcMs,std::uint64_t monotonicNowMs){
+        if(manifest.selectionUnresolved||cacheLocalAccount_!=manifest.senderAccount)return false;
+        auto snapshot=eligibility_.find(manifest.recipientAccount);
+        if(snapshot==eligibility_.end()||nowUtcMs<snapshot->second.issued||nowUtcMs>snapshot->second.fresh||
+           monotonicNowMs<snapshot->second.installedMonotonic||
+           monotonicNowMs-snapshot->second.installedMonotonic>snapshot->second.fresh-snapshot->second.issued)return false;
+        auto target=std::find_if(manifest.targets.begin(),manifest.targets.end(),[&](const auto& value){return value.device==device;});
+        if(target==manifest.targets.end()||target->status!=DeliveryTargetStatus::Pending)return false;
+        auto candidate=std::find_if(snapshot->second.devices.begin(),snapshot->second.devices.end(),[&](const auto& value){return value.device==device;});
+        if(candidate==snapshot->second.devices.end())return false;
+        auto contacts=storage_.contacts();auto pin=std::find_if(contacts.begin(),contacts.end(),[&](const Contact& value){
+            return value.peerId==device&&value.verified&&value.publicKey==candidate->publicKey&&
+                Storage::publicKeyId(value.publicKey)==device;});
+        return pin!=contacts.end();
+    }
+    struct EligibleDevice {
+        std::string device;Blob publicKey;bool online=false;
+        std::optional<mailbox::RecipientBinding> binding;
+    };
+    struct EligibilitySnapshot {
+        std::string id;std::uint64_t sequence=0,account=0,issued=0,fresh=0,installedMonotonic=0;
+        Blob raw;
+        std::vector<EligibleDevice> devices;
+    };
     enum class Kind : unsigned char { Message, GroupEvent, GroupKey };
 
     struct Key {
@@ -381,6 +570,9 @@ private:
     std::string localDeviceId_;
     std::map<std::uint64_t, TransportAuthorization> transports_;
     std::map<Key, std::map<std::uint64_t,std::uint64_t>> submissions_;
+    std::uint64_t cacheFriendGeneration_=0;
+    std::uint64_t cacheLocalAccount_=0;
+    std::map<std::uint64_t,EligibilitySnapshot> eligibility_;
 };
 
 } // namespace peerchat::delivery

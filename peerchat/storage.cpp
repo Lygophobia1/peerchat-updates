@@ -4,6 +4,7 @@
 #include "storage.hpp"
 #include "group.hpp"
 #include "group_text.hpp"
+#include "archive_provenance.hpp"
 #include "mailbox_protocol.hpp"
 #include "platform/identity_provider.hpp"
 #include "platform/storage_backend.hpp"
@@ -215,6 +216,67 @@ StoredMessage decodeMessage(const Blob& plain) {
     require(identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&state<=3&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384,"Invalid stored message");m.delivery=static_cast<Delivery>(state);return m;
 }
 void encodeMessage(Writer& w,const StoredMessage& m){w.string(m.id);w.string(m.sender);w.string(m.recipient);w.text(m.text);w.number(m.utcMilliseconds);w.number(static_cast<unsigned char>(m.delivery));w.number(m.logicalOrder);}
+void validateTargets(const DeliveryTargetManifest& manifest){
+    require(identifier(manifest.messageId,32)&&identifier(manifest.canonicalRecipient)&&
+        manifest.senderAccount>0&&manifest.recipientAccount>0&&manifest.senderAccount!=manifest.recipientAccount&&
+        manifest.targets.size()>0&&manifest.targets.size()<=32,"Invalid delivery target manifest");
+    if(manifest.selectionUnresolved){
+        require(manifest.snapshotId.empty()&&manifest.snapshotSequence==0&&manifest.issuedUtcMs==0&&manifest.freshUntilUtcMs==0&&
+            manifest.targets.size()==1&&manifest.targets.front().device==manifest.canonicalRecipient&&
+            manifest.targets.front().bindingKeyId.empty(),
+            "Unresolved delivery target must be canonical only");
+    }else require(identifier(manifest.snapshotId,32)&&manifest.recipientAccount>0&&manifest.snapshotSequence>0&&
+        manifest.issuedUtcMs>0&&manifest.freshUntilUtcMs>manifest.issuedUtcMs,"Invalid authenticated target snapshot metadata");
+    std::string previous;
+    for(const auto& target:manifest.targets){
+        require(identifier(target.device)&&target.device>previous&&static_cast<unsigned char>(target.status)<=2&&
+            (target.bindingKeyId.empty()?target.bindingGeneration==0:identifier(target.bindingKeyId,32)&&target.bindingGeneration>0),
+            "Invalid or duplicate delivery target");
+        previous=target.device;
+    }
+}
+Blob encodeTargets(const DeliveryTargetManifest& manifest){
+    validateTargets(manifest);Writer writer;writer.string("PeerChat/DeliveryTargets/v1");writer.string(manifest.messageId);
+    writer.string(manifest.canonicalRecipient);writer.string(manifest.snapshotId);writer.number(manifest.senderAccount);
+    writer.number(manifest.recipientAccount);
+    writer.number(manifest.snapshotSequence);writer.number(manifest.issuedUtcMs);writer.number(manifest.freshUntilUtcMs);
+    writer.number(manifest.selectionUnresolved?1:0);writer.number(manifest.targets.size());
+    for(const auto& target:manifest.targets){writer.string(target.device);writer.string(target.bindingKeyId);
+        writer.number(target.bindingGeneration);writer.number(static_cast<unsigned char>(target.status));}
+    return writer.data;
+}
+DeliveryTargetManifest decodeTargets(const Blob& bytes){
+    Reader reader(bytes);require(reader.string()=="PeerChat/DeliveryTargets/v1","Unsupported delivery target manifest");
+    DeliveryTargetManifest manifest;manifest.messageId=reader.string();manifest.canonicalRecipient=reader.string();
+    manifest.snapshotId=reader.string();manifest.senderAccount=reader.number();manifest.recipientAccount=reader.number();
+    manifest.snapshotSequence=reader.number();
+    manifest.issuedUtcMs=reader.number();manifest.freshUntilUtcMs=reader.number();
+    const auto unresolved=reader.number(),count=reader.number();require(unresolved<=1&&count>0&&count<=32,"Invalid delivery target count");
+    manifest.selectionUnresolved=unresolved!=0;
+    for(std::uint64_t i=0;i<count;++i){DeliveryTargetState target;target.device=reader.string();
+        target.bindingKeyId=reader.string();target.bindingGeneration=reader.number();
+        auto status=reader.number();require(status<=2,"Invalid delivery target state");target.status=static_cast<DeliveryTargetStatus>(status);
+        manifest.targets.push_back(std::move(target));}
+    reader.end();validateTargets(manifest);return manifest;
+}
+bool validTargetRetryReason(const std::string& reason){
+    constexpr std::array<const char*,8> allowed{{"not_authorized","recipient_key_retired",
+        "recipient_key_unavailable","quota_exceeded","expired_or_invalid_timestamp",
+        "conflicting_message","rejected_or_storage_unavailable","store_rejected"}};
+    return std::any_of(allowed.begin(),allowed.end(),[&](const char* value){return reason==value;});
+}
+Blob encodeTargetRetry(const std::string& id,const std::string& device,const DeliveryTargetRetry& retry){
+    require(identifier(id,32)&&identifier(device)&&validTargetRetryReason(retry.reason)&&retry.retryUtcMs>0,
+        "Invalid target retry marker");
+    Writer writer;writer.string("PeerChat/DeliveryTargetRetry/v1");writer.string(id);writer.string(device);
+    writer.string(retry.reason);writer.number(retry.retryUtcMs);return writer.data;
+}
+DeliveryTargetRetry decodeTargetRetry(const Blob& bytes,const std::string& id,const std::string& device){
+    Reader reader(bytes);require(reader.string()=="PeerChat/DeliveryTargetRetry/v1"&&reader.string()==id&&
+        reader.string()==device,"Target retry marker identity mismatch");
+    DeliveryTargetRetry retry;retry.reason=reader.string();retry.retryUtcMs=reader.number();reader.end();
+    require(validTargetRetryReason(retry.reason)&&retry.retryUtcMs>0,"Invalid target retry marker");return retry;
+}
 }
 
 using namespace storage_detail;
@@ -250,6 +312,8 @@ struct Storage::Impl {
             execute("CREATE TABLE IF NOT EXISTS group_reference_index_v1(sequence INTEGER PRIMARY KEY AUTOINCREMENT,server_group TEXT NOT NULL,local_group TEXT NOT NULL,message_id TEXT NOT NULL,UNIQUE(server_group,message_id));");
             // Separate outbox index contains identifiers only, never message text.
             execute("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL);"
+                    "CREATE TABLE IF NOT EXISTS delivery_target_outbox(id TEXT NOT NULL,device TEXT NOT NULL,PRIMARY KEY(id,device));"
+                    "CREATE INDEX IF NOT EXISTS delivery_target_device ON delivery_target_outbox(device,id);"
                     "CREATE TABLE IF NOT EXISTS group_events(event_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,logical_order INTEGER NOT NULL,b BLOB NOT NULL);"
                     "CREATE INDEX IF NOT EXISTS group_event_order ON group_events(group_id,logical_order,event_id);"
                     "CREATE TABLE IF NOT EXISTS group_outbox(event_id TEXT NOT NULL REFERENCES group_events(event_id) ON DELETE CASCADE,peer_id TEXT NOT NULL,PRIMARY KEY(event_id,peer_id));"
@@ -375,6 +439,43 @@ bool Storage::append(const std::string& conversation,const StoredMessage& m) {
     Writer plain;encodeMessage(plain,m);Blob encrypted=impl_->protect(plain.data,"PeerChat.v1/message/"+m.id+"/"+conversation,true);
     Statement insert(impl_->sql,"INSERT INTO messages(id,peer,b) VALUES(?,?,?)");insert.text(1,m.id);insert.text(2,conversation);insert.blob(3,encrypted);insert.row();
     if(m.delivery!=Delivery::Delivered){Statement pending(impl_->sql,"INSERT INTO outbox(id,peer) VALUES(?,?)");pending.text(1,m.id);pending.text(2,conversation);pending.row();}
+    transaction.commit();return true;
+}
+std::optional<DeliveryTargetManifest> Storage::deliveryTargets(const std::string& id){
+    require(identifier(id,32),"Invalid delivery target message identity");
+    auto bytes=impl_->get("delivery-targets/v1/"+id);if(bytes.empty())return {};
+    auto manifest=decodeTargets(bytes);require(manifest.messageId==id,"Delivery target manifest identity mismatch");return manifest;
+}
+std::optional<DeliveryTargetRetry> Storage::targetRetry(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid target retry identity");
+    auto bytes=impl_->get("delivery-target-retry/v1/"+id+"/"+device);if(bytes.empty())return {};
+    return decodeTargetRetry(bytes,id,device);
+}
+bool Storage::appendWithTargets(const std::string& conversation,const StoredMessage& m,const DeliveryTargetManifest& manifest){
+    validateTargets(manifest);
+    require(identifier(conversation)&&identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&
+        conversation==m.recipient&&m.recipient==manifest.canonicalRecipient&&m.id==manifest.messageId&&
+        m.delivery==Delivery::Queued&&!m.text.empty()&&unicode::utf16Units(m.text)<=16384,
+        "Invalid targeted outgoing message");
+    Transaction transaction(impl_->sql);
+    Statement existing(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");existing.text(1,m.id);
+    if(existing.row()){
+        require(existing.text(0)==conversation,"Targeted message ID reused in another conversation");
+        Secret plain{impl_->protect(existing.bytes(1),"PeerChat.v1/message/"+m.id+"/"+conversation,false)};
+        const auto old=decodeMessage(plain.data);auto frozen=deliveryTargets(m.id);
+        require(frozen&&encodeTargets(*frozen)==encodeTargets(manifest)&&old.id==m.id&&old.sender==m.sender&&
+            old.recipient==m.recipient&&old.text==m.text&&old.utcMilliseconds==m.utcMilliseconds&&
+            old.logicalOrder==m.logicalOrder,"Conflicting targeted message ID");
+        transaction.commit();return false;
+    }
+    Writer plain;encodeMessage(plain,m);auto encrypted=impl_->protect(plain.data,"PeerChat.v1/message/"+m.id+"/"+conversation,true);
+    Statement insert(impl_->sql,"INSERT INTO messages(id,peer,b) VALUES(?,?,?)");insert.text(1,m.id);insert.text(2,conversation);insert.blob(3,encrypted);insert.row();
+    Statement pending(impl_->sql,"INSERT INTO outbox(id,peer) VALUES(?,?)");pending.text(1,m.id);pending.text(2,conversation);pending.row();
+    impl_->put("delivery-targets/v1/"+m.id,encodeTargets(manifest));
+    for(const auto& target:manifest.targets){
+        if(target.status!=DeliveryTargetStatus::Pending)continue;
+        Statement route(impl_->sql,"INSERT INTO delivery_target_outbox(id,device) VALUES(?,?)");route.text(1,m.id);route.text(2,target.device);route.row();
+    }
     transaction.commit();return true;
 }
 std::optional<StoredMessage> Storage::message(const std::string& id){
@@ -534,6 +635,7 @@ void Storage::rememberAuthenticatedDeviceAccount(const std::string& device,std::
 void Storage::acknowledge(const std::string& id,Delivery delivery) {
     require(identifier(id,32)&&static_cast<unsigned char>(delivery)<=3,"Invalid delivery acknowledgement");
     Transaction transaction(impl_->sql);
+    require(delivery!=Delivery::Delivered||!deliveryTargets(id),"Manifested delivery requires authenticated target settlement");
     Statement s(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");s.text(1,id);if(!s.row()){transaction.commit();return;}
     std::string peer=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);
     require(m.id==id,"Stored message ID mismatch");if(deliveryRank(delivery)<=deliveryRank(m.delivery)){transaction.commit();return;}m.delivery=delivery;
@@ -542,9 +644,65 @@ void Storage::acknowledge(const std::string& id,Delivery delivery) {
     if(delivery==Delivery::Delivered){Statement remove(impl_->sql,"DELETE FROM outbox WHERE id=?");remove.text(1,id);remove.row();}
     transaction.commit();
 }
+bool Storage::settleTarget(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid target acknowledgement identity");
+    Transaction transaction(impl_->sql);auto manifest=deliveryTargets(id);
+    require(manifest.has_value(),"Target acknowledgement requires frozen manifest");
+    auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& item){return item.device==device;});
+    require(target!=manifest->targets.end(),"Target acknowledgement is not in frozen manifest");
+    if(target->status==DeliveryTargetStatus::Acknowledged){transaction.commit();return false;}
+    // An exact authenticated ACK may arrive after a route became unavailable.
+    // It proves delivery; unavailable alone never did.
+    Statement row(impl_->sql,"SELECT peer,b FROM messages WHERE id=?");row.text(1,id);
+    require(row.row()&&row.text(0)==manifest->canonicalRecipient,"Target acknowledgement lost canonical message");
+    Secret plain{impl_->protect(row.bytes(1),"PeerChat.v1/message/"+id+"/"+manifest->canonicalRecipient,false)};
+    auto message=decodeMessage(plain.data);require(message.id==id&&message.recipient==manifest->canonicalRecipient,
+        "Target acknowledgement message identity mismatch");
+    target->status=DeliveryTargetStatus::Acknowledged;
+    impl_->put("delivery-targets/v1/"+id,encodeTargets(*manifest));
+    Statement removeTarget(impl_->sql,"DELETE FROM delivery_target_outbox WHERE id=? AND device=?");removeTarget.text(1,id);removeTarget.text(2,device);removeTarget.row();
+    const bool all= !manifest->selectionUnresolved&&std::all_of(manifest->targets.begin(),manifest->targets.end(),
+        [](const auto& item){return item.status==DeliveryTargetStatus::Acknowledged;});
+    if(all){
+        message.delivery=Delivery::Delivered;Writer writer;encodeMessage(writer,message);
+        auto encrypted=impl_->protect(writer.data,"PeerChat.v1/message/"+id+"/"+manifest->canonicalRecipient,true);
+        Statement update(impl_->sql,"UPDATE messages SET b=? WHERE id=?");update.blob(1,encrypted);update.text(2,id);update.row();
+        Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE id=?");removeOutbox.text(1,id);removeOutbox.row();
+    }
+    transaction.commit();return true;
+}
+bool Storage::unavailableTarget(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid unavailable target identity");
+    Transaction transaction(impl_->sql);auto manifest=deliveryTargets(id);
+    require(manifest.has_value(),"Unavailable target requires frozen manifest");
+    auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& item){return item.device==device;});
+    require(target!=manifest->targets.end(),"Unavailable target is not in frozen manifest");
+    if(target->status==DeliveryTargetStatus::Unavailable){transaction.commit();return false;}
+    require(target->status==DeliveryTargetStatus::Pending,"Acknowledged target cannot become unavailable");
+    target->status=DeliveryTargetStatus::Unavailable;impl_->put("delivery-targets/v1/"+id,encodeTargets(*manifest));
+    Statement removeTarget(impl_->sql,"DELETE FROM delivery_target_outbox WHERE id=? AND device=?");removeTarget.text(1,id);removeTarget.text(2,device);removeTarget.row();
+    transaction.commit();return true;
+}
 Blob Storage::mailboxEnvelope(const std::string& id,const std::string& device){
     require(identifier(id,32)&&identifier(device),"Invalid mailbox submission identity");
     return impl_->get("mailbox-envelope/"+id+"/"+device);
+}
+bool Storage::saveTargetRetry(const std::string& id,const std::string& device,const Blob& exactEnvelope,
+                              const DeliveryTargetRetry& retry){
+    require(!exactEnvelope.empty()&&mailboxEnvelope(id,device)==exactEnvelope,"Target retry has no exact durable envelope");
+    const auto header=mailbox::parse(exactEnvelope).header;
+    require(header.messageId==id&&header.recipientDevice==device,"Target retry envelope identity mismatch");
+    Transaction transaction(impl_->sql);auto manifest=deliveryTargets(id);
+    require(manifest&&manifest->senderAccount==header.senderAccount&&
+        manifest->recipientAccount==header.recipientAccount,"Target retry account mismatch");
+    auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& value){return value.device==device;});
+    require(target!=manifest->targets.end()&&target->status==DeliveryTargetStatus::Pending,
+        "Target retry is not pending in frozen manifest");
+    if(mailboxUploadAccepted(id,device)){transaction.commit();return false;}
+    const auto key="delivery-target-retry/v1/"+id+"/"+device;
+    const auto bytes=encodeTargetRetry(id,device,retry);
+    const bool changed=impl_->get(key)!=bytes;if(changed)impl_->put(key,bytes);
+    transaction.commit();return changed;
 }
 void Storage::saveMailboxEnvelope(const std::string& id,const std::string& device,const Blob& wire){
     auto envelope=mailbox::parse(wire);
@@ -555,6 +713,11 @@ void Storage::saveMailboxEnvelope(const std::string& id,const std::string& devic
     // DeliveryManager authorizes every additional device against the same
     // authenticated account. History keeps its original canonical conversation.
     require(stored.sender==envelope.header.senderDevice&&stored.recipient==canonicalPeer&&stored.logicalOrder==envelope.header.logicalOrder,"Mailbox logical message mismatch");
+    if(auto manifest=deliveryTargets(id))require(manifest->senderAccount==envelope.header.senderAccount&&
+        manifest->recipientAccount==envelope.header.recipientAccount&&
+        std::any_of(manifest->targets.begin(),manifest->targets.end(),[&](const auto& target){
+            return target.device==device&&target.status==DeliveryTargetStatus::Pending;}),
+        "Mailbox envelope is outside frozen target/account scope");
     auto key="mailbox-envelope/"+id+"/"+device;auto previous=impl_->get(key);
     require(previous.empty()||previous==wire,"Conflicting durable mailbox envelope");
     if(previous.empty())impl_->put(key,wire);
@@ -566,6 +729,7 @@ void Storage::mailboxStored(const std::string& id,const std::string& device,cons
     // Mark only after real server acceptance. A crash between advancement and
     // this protected marker safely retries the identical ciphertext.
     impl_->put("mailbox-uploaded/"+id+"/"+device,expected);
+    impl_->erase("delivery-target-retry/v1/"+id+"/"+device);
 }
 std::vector<StoredMessage> Storage::pendingMailboxUploads(int limit){
     require(limit>0&&limit<=64,"Invalid mailbox upload page");
@@ -581,7 +745,7 @@ bool Storage::mailboxUploadAccepted(const std::string& id,const std::string& dev
 }
 std::vector<StoredMessage> Storage::mailboxCandidates(std::int64_t afterSequence,int limit){
     require(afterSequence>=0&&limit>0&&limit<=64,"Invalid mailbox candidate page");
-    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND ((EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k LIKE 'mailbox-uploaded/'||m.id||'/%')) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
+    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND ((EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id) AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k LIKE 'mailbox-uploaded/'||m.id||'/%')) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
     query.number(1,afterSequence);query.number(2,limit);std::vector<StoredMessage> result;
     while(query.row()){const auto sequence=query.number(0);auto id=query.text(1),peer=query.text(2);Secret plain{impl_->protect(query.bytes(3),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox candidate identity mismatch");m.sequence=sequence;result.push_back(std::move(m));}
     return result;
@@ -603,6 +767,31 @@ std::string Storage::mailboxDiagnostics(){
         require(reason.size()<=128&&std::all_of(reason.begin(),reason.end(),[](char c){return(c>='a'&&c<='z')||c=='_';}),"Invalid retained mailbox issue");
         result+="mailbox_action_required message="+key.substr(14,32)+" device="+key.substr(47)+" reason="+reason+" action=preserve_queued_message_and_request_verified_attempt_reconciliation\n";
     }
+    Statement targets(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'delivery-targets/v1/%' ORDER BY k LIMIT 32");
+    while(targets.row()){
+        const auto key=targets.text(0),id=key.substr(std::string("delivery-targets/v1/").size());
+        auto manifest=deliveryTargets(id);require(manifest.has_value(),"Missing delivery target manifest");
+        unsigned acknowledged=0,pending=0,unavailable=0;
+        for(const auto& target:manifest->targets)switch(target.status){
+            case DeliveryTargetStatus::Acknowledged:++acknowledged;break;
+            case DeliveryTargetStatus::Pending:++pending;break;
+            case DeliveryTargetStatus::Unavailable:++unavailable;break;
+        }
+        const bool all= !manifest->selectionUnresolved&&acknowledged==manifest->targets.size();
+        result+="delivery_targets message="+id+" selection="+(manifest->selectionUnresolved?"unresolved":"resolved")+
+            " total="+std::to_string(manifest->targets.size())+" acknowledged="+std::to_string(acknowledged)+
+            " pending="+std::to_string(pending)+" unavailable="+std::to_string(unavailable)+
+            " result="+(all?"all_verified_acks":"partial")+"\n";
+    }
+    Statement retries(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'delivery-target-retry/v1/%' ORDER BY k LIMIT 32");
+    while(retries.row()){
+        const auto key=retries.text(0),prefix=std::string("delivery-target-retry/v1/");
+        require(key.size()==prefix.size()+32+1+64&&key[prefix.size()+32]=='/',"Invalid target retry key");
+        const auto id=key.substr(prefix.size(),32),device=key.substr(prefix.size()+33);
+        auto retry=targetRetry(id,device);require(retry.has_value(),"Missing target retry marker");
+        result+="delivery_target_retry message="+id+" device="+device+" reason="+retry->reason+
+            " retry_utc_ms="+std::to_string(retry->retryUtcMs)+"\n";
+    }
     return result.empty()?"mailbox_action_required=none\n":result;
 }
 Blob Storage::mailboxReceipt(const std::string& id,const std::string& device,const Blob& digest){
@@ -618,6 +807,46 @@ void Storage::saveMailboxReceipt(const std::string& id,const std::string& sender
     if(!previous.empty())require(mailbox::receiptPayload(mailbox::parseReceipt(previous))==mailbox::receiptPayload(receipt),"Conflicting mailbox receipt");
     else {
         Statement count(impl_->sql,"SELECT COUNT(*) FROM objects WHERE k LIKE ?");count.text(1,prefix+"%");require(count.row()&&count.number(0)<32,"Mailbox receipt retention limit reached");impl_->put(key,wire);
+    }
+    transaction.commit();
+}
+void Storage::saveAuthenticatedMailboxReceipt(const StoredMessage& received,std::uint64_t localAccount,const Blob& wire){
+    const auto receipt=mailbox::parseReceipt(wire);
+    require(localAccount>0&&receipt.recipientAccount==localAccount&&receipt.messageId==received.id&&
+        receipt.senderDevice==received.sender&&receipt.recipientDevice==received.recipient&&
+        received.delivery==Delivery::Delivered,"Authenticated mailbox receipt context mismatch");
+    auto durable=message(received.id);require(durable.has_value(),"Mailbox receipt requires committed message");
+    if(durable->recipient==received.recipient){
+        saveMailboxReceipt(received.id,received.sender,wire);return;
+    }
+    // An archive-first original can name another device on this account. Its
+    // protected assertion was already verified during import, but neither the
+    // import nor its alias is an ACK. Only the now-authenticated mailbox receive
+    // may create this local device's receipt for identical original content.
+    Transaction transaction(impl_->sql);
+    durable=message(received.id);require(durable.has_value(),"Archived mailbox receipt lost durable message");
+    auto proofBytes=archiveHistoryProof(received.id);
+    require(!proofBytes.empty(),"Mailbox recipient alias requires verified archived provenance");
+    const auto assertion=archive::decodeAssertion(proofBytes);
+    const auto& original=assertion.original.message;
+    require(assertion.account==localAccount&&assertion.original.recipientAccount==localAccount&&
+        assertion.original.senderAccount!=localAccount&&original.id==received.id&&
+        original.sender==received.sender&&original.recipient==durable->recipient&&
+        durable->sender==received.sender&&durable->delivery==Delivery::Sent&&
+        original.text==received.text&&durable->text==received.text&&
+        original.utcMilliseconds==received.utcMilliseconds&&durable->utcMilliseconds==received.utcMilliseconds&&
+        original.logicalOrder==received.logicalOrder&&durable->logicalOrder==received.logicalOrder,
+        "Mailbox receipt does not match verified archived original");
+    auto recipientAccount=historicalDeviceAccount(durable->recipient);
+    require(recipientAccount&&*recipientAccount==localAccount,"Archived recipient account binding mismatch");
+    const auto prefix="mailbox-receipt/"+received.id+"/"+received.sender+"/";
+    const auto key=prefix+hex(receipt.envelopeDigest);
+    const auto previous=impl_->get(key);
+    if(!previous.empty())require(mailbox::receiptPayload(mailbox::parseReceipt(previous))==mailbox::receiptPayload(receipt),
+        "Conflicting archived mailbox receipt");
+    else {
+        Statement count(impl_->sql,"SELECT COUNT(*) FROM objects WHERE k LIKE ?");count.text(1,prefix+"%");
+        require(count.row()&&count.number(0)<32,"Mailbox receipt retention limit reached");impl_->put(key,wire);
     }
     transaction.commit();
 }
@@ -646,17 +875,33 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
 void Storage::eraseHistory(const std::string& conversation) {
     require(identifier(conversation),"Invalid conversation identity");
     Transaction transaction(impl_->sql);
-    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%' OR objects.k='archive-history-proof/'||m.id))");
+    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%' OR objects.k LIKE 'delivery-target-retry/v1/'||m.id||'/%' OR objects.k='archive-history-proof/'||m.id OR objects.k='delivery-targets/v1/'||m.id))");
     mailboxRecords.text(1,conversation);mailboxRecords.row();
+    Statement removeTargetRoutes(impl_->sql,"DELETE FROM delivery_target_outbox WHERE id IN (SELECT id FROM messages WHERE peer=?)");removeTargetRoutes.text(1,conversation);removeTargetRoutes.row();
     Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE peer=?");removeOutbox.text(1,conversation);removeOutbox.row();
     Statement removeMessages(impl_->sql,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();
     transaction.commit();
 }
 std::vector<StoredMessage> Storage::pending(const std::string& conversation,int limit) {
     require(identifier(conversation)&&limit>0&&limit<=1000,"Invalid outbox page request");
-    Statement s(impl_->sql,"SELECT m.id,m.b FROM outbox o JOIN messages m ON o.id=m.id WHERE o.peer=? ORDER BY m.rowid LIMIT ?");s.text(1,conversation);s.number(2,limit);
+    Statement s(impl_->sql,"SELECT m.id,m.peer,m.b FROM outbox o JOIN messages m ON o.id=m.id WHERE (o.peer=? AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id)) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id AND t.device=?) ORDER BY m.rowid LIMIT ?");s.text(1,conversation);s.text(2,conversation);s.number(3,limit);
     std::vector<StoredMessage> result;
-    while(s.row()){auto id=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Outbox identity mismatch");result.push_back(std::move(m));}
+    while(s.row()){
+        auto id=s.text(0),canonical=s.text(1);Secret plain{impl_->protect(s.bytes(2),"PeerChat.v1/message/"+id+"/"+canonical,false)};
+        auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==canonical,"Outbox identity mismatch");
+        if(auto manifest=deliveryTargets(id)){
+            auto target=std::find_if(manifest->targets.begin(),manifest->targets.end(),[&](const auto& value){return value.device==conversation;});
+            require(target!=manifest->targets.end()&&target->status==DeliveryTargetStatus::Pending,"Target outbox index mismatch");
+            m.delivery=mailboxUploadAccepted(id,conversation)?Delivery::Stored:Delivery::Queued;
+        }
+        result.push_back(std::move(m));
+    }
+    return result;
+}
+std::vector<std::string> Storage::pendingTargetDevices(int limit){
+    require(limit>0&&limit<=256,"Invalid pending target device page");
+    Statement query(impl_->sql,"SELECT DISTINCT device FROM delivery_target_outbox ORDER BY device LIMIT ?");query.number(1,limit);
+    std::vector<std::string> result;while(query.row()){auto device=query.text(0);require(identifier(device),"Invalid target outbox device");result.push_back(std::move(device));}
     return result;
 }
 bool Storage::appendGroupEvent(const GroupEvent& event) {
