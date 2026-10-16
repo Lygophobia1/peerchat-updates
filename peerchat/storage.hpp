@@ -121,6 +121,10 @@ public:
     void saveMailboxEnvelope(const std::string& messageId,const std::string& recipientDevice,const Blob& envelope);
     void mailboxStored(const std::string& messageId,const std::string& recipientDevice,const Blob& expectedEnvelope);
     std::vector<StoredMessage> pendingMailboxUploads(int limit=64);
+    std::vector<StoredMessage> mailboxCandidates(std::int64_t afterSequence,int limit=64);
+    bool mailboxHasPendingEnvelope(const std::string& messageId);
+    void mailboxIssue(const std::string& messageId,const std::string& recipientDevice,const std::string& reason);
+    std::string mailboxIssue(const std::string& messageId,const std::string& recipientDevice);
     bool mailboxUploadAccepted(const std::string& messageId,const std::string& recipientDevice);
     Blob mailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& envelopeDigest);
     void saveMailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& receipt);

@@ -382,13 +382,10 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);
         peerchat::mailbox::require(instance->storage&&instance->friends.localAccount()>0);
-        std::vector<peerchat::StoredMessage> pending;std::set<std::string> seen;
-        for(auto& message:instance->storage->pendingMailboxUploads())if(instance->friends.accountFor(message.recipient)>0){seen.insert(message.id);pending.push_back(std::move(message));}
-        for(const auto& contact:instance->storage->contacts())if(contact.verified&&instance->friends.accountFor(contact.peerId)>0){
-            auto route=instance->sessions.snapshot(contact.peerId);if(route&&route->connected)continue;
-            auto messages=instance->deliveries->pendingMessages(contact.peerId,1000);
-            for(auto& message:messages){if(pending.size()==64)break;if(message.delivery!=peerchat::Delivery::Stored&&seen.insert(message.id).second)pending.push_back(std::move(message));}
-            if(pending.size()==64)break;
+        std::vector<peerchat::StoredMessage> pending;
+        for(auto& message:instance->deliveries->mailboxCandidates())if(instance->friends.accountFor(message.recipient)>0){
+            auto route=instance->sessions.snapshot(message.recipient);if(route&&route->connected&&!instance->storage->mailboxHasPendingEnvelope(message.id))continue;
+            pending.push_back(std::move(message));
         }
         peerchat::protocol::Writer record(peerchat::protocol::Accepted);record.number(pending.size());
         for(const auto& message:pending){record.string(message.id);record.string(message.recipient);record.number(instance->friends.accountFor(message.recipient));}
@@ -424,8 +421,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
             auto known=std::find_if(contacts.begin(),contacts.end(),[&](const auto& c){return c.peerId==binding.device&&c.verified;});
             if(known==contacts.end()||instance->friends.accountFor(binding.device)!=account)continue;
             auto contact=mailboxContact(*instance,binding.device,account);
-            auto wire=instance->deliveries->prepareMailbox(id,instance->friends.localAccount(),account,binding,contact,*instance->profile.identity,*instance->hpke,mailboxNow(),true,false,&canonical);
-            if(!wire.empty()&&!instance->storage->mailboxUploadAccepted(id,binding.device))prepared.push_back(binding);
+            try{
+                if(instance->storage->mailboxUploadAccepted(id,binding.device))continue;
+                auto wire=instance->deliveries->prepareMailbox(id,instance->friends.localAccount(),account,binding,contact,*instance->profile.identity,*instance->hpke,mailboxNow(),true,false,&canonical);
+                if(!wire.empty())prepared.push_back(binding);
+            }catch(const std::exception&){
+                if(instance->storage->mailboxIssue(id,binding.device).empty())instance->storage->mailboxIssue(id,binding.device,"preparation_failed_requires_review");
+            }
         }
         peerchat::protocol::Writer record(peerchat::protocol::Accepted);record.number(prepared.size());
         for(const auto& binding:prepared)record.bytes(peerchat::mailbox::serializeBinding(binding));
@@ -832,7 +834,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         if(!input||env->GetArrayLength(input)>65536)return nullptr;
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return nullptr;
-        auto& endpoint=*found->second;peerchat::Blob output;
+        auto& endpoint=*found->second;peerchat::Blob output;endpoint.tick(runtimeNow());
         try{
             if(operation==0){endpoint.receive(peerchat::platform::android::Context::output(env,input),runtimeNow());retireEndpoints(*instance,endpoint);}
             else{

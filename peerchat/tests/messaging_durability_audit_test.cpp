@@ -82,10 +82,17 @@ int main(int argc,char** argv){try{
     // old immutable wire, which production server rejects as a new retired-key upload.
     auto pending=queue();auto stale=outgoing.prepareMailbox(pending.id,7,8,binding,target,sender,*hpke,now,true,false);
     auto rotated=binding;rotated.keyId=Storage::newMessageId();rotated.generation=2;rotated.signature=receiver.sign(mailbox::bindingPayload(rotated));
-    auditNeed(outgoing.prepareMailbox(pending.id,7,8,rotated,target,sender,*hpke,now,true,false)==stale&&mailbox::parse(stale).header.keyGeneration==1,"current key-rotation boundary changed");
+    auditReject([&]{outgoing.prepareMailbox(pending.id,7,8,rotated,target,sender,*hpke,now,true,false);},"rotated key attempt was not isolated");
+    auditNeed(senderStore.mailboxEnvelope(pending.id,target.peerId)==stale&&senderStore.mailboxIssue(pending.id,target.peerId)=="key_changed_requires_reconciliation","key-rotation did not preserve immutable wire with actionable issue");
     auditReject([&]{outgoing.prepareMailbox(pending.id,7,8,rotated,target,sender,*hpke,now+mailbox::MaxTtlMilliseconds,true,false);},"expired immutable envelope was not rejected");
     const auto uploads=senderStore.pendingMailboxUploads();auditNeed(std::any_of(uploads.begin(),uploads.end(),[&](const auto& row){return row.id==pending.id;}),"expired envelope no longer appears as pending");
-    std::cout<<"OBSERVED DEFECT: stale-key immutable ciphertext is reused after rotation; expiry throws while the same item remains pending\n";
+    auditNeed(senderStore.mailboxIssue(pending.id,target.peerId)=="attempt_expired_requires_review","expiry lacks actionable issue");
+    std::cout<<"SAFE: stale-key and expired attempts preserve immutable ciphertext and durable actionable state\n";
+
+    auto stalled=queue();auditNeed(outgoing.authorizeTransport({901},target.peerId)&&outgoing.submittedMessage(target.peerId,stalled.id,{901},1000),"deadline admission failed");
+    auditNeed(!outgoing.messageAckExpired({901},30999)&&outgoing.messageAckExpired({901},31000),"application ACK deadline boundary incorrect");
+    auditNeed(senderStore.message(stalled.id)->delivery==Delivery::Queued,"timeout changed durable delivery state");
+    auditNeed(outgoing.acknowledgeMessage(target.peerId,{901},stalled.id)&&!outgoing.messageAckExpired({901},31000),"late valid ACK did not settle exact submission");
 
     // Bounded local queue durability only, not a network throughput benchmark.
     reliable::AuthenticatedFriendSnapshot burstFriends;burstFriends.replace(7,2,{{8,target.peerId,{target.peerId}},{9,other.peerId,{other.peerId}}});
@@ -93,5 +100,8 @@ int main(int argc,char** argv){try{
     for(unsigned i=0;i<500;++i){auto& contact=(i%2)?other:target;reliable::queueText(senderStore,sender.profile,&contact,contact.peerId,Storage::newMessageId(),L"bounded audit burst",now+i,&burstFriends);}
     {Storage reopened((root/L"sender").wstring());auditNeed(reopened.pending(target.peerId,1000).size()==targetBefore+250&&reopened.pending(other.peerId,1000).size()==otherBefore+250,"two-conversation burst lost durable queued rows");}
     std::cout<<"SAFE: 500 local durable queued messages across two conversations survive protected reopen; no network performance claim\n";
+    std::set<std::string> reached;for(unsigned page=0;page<10;++page)for(const auto& row:outgoing.mailboxCandidates())reached.insert(row.id);
+    auditNeed(reached.size()>=500,"rotating native candidate pages starve messages beyond first 64");
+    std::cout<<"SAFE: bounded rotating native pages reach all 500 queued messages beyond the first 64\n";
     hpke->shutdown();return 0;
 }catch(const std::exception& error){std::cerr<<"AUDIT FIXTURE FAILED: "<<error.what()<<'\n';return 1;}}

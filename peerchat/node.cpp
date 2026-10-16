@@ -880,7 +880,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(deliveries->wasSubmittedMessage(c.peerId,m.id,transport))continue;
             if(deliveries->inFlightCount(transport)>=16||c.output.size()-c.sent>MaxQueue/2)break;
             auto w=reliable::textPacket(m,c.logicalOrdering);packet(c,w);
-            if(!deliveries->submittedMessage(c.peerId,m.id,transport))throw std::runtime_error("Could not record authenticated message submission");
+            if(!deliveries->submittedMessage(c.peerId,m.id,transport,nowMilliseconds()))throw std::runtime_error("Could not record authenticated message submission");
         }
     }
     std::set<std::string> groupPeers(const GroupState& state){std::set<std::string> peers;for(const auto& member:state.members)peers.insert(member.second.peerId);for(const auto& invitation:state.invitations)peers.insert(invitation.second.peerId);peers.erase(profile.peerId);return peers;}
@@ -1793,6 +1793,10 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     NodeEvent request;request.kind=NodeEvent::Kind::RelayRequested;request.peerId=request.expectedPeerId=relay.remoteDeviceId;request.attemptId=attempt;request.networkGeneration=relay.networkRevision;request.candidate=L"PeerChat server relay";request.candidateSource=L"Authenticated discovery service";request.route=L"manager-owned bounded direct fallback";request.text=L"Relay transport requested";
                     if(archiveRoute){request.authorizationArchive=group_text::base64(archive::sessionBinding(relay.authorization).data);request.authorizationTargetAccountId=relay.authorization.archive.account;}
                     emit(std::move(request));emitSessionSnapshot(archiveRoute?relay.authorization.continuityKey():relay.remoteDeviceId);
+                }
+                for(auto& c:connections)if(!c->dead&&c->online&&c->authorization.permitsDirectMessage()&&deliveries->messageAckExpired({c->attemptId},nowMilliseconds())){
+                    c->closeReason=L"message_ack_deadline: recipient application did not acknowledge committed message";c->dead=true;
+                    emit(connectionEvent(NodeEvent::Kind::ConnectionLifecycle,c->closeReason,*c,c->peerId));
                 }
                 for(auto& c:connections)if(!c->dead&&c->relay&&!c->online&&Clock::now()-c->began>std::chrono::seconds(20)){c->closeReason=L"relay peer authentication timeout";c->dead=true;}
                 reapDeadConnections();

@@ -293,7 +293,13 @@ public:
             if(deliveries_.wasSubmittedMessage(runtime_.peerId,message.id,id_))continue;
             if(deliveries_.inFlightCount(id_)>=16||output_.size()>MaxOutput/2)break;
             auto value=reliable::textPacket(message,runtime_.logicalOrdering);packet(value);
-            protocol::check(deliveries_.submittedMessage(runtime_.peerId,message.id,id_));
+            protocol::check(deliveries_.submittedMessage(runtime_.peerId,message.id,id_,now_));
+        }
+    }
+    void tick(std::uint64_t now){
+        now_=now;
+        if(!archive_&&!group_&&ready()&&deliveries_.messageAckExpired(id_,now)){
+            stage_="message_ack_deadline";close(true);
         }
     }
     bool sendTransfer(const Blob& bytes){

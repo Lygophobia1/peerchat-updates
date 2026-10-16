@@ -80,13 +80,10 @@ public:
         }
         if(operation==1){auto binding=parseBinding(input);require(binding.accountId==friends.localAccount());coordinator_.accepted(binding);return {1};}
         if(operation==2){
-            std::vector<StoredMessage> pending;std::set<std::string> seen;
-            for(auto& message:storage.pendingMailboxUploads())if(friends.accountFor(message.recipient)>0){seen.insert(message.id);pending.push_back(std::move(message));}
-            for(const auto& known:storage.contacts())if(known.verified&&friends.accountFor(known.peerId)>0){
-                auto route=sessions.snapshot(known.peerId);
-                if(delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)!=delivery::MailboxRoutePolicy::Unavailable)continue;
-                for(auto& message:deliveries.pendingMessages(known.peerId,1000)){if(pending.size()==64)break;if(message.delivery!=Delivery::Stored&&seen.insert(message.id).second)pending.push_back(std::move(message));}
-                if(pending.size()==64)break;
+            std::vector<StoredMessage> pending;
+            for(auto& message:deliveries.mailboxCandidates())if(friends.accountFor(message.recipient)>0){
+                auto route=sessions.snapshot(message.recipient);
+                if(storage.mailboxHasPendingEnvelope(message.id)||delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)==delivery::MailboxRoutePolicy::Unavailable)pending.push_back(std::move(message));
             }
             protocol::Writer result(protocol::Accepted);result.number(pending.size());
             for(const auto& message:pending){result.string(message.id);result.string(message.recipient);result.number(friends.accountFor(message.recipient));}
@@ -125,8 +122,13 @@ public:
                 auto known=storage.contacts();auto found=std::find_if(known.begin(),known.end(),[&](const auto& c){return c.peerId==binding.device&&c.verified;});
                 if(found==known.end()||friends.accountFor(binding.device)!=accountId)continue;
                 auto verified=contact(storage,friends,binding.device,accountId);
-                auto wire=deliveries.prepareMailbox(id,friends.localAccount(),accountId,binding,verified,identity_,*hpke_,now(),allowed,false,&canonical);
-                if(!wire.empty()&&!storage.mailboxUploadAccepted(id,binding.device))prepared.push_back(binding);
+                try{
+                    if(storage.mailboxUploadAccepted(id,binding.device))continue;
+                    auto wire=deliveries.prepareMailbox(id,friends.localAccount(),accountId,binding,verified,identity_,*hpke_,now(),allowed,false,&canonical);
+                    if(!wire.empty())prepared.push_back(binding);
+                }catch(const std::exception&){
+                    if(storage.mailboxIssue(id,binding.device).empty())storage.mailboxIssue(id,binding.device,"preparation_failed_requires_review");
+                }
             }
             // No network upload until all authorized envelopes are durable. If
             // the process stops here, existing storage drives the next pass.

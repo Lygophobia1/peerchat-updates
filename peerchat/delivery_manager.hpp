@@ -14,6 +14,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 namespace peerchat::delivery {
 
@@ -76,6 +77,12 @@ public:
                                                 int limit = 100) {
         return storage_.pending(destination, limit);
     }
+    std::vector<StoredMessage> mailboxCandidates(){
+        auto page=storage_.mailboxCandidates(mailboxCursor_);
+        if(page.empty()&&mailboxCursor_){mailboxCursor_=0;page=storage_.mailboxCandidates(0);}
+        if(!page.empty())mailboxCursor_=page.back().sequence;
+        return page;
+    }
 
     // Called by the existing application/channel servicing loop, not a new
     // retry owner. Authorization arguments must come from its current verified
@@ -94,7 +101,13 @@ public:
         auto existing=storage_.mailboxEnvelope(id,verifiedRecipient.peerId);
         if(!existing.empty()) {
             auto header=mailbox::parse(existing).header;
-            mailbox::require(header.senderAccount==localAccount&&header.recipientAccount==recipientAccount&&header.expiresUtc>now);
+            mailbox::require(header.senderAccount==localAccount&&header.recipientAccount==recipientAccount);
+            // An ambiguous accepted store must never be replaced under its old
+            // immutable identity. Preserve ciphertext/outbox for reconciliation.
+            if(header.expiresUtc<=now){storage_.mailboxIssue(id,verifiedRecipient.peerId,"attempt_expired_requires_review");throw std::runtime_error("attempt_expired_requires_review");}
+            if(header.keyId!=binding.keyId||header.keyGeneration!=binding.generation){
+                storage_.mailboxIssue(id,verifiedRecipient.peerId,"key_changed_requires_reconciliation");throw std::runtime_error("key_changed_requires_reconciliation");
+            }
             return existing; // Reconnect preserves HPKE ciphertext and logical ID.
         }
         if(message->delivery==Delivery::Delivered)return {};
@@ -186,8 +199,19 @@ public:
     }
 
     bool submittedMessage(const std::string& destination, const std::string& messageId,
-                          session::TransportInstanceId instance) {
-        return submitted(Kind::Message, destination, messageId, instance);
+                          session::TransportInstanceId instance,std::uint64_t now=0) {
+        if(!now)now=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        return submitted(Kind::Message, destination, messageId, instance,now);
+    }
+
+    // Application progress, not socket activity. Only the transport owner acts
+    // on expiry; no second retry owner and no change to normal ACK latency.
+    bool messageAckExpired(session::TransportInstanceId instance,std::uint64_t now)const {
+        for(const auto& item:submissions_)if(item.first.kind==Kind::Message){
+            auto sent=item.second.find(instance.value);
+            if(sent!=item.second.end()&&now>=sent->second&&now-sent->second>=30000)return true;
+        }
+        return false;
     }
 
     bool submittedGroupEvent(const std::string& destination, const std::string& eventId,
@@ -325,11 +349,11 @@ private:
     };
 
     bool submitted(Kind kind, const std::string& destination, const std::string& id,
-                   session::TransportInstanceId instance) {
+                   session::TransportInstanceId instance,std::uint64_t now=0) {
         auto transport = transports_.find(instance.value);
         if (transport == transports_.end() || transport->second.draining ||
             transport->second.destination != destination || id.empty()) return false;
-        return submissions_[Key{kind, destination, id}].insert(instance.value).second;
+        return submissions_[Key{kind, destination, id}].emplace(instance.value,now).second;
     }
 
     bool wasSubmitted(Kind kind, const std::string& destination, const std::string& id,
@@ -347,9 +371,10 @@ private:
     }
 
     Storage& storage_;
+    std::int64_t mailboxCursor_=0;
     std::string localDeviceId_;
     std::map<std::uint64_t, TransportAuthorization> transports_;
-    std::map<Key, std::set<std::uint64_t>> submissions_;
+    std::map<Key, std::map<std::uint64_t,std::uint64_t>> submissions_;
 };
 
 } // namespace peerchat::delivery

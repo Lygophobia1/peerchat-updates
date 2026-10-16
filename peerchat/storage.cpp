@@ -579,6 +579,23 @@ bool Storage::mailboxUploadAccepted(const std::string& id,const std::string& dev
     if(accepted.empty())return false;
     require(accepted==mailboxEnvelope(id,device),"Mailbox upload acceptance mismatch");return true;
 }
+std::vector<StoredMessage> Storage::mailboxCandidates(std::int64_t afterSequence,int limit){
+    require(afterSequence>=0&&limit>0&&limit<=64,"Invalid mailbox candidate page");
+    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND (EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
+    query.number(1,afterSequence);query.number(2,limit);std::vector<StoredMessage> result;
+    while(query.row()){const auto sequence=query.number(0);auto id=query.text(1),peer=query.text(2);Secret plain{impl_->protect(query.bytes(3),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox candidate identity mismatch");m.sequence=sequence;result.push_back(std::move(m));}
+    return result;
+}
+bool Storage::mailboxHasPendingEnvelope(const std::string& id){
+    require(identifier(id,32),"Invalid pending envelope identity");Statement query(impl_->sql,"SELECT 1 FROM objects e WHERE e.k LIKE ? AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)) LIMIT 1");query.text(1,"mailbox-envelope/"+id+"/%");return query.row();
+}
+void Storage::mailboxIssue(const std::string& id,const std::string& device,const std::string& reason){
+    require(identifier(id,32)&&identifier(device)&&reason.size()<=128&&std::all_of(reason.begin(),reason.end(),[](char c){return (c>='a'&&c<='z')||c=='_';}),"Invalid mailbox issue");
+    auto key="mailbox-issue/"+id+"/"+device;Blob value(reason.begin(),reason.end());if(impl_->get(key)!=value)impl_->put(key,value);
+}
+std::string Storage::mailboxIssue(const std::string& id,const std::string& device){
+    require(identifier(id,32)&&identifier(device),"Invalid mailbox issue identity");auto value=impl_->get("mailbox-issue/"+id+"/"+device);return std::string(value.begin(),value.end());
+}
 Blob Storage::mailboxReceipt(const std::string& id,const std::string& device,const Blob& digest){
     require(identifier(id,32)&&identifier(device)&&digest.size()==32,"Invalid mailbox receipt identity");return impl_->get("mailbox-receipt/"+id+"/"+device+"/"+hex(digest));
 }
