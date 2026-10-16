@@ -12,6 +12,8 @@ static class DiagnosticsFileExportTest {
     static int Main(string[] args){try{
         string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);
         var rows=new StringBuilder();for(int i=0;i<30000;i++)rows.AppendLine("message_id=message-"+i+" transfer_id=transfer-"+i+" stage=durable_ack retry_ms=9300 sender_device=public-peer");
+        const string canonicalTargets="delivery_targets message=3d929b5f4f45431db99b42e02ad55a1d selection=unresolved total=1 acknowledged=1 pending=0 unavailable=0 result=partial";
+        rows.AppendLine(canonicalTargets);
         rows.AppendLine("token=LAST_TOKEN_SECRET");rows.AppendLine("message_content=LAST_MESSAGE_PLAINTEXT");rows.AppendLine("file_path=C:\\Users\\PrivateUser\\private.bin");
         rows.AppendLine("message=UNLABELED_MESSAGE_SECRET");rows.AppendLine("group_key=EPOCH_KEY_SECRET");rows.AppendLine("endpoint=https://private-user:URI_PASSWORD_SECRET@example.invalid");
         rows.AppendLine("-----BEGIN PRIVATE KEY-----");rows.AppendLine("PRIVATE_KEY_MATERIAL");rows.AppendLine("-----END PRIVATE KEY-----");rows.AppendLine("last_large_section_marker=完整 Δ 🙂");
@@ -23,6 +25,7 @@ static class DiagnosticsFileExportTest {
         byte[] bytes=File.ReadAllBytes(path);Check(bytes.Length>2*1024*1024,"fixture does not exceed clipboard-size report limits");Check(!(bytes[0]==0xef&&bytes[1]==0xbb&&bytes[2]==0xbf),"unexpected UTF-8 BOM");
         string report=new UTF8Encoding(false,true).GetString(bytes);
         foreach(string expected in new[]{"build=4.0.2-dev.169","snapshot_utc=","snapshot_id=","message_id=message-29999","transfer_id=transfer-29999","last_large_section_marker=完整 Δ 🙂","retained_end_marker=present","operation_id=retained-transfer-id","last_failure=relay_pair_timeout","duration_ms=15000","native_scope_freshness_or_binding_rejected","=== End of complete available diagnostic snapshot ==="})Check(report.Contains(expected),"missing complete field "+expected);
+        Check(report.Contains(canonicalTargets),"canonical native delivery target message ID/counters were redacted");
         foreach(string forbidden in new[]{"LAST_TOKEN_SECRET","LAST_MESSAGE_PLAINTEXT","UNLABELED_MESSAGE_SECRET","EPOCH_KEY_SECRET","URI_PASSWORD_SECRET","PrivateUser","PRIVATE_KEY_MATERIAL","RETAINED_KEY_SECRET","PASSWORD_SECRET","CHANGED_AFTER_CAPTURE","diagnostics truncated"})Check(!report.Contains(forbidden),"private/truncated/mutable value leaked "+forbidden);
         Check(service.Capture().Sections.First(s=>s.Name=="File transfers").Details=="CHANGED_AFTER_CAPTURE","bounded capture changed unexpectedly");
         string original="existing user file";File.WriteAllText(path,original);var cancelled=new CancellationTokenSource();cancelled.Cancel();Rejected<OperationCanceledException>(()=>DiagnosticsFileExport.Save(path,complete,null,cancelled.Token));Check(File.ReadAllText(path)==original,"cancel overwrote destination");
