@@ -31,7 +31,7 @@ object OpaquePushWake {
         val scheduler=context.getSystemService(JobScheduler::class.java)
         if(scheduler.getPendingJob(RETRY_JOB_ID)!=null||running.contains(RETRY_JOB_ID))return true
         return scheduler.schedule(JobInfo.Builder(RETRY_JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setMinimumLatency(30000)
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPersisted(true).setMinimumLatency(30000)
             .setBackoffCriteria(30000,JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())==JobScheduler.RESULT_SUCCESS
     }
     /** One persisted, network-constrained recovery window for an opted-in
@@ -51,8 +51,10 @@ object OpaquePushWake {
     internal fun refreshPeriodic(context:Context):Boolean = try {
         val config=AndroidServerConfigurationStore(context).load()
         val credential=AndroidRememberedLoginStore(context).load()
-        val allowed=AndroidQolStore(context).load().mailboxStorageAllowed
-        maintainPeriodic(context,periodicEligible(config,credential,allowed))
+        // Mailbox storage consent and signed History Sync consent are separate.
+        // This authenticates a bounded reconciliation window only; the existing
+        // mailbox policy and native archive grants still gate actual work.
+        maintainPeriodic(context,periodicEligible(config,credential,true))
     }catch(_:Exception){
         try{maintainPeriodic(context,false)}catch(_:Exception){}
         false

@@ -60,7 +60,7 @@ class PeerChatWakeJob:JobService() {
                 }
                 android.util.Log.i("PeerChatWake","stage=remembered_credential_loaded")
                 stage="remembered_authentication"
-                lease=AndroidMessagingRuntime.acquire(this@PeerChatWakeJob,deadline)
+                lease=AndroidMessagingRuntime.acquire(this@PeerChatWakeJob,deadline,archiveLease=true)
                 android.util.Log.i("PeerChatWake","stage=backend_lease_acquired")
                 if(!lease!!.restoreRemembered(config)){
                     reschedule=false

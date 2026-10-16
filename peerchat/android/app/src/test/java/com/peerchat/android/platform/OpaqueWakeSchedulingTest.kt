@@ -58,6 +58,7 @@ class OpaqueWakeSchedulingTest {
         assertTrue(OpaquePushWake.reconcile(context))
         val retry=checkNotNull(scheduler.getPendingJob(OpaquePushWake.RETRY_JOB_ID))
         assertEquals(30000,retry.minLatencyMillis)
+        assertTrue(retry.isPersisted)
         repeat(100){assertTrue(OpaquePushWake.schedule(context,hint))}
         assertEquals(2,scheduler.allPendingJobs.size)
         assertSame(retry,scheduler.getPendingJob(OpaquePushWake.RETRY_JOB_ID))

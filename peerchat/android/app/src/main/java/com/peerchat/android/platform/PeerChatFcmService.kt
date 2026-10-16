@@ -12,11 +12,7 @@ class PeerChatAndroidApplication:Application() {
     override fun onCreate() {
         super.onCreate()
         try {
-            val config=AndroidServerConfigurationStore(this).load()
-            val credential=AndroidRememberedLoginStore(this).load()
-            val allowed=AndroidQolStore(this).load().mailboxStorageAllowed
-            OpaquePushWake.maintainPeriodic(this,config!=null&&credential!=null&&
-                !credential.revocationPending&&credential.endpoint==config&&allowed)
+            OpaquePushWake.refreshPeriodic(this)
         }catch(_:Exception){/* Protected state unavailable: never schedule an unauthenticated wake. */}
         if(!BuildConfig.FCM_CONFIGURED)return
         if(FirebaseApp.getApps(this).isEmpty() && FirebaseApp.initializeApp(this)==null)return

@@ -18,13 +18,14 @@ data class ArchiveSyncProgress(val state:String="Not started",val processed:Long
     val currentActivity:String get()=if(!projectionFresh)"Status unavailable — retry pending" else if(activity<0)displayState else listOf("Idle","Connecting","Importing","Waiting","Paused","Off","Failed")[activity]
     val lastResultSummary:String get()=if(lastResult==0)"No completed result recorded" else "${listOf("None","Full","Partial","Failed","Cancelled")[lastResult]} · $resultImported messages imported · $resultConversations conversations completed · $resultDeferred unresolved records"
     val displayState:String get(){
+        if(!projectionFresh)return "Waiting"
         val value=state.lowercase()
         return when {
             value.startsWith("partial history")->"Partial"
             "failed" in value||"rejected" in value->"Error"
             "off" in value||"paused" in value->"Paused"
-            complete->"Complete"
             "unavailable" in value||"waiting" in value||"timed out" in value->"Waiting"
+            complete->"Complete"
             "synchronizing" in value->"Syncing"
             "connecting" in value->"Connecting"
             else->"Idle"
