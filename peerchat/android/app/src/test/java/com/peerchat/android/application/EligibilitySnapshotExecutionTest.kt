@@ -50,4 +50,52 @@ class EligibilitySnapshotExecutionTest {
         repeat(32){rows.put(JSONObject().put("device","%064x".format(it+1)).put("online",true).put("binding",""))}
         rejected(value)
     }
+    @Test fun smallClockSkewRetriesOriginalSnapshotOnlyAfterIssuance() {
+        var utc=1000L;var calls=0;var fetched=0;var installed:ByteArray?=null
+        val execution=EligibilitySnapshotExecution({utc}){_,wire->calls++;installed=wire;0}
+        val response=reply().put("issuedUtcMs",1410).put("freshUntilUtcMs",121410)
+        val expected=EligibilitySnapshotExecution.encode(response,10,3,device,20)
+        fun step(now:Long)=execution.refreshWith(1,10,3,device,listOf(20),now){fetched++;response}
+        assertFalse(step(100));assertEquals(0,calls);assertEquals(1,fetched)
+        assertTrue(execution.diagnostic.contains("clock_ahead_ms=410"))
+        utc=1409;assertFalse(step(200));assertEquals(0,calls)
+        utc=1410;assertTrue(step(300));assertEquals(1,calls);assertEquals(1,fetched)
+        assertArrayEquals(expected,installed)
+        assertFalse(step(400));assertEquals(1,calls)
+    }
+    @Test fun deferredSnapshotStillRequiresNativeAuthorizationAndNeverExtendsExpiry() {
+        var utc=1000L;var calls=0
+        val execution=EligibilitySnapshotExecution({utc}){_,_->calls++;1}
+        val response=reply().put("issuedUtcMs",1410).put("freshUntilUtcMs",2410)
+        assertFalse(execution.refreshWith(1,10,3,device,listOf(20),100){response})
+        utc=1410
+        assertFalse(execution.refreshWith(1,10,3,device,listOf(20),200){fail("Unexpected fetch");response})
+        assertEquals(1,calls);assertTrue(execution.diagnostic.contains("binding_rejected"))
+        val expired=EligibilitySnapshotExecution({utc}){_,_->calls++;0}
+        utc=1000;expired.refreshWith(1,10,3,device,listOf(20),100){response}
+        utc=2410
+        assertFalse(expired.refreshWith(1,10,3,device,listOf(20),200){fail("Unexpected fetch");response})
+        assertEquals(1,calls);assertTrue(expired.diagnostic.contains("reason=expired"))
+    }
+    @Test fun generationChangesRecipientRemovalAndResetDiscardDeferredEvidence() {
+        var utc=1000L;var calls=0
+        val execution=EligibilitySnapshotExecution({utc}){_,_->calls++;0}
+        val response=reply().put("issuedUtcMs",1410).put("freshUntilUtcMs",121410)
+        execution.refreshWith(1,10,3,device,listOf(20),100){response}
+        utc=1410
+        assertFalse(execution.refreshWith(1,10,4,device,emptyList(),200){fail("Unexpected fetch");response})
+        assertEquals(0,calls)
+        utc=1000;execution.refreshWith(1,10,4,device,listOf(20),60100){response}
+        execution.reset();utc=1410
+        assertFalse(execution.refreshWith(1,10,4,device,emptyList(),60200){response})
+        assertEquals(0,calls)
+    }
+    @Test fun largeClockMismatchIsNotDeferredOrAcceptedByTheAdapter() {
+        var calls=0
+        val execution=EligibilitySnapshotExecution({1000}){_,_->calls++;1}
+        assertFalse(execution.refreshWith(1,10,3,device,listOf(20),100){
+            reply().put("issuedUtcMs",6001).put("freshUntilUtcMs",126001)
+        })
+        assertEquals(1,calls);assertTrue(execution.diagnostic.contains("binding_rejected"))
+    }
 }

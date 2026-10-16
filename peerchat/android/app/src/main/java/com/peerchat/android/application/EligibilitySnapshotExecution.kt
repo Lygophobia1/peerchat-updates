@@ -11,39 +11,76 @@ import java.io.DataOutputStream
  * eligibility evidence, not trust: native still requires an existing identity
  * pin and verifies any signed HPKE binding. This collector owns no messages,
  * timer, transport or database. Sends never wait for its network request. */
-internal class EligibilitySnapshotExecution {
+internal class EligibilitySnapshotExecution(
+    private val wallNow:()->Long=System::currentTimeMillis,
+    private val install:(Long,ByteArray)->Int={handle,wire->MailboxBridge.eligibility(handle,wire)}
+) {
     private var nextAt = 0L
     private var offset = 0
     private var context = ""
     private val refreshAfter=linkedMapOf<Long,Long>()
+    private data class Deferred(val wire:ByteArray,val issued:Long,val fresh:Long,val expires:Long)
+    // Authenticated response bytes only, NOT eligibility authority. Native must
+    // still validate the original snapshot after the local clock reaches issuance.
+    private val deferred=linkedMapOf<Long,Deferred>()
     var diagnostic = "eligibility=waiting_for_authenticated_snapshot"
         private set
 
-    fun reset() { nextAt=0; offset=0; context=""; refreshAfter.clear();diagnostic="eligibility=waiting_for_authenticated_snapshot" }
+    fun reset() { nextAt=0; offset=0; context=""; refreshAfter.clear();deferred.clear();diagnostic="eligibility=waiting_for_authenticated_snapshot" }
 
     fun refresh(accounts:ServerAccounts,handle:Long,account:Long,generation:Long,device:String,
-                recipients:List<Long>,now:Long):Boolean {
+                recipients:List<Long>,now:Long):Boolean = refreshWith(handle,account,generation,device,recipients,now){recipient->
+        accounts.mailbox("mailbox_eligibility_snapshot",JSONObject().put("recipientAccountId",recipient.toString()))
+    }
+
+    internal fun refreshWith(handle:Long,account:Long,generation:Long,device:String,
+                recipients:List<Long>,now:Long,fetch:(Long)->JSONObject):Boolean {
         val owner="$account/$generation/$device"
         if(owner!=context){reset();context=owner}
-        if(now<nextAt)return false
-        nextAt=now+60_000
         val targets=recipients.distinct().sorted()
         refreshAfter.keys.retainAll(targets.toSet())
-        if(targets.isEmpty())return false
-        val selected=(targets.drop(offset%targets.size)+targets.take(offset%targets.size)).filter{(refreshAfter[it]?:0)<=now}.take(4)
-        offset=(offset+selected.size)%targets.size
+        deferred.keys.retainAll(targets.toSet())
         var installed=false
+        val retry=deferred.entries.iterator()
+        while(retry.hasNext()) {
+            val (recipient,value)=retry.next();val utc=wallNow()
+            if(now>=value.expires||utc>=value.fresh){
+                retry.remove();refreshAfter[recipient]=now+15_000
+                diagnostic="eligibility=unavailable_primary_delivery_independent stage=deferred_snapshot reason=expired"
+            }else if(utc>=value.issued){
+                retry.remove()
+                if(install(handle,value.wire)==0){
+                    refreshAfter[recipient]=now+60_000;installed=true
+                    diagnostic="eligibility=authenticated_snapshot_cached"
+                }else {
+                    refreshAfter[recipient]=now+15_000
+                    diagnostic="eligibility=unavailable_primary_delivery_independent stage=native_verified_eligibility reason=native_scope_freshness_or_binding_rejected"
+                }
+            }
+        }
+        if(now<nextAt)return installed
+        nextAt=now+60_000
+        if(targets.isEmpty())return false
+        val selected=(targets.drop(offset%targets.size)+targets.take(offset%targets.size)).filter{it !in deferred&&(refreshAfter[it]?:0)<=now}.take(4)
+        offset=(offset+selected.size)%targets.size
         for(recipient in selected) {
             var stage="authenticated_rpc"
             var reason="transport_or_rpc_unavailable"
             try {
-                val reply=accounts.mailbox("mailbox_eligibility_snapshot",JSONObject().put("recipientAccountId",recipient.toString()))
+                val reply=fetch(recipient)
                 stage="snapshot_response";reason=safeState(reply.optString("state"))
                 check(reply.optString("state")=="ready")
                 stage="snapshot_scope_and_format";reason="response_scope_or_format_rejected"
                 val wire=encode(reply,account,generation,device,recipient)
+                val utc=wallNow();val issued=reply.getLong("issuedUtcMs");val fresh=reply.getLong("freshUntilUtcMs")
+                if(issued>utc&&issued-utc<=5000&&deferred.size<32){
+                    deferred[recipient]=Deferred(wire,issued,fresh,now+minOf(120_000L,fresh-utc))
+                    refreshAfter[recipient]=now+1000
+                    diagnostic="eligibility=waiting_for_snapshot_issuance stage=deferred_snapshot clock_ahead_ms=${issued-utc}"
+                    continue
+                }
                 stage="native_verified_eligibility";reason="native_scope_freshness_or_binding_rejected"
-                check(MailboxBridge.eligibility(handle,wire)==0)
+                check(install(handle,wire)==0)
                 diagnostic="eligibility=authenticated_snapshot_cached"
                 refreshAfter[recipient]=now+60_000;installed=true
             } catch(failure:Exception) {
