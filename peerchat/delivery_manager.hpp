@@ -52,46 +52,60 @@ public:
                             const std::function<std::uint64_t(const std::string&)>& accountFor,
                             const std::vector<Contact>& pinnedContacts,std::uint64_t nowUtcMs,
                             std::uint64_t monotonicNowMs){
+        eligibilityStage_="wire_domain";eligibilityNow_=nowUtcMs;eligibilityIssued_=eligibilityFresh_=0;
+        struct Timing {std::uint64_t& out;std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();~Timing(){out=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count());}} timing{eligibilityValidationUs_};
         mailbox::Reader reader(wire,"PeerChat/mailbox-eligibility-snapshot/v1");
-        mailbox::require(reader.number(8)==localAccount&&reader.number(8)==friendGeneration&&
-            reader.text(64)==localDeviceId_);
+        eligibilityStage_="local_account_mismatch";mailbox::require(reader.number(8)==localAccount);
+        eligibilityStage_="friend_generation_mismatch";mailbox::require(reader.number(8)==friendGeneration);
+        eligibilityStage_="local_device_mismatch";mailbox::require(reader.text(64)==localDeviceId_);
+        eligibilityStage_="snapshot_header";
         const auto recipientAccount=reader.number(8),version=reader.number(4);
         const auto id=reader.text(32);const auto sequence=reader.number(8),issued=reader.number(8),fresh=reader.number(8);
-        mailbox::require(mailbox::account(recipientAccount)&&version==1&&mailbox::id(id,32)&&sequence>0&&
-            issued>0&&issued<=nowUtcMs&&fresh>nowUtcMs&&fresh>issued&&fresh-issued<=120000&&monotonicNowMs>0);
+        eligibilityIssued_=issued;eligibilityFresh_=fresh;
+        mailbox::require(mailbox::account(recipientAccount)&&version==1&&mailbox::id(id,32)&&sequence>0);
+        eligibilityStage_="snapshot_issued_in_future";mailbox::require(issued>0&&issued<=nowUtcMs);
+        eligibilityStage_="snapshot_expired";mailbox::require(fresh>nowUtcMs);
+        eligibilityStage_="snapshot_freshness_bounds";mailbox::require(fresh>issued&&fresh-issued<=120000&&monotonicNowMs>0);
+        eligibilityStage_="candidate_count";
         const auto count=reader.number(1);mailbox::require(count<=32);
         EligibilitySnapshot incoming;incoming.id=id;incoming.sequence=sequence;incoming.account=recipientAccount;incoming.raw=wire;
         incoming.issued=issued;incoming.fresh=fresh;incoming.installedMonotonic=monotonicNowMs;
         std::string previous;
         for(std::uint64_t i=0;i<count;++i){
+            eligibilityStage_="candidate_encoding";
             const auto device=reader.text(64);
             const auto online=reader.number(1);
             const auto proof=reader.field(4096);
-            mailbox::require(mailbox::id(device,64)&&device>previous&&online<=1);previous=device;
+            eligibilityStage_="candidate_order_or_identity";mailbox::require(mailbox::id(device,64)&&device>previous&&online<=1);previous=device;
             auto pinned=std::find_if(pinnedContacts.begin(),pinnedContacts.end(),[&](const Contact& contact){
                 return contact.peerId==device&&contact.verified&&!contact.publicKey.empty()&&
                     Storage::publicKeyId(contact.publicKey)==device;});
             if(pinned==pinnedContacts.end()||accountFor(device)!=recipientAccount)continue;
             EligibleDevice target;target.device=device;target.publicKey=pinned->publicKey;target.online=online!=0;
             if(!proof.empty()){
+                eligibilityStage_="binding_encoding";
                 auto binding=mailbox::parseBinding(proof);
+                eligibilityStage_="binding_authorization_or_signature";
                 mailbox::require(binding.storageAllowed&&mailbox::verifyBinding(binding,recipientAccount,device,
                     pinned->publicKey,verifyDevicePayload,Storage::publicKeyId));
                 target.binding=std::move(binding);
             }
             if(target.online||target.binding)incoming.devices.push_back(std::move(target));
         }
+        eligibilityStage_="trailing_bytes";
         reader.end();
         if(cacheFriendGeneration_!=friendGeneration||cacheLocalAccount_!=localAccount){
             eligibility_.clear();cacheFriendGeneration_=friendGeneration;cacheLocalAccount_=localAccount;
         }
         auto old=eligibility_.find(recipientAccount);
         if(old!=eligibility_.end()){
+            eligibilityStage_="snapshot_sequence_rollback";
             mailbox::require(sequence>=old->second.sequence);
-            if(sequence==old->second.sequence){mailbox::require(wire==old->second.raw);return true;}
+            if(sequence==old->second.sequence){eligibilityStage_="snapshot_sequence_conflict";mailbox::require(wire==old->second.raw);eligibilityStage_="cached_replay";return true;}
         }
-        eligibility_[recipientAccount]=std::move(incoming);return true;
+        eligibility_[recipientAccount]=std::move(incoming);eligibilityStage_="cached";return true;
     }
+    std::string eligibilityDiagnostic()const{return "native_eligibility="+eligibilityStage_+" native_now_utc_ms="+std::to_string(eligibilityNow_)+" snapshot_issued_utc_ms="+std::to_string(eligibilityIssued_)+" snapshot_fresh_until_utc_ms="+std::to_string(eligibilityFresh_)+" validation_us="+std::to_string(eligibilityValidationUs_);}
 
     // Call at every authoritative friendship/account generation change, not
     // only when a new eligibility response arrives.
@@ -573,6 +587,8 @@ private:
     std::uint64_t cacheFriendGeneration_=0;
     std::uint64_t cacheLocalAccount_=0;
     std::map<std::uint64_t,EligibilitySnapshot> eligibility_;
+    std::string eligibilityStage_="not_requested";
+    std::uint64_t eligibilityNow_=0,eligibilityIssued_=0,eligibilityFresh_=0,eligibilityValidationUs_=0;
 };
 
 } // namespace peerchat::delivery

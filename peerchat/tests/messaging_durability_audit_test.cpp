@@ -96,6 +96,16 @@ int main(int argc,char** argv){try{
     for(const auto& row:eligibleRows){eligibility.text(row.first);eligibility.number(1,1);eligibility.field(row.second);}
     auditNeed(outgoing.installEligibility(eligibility.bytes,7,1,[&](const std::string& device){return friends.accountFor(device);},
         senderStore.contacts(),now,steady),"authenticated eligibility installation failed");
+    auto rejectEligibility=[&](std::uint64_t account,std::uint64_t generation,std::uint64_t clock,const char* stage){
+        auditReject([&]{outgoing.installEligibility(eligibility.bytes,account,generation,[&](const std::string& device){return friends.accountFor(device);},senderStore.contacts(),clock,steady);},"invalid eligibility was accepted");
+        auditNeed(outgoing.eligibilityDiagnostic().find(std::string("native_eligibility=")+stage+" ")!=std::string::npos,"eligibility validation boundary was not retained");
+    };
+    rejectEligibility(9,1,now,"local_account_mismatch");
+    rejectEligibility(7,2,now,"friend_generation_mismatch");
+    rejectEligibility(7,1,now-1,"snapshot_issued_in_future");
+    rejectEligibility(7,1,now+120000,"snapshot_expired");
+    auditNeed(outgoing.installEligibility(eligibility.bytes,7,1,[&](const std::string& device){return friends.accountFor(device);},senderStore.contacts(),now,steady),"rejected snapshot corrupted prior verified cache");
+    auditNeed(outgoing.eligibilityDiagnostic().find("native_eligibility=cached_replay ")!=std::string::npos,"verified snapshot replay diagnostic missing");
     StoredMessage targeted{Storage::newMessageId(),sender.profile.peerId,target.peerId,L"one logical body, two devices",now,
         Delivery::Queued,0,senderStore.nextLogicalOrder()};
     auditNeed(outgoing.queueMessageWithCachedSnapshot(targeted,7,8,1,now,steady),"targeted queue failed");

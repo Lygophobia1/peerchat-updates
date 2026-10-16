@@ -20,6 +20,7 @@ import kotlinx.coroutines.withContext
 class MessagingBackend(context: Context,private val profileName: String="default") : MessagingApplication {
     private val context=context.applicationContext
     private val gate=Any()
+    private val ownerTimings=OwnerStageTimings(slow={stage,elapsed->android.util.Log.i("PeerChatWake","stage=owner_$stage elapsed_ms=$elapsed")})
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val mutable=MutableStateFlow(MessagingSnapshot())
     private val relayFailureDiagnostics=linkedMapOf<Long,String>()
@@ -214,7 +215,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     init {
         executor.scheduleWithFixedDelay({
-            if(!stopped&&!resetting)try {synchronized(gate){if(!resetting)tick()}}catch(failure: Exception){
+            val waiting=System.nanoTime()
+            if(!stopped&&!resetting)try {synchronized(gate){
+                ownerTimings.record(OwnerStage.GateWait,System.nanoTime()-waiting)
+                if(!resetting)ownerTimings.measure(OwnerStage.Tick){tick()}
+            }}catch(failure: Exception){
                 if(loggedTickFailure!=failure.javaClass.simpleName){
                     loggedTickFailure=failure.javaClass.simpleName
                     android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+loggedTickFailure)
@@ -517,7 +522,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
             Unit
         }
     }
-    private fun refresh(bootstrap:Boolean=true) {
+    private fun refresh(bootstrap:Boolean=true)=ownerTimings.measure(OwnerStage.Contacts){refreshLocked(bootstrap)}
+    private fun refreshLocked(bootstrap:Boolean) {
         val accounts=checkNotNull(accounts);val active=checkNotNull(accounts.session)
         val state=if(bootstrap)accounts.bootstrap() else accounts.friends()
         val pending=state.getJSONArray("incoming");require(pending.length()<=128)
@@ -582,7 +588,6 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     android.util.Log.i("PeerChatNetwork","event=disconnected repair=bounded")
                     if(failure!=null&&expiredServerSession(failure))throw failure
                 }else {
-                    try{stream.heartbeat(now)}catch(_:java.io.IOException){stream.close()}
                     repeat(32){stream.poll()?.let{event->handleServerEvent(event)}}
                 }
             }
@@ -598,7 +603,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }finally {refreshAt=System.nanoTime()/1_000_000+if(events?.connected==true)900000 else 120000}
         }
         if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupRefreshAt){
-            try{groupExecution.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation);groupRefreshAt=now+60000;groupProjectionAt=0L;groupPendingMore=true}
+            try{ownerTimings.measure(OwnerStage.Groups){groupExecution.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation)};groupRefreshAt=System.nanoTime()/1_000_000+60000;groupProjectionAt=0L;groupPendingMore=true}
             catch(failure:Exception){
                 if(expiredServerSession(failure))throw failure
                 try{groupExecution.invalidate(native,mutable.value.accountId,generation)}catch(_:Exception){}
@@ -617,7 +622,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         if(mutable.value.authenticated&&now>=mailboxAt) {
             try {
-                measured("mailbox_service") {
+                ownerTimings.measure(OwnerStage.Mailbox){measured("mailbox_service") {
                     configureMailboxEnrollment(checkNotNull(accounts),native)
                     mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed(),committed={ messageId ->
                         // Publish at the durable-import boundary. A later ACK,
@@ -630,7 +635,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                         // marker can release a background wake.
                         mailboxPublication.acknowledged()
                     }
-                }
+                }}
                 mutable.value=mutable.value.copy(mailboxRecoveryError=null)
                 publish()
                 mailboxPublication.servicePublished()
@@ -655,7 +660,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 val count=rows.number();require(count<=64)
                 List(count.toInt()){rows.text();rows.text();rows.number()}.also{rows.end()}
             }catch(_:Exception){emptyList()}
-            if(eligibilitySnapshots.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation,mutable.value.localPeerId,recipients,now))mailboxAt=0L
+            if(ownerTimings.measure(OwnerStage.Eligibility){eligibilitySnapshots.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation,mutable.value.localPeerId,recipients,System.nanoTime()/1_000_000)})mailboxAt=0L
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
@@ -664,20 +669,24 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(archiveWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
             val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId
             val execution=archiveExecution(owner,checkNotNull(profile))
-            try{if(initialArchive||now>=archiveMetadataAt){
+            try{ownerTimings.measure(OwnerStage.Archive){if(initialArchive||now>=archiveMetadataAt){
                     if(initialArchive)execution.publishPending(active.accountId,generation,local) else execution.refreshCurrent(active.accountId,generation,local)
                     // Stay below the native 30-second authorization expiry.
-                    archiveMetadataAt=now+if(mutable.value.archiveProgress.running)10000 else 20000
+                    archiveMetadataAt=System.nanoTime()/1_000_000+if(mutable.value.archiveProgress.running)10000 else 20000
                 }
                 mutable.value=mutable.value.copy(archiveProgress=execution.progress(active.accountId,generation))
-                if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,now+10000)
+                if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,System.nanoTime()/1_000_000+10000)
                 archiveLoadedGeneration=generation
                 archiveRetryAt=0L
-            }catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(projectionFresh=false));archiveRetryAt=now+60000}
+            }}catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(projectionFresh=false));archiveRetryAt=System.nanoTime()/1_000_000+60000}
             finally{val admission=try{execution.authorizationDiagnostics(active.accountId,generation)}catch(error:Exception){"Admission snapshot unavailable: ${error.javaClass.simpleName}"};mutable.value=mutable.value.copy(archiveAuthorizationDiagnostics=admission)}
         }
         // Drain bounded events; payload history/delivery is always reread from
         // Storage. An event is never a second message/persistence authority.
+        ownerTimings.measure(OwnerStage.NativeRelay){servicePeerExecutions(native,System.nanoTime()/1_000_000)}
+        publish()
+    }
+    private fun servicePeerExecutions(native:Long,now:Long){
         val iterator=executions.iterator()
         val checkGroupCompletion=now>=groupCompletionAt
         if(checkGroupCompletion)groupCompletionAt=now+500
@@ -748,7 +757,6 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId)
             executions[request.attempt]=execution;execution.start()
         }
-        publish()
     }
     private fun handleServerEvent(event:org.json.JSONObject){
         if(event.optString("type") in setOf("group_message","group_delivery")){
@@ -819,7 +827,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(status="Device explicitly verified; delivery awaits native acknowledgment")
         mailboxAt=0L;check(ReliableBridge.demand(native,value.presented.toByteArray(Charsets.US_ASCII))==0)
     }}
-    private fun publish() {
+    private fun publish()=ownerTimings.measure(OwnerStage.Projection){publishLocked()}
+    private fun publishLocked() {
         pendingDeviceVerifications.entries.removeAll{it.value.generation!=generation}
         pendingDeviceVerifications.replaceAll{_,value->value.copy(live=value.attempt in executions&&executions[value.attempt]?.finished==false)}
         mutable.value=mutable.value.copy(deviceVerifications=pendingDeviceVerifications.values.toList())
@@ -827,6 +836,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
             appendLine(mailboxExecution.inboundDiagnostic)
             appendLine(eligibilitySnapshots.diagnostic)
+            appendLine(ownerTimings.summary())
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
@@ -836,14 +846,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val conversations=nativeConversationProjection(friends,
             {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},
             {peer->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),Long.MAX_VALUE))})
-        val projectionNow=android.os.SystemClock.elapsedRealtime()
-        if(native!=attachmentProjectionHandle||generation!=attachmentProjectionGeneration||projectionNow>=attachmentProjectionAt){
-            attachmentProjection=attachmentSnapshots(transfer(4));attachmentProjectionHandle=native;attachmentProjectionGeneration=generation;attachmentProjectionAt=projectionNow+1000
-        }
-        val attachments=attachmentProjection
         val diagnosticNow=android.os.SystemClock.elapsedRealtime()
-        if(attachments.isNotEmpty()&&diagnosticNow>=transferDiagnosticsAt){
-            transferDiagnosticsAt=diagnosticNow+1000
+        // Failed offers may never create an attachment row. Keep their bounded
+        // native failure projection visible without polling an idle profile fast.
+        if(diagnosticNow>=transferDiagnosticsAt){
+            transferDiagnosticsAt=diagnosticNow+if(attachmentProjection.isNotEmpty())1000 else 10000
             val record=NativeRecord(transfer(5),30)
             val measured=StringBuilder()
             val currentIds=mutableSetOf<String>()
@@ -861,6 +868,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
             mutable.value=mutable.value.copy(transferDiagnostics=measured.toString().take(32768))
             transferDiagnosticStates.keys.retainAll(currentIds)
         }
+        // Read failure diagnostics first: attachment setup itself can fail.
+        val projectionNow=android.os.SystemClock.elapsedRealtime()
+        if(native!=attachmentProjectionHandle||generation!=attachmentProjectionGeneration||projectionNow>=attachmentProjectionAt){
+            attachmentProjection=attachmentSnapshots(transfer(4));attachmentProjectionHandle=native;attachmentProjectionGeneration=generation;attachmentProjectionAt=projectionNow+1000
+        }
+        val attachments=attachmentProjection
         mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
