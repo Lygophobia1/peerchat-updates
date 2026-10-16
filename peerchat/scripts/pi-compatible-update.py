@@ -42,6 +42,22 @@ def identities(database, reference=None):
     return result
 def tree_hashes(directory):
     return {str(p.relative_to(directory)):digest(p) for p in sorted(directory.rglob('*')) if p.is_file()}
+
+def cache_health(config, check_index=False):
+    cache = config.get('AttachmentCache', {})
+    if not cache.get('Enabled', False): return {'enabled':False}
+    directory = confined(cache['Directory'])
+    assert directory.is_dir() and not directory.is_symlink(), 'Cache storage unavailable'
+    assert (directory/'.peerchat-attachment-cache-instance').read_text().strip()==cache['InstanceId']
+    mount=json.loads(run(['findmnt','-J','-T',str(directory),'-o','TARGET,UUID']))['filesystems'][0]
+    assert mount['target']==cache['ExpectedMountPoint']
+    assert 'UUID='+mount['uuid']==cache['ExpectedFilesystem']
+    stats=os.statvfs(directory);reserve=max(cache['MinimumFreeBytes'],(stats.f_blocks*stats.f_frsize*cache['MinimumFreePercent']+99)//100)
+    assert stats.f_bavail*stats.f_frsize>=reserve, 'Cache free-space reserve'
+    if check_index:
+        with sqlite3.connect('file:'+str(directory/'cache.sqlite')+'?mode=ro',uri=True) as db:
+            assert db.execute('pragma integrity_check').fetchone()[0]=='ok', 'Cache integrity'
+    return {'enabled':True,'filesystem_binding':'verified','index_integrity':'ok' if check_index else 'not checked while exclusive server owner is active','reserve':'satisfied','configuration':'unchanged'}
 def frame(channel, request):
     wire=json.dumps(request).encode();channel.sendall(len(wire).to_bytes(4,'big')+wire)
     def exact(n):
@@ -109,6 +125,14 @@ def main():
     assert tree_hashes(oldexe)==tree_hashes(backup/'server')
     assert tree_hashes(oldconfig)==tree_hashes(backup/'config')
     snapshot(database,backup/'online.sqlite')
+    # Preserve referenced private configuration files without printing their contents.
+    for field in ('CertificatePath','CertificatePasswordFile','TurnRestSharedSecretFile','FcmServiceAccountPath'):
+        if config.get(field):
+            source=confined(config[field]);target=backup/'private-files'/source.relative_to(ROOT)
+            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            shutil.copy2(source,target);os.chmod(target,0o600)
+            assert digest(source)==digest(target), 'Private-file backup'
+    cache_before=cache_health(config)
     certificate=confined(config['CertificatePath']);cert_hash=digest(certificate)
     before=identities(database)
     report={'old':args.old,'new':args.new,'rollback':str(backup),'zip_sha256':args.sha256,
@@ -126,9 +150,13 @@ def main():
     run(['python3',helper,'stop','--version',args.old,'--port','7443'])
     try:
         snapshot(database,backup/'stopped.sqlite')
+        if cache_before['enabled']:
+            report['cache_stopped_integrity']=cache_health(config,True)
+            snapshot(confined(config['AttachmentCache']['Directory'])/'cache.sqlite',backup/'cache-stopped.sqlite')
         before=identities(database);report['identity_grant_snapshot']=before
         run(['python3',helper,'start','--version',args.new,'--port','7443'])
         report['health']=health(config,args.pin.upper())
+        report['health']['cache']=cache_health(config)
         assert digest(certificate)==cert_hash and digest(oldconfig/'server-config.json')==digest(newconfig/'server-config.json')
         assert identities(database,before)==before, 'Original identity/grant content changed; inspect without restoring DB'
         report['result']='deployed';(backup/'manifest.json').write_text(json.dumps(report,indent=2))

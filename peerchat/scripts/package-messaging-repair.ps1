@@ -1,4 +1,4 @@
-param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b')
+param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b',[switch]$IndependentDeviceDelivery)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -33,7 +33,9 @@ try {
     $payload=@(Get-ChildItem -LiteralPath $stage -Recurse -File|ForEach-Object {
         [ordered]@{path=[IO.Path]::GetRelativePath($stage,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
     })
-    [ordered]@{version=$Version;sourceCheckpoint=$source;branch='codex/native-unicode-emoji';physicalAcceptance='Pending';scope='Phase 1 repairs only';independentDeviceDelivery=$false;phase2='Blocked pending authenticated target-snapshot contract review';piDeployed=$false;phoneInstalled=$false;payload=$payload}|
+    $scope=if($IndependentDeviceDelivery){'Phase 2 frozen verified DM targets and independent ACKs; groups unchanged'}else{'Phase 1 repairs only'}
+    $phase2=if($IndependentDeviceDelivery){'Authenticated snapshot contract; no fresh snapshot means canonical-only unresolved, not all-device Delivered'}else{'Blocked pending authenticated target-snapshot contract review'}
+    [ordered]@{version=$Version;sourceCheckpoint=$source;branch='codex/native-unicode-emoji';physicalAcceptance='Pending';scope=$scope;independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;phase2=$phase2;piDeployed=$false;phoneInstalled=$false;payload=$payload}|
         ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $stage 'candidate-manifest.json') -Encoding utf8
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$zip)
@@ -51,7 +53,7 @@ try {
     if((Get-FileHash $apkSource).Hash -ne (Get-FileHash $apk).Hash){throw 'APK copy hash mismatch'}
     $artifacts=@($zip,$apk)+@(Get-ChildItem -LiteralPath (Join-Path $root "build/linux/$Version") -Filter '*.zip' -File|ForEach-Object FullName)
     $records=@($artifacts|ForEach-Object {[ordered]@{path=$_;bytes=(Get-Item -LiteralPath $_).Length;sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()}})
-    [ordered]@{version=$Version;sourceCheckpoint=$source;physicalAcceptance='Pending';independentDeviceDelivery=$false;artifacts=$records}|
+    [ordered]@{version=$Version;sourceCheckpoint=$source;physicalAcceptance='Pending';independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;artifacts=$records}|
         ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $out 'messaging-repair-package-audit.json') -Encoding utf8
     $records|ConvertTo-Json
     Write-Output 'PASS version, signature, dependency, source and ZIP byte audit. No install or deployment.'
