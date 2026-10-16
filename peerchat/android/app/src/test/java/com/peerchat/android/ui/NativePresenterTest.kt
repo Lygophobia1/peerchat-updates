@@ -82,7 +82,14 @@ class NativePresenterTest {
         override suspend fun requestFriend(username:String) {}
         val searches=mutableListOf<String>()
         var searchDelay=0L
-        override suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot>{searches.add(query);kotlinx.coroutines.delay(searchDelay);return listOf(DirectoryAccountSnapshot(27,query,true))}
+        var searchBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
+        var cancelSearch=false
+        override suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot>{
+            searches.add(query)
+            if(cancelSearch)throw kotlinx.coroutines.CancellationException("test-only lookup interrupted")
+            searchBlocker?.let{blocker->kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable){blocker.await()}}
+            kotlinx.coroutines.delay(searchDelay);return listOf(DirectoryAccountSnapshot(27,query,true))
+        }
         override suspend fun refreshContacts(){}
         override suspend fun respondFriend(accountId:Long,accept:Boolean) {}
         override suspend fun signOut(){signOuts++;state.value=MessagingSnapshot()}
@@ -115,6 +122,44 @@ class NativePresenterTest {
         assertTrue(p.state.value.peopleResults.isEmpty())
         p.dispatch(UiAction.PeopleQuery("offline"));dispatcher.scheduler.advanceUntilIdle()
         assertFalse(commands.searches.contains("offline"));assertNotNull(p.state.value.peopleError)
+    }
+    @Test fun peopleSearchDeadlineIncludesNonCooperativeLookupAndSerializedWait(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test password");dispatcher.scheduler.advanceUntilIdle()
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.searchBlocker=blocker
+        try{
+            p.dispatch(UiAction.PeopleQuery("hung"));dispatcher.scheduler.advanceTimeBy(350);dispatcher.scheduler.runCurrent()
+            assertEquals(listOf("hung"),commands.searches)
+            p.dispatch(UiAction.PeopleQuery("queued"));dispatcher.scheduler.advanceTimeBy(12_001);dispatcher.scheduler.runCurrent()
+            assertFalse("A blocked lookup must not leave Searching indefinitely",p.state.value.peopleLoading)
+            assertTrue(p.state.value.peopleError.orEmpty().contains("timed out"))
+            assertEquals("One network lookup remains bounded even when replaced",listOf("hung"),commands.searches)
+        }finally{blocker.complete(Unit);dispatcher.scheduler.runCurrent()}
+        assertTrue(p.state.value.peopleResults.isEmpty())
+        assertTrue(p.state.value.peopleError.orEmpty().contains("timed out"))
+        commands.searchBlocker=null;p.dispatch(UiAction.PeopleQuery("retry"));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("retry",p.state.value.peopleResults.single().username)
+    }
+    @Test fun hungPeopleSearchTimesOutAndLateOldAccountResultCannotPublish(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test password");dispatcher.scheduler.advanceUntilIdle()
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.searchBlocker=blocker
+        try{
+            p.dispatch(UiAction.PeopleQuery("hung"));dispatcher.scheduler.advanceTimeBy(12_001);dispatcher.scheduler.runCurrent()
+            assertFalse(p.state.value.peopleLoading);assertTrue(p.state.value.peopleError.orEmpty().contains("timed out"))
+            commands.state.value=commands.state.value.copy(accountId=99,username="Other")
+            dispatcher.scheduler.runCurrent()
+            assertEquals("",p.state.value.peopleQuery);assertNull(p.state.value.peopleError)
+        }finally{blocker.complete(Unit);dispatcher.scheduler.runCurrent()}
+        assertTrue(p.state.value.peopleResults.isEmpty());assertFalse(p.state.value.peopleLoading)
+    }
+    @Test fun peopleSearchInterruptedWithoutContextChangeClearsLoadingAndCanRetry(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test password");dispatcher.scheduler.advanceUntilIdle()
+        commands.cancelSearch=true;p.dispatch(UiAction.PeopleQuery("interrupted"));dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(p.state.value.peopleLoading);assertNotNull(p.state.value.peopleError)
+        commands.cancelSearch=false;p.dispatch(UiAction.PeopleQuery("retry"));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("retry",p.state.value.peopleResults.single().username)
     }
     private fun reenrollmentOffer()=mailboxReenrollment(NativeRecordWriter(3).also{w->
         w.text("PeerChat/MailboxReenrollment/v1");w.number(19);w.number(3);w.number(4)

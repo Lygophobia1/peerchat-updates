@@ -49,7 +49,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         }
     }
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
-    private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","friend_request","friend_respond"))type else "other"
+    private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","people_search","friend_request","friend_respond","friend_cancel"))type else "other"
     private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
         android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
     }

@@ -124,28 +124,48 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var automaticResumeSuppressed=false
     private var uiGeneration=0L
     private var peopleSearch:Job?=null
+    private var peopleWatchdog:Job?=null
     private val peopleSearchMutex=Mutex()
     private var peopleRevision=0L
     private fun searchPeople(text:String){
-        peopleSearch?.cancel();val revision=++peopleRevision
+        val revision=++peopleRevision;peopleWatchdog?.cancel();peopleSearch?.cancel()
         val query=text.trim().take(32);val epoch=uiGeneration;val account=current.accountId
+        fun currentSearch()=revision==peopleRevision&&epoch==uiGeneration&&account==current.accountId&&current.authenticated&&current.serverPresenceLive
         mutable.value=mutable.value.copy(peopleQuery=query,peopleResults=emptyList(),peopleLoading=false,peopleError=null)
         if(!validPeopleQuery(query))return
         if(!current.authenticated||!current.serverPresenceLive){mutable.value=mutable.value.copy(peopleError="Search unavailable while offline. Reconnect and retry.");return}
         mutable.value=mutable.value.copy(peopleLoading=true)
+        // Independent from the worker: cancellation/withTimeout alone waits for
+        // blocking platform I/O to unwind. Include debounce and mutex waiting in
+        // this UI budget without starting another concurrent network lookup.
+        peopleWatchdog=viewModelScope.launch{
+            delay(12_000)
+            if(currentSearch()&&mutable.value.peopleLoading){
+                peopleRevision++
+                retainDiagnostic("People search","stage=deadline_exceeded budget_ms=12000")
+                mutable.value=mutable.value.copy(peopleLoading=false,peopleError="People search timed out. Check your connection, then tap Refresh or edit the query to retry.")
+                peopleSearch?.cancel()
+            }
+        }
         peopleSearch=viewModelScope.launch{
-            delay(350)
             try{
+                delay(350)
                 val result=peopleSearchMutex.withLock {coroutineContext.ensureActive();backend.searchPeople(query)}
-                if(revision==peopleRevision&&epoch==uiGeneration&&account==current.accountId&&current.authenticated)
+                if(currentSearch())
                     mutable.value=mutable.value.copy(peopleResults=result,peopleLoading=false)
             }catch(error:Exception){
-                if(error is CancellationException)throw error
-                if(revision==peopleRevision&&epoch==uiGeneration&&account==current.accountId)
+                if(currentSearch())
                     mutable.value=mutable.value.copy(peopleLoading=false,peopleError=when{
+                        error is CancellationException->"People search was interrupted. Tap Refresh or edit the query to retry."
                         error is ServerRejected && error.code=="search_rate_limited"->"Search is temporarily limited. Wait a moment and try again."
                         error is ServerRejected && error.code=="unsupported_request"->"This server does not support authorized partial search. Ask the operator to update it."
                         else->"People search unavailable. Check your connection and try again."})
+                if(error is CancellationException)throw error
+            }finally{
+                if(currentSearch()){
+                    peopleWatchdog?.cancel()
+                    mutable.value=mutable.value.copy(peopleLoading=false)
+                }
             }
         }
     }
@@ -182,8 +202,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         retainDiagnostic("Network recovery","reason=$reason destination=$destination authenticated=${current.authenticated}")
         android.util.Log.i("PeerChatNetwork","event=login_navigation reason=$reason ui_generation=$uiGeneration authenticated=${current.authenticated}")
         recovering=true;automaticResumeSuppressed=true;uiGeneration++
+        peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
-        mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline)
+        mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline,
+            peopleLoading=false,peopleResults=emptyList(),peopleError=null)
         viewModelScope.launch {
             var completed=false
             try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
@@ -317,9 +339,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(recovering)return@collect
         if(snapshot.accountId!=current.accountId||!snapshot.authenticated||!snapshot.serverPresenceLive){
-            peopleSearch?.cancel();peopleRevision++
+            peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
             mutable.value=mutable.value.copy(peopleResults=emptyList(),peopleLoading=false,contactBusy=false,
-                peopleQuery=if(snapshot.accountId!=current.accountId)"" else mutable.value.peopleQuery)
+                peopleQuery=if(snapshot.accountId!=current.accountId)"" else mutable.value.peopleQuery,
+                peopleError=if(snapshot.accountId!=current.accountId)null else if(mutable.value.peopleLoading)"Search interrupted by a connection change. Reconnect and retry." else mutable.value.peopleError)
         }
         if(snapshot.accountId!=current.accountId)mutable.value=mutable.value.copy(transferSettings=null,transferSettingsBusy=false,transferSettingsError=null)
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
