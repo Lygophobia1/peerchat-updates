@@ -9,7 +9,6 @@ class ArchiveWakePolicyTest {
         assertTrue(archiveWakePending(ArchiveSyncProgress(running=true,activity=2)))
         assertTrue(archiveWakePending(ArchiveSyncProgress(state="Archive source unavailable; retry pending",activity=3)))
         assertTrue(archiveWakePending(ArchiveSyncProgress(complete=true,projectionFresh=false)))
-        assertTrue(archiveWakePending(ArchiveSyncProgress(activity=6,source="a".repeat(64))))
         assertTrue(archiveWakePending(ArchiveSyncProgress(state="Waiting for archive authorization",activity=0,source="a".repeat(64))))
     }
     @Test fun settledDisabledPausedAndUnauthorizedProfilesReleaseBoundedWake(){
@@ -17,6 +16,7 @@ class ArchiveWakePolicyTest {
         assertFalse(archiveWakePending(ArchiveSyncProgress(complete=true,activity=0)))
         assertFalse(archiveWakePending(ArchiveSyncProgress(enabled=false,running=true)))
         assertFalse(archiveWakePending(ArchiveSyncProgress(activity=4,source="a".repeat(64))))
+        assertFalse(archiveWakePending(ArchiveSyncProgress(activity=6,state="Archive synchronization failed closed",source="a".repeat(64))))
         assertTrue(archiveWakePending(ArchiveSyncProgress(complete=true,providers=listOf("a".repeat(64)))))
     }
     @Test fun staleCompletionAndUnavailableSourceDisplayPending(){

@@ -8,6 +8,8 @@ Leaving the foreground with pending archive work schedules the existing coalesce
 
 Native encrypted storage remains the sole owner of sync intent, per-source conversation cursors, deduplication, grants and imports. No extra cursor database, engine, account identity, historical authorization or permanent foreground service was introduced. Native metadata refresh and relay retry remain bounded; server mailbox publication is serviced before archive work on each coordinator pass.
 
+Terminal native fail-closed, paused and disabled activities do not generate repeated background retries. They retain their native error/policy status; the scheduler does not attempt to repair rejected authorization or corrupt state by starting its own scan.
+
 Stale archive status now displays Waiting, including when the previous snapshot was Complete. A failed incoming archive demand clears the current completion projection and retains the previous completed-result counters separately. A relay rendezvous failure is not proof of missing history, successful completion, or an Android lifecycle failure. Existing stage/class diagnostics distinguish rendezvous, TLS admission, transport I/O and server authorization errors without logging credentials or message contents.
 
 ## Validation and physical limits
