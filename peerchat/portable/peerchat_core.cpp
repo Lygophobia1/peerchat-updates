@@ -604,9 +604,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_
             instance->archiveExecution=std::make_unique<peerchat::archive::Execution>(*instance->storage,instance->profile,
                 instance->archiveApplication->policy(),*instance->deliveries,instance->sessions);
             instance->archiveGroups=std::make_unique<peerchat::archive::GroupHistoryAccess>(*instance->storage,instance->profile,instance->friends.localAccount(),
-                [instance](const std::string& server)->std::optional<peerchat::archive::GroupHistoryContext>{
-                    if(!instance->groups||instance->groups->generation()!=instance->friends.generation())return {};
-                    return instance->groups->historyContext(server);
+                [weak=std::weak_ptr<Instance>(instance)](const std::string& server)->std::optional<peerchat::archive::GroupHistoryContext>{
+                    // The profile owns this callback. Do not keep the profile,
+                    // database or partial-file handles alive through a self-cycle.
+                    auto owner=weak.lock();if(!owner||!owner->groups||owner->groups->generation()!=owner->friends.generation())return {};
+                    return owner->groups->historyContext(server);
                 });
             instance->archiveExecution->groupHistory(*instance->archiveGroups);
         }

@@ -1,4 +1,4 @@
-param([string]$JavaHome='C:\Program Files\Java\jdk-22',[string]$ServerDirectory)
+param([string]$JavaHome='C:\Program Files\Java\jdk-22',[string]$ServerDirectory,[switch]$TransferFiles)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $out=Join-Path $root ('build\tests\reliable-profile-jni-'+[Guid]::NewGuid().ToString('N'))
@@ -28,19 +28,31 @@ try {
     $core=[IO.File]::ReadAllText($corePath)
     $original='#include "attachment_file_io.hpp"'
     if(([regex]::Matches($core,[regex]::Escape($original))).Count -ne 1){throw 'Expected exactly one Android attachment include in production core'}
-    $core=$core.Replace($original,'#include "attachment_file_io_unavailable.hpp"')
+    $adapter=if($TransferFiles){'attachment_file_io_windows_host.hpp'}else{'attachment_file_io_unavailable.hpp'}
+    $core=$core.Replace($original,('#include "'+$adapter+'"'))
     if((Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash -ne $before){throw 'Production core changed during host fixture preparation'}
     [IO.File]::WriteAllText((Join-Path $hostPortable 'peerchat_core.cpp'),$core)
-    Copy-Item -LiteralPath 'tests\portable\attachment_file_io_unavailable.hpp' -Destination $hostPortable
+    Write-Host "Production core SHA256=$before fixture=$out"
+    Copy-Item -LiteralPath (Join-Path 'tests\portable' $adapter) -Destination $hostPortable
     Copy-Item -LiteralPath 'tests\reliable_jni_storage_host.cpp' -Destination $hostTests
     Copy-Item -LiteralPath 'storage.cpp' -Destination $out
-    Write-Host 'JNI messaging host proof uses fail-closed attachment and voice adapters; Android POSIX I/O, Keystore, media and OS lifecycle are not covered.'
+    Write-Host "JNI host proof attachment adapter=$adapter; voice fail-closed. Android POSIX I/O, Keystore, media and OS lifecycle are not covered."
     & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -Wno-error=misleading-indentation -shared -static-libgcc -static-libstdc++ -D_WIN32_WINNT=0x0601 -D__ANDROID__ -DPEERCHAT_PORTABLE_TEXT '-I.' '-Itests' '-Iportable' '-include' 'windows.h' ("-I$JavaHome\include") ("-I$JavaHome\include\win32") (Join-Path $hostTests 'reliable_jni_storage_host.cpp') portable/tls_android.cpp group.cpp group_message_envelope.cpp android/voice-media/media_capabilities.cpp tests/portable/voice_media_unavailable.cpp -o "$out\peerchat_messaging.dll" ("-Wl,--out-implib,$out\libpeerchat_messaging.a") -lbcrypt -lcrypt32 2> "$out\compile.stderr.txt"
     if($LASTEXITCODE -ne 0){Get-Content -LiteralPath "$out\compile.stderr.txt" -TotalCount 50|Write-Host;throw 'Reliable production JNI host fixture compilation failed'}
     & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -shared -static-libgcc -static-libstdc++ '-Iportable' ("-I$JavaHome\include") ("-I$JavaHome\include\win32") android/app/src/main/cpp/peerchat_jni.cpp ("-L$out") -lpeerchat_messaging -o "$out\peerchat_jni.dll"
     if($LASTEXITCODE -ne 0){throw 'Foundation JNI host fixture compilation failed'}
     & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp $classpath -d $out tests/jni-host/com/peerchat/android/NativeBridge.java tests/jni-host/com/peerchat/android/ProfileBridge.java tests/jni-host/com/peerchat/android/PeerTlsBridge.java tests/jni-host/com/peerchat/android/ReliableBridge.java tests/jni-host/com/peerchat/android/TransferBridge.java android/app/src/main/java/com/peerchat/android/platform/tls/OpaqueTlsSigner.java android/app/src/main/java/com/peerchat/android/platform/tls/PeerTls.java android/app/src/main/java/com/peerchat/android/platform/tls/ServerChannel.java android/app/src/main/java/com/peerchat/android/platform/tls/RelayFrames.java tests/tls-host/PeerTlsProof.java tests/tls-host/ReliableProfileProof.java tests/tls-host/ServerRelayProof.java
     if($LASTEXITCODE -ne 0){throw 'Reliable production JNI Java proof compilation failed'}
+    if($TransferFiles){
+        & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp "$out;$classpath" -d $out tests/jni-host/com/peerchat/android/ArchiveBridge.java tests/tls-host/NativeTransferProof.java
+        if($LASTEXITCODE -ne 0){throw 'Native transfer Java proof compilation failed'}
+        Write-Host 'Native transfer proof: production JNI/core/Java TLS with real Windows files and protected SQLite journals; NOT Android POSIX/Keystore.'
+        & "$JavaHome\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp "$out;$classpath" com.peerchat.android.platform.tls.NativeTransferProof "$out\transfer-profiles"
+        if($LASTEXITCODE -ne 0){throw "Native transfer proof failed; retained fixture $out"}
+        & "$JavaHome\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp "$out;$classpath" com.peerchat.android.platform.tls.ReliableProfileProof "$out\messaging-profiles"
+        if($LASTEXITCODE -ne 0){throw 'Reliable production JNI/Profile messaging baseline failed'}
+        return
+    }
     & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp "$out;$classpath" -d $out tests/tls-host/ServerDeadlineProof.java
     if($LASTEXITCODE -ne 0){throw 'Platform deadline proof compilation failed'}
     & "$JavaHome\bin\java.exe" -cp "$out;$classpath" com.peerchat.android.platform.tls.ServerDeadlineProof

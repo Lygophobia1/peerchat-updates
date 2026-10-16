@@ -22,6 +22,17 @@ template<class F> jbyteArray call(JNIEnv* env,F body){
     try{std::lock_guard<std::mutex> lock(gate);return peerchat::platform::android::Context::input(env,body());}
     catch(...){if(env->ExceptionCheck())env->ExceptionClear();auto type=env->FindClass("java/lang/IllegalStateException");if(type)env->ThrowNew(type,"Host test SQL/protection provider failed");return nullptr;}
 }
+// Test-only protected archive classification: deny ordinary traffic for an ID.
+// Does not create any archive authorization/grant or bypass production dispatch.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_platform_tls_NativeTransferProof_markArchive(JNIEnv* env,jclass,jlong handle,jbyteArray input){
+    try{
+        auto instance=lookup(static_cast<pc_core_handle>(handle));peerchat::protocol::check(bool(instance));std::lock_guard<std::mutex> lock(instance->gate);
+        auto bytes=peerchat::platform::android::Context::output(env,input);std::string id(bytes.begin(),bytes.end());peerchat::protocol::check(peerchat::protocol::id(id,32)&&bool(instance->archiveTransfers));
+        auto w=peerchat::archive::attachmentHeader(10);w.number(instance->friends.localAccount());w.string(instance->profile.peerId);w.string(id);
+        static const char hex[]="0123456789abcdef";std::string context;for(auto b:peerchat::digestDevicePayload(w.data)){context+=hex[b>>4];context+=hex[b&15];}
+        instance->storage->saveArchiveSyncState(context,{},peerchat::Blob{1});return peerchat::platform::android::Context::input(env,peerchat::Blob{});
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
 peerchat::Blob number(std::uint64_t value){peerchat::Blob bytes;for(int i=0;i<8;++i)bytes.push_back(static_cast<unsigned char>(value>>(8*i)));return bytes;}
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_platform_tls_ReliableProfileProof_database(JNIEnv* env,jclass,jbyteArray directory){

@@ -18,16 +18,16 @@ public final class ReliableProfileProof {
     static byte[] empty=new byte[0];
     static long number(byte[] bytes){return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getLong();}
     public static final class Facade {
-        final PeerTlsProof.Identity identity;final long db;boolean closed,failAttachments;
-        Facade(PeerTlsProof.Identity identity,String directory){this.identity=identity;db=ReliableProfileProof.number(database(utf8(directory)));}
+        final PeerTlsProof.Identity identity;final long db;final java.io.File attachmentPath;boolean closed,failAttachments;PeerTls lastTls;
+        Facade(PeerTlsProof.Identity identity,String directory){this.identity=identity;db=ReliableProfileProof.number(database(utf8(directory)));attachmentPath=new java.io.File(directory,"attachments");}
         public byte[] publicKey(){return identity.publicKey();}
         // Required by the current native owner even for text-only sessions.
-        // The host attachment adapter refuses all file operations.
-        public byte[] attachmentDirectory(){if(failAttachments)throw new IllegalStateException("synthetic-private-path-never-log");return utf8("/host-messaging-proof-attachments-unavailable");}
+        // The selected host adapter decides whether file I/O is available.
+        public byte[] attachmentDirectory(){if(failAttachments)throw new IllegalStateException("synthetic-private-path-never-log");PeerTlsProof.check(attachmentPath.isDirectory()||attachmentPath.mkdirs());return utf8(attachmentPath.getAbsolutePath());}
         public byte[] sign(byte[] original)throws Exception{return identity.sign(original);}
         public PeerTls createPeerTls(boolean incoming,byte[] pin)throws Exception{
             if(closed)throw new IllegalStateException("Closed fixture");
-            return new PeerTls(identity,incoming,new String(pin,StandardCharsets.US_ASCII));
+            lastTls=new PeerTls(identity,incoming,new String(pin,StandardCharsets.US_ASCII));return lastTls;
         }
         public byte[] protect(byte[] bytes,byte[] label){return protection(true,bytes,label);}
         public byte[] unprotect(byte[] bytes,byte[] label){return protection(false,bytes,label);}
@@ -58,10 +58,10 @@ public final class ReliableProfileProof {
     }
     static final class Side implements AutoCloseable {
         final com.peerchat.android.NativeBridge core=new com.peerchat.android.NativeBridge();
-        final long handle;final String id,other;long peer;
+        final long handle;final String id,other;final Facade facade;long peer;
         Side(PeerTlsProof.Identity identity,String directory,String other,long account,long remote)throws Exception{
             id=PeerTls.peerId(identity.pub);this.other=other;handle=core.create();PeerTlsProof.check(handle!=0);
-            Facade facade=new Facade(identity,directory);PeerTlsProof.check(com.peerchat.android.ProfileBridge.bind(handle,facade)==0);
+            facade=new Facade(identity,directory);PeerTlsProof.check(com.peerchat.android.ProfileBridge.bind(handle,facade)==0);
             // Read failure diagnostics while the original initialization still
             // fails; diagnostics must not retry cache/journal construction.
             facade.failAttachments=true;
