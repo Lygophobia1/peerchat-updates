@@ -10,6 +10,7 @@ class PortableServerTests {
         if(args.Length>0&&args[0]=="--discovery")return PeerChat.ServerTests.DiscoveryIntegrationTest.Main(args[1..]);
         if(args.Length==2&&args[0]=="--fcm-live-config")return LiveFcmConfiguration(args[1]);
         if(args.Length==2&&args[0]=="--group-device")return GroupDeviceServerTest.Main(new[]{args[1]});
+        if(args.Length==2&&args[0]=="--friend-relay-revoke")return FriendRelayRevocationServerTest.Main(new[]{args[1]});
         if(args.Length==4&&args[0]=="--archive-relay")return ArchiveRelayLifecycleTest.Main(new[]{args[1],args[2],args[3]});
         if(args.Length==4&&args[0]=="--group-fanout")return GroupCiphertextFanoutTest.Main(new[]{args[1],args[2],args[3]});
         string root=args[0];ServerLifecycleTests.Run(root);var json=new JavaScriptSerializer();
