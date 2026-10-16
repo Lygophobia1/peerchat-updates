@@ -62,14 +62,16 @@ struct Instance {
         const char* stage="none";
         const char* reason="none";
         int operation=-1;
-        std::uint64_t inputBytes=0,elapsedMs=0;
-        void record(int op,std::uint64_t bytes,const char* at,const char* why,std::uint64_t elapsed){operation=op;inputBytes=bytes;stage=at;reason=why;elapsedMs=elapsed;}
+        std::uint64_t inputBytes=0,elapsedMs=0;std::string peer,transferId;
+        void record(int op,std::uint64_t bytes,const char* at,const char* why,std::uint64_t elapsed){operation=op;inputBytes=bytes;stage=at;reason=why;elapsedMs=elapsed;peer.clear();transferId.clear();}
         std::string line(const char* domain)const{return std::string(domain)+" operation="+std::to_string(operation)+" stage="+stage+" reason="+reason+
-            " input_bytes="+std::to_string(inputBytes)+" elapsed_ms="+std::to_string(elapsedMs);}
+            " input_bytes="+std::to_string(inputBytes)+" elapsed_ms="+std::to_string(elapsedMs)+(peer.empty()?"":" peer="+peer)+(transferId.empty()?"":" transfer="+transferId);}
     };
     // Two bounded last-failure records, fixed local stage/reason vocabulary only.
-    // Never retain exception messages, filenames, identities or payload bytes.
+    // No exception messages, filenames, private identities or payload bytes;
+    // only authenticated public peer / validated transfer IDs may correlate.
     NativeOperationFailure transferRequestFailure,reliableExchangeFailure;
+    std::string receivingTransferPeer,receivingTransferId;
     std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
         using namespace peerchat;auto open=[&](const transfer::DurableState& row){return transfer::posix::FileSource::reopen(attachmentCache,row);};
         if(transfer::ProtectedTextSource::token(d.location))return transfer::ProtectedTextSource::reopen(d,attachmentRecords,open);
@@ -870,7 +872,16 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
         if(!group)instance->prepareAttachments(runtimeNow());auto owner=instance.get();
         auto endpoint=std::make_unique<peerchat::portable::ReliableEndpoint>(instance->profile,*instance->storage,instance->sessions,*instance->deliveries,
             instance->friends,peerchat::session::SessionEpoch{1},peerchat::session::TransportInstanceId{id},std::move(tls),expected,route,runtimeNow(),std::move(archive),
-            [owner,id](const std::string& peer,const peerchat::Blob& frame,std::uint64_t now){peerchat::protocol::check(owner->friends.contains(peer)&&(!owner->archiveTransfers||!owner->archiveTransfers->wasArchiveTransfer(peerchat::archive::transferPacketId(frame))));auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline());owner->transfers->receive(peer,frame,now);},std::move(group),
+            [owner,id](const std::string& peer,const peerchat::Blob& frame,std::uint64_t now){
+                owner->receivingTransferPeer.clear();owner->receivingTransferId.clear();
+                peerchat::protocol::check(owner->friends.contains(peer));
+                // Ordinary friend transfers negotiate v1/v2. The archive wrapper
+                // parser deliberately remains v1-only and must not gate this lane.
+                std::string transferId;try{transferId=peerchat::transfer::packetId(frame);}catch(...){throw peerchat::transfer::ReceiveFailure("transfer_header");}
+                owner->receivingTransferPeer=peer;owner->receivingTransferId=transferId;
+                if(owner->archiveTransfers&&owner->archiveTransfers->wasArchiveTransfer(transferId))throw peerchat::transfer::ReceiveFailure("transfer_archive_identity");
+                auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline());owner->transfers->receive(peer,frame,now);
+            },std::move(group),
             peerchat::portable::ReliableEndpoint::VoiceAdmission{[]{return peerchat::androidVoiceAvailable();},
                 [owner](const std::string& peer,const peerchat::Blob& frame,std::uint64_t now){peerchat::protocol::check(bool(owner->voice));owner->voice->app.receive(peer,frame,now);}});
         instance->peers.emplace(id,std::move(endpoint));return static_cast<jlong>(id);
@@ -884,6 +895,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         if(!input||length>65536){instance->reliableExchangeFailure.record(operation,static_cast<std::uint64_t>(length),"jni_input","input_bound_rejected",0);return nullptr;}
         auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return nullptr;
         auto& endpoint=*found->second;peerchat::Blob output;endpoint.tick(runtimeNow());
+        instance->receivingTransferPeer.clear();instance->receivingTransferId.clear();
         try{
             if(operation==0){endpoint.receive(peerchat::platform::android::Context::output(env,input),runtimeNow());retireEndpoints(*instance,endpoint);}
             else{
@@ -919,6 +931,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             }
         }catch(...){
             instance->reliableExchangeFailure.record(operation,static_cast<std::uint64_t>(length),endpoint.diagnosticStage(),"native_operation_rejected",runtimeNow()-began);
+            if(std::strncmp(endpoint.diagnosticStage(),"transfer_",9)==0){instance->reliableExchangeFailure.peer=instance->receivingTransferPeer;instance->reliableExchangeFailure.transferId=instance->receivingTransferId;}
             if(auto scope=endpoint.archiveScope())if(instance->archiveExecution)instance->archiveExecution->recordTransport(
                 static_cast<std::uint64_t>(token),*scope,endpoint.diagnosticStage());
             endpoint.close(false);throw;
