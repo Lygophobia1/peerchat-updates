@@ -40,7 +40,13 @@ internal class DiagnosticsSnapshot(val build:String,val capturedAt:Instant,priva
 private val diagnosticSecrets=Regex("(?i)([\"']?(?:password|passwd|session[_-]?token|auth[_-]?token|access[_-]?token|refresh[_-]?token|token|credential|private[_-]?key|secret|plaintext|message|text|body|message[_-]?(?:text|body|plaintext)|payload|authorization)[\"']?\\s*[:=]\\s*)(?:\"[^\"]*\"|'[^']*'|[^\\r\\n]*)")
 private val diagnosticPaths=Regex("(?i)(?:[a-z]:[\\\\/][^\\r\\n]*|\\\\\\\\[^\\r\\n]*|(?:file|content)://[^\\s\"']+|(?<![\\w:])/(?:data|storage|sdcard|mnt|home|Users|tmp|var|private)(?:/[^\\r\\n]*)?)")
 private val diagnosticPathFields=Regex("(?i)([\"']?(?:(?:source|destination|local|download|cache)[_-]?)?(?:file[_-]?path|path|directory|file[_-]?name)[\"']?\\s*[:=]\\s*)[^\\r\\n]*")
-internal fun safeDiagnosticLine(line:String):String=diagnosticPaths.replace(diagnosticPathFields.replace(diagnosticSecrets.replace(line){it.groupValues[1]+"[redacted]"}){it.groupValues[1]+"[path redacted]"},"[path redacted]")
+private val diagnosticDeliveryId=Regex("^delivery_targets message=([0-9a-f]{32})(?=\\s|$)")
+internal fun safeDiagnosticLine(line:String):String {
+    // This native diagnostic's historical `message` field is a validated ID,
+    // never body text. Canonicalize only that exact stage/ID before redaction.
+    val identified=diagnosticDeliveryId.replace(line){"delivery_targets message_id=${it.groupValues[1]}"}
+    return diagnosticPaths.replace(diagnosticPathFields.replace(diagnosticSecrets.replace(identified){it.groupValues[1]+"[redacted]"}){it.groupValues[1]+"[path redacted]"},"[path redacted]")
+}
 
 internal class DiagnosticsCreateDocument:ActivityResultContracts.CreateDocument("text/plain") {
     override fun createIntent(context:Context,input:String):Intent=super.createIntent(context,input).addCategory(Intent.CATEGORY_OPENABLE)

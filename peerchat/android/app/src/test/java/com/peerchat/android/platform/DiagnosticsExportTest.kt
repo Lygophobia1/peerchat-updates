@@ -37,6 +37,9 @@ class DiagnosticsExportTest {
     @Test fun privateFieldsAndPathsAreRedactedButCorrelationRemains(){
         val exported=text(snapshot("""
             message_id=${"1".repeat(32)} transfer_id=${"2".repeat(32)} sender_device=${"a".repeat(64)} reason=retry_scheduled
+            delivery_targets message=${"3".repeat(32)} selection=unresolved total=2 acknowledged=1 pending=1 unavailable=0 result=partial
+            message=PRIVATE_MESSAGE_BODY
+            delivery_targets message=PRIVATE_DELIVERY_TEXT selection=unknown
             password=hunter-secret
             sessionToken="session-secret"
             private_key=key-secret
@@ -51,9 +54,10 @@ class DiagnosticsExportTest {
             -----END PRIVATE KEY-----
             final_stage=complete
         """.trimIndent()))
-        listOf("hunter-secret","session-secret","key-secret","PRIVATE_MESSAGE_CONTENT","PRIVATE_BODY","sensitive.txt","private.db","private.documents","history.db","BASE64_PRIVATE_KEY_MATERIAL").forEach{assertFalse(it,exported.contains(it))}
+        listOf("hunter-secret","session-secret","key-secret","PRIVATE_MESSAGE_CONTENT","PRIVATE_BODY","PRIVATE_MESSAGE_BODY","PRIVATE_DELIVERY_TEXT","sensitive.txt","private.db","private.documents","history.db","BASE64_PRIVATE_KEY_MATERIAL").forEach{assertFalse(it,exported.contains(it))}
         assertTrue(exported.contains("message_id=${"1".repeat(32)}"));assertTrue(exported.contains("sender_device=${"a".repeat(64)}"))
         assertTrue(exported.contains("final_stage=complete"))
+        assertTrue(exported.contains("delivery_targets message_id=${"3".repeat(32)} selection=unresolved total=2 acknowledged=1 pending=1 unavailable=0 result=partial"))
     }
     @Test fun systemSaveAndShareUseContentUrisAndOnlyReadGrants(){
         val context=ApplicationProvider.getApplicationContext<Context>()
