@@ -486,7 +486,8 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_MailboxBridge_receip
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
         std::lock_guard<std::mutex> lock(instance->gate);peerchat::mailbox::require(instance->deliveries!=nullptr);
         auto contact=mailboxContact(*instance,receipt.recipientDevice,receipt.recipientAccount);
-        instance->deliveries->acknowledgeMailbox(wire,receipt.recipientAccount,contact);return PC_CORE_OK;
+        bool authenticated=false;instance->deliveries->acknowledgeMailbox(wire,receipt.recipientAccount,contact,&authenticated);
+        return authenticated?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
     });
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_friends(JNIEnv* env,jobject,jlong handle,jlong account,jlong generation,jbyteArray snapshot){

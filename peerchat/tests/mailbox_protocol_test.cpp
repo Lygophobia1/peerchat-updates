@@ -174,8 +174,12 @@ int main(int argc,char** argv){try{
     check(received.inserted&&recipientStore.message(message.id)->text==message.text);
     auto repeated=incoming.acceptMailbox(submitted,7,origin,binding,keys,recipient,*hpke,now+100);
     check(!repeated.inserted&&repeated.receipt==received.receipt);
-    check(!outgoing.acknowledgeMailbox(received.receipt,9,destination));
-    check(outgoing.acknowledgeMailbox(received.receipt,8,destination));check(!outgoing.acknowledgeMailbox(received.receipt,8,destination));
+    bool authenticatedReceipt=true;
+    check(!outgoing.acknowledgeMailbox(received.receipt,9,destination,&authenticatedReceipt)&&!authenticatedReceipt);
+    check(outgoing.acknowledgeMailbox(received.receipt,8,destination,&authenticatedReceipt)&&authenticatedReceipt);
+    check(!outgoing.acknowledgeMailbox(received.receipt,8,destination,&authenticatedReceipt)&&authenticatedReceipt);
+    auto forgedReceipt=received.receipt;forgedReceipt.back()^=1;
+    check(!outgoing.acknowledgeMailbox(forgedReceipt,8,destination,&authenticatedReceipt)&&!authenticatedReceipt);
     check(senderStore.message(message.id)->delivery==Delivery::Delivered&&outgoing.pendingMessages(recipientId).empty());
     // A first device ACK drains the logical outbox but cannot discard another
     // authorized device's durable unsent envelope. Same ID survives a reopen.

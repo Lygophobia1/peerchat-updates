@@ -131,14 +131,17 @@ public:
         for(std::size_t i=0;i<text.size();i+=2)digest.push_back(static_cast<unsigned char>(std::stoul(text.substr(i,2),nullptr,16)));
         return digest;
     }
-    bool acknowledgeMailbox(const Blob& receiptWire,std::uint64_t verifiedRecipientAccount,const Contact& verifiedRecipient) {
+    bool acknowledgeMailbox(const Blob& receiptWire,std::uint64_t verifiedRecipientAccount,const Contact& verifiedRecipient,bool* authenticatedReceipt=nullptr) {
+        if(authenticatedReceipt)*authenticatedReceipt=false;
         auto receipt=mailbox::parseReceipt(receiptWire);auto wire=storage_.mailboxEnvelope(receipt.messageId,verifiedRecipient.peerId);
         if(wire.empty()||!verifiedRecipient.verified)return false;
         auto envelope=mailbox::parse(wire);
         if(envelope.header.recipientAccount!=verifiedRecipientAccount||!mailbox::verifyReceipt(receipt,verifiedRecipientAccount,verifiedRecipient.peerId,
             localDeviceId_,envelope.header.messageId,mailboxDigest(wire),verifiedRecipient.publicKey,verifyDevicePayload,Storage::publicKeyId))return false;
         auto message=storage_.message(receipt.messageId);
-        if(!message||message->sender!=localDeviceId_||message->delivery==Delivery::Delivered)return false;
+        if(!message||message->sender!=localDeviceId_)return false;
+        if(authenticatedReceipt)*authenticatedReceipt=true;
+        if(message->delivery==Delivery::Delivered)return false;
         storage_.acknowledge(receipt.messageId,Delivery::Delivered);submissions_.erase(Key{Kind::Message,message->recipient,receipt.messageId});return true;
     }
     struct MailboxReceive {bool inserted=false;Blob receipt;};

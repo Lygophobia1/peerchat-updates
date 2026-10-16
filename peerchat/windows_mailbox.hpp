@@ -110,7 +110,7 @@ public:
             result.string(header.senderDevice);result.string(header.messageId);return result.data;
         }
         if(operation==6){auto receipt=parseReceipt(input);auto verified=contact(storage,friends,receipt.recipientDevice,receipt.recipientAccount);
-            deliveries.acknowledgeMailbox(input,receipt.recipientAccount,verified);return {1};}
+            bool authenticated=false;deliveries.acknowledgeMailbox(input,receipt.recipientAccount,verified,&authenticated);require(authenticated);return {1};}
         if(operation==7)return identity_.publicKey();
         if(operation==8){
             require(allowed&&mailbox::id(id,32));auto message=storage.message(id);require(message.has_value());
