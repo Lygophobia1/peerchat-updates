@@ -96,6 +96,12 @@ struct CapacityError:std::runtime_error {
     CapacityError(const std::string& message,const std::string& transferId={},std::uint64_t v=1,std::uint64_t n=0):std::runtime_error(message),id(transferId),version(v),negotiation(n){}
     Blob cancellation()const{protocol::check(protocol::id(id,32));protocol::Writer w(protocol::FileTransfer);w.number(version);w.number(static_cast<unsigned>(Kind::Cancel));w.string(id);if(version==2)w.number(negotiation);return w.data;}
 };
+// Fixed local rejection stage only. Never include a filename, peer ID, packet
+// body or arbitrary provider exception in endpoint diagnostics.
+struct ReceiveFailure:std::runtime_error {
+    const char* stage;
+    explicit ReceiveFailure(const char* value):std::runtime_error("Transfer receive rejected"),stage(value){}
+};
 // Platform finalizers supply only controlled stage names + numeric errno,
 // never a path, filename, payload or arbitrary provider exception text.
 struct CompletionError:std::runtime_error {
@@ -155,6 +161,7 @@ class TransferManager {
     struct Capability {std::uint64_t route=0;bool pipeline=false;};
     std::map<std::string,Capability> capabilities_;
     std::uint64_t nextNegotiation_=1;
+    const char* receiveStage_="transfer_header";
     std::map<std::string,Options> options_;
     std::uint64_t aggregateBits_=0,aggregateAt_=0;double aggregateTokens_=ExtendedChunkBytes;
     std::uint64_t downloadBits_=0,downloadAt_=0;
@@ -392,6 +399,11 @@ public:
                 }
                 auto current=route(e);if(!current){e.route=0;e.ready=false;continue;}
                 if(!e.routeAt)e.routeAt=now;
+                // A user can accept a persisted offer before its sender's fresh
+                // Offer arrives. Restore intentionally does not persist wire
+                // version/negotiation; hold that queued reply until the current
+                // authenticated Offer establishes them (including v1 -> v2).
+                if(!e.sending&&!e.offerSeen)continue;
                 // Never send a pending ACK from an old negotiation onto a new
                 // route before its authenticated Offer establishes the scope.
                 if(!e.sending&&e.version==2){auto cap=capabilities_.find(e.peer);if(cap==capabilities_.end()||cap->second.route!=e.route)continue;}
@@ -428,20 +440,30 @@ public:
         cacheContext(expected,plainBytes);receiveScoped(peer,frame,now,Purpose::GroupCacheCiphertext,&expected);
     }
 private:
-    void receiveScoped(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){supported(purpose);receiveImpl(peer,frame,now,purpose,expected);for(auto& item:entries_)statistics(item.second,now);save();}
+    void receiveScoped(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){
+        receiveStage_="transfer_purpose";
+        try{supported(purpose);receiveImpl(peer,frame,now,purpose,expected);for(auto& item:entries_)statistics(item.second,now);save();}
+        catch(const CapacityError&){throw;}
+        catch(const PersistenceError&){throw;}
+        catch(const std::exception&){throw ReceiveFailure(receiveStage_);}
+    }
     void receiveImpl(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){
+        receiveStage_="transfer_header";
         protocol::Reader r(frame);protocol::check(r.type()==protocol::FileTransfer);auto version=r.number();protocol::check(version==1||version==2);
         auto kind=static_cast<Kind>(r.number());auto id=r.string();protocol::check(protocol::id(id,32));auto negotiation=version==2?r.number():0;
+        receiveStage_="transfer_v2_capability";
         auto cap=capabilities_.find(peer);if(version==2)protocol::check(cap!=capabilities_.end()&&cap->second.pipeline&&cap->second.route&&negotiation);
         auto i=entries_.find(id);
+        receiveStage_="transfer_entry_purpose";
         protocol::check((!expected||expected->id==id)&&(i==entries_.end()||(i->second.purpose==purpose&&(!expected||i->second.metadata==*expected))));
         if(kind==Kind::Offer){
+            receiveStage_="transfer_offer_metadata";
             Metadata m;m.id=id;m.name=r.string();m.size=r.number();auto digest=r.bytes();Options options;if(version==2){options.chunkBytes=r.number();options.window=r.number();}r.end();protocol::check(options.valid());
             protocol::check(safeName(m.name)&&m.size<=maximum(purpose)&&digest.size()==32);
             std::copy(digest.begin(),digest.end(),m.digest.begin());
             protocol::check(!expected||m==*expected);
             if(i!=entries_.end()){
-                auto& e=i->second;protocol::check(e.peer==peer&&!e.sending&&e.metadata==m);
+                receiveStage_="transfer_offer_identity";auto& e=i->second;protocol::check(e.peer==peer&&!e.sending&&e.metadata==m);
                 e.offerSeen=true;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;
                 e.lastActivity=now;
                 // A restarted sender must first learn the durable full offset,
@@ -455,27 +477,31 @@ private:
             protocol::check(protocol::id(peer));try{room();}catch(const CapacityError& e){throw CapacityError(e.what(),id,version,negotiation);}Entry e;e.purpose=purpose;e.metadata=m;e.peer=peer;e.version=static_cast<unsigned>(version);e.negotiation=negotiation;e.effective=options;e.route=version==2?cap->second.route:0;e.state=State::AwaitingAcceptance;e.lastActivity=now;e.digestReady=true;e.statisticsKnown=true;touch(e);entries_.emplace(id,std::move(e));return;
         }
         if(kind==Kind::Cancel&&i==entries_.end()){r.end();return;} // Cancellation can race an unobserved offer.
-        protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;
+        receiveStage_="transfer_control_identity";protocol::check(i!=entries_.end()&&i->second.peer==peer);auto& e=i->second;
         if(version==2&&(e.version!=version||e.negotiation!=negotiation))return; // superseded authenticated negotiation
-        protocol::check(e.version==version||kind==Kind::Cancel);
+        receiveStage_="transfer_control_version";protocol::check(e.version==version||kind==Kind::Cancel);
         if(kind==Kind::Resume){
-            auto offset=r.number();r.end();protocol::check(e.sending&&offset<=e.metadata.size&&offset<=e.highWaterSent);
+            receiveStage_="transfer_resume_decode";auto offset=r.number();r.end();
+            receiveStage_="transfer_resume_direction";protocol::check(e.sending);
+            receiveStage_="transfer_resume_size";protocol::check(offset<=e.metadata.size);
+            receiveStage_="transfer_resume_high_water";protocol::check(offset<=e.highWaterSent);
             if(e.state==State::Recovering)return; // No peer event may bypass full source revalidation.
             if(terminal(e.state))return;
-            if(e.ready){if(offset<=e.done)return;protocol::check(offset<=e.sentUntil&&std::find(e.outstanding.begin(),e.outstanding.end(),offset)!=e.outstanding.end());}
+            if(e.ready){if(offset<=e.done)return;receiveStage_="transfer_resume_outstanding";protocol::check(offset<=e.sentUntil&&std::find(e.outstanding.begin(),e.outstanding.end(),offset)!=e.outstanding.end());}
             else {e.sentUntil=offset;e.outstanding.clear();}
             e.done=offset;while(!e.outstanding.empty()&&e.outstanding.front()<=offset)e.outstanding.pop_front();e.ready=true;e.finishSent=false;e.state=State::Transferring;e.lastActivity=now;e.lastAckAt=now;return;
         }
         if(kind==Kind::Cancel){r.end();if(!terminal(e.state)||e.state==State::Suspended){e.state=State::Cancelled;try{if(e.sink)e.sink->discard();}catch(...){e.error="Owned partial cleanup failed; manual attention required";}e.sink.reset();e.source.reset();e.hash.reset();}e.reply.reset();return;}
-        if(kind==Kind::Complete){r.end();protocol::check(e.sending&&e.done==e.metadata.size&&e.finishSent);e.state=State::Complete;e.source.reset();return;}
-        protocol::check(!e.sending);
+        if(kind==Kind::Complete){receiveStage_="transfer_complete_state";r.end();protocol::check(e.sending&&e.done==e.metadata.size&&e.finishSent);e.state=State::Complete;e.source.reset();return;}
+        receiveStage_="transfer_receiver_direction";protocol::check(!e.sending);
         if(kind==Kind::Chunk){
+            receiveStage_="transfer_chunk_bounds";
             auto offset=r.number();auto b=r.bytes();r.end();protocol::check(!b.empty()&&b.size()<=e.effective.chunkBytes&&offset<=e.metadata.size&&b.size()<=e.metadata.size-offset);
             if(e.state==State::Complete){e.reply=packet(Kind::Complete,e).data;return;}
             if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,e).data;return;}
-            protocol::check(e.state==State::Transferring&&e.sink&&e.hash);
+            receiveStage_="transfer_chunk_state";protocol::check(e.state==State::Transferring&&e.sink&&e.hash);
             if(offset<e.done){protocol::check(offset+b.size()<=e.done);e.reply=offsetPacket(Kind::Resume,e);return;}
-            protocol::check(offset==e.done);
+            receiveStage_="transfer_chunk_offset";protocol::check(offset==e.done);
             try{
                 {Timer timer(e.writeUs);for(size_t n=0;n<b.size();n+=ChunkBytes)e.sink->append(Blob(b.begin()+n,b.begin()+std::min(b.size(),n+ChunkBytes)));}
                 {Timer timer(e.flushUs);e.sink->flush();}
@@ -491,6 +517,7 @@ private:
             return;
         }
         if(kind==Kind::Finish){
+            receiveStage_="transfer_finish_state";
             r.end();if(e.state==State::Complete){e.reply=packet(Kind::Complete,e).data;return;}
             if(e.state==State::Cancelled||e.state==State::Failed){e.reply=packet(Kind::Cancel,e).data;return;}
             protocol::check(e.state==State::Transferring&&e.done==e.metadata.size&&e.hash&&e.sink);
