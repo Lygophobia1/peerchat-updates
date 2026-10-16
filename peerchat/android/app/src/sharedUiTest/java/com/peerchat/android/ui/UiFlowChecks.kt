@@ -149,7 +149,10 @@ abstract class UiFlowChecks {
     }
     @Test fun manyMessagesDateGroupingStillShowsNewestAndComposer() {
         val c = DemoConversations().initialSnapshot().first().copy(messages = (0 until 300).map {
-            MessageUi("many-$it", "demo-sammy", "Sammy", "Message $it · 日本語 👋", false, "10:00", "Day ${it / 10}")
+            // Give the synthetic sequence actual chronology: equal timestamps
+            // intentionally use sender/ID ties rather than numeric ID suffixes.
+            MessageUi("many-$it", "demo-sammy", "Sammy", "Message $it · 日本語 👋", false, "10:00", "Day ${it / 10}",
+                timestamp=it.toLong()*60_000,logicalOrder=it.toLong()+1)
         })
         launch(PeerChatUiState(route = Route.Conversation, selectedId = c.id, conversations = listOf(c)))
         compose.onNodeWithText("Message 299 · 日本語 👋").assertIsDisplayed()
