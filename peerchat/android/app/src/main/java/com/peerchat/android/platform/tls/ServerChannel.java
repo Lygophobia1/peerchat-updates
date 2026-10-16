@@ -172,6 +172,18 @@ public final class ServerChannel implements AutoCloseable {
         if(data==null||data.length==0||data.length>maximum)throw new IOException("Invalid server frame size");
         DataOutputStream output=new DataOutputStream(socket.getOutputStream());output.writeInt(data.length);output.write(data);output.flush();
     }
+    /** A long-lived reader has no idle read timeout. Bound its independent
+     * writer without changing that read policy or allocating a thread per write. */
+    public void writeBounded(byte[] data,int maximum,int milliseconds)throws IOException {
+        boundedWrite(tcp,milliseconds,() -> write(data,maximum));
+    }
+    interface WriteOperation { void run() throws IOException; }
+    static void boundedWrite(Socket socket,int milliseconds,WriteOperation operation)throws IOException {
+        if(milliseconds<1||milliseconds>30000)throw new IllegalArgumentException("Invalid write timeout");
+        java.util.concurrent.ScheduledFuture<?> deadline=OperationScope.CLOCK.schedule(
+            () -> {try{socket.close();}catch(IOException ignored){}},milliseconds,java.util.concurrent.TimeUnit.MILLISECONDS);
+        try{operation.run();}finally{deadline.cancel(false);}
+    }
     public byte[] read(int maximum)throws IOException {
         operations.check();
         if(maximum<1||maximum>100000)throw new IOException("Invalid frame bound");
