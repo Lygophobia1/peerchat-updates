@@ -5,6 +5,38 @@ using System.Windows.Controls;
 using System.Windows.Media;
 namespace PeerChatDesktop {
 public partial class DesktopApplication {
+    bool completeDiagnosticsExporting;
+    DiagnosticsSnapshot CaptureCompleteDiagnosticSnapshot(){
+        var snapshot=diagnosticsService.CaptureComplete();var correlation=new System.Text.StringBuilder();
+        correlation.AppendLine("scope=currently loaded message metadata and existing transfer catalog; no plaintext or disk history scan");
+        correlation.AppendLine("local_peer_id="+model.OwnId+" authenticated_account_id="+(discovery==null?0:discovery.AccountId)+" authentication_generation="+authenticatedFriendSnapshotGeneration);
+        foreach(var conversation in model.Conversations.Values){
+            correlation.AppendLine("conversation_id="+conversation.ConversationId+" account_id="+conversation.AccountId+" known_peer_ids="+String.Join(",",conversation.KnownPeerIds)+" live_session="+conversation.Online+" session_epoch="+conversation.SessionEpoch+" session_revision="+conversation.SessionRevision);
+            foreach(var message in conversation.Messages)correlation.AppendLine("message_id="+message.Data.id+" sender_device="+message.Data.sender+" direction="+(message.Outgoing?"outgoing":"incoming")+" timestamp="+message.Data.time+" sequence="+message.Data.sequence+" logical_order="+message.Data.logical+" delivery="+message.Data.delivery);
+        }
+        foreach(var group in model.GroupChats.Values){correlation.AppendLine("group_id="+group.Id);foreach(var message in group.Messages)correlation.AppendLine("message_id="+message.Data.id+" sender_device="+message.Data.sender+" timestamp="+message.Data.time+" sequence="+message.Data.sequence+" delivery="+message.Data.delivery);}
+        foreach(var row in chatCatalog.Values){
+            correlation.AppendLine("transfer_id="+row.id+" logical_id="+row.logicalId+" peer_id="+row.peer+" sender_peer="+row.senderPeer+" conversation_peer="+row.conversationPeer+" account_id="+row.account+" sending="+row.sending+" archive="+row.isArchive+" state="+row.state+" size="+row.size+" durable_or_acknowledged="+row.done);
+            correlation.AppendLine("transfer_id="+row.id+" final_failure="+row.error+" save_state="+row.saveState+" save_failure="+row.saveError);
+        }
+        snapshot.Sections.Add(new DiagnosticsSection{Name="Message and transfer correlation",Details=correlation.ToString()});return snapshot;
+    }
+    async void ExportCompleteDiagnostics(Window owner){
+        if(completeDiagnosticsExporting)return;
+        var picker=new Microsoft.Win32.SaveFileDialog{Title="Export complete PeerChat diagnostics",FileName="PeerChat-diagnostics-"+DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")+".txt",DefaultExt=".txt",AddExtension=true,OverwritePrompt=true,Filter="UTF-8 text files (*.txt)|*.txt|All files (*.*)|*.*"};
+        if(picker.ShowDialog(owner)!=true)return;
+        completeDiagnosticsExporting=true;
+        try{
+            // Source delegates read existing dispatcher-owned/native snapshots.
+            // Freeze those once; the worker never traverses mutable UI models.
+            var snapshot=CaptureCompleteDiagnosticSnapshot();
+            var failures=diagnosticsRetention==null?new System.Collections.Generic.List<FailureSnapshot>():diagnosticsRetention.Failures().ToList();
+            string path=picker.FileName;
+            await System.Threading.Tasks.Task.Run(()=>DiagnosticsFileExport.Save(path,snapshot,failures,System.Threading.CancellationToken.None));
+            if(!closing){model.Status="Complete diagnostics exported to the selected UTF-8 file.";Refresh();}
+        }catch(Exception error){if(!closing)Notify("Could not export complete diagnostics ("+error.GetType().Name+"). No partial report was saved.",owner.IsVisible?owner:window);}
+        finally{completeDiagnosticsExporting=false;}
+    }
     IDiagnosticLayoutProvider diagnosticLayoutProvider=new SampleDiagnosticLayoutProvider();
     DiagnosticContext diagnosticContext=new DiagnosticContext(DiagnosticSection.GroupCalls,"");
     DiagnosticExampleState diagnosticExampleState=DiagnosticExampleState.Active;

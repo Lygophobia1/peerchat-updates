@@ -132,14 +132,17 @@ public sealed class VoiceDiagnosticsData {
 public sealed class DiagnosticsService {
     readonly DiagnosticsSources sources;
     public DiagnosticsService(DiagnosticsSources value){if(value==null)throw new ArgumentNullException("value");sources=value;}
-    public DiagnosticsSnapshot Capture(){
+    public DiagnosticsSnapshot Capture(){return Capture(false);}
+    public DiagnosticsSnapshot CaptureComplete(){return Capture(true);}
+    DiagnosticsSnapshot Capture(bool complete){
         var sections=new List<DiagnosticsSection>();
-        Add(sections,"History Sync authorization",Read(sources.HistorySync));
-        Add(sections,"File transfers",Read(sources.Transfers));
-        Add(sections,"Connection",Read(sources.Connection));Add(sections,"Connection events",Read(sources.ConnectionEvents));
-        Add(sections,"Security",Read(sources.Security));
-        var voice=ReadVoice();Add(sections,"Voice",String.IsNullOrWhiteSpace(voice)?Read(sources.Voice):voice);
-        Add(sections,"Screen share",Read(sources.ScreenShare));Add(sections,"Local",Read(sources.Local));
+        Action<string,string> add=(name,content)=>{if(complete){if(!String.IsNullOrWhiteSpace(content))sections.Add(new DiagnosticsSection{Name=name,Details=content});}else Add(sections,name,content);};
+        add("History Sync authorization",Read(sources.HistorySync));
+        add("File transfers",Read(sources.Transfers));
+        add("Connection",Read(sources.Connection));add("Connection events",Read(sources.ConnectionEvents));
+        add("Security",Read(sources.Security));
+        var voice=ReadVoice();add("Voice",String.IsNullOrWhiteSpace(voice)?Read(sources.Voice):voice);
+        add("Screen share",Read(sources.ScreenShare));add("Local",Read(sources.Local));
         return new DiagnosticsSnapshot{SnapshotId=Guid.NewGuid().ToString("N"),TimestampUtc=DateTime.UtcNow.ToString("O"),Build=Read(sources.Build),Profile=Read(sources.Profile),Status=Read(sources.Status),Sections=sections,Groups=ReadGroups()};
     }
     List<GroupDiagnosticsData> ReadGroups(){try{return CloneGroups(sources.Groups==null?null:sources.Groups());}catch{return new List<GroupDiagnosticsData>();}}
@@ -288,6 +291,66 @@ public sealed class DiagnosticsService {
 public static class DiagnosticsPrivacyFilter {
     static readonly Regex SensitiveLine=new Regex("(?im)^([^\\r\\n]*(?:password|secret|token|authorization|private[_ -]?key|turn[_ -]?(?:uri|username|user)|credential[_ -]?uri|pcm|message[_ -]?content)[^=:\\r\\n]*[=:]).*$",RegexOptions.Compiled);
     public static string Redact(string value){if(String.IsNullOrEmpty(value))return "";string filtered=SensitiveLine.Replace(value,"$1 [redacted]");return filtered.Length>65536?filtered.Substring(0,65536):filtered;}
+    public static string RedactComplete(string value){return String.IsNullOrEmpty(value)?"":SensitiveLine.Replace(value,"$1 [redacted]");}
+}
+
+/** Complete local-file representation. Clipboard/view retention limits remain
+ * independent. The caller freezes subsystem snapshots before worker-thread I/O. */
+public static class DiagnosticsFileExport {
+    public const long MaxReportChars=32L*1024*1024;
+    const int MaxLineChars=1024*1024;
+    static readonly Regex ContentField=new Regex(@"(?i)^([^\r\n=:]*(?:message[_ -]?(?:text|content|body)|plaintext|chat[_ -]?content|(?:^|\s)(?:password|token|text|body|content)|(?:source|destination|file|private)[_ -]?path)[^=:\r\n]*[=:]).*$");
+    static readonly Regex WindowsPath=new Regex(@"(?i)(?:[a-z]:[\\/]|\\\\)[^\r\n]*");
+    static readonly Regex UnixPath=new Regex(@"(?i)(?<![a-z0-9])/(?:home|Users|data|storage|sdcard|private|tmp|var|mnt|media|etc)/[^\r\n]*");
+    static readonly Regex PlainContent=new Regex(@"(?i)^(\s*(?:message|text|body|content)\s*[=:]).*$");
+    static readonly Regex PrivateMaterial=new Regex(@"(?i)^([^=:\r\n]*(?:(?:private|secret|shared|epoch|group|root|master|encryption|decryption)[_ -]?(?:key|seed)|key[_ -]?(?:bytes|material))[^=:\r\n]*[=:]).*$");
+    static readonly Regex UriCredentials=new Regex(@"(?i)(\b[a-z][a-z0-9+.-]{0,31}://)[^/\s:@]+:[^/\s@]+@");
+    sealed class Report {
+        readonly TextWriter writer;readonly System.Threading.CancellationToken cancellation;long count;bool privateBlock;
+        public Report(TextWriter writer,System.Threading.CancellationToken cancellation){this.writer=writer;this.cancellation=cancellation;}
+        public void Text(string value){using(var input=new StringReader(value??"")){string line;while((line=input.ReadLine())!=null){
+            cancellation.ThrowIfCancellationRequested();if(line.Length>MaxLineChars)throw new InvalidDataException("Diagnostic line exceeds the explicit export bound.");
+            if(line.IndexOf("-----BEGIN",StringComparison.Ordinal)>=0&&line.IndexOf("PRIVATE KEY-----",StringComparison.Ordinal)>=0){privateBlock=true;line="[private key redacted]";}
+            else if(privateBlock){if(line.IndexOf("-----END",StringComparison.Ordinal)>=0&&line.IndexOf("PRIVATE KEY-----",StringComparison.Ordinal)>=0)privateBlock=false;continue;}
+            line=DiagnosticsPrivacyFilter.RedactComplete(line);line=ContentField.Replace(line,"$1 [redacted]");line=PlainContent.Replace(line,"$1 [redacted]");line=PrivateMaterial.Replace(line,"$1 [redacted]");line=UriCredentials.Replace(line,"$1[credentials redacted]@");line=WindowsPath.Replace(line,"[private path redacted]");line=UnixPath.Replace(line,"[private path redacted]");
+            count+=line.Length+Environment.NewLine.Length;if(count>MaxReportChars)throw new InvalidDataException("Diagnostics exceed the explicit 32 MiB text export bound; no partial report was saved.");writer.WriteLine(line);
+        }}if(privateBlock)throw new InvalidDataException("Unterminated private material block; no partial report was saved.");}
+        public void Field(string name,object value){Text(name+"="+Convert.ToString(value,System.Globalization.CultureInfo.InvariantCulture));}
+        public void Snapshot(DiagnosticsSnapshot value){
+            if(value==null){Text("snapshot=unavailable");return;}
+            Field("snapshot_id",value.SnapshotId);Field("snapshot_utc",value.TimestampUtc);Field("build",value.Build);Field("profile",value.Profile);Field("status",value.Status);
+            foreach(var section in value.Sections??new List<DiagnosticsSection>()){Text("");Text("=== "+section.Name+" ===");Text(section.Details??"Unavailable");}
+            foreach(var group in value.Groups??new List<GroupDiagnosticsData>()){
+                Text("");Text("=== Complete group metadata ===");foreach(var property in typeof(GroupDiagnosticsData).GetProperties().Where(p=>p.Name!="Members"))Field(property.Name,property.GetValue(group,null));
+                foreach(var member in group.Members??new List<GroupDiagnosticsMember>()){Text("--- group member ---");foreach(var property in typeof(GroupDiagnosticsMember).GetProperties())Field(property.Name,property.GetValue(member,null));}
+            }
+        }
+    }
+    public static void Write(TextWriter writer,DiagnosticsSnapshot snapshot,IEnumerable<FailureSnapshot> failures,System.Threading.CancellationToken cancellation){
+        if(writer==null)throw new ArgumentNullException("writer");var report=new Report(writer,cancellation);
+        report.Text("PeerChat complete local diagnostics / UTF-8 / v1");report.Field("exported_utc",DateTime.UtcNow.ToString("O"));
+        report.Text("scope=all available current subsystem snapshots and bounded retained failures; no clipboard or upload");
+        report.Text("consistency=frozen application snapshot; independent subsystem captures are sequential, not a global transport transaction");
+        report.Text("availability=only existing recorded fields are included; absent stage durations/native failures are not inferred");
+        report.Snapshot(snapshot);
+        foreach(var failure in failures??Enumerable.Empty<FailureSnapshot>()){
+            report.Text("");report.Text("=== Retained failure ===");report.Field("failure_id",failure.Id);report.Field("failure_utc",failure.TimestampUtc);report.Field("title",failure.Title);report.Field("operation_type",failure.OperationType);report.Field("operation_id",failure.OperationId);report.Field("failure_domain",failure.FailureDomain);report.Field("reason",failure.Reason);report.Field("stage",failure.Stage);report.Field("generation",failure.Generation);report.Field("module",failure.Module);report.Snapshot(failure.Diagnostics);
+        }
+        report.Text("");report.Text("=== End of complete available diagnostic snapshot ===");
+    }
+    public static void Save(string path,DiagnosticsSnapshot snapshot,IEnumerable<FailureSnapshot> failures,System.Threading.CancellationToken cancellation){
+        if(String.IsNullOrWhiteSpace(path))throw new ArgumentException("Choose an export file.","path");
+        path=Path.GetFullPath(path);string temporary=Path.Combine(Path.GetDirectoryName(path),".PeerChat-diagnostics-"+Guid.NewGuid().ToString("N")+".tmp");
+        try{
+            cancellation.ThrowIfCancellationRequested();
+            using(var stream=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)){
+                using(var writer=new StreamWriter(stream,new System.Text.UTF8Encoding(false,true),16384,true)){Write(writer,snapshot,failures,cancellation);writer.Flush();}
+                stream.Flush(true);
+            }
+            cancellation.ThrowIfCancellationRequested();
+            if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
+        }finally{try{if(File.Exists(temporary))File.Delete(temporary);}catch{}}
+    }
 }
 
 // Small profile-local persistence: one active marker per concurrent logical operation
