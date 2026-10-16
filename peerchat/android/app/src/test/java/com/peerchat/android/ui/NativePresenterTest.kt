@@ -80,6 +80,10 @@ class NativePresenterTest {
         override suspend fun send(peerId:String,text:String):String {sends++;if(failSend)error("test failure");return "c".repeat(32)}
         override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
         override suspend fun requestFriend(username:String) {}
+        val searches=mutableListOf<String>()
+        var searchDelay=0L
+        override suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot>{searches.add(query);kotlinx.coroutines.delay(searchDelay);return listOf(DirectoryAccountSnapshot(27,query,true))}
+        override suspend fun refreshContacts(){}
         override suspend fun respondFriend(accountId:Long,accept:Boolean) {}
         override suspend fun signOut(){signOuts++;state.value=MessagingSnapshot()}
         override suspend fun resetNetworkSession(){resets++;state.value=state.value.copy(authenticated=false,serverPresenceLive=false,status="Network session reset")}
@@ -94,6 +98,23 @@ class NativePresenterTest {
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
         dispatcher.scheduler.advanceUntilIdle()
         return p
+    }
+    @Test fun peopleSearchDebouncesAndDropsPreviousQueryAndOfflineResults(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test password");dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.PeopleQuery("sa"));dispatcher.scheduler.advanceTimeBy(200)
+        p.dispatch(UiAction.PeopleQuery("sam"));dispatcher.scheduler.advanceTimeBy(349);dispatcher.scheduler.runCurrent()
+        assertTrue(commands.searches.isEmpty())
+        dispatcher.scheduler.advanceTimeBy(1);dispatcher.scheduler.runCurrent()
+        assertEquals(listOf("sam"),commands.searches);assertEquals("sam",p.state.value.peopleResults.single().username)
+        commands.searchDelay=1000
+        p.dispatch(UiAction.PeopleQuery("old"));dispatcher.scheduler.advanceTimeBy(350);dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.PeopleQuery("new"));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("new",p.state.value.peopleResults.single().username)
+        commands.state.value=commands.state.value.copy(serverPresenceLive=false);dispatcher.scheduler.runCurrent()
+        assertTrue(p.state.value.peopleResults.isEmpty())
+        p.dispatch(UiAction.PeopleQuery("offline"));dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(commands.searches.contains("offline"));assertNotNull(p.state.value.peopleError)
     }
     private fun reenrollmentOffer()=mailboxReenrollment(NativeRecordWriter(3).also{w->
         w.text("PeerChat/MailboxReenrollment/v1");w.number(19);w.number(3);w.number(4)

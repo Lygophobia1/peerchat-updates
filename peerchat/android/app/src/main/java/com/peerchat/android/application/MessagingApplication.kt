@@ -34,6 +34,11 @@ interface MessagingApplication:AutoCloseable {
     suspend fun attachmentAction(id:String,accept:Boolean) { error("File sharing unavailable") }
     suspend fun attachmentText(id:String):String = error("Text preview unavailable")
     suspend fun requestFriend(username:String)
+    suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot> = error("People search unavailable")
+    suspend fun cancelFriend(accountId:Long) { error("Request cancellation unavailable") }
+    suspend fun refreshContacts() { error("Contact refresh unavailable") }
+    suspend fun transferSettings():TransferSettingsSnapshot = error("Transfer settings unavailable")
+    suspend fun saveTransferSettings(value:TransferSettingsSnapshot) { error("Transfer settings unavailable") }
     suspend fun respondFriend(accountId:Long,accept:Boolean)
     suspend fun signOut()
     /** Recovery only: retain protected credentials, Profile, keys and history. */

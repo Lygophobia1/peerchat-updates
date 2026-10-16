@@ -12,7 +12,8 @@ import com.peerchat.android.platform.NotificationPreview
 import com.peerchat.android.application.ArchiveEnrollmentSnapshot
 import com.peerchat.android.application.ArchiveDeviceAction
 
-enum class Route { Welcome, Login, Register, Server, Home, Conversation, Details, Diagnostics }
+enum class Route { Welcome, Login, Register, Server, Home, Conversation, Details, Diagnostics, Contacts, TransferSettings }
+enum class ContactPage { Menu, FindPeople, Incoming, Outgoing, Invitations, NewChat }
 enum class Tab { Chats, Calls, You }
 enum class ChatKind { Direct, Group }
 enum class LoadState { Ready, Loading, Empty, Error }
@@ -58,6 +59,12 @@ data class PeerChatUiState(
     val voiceAvailable:Boolean=false,val voiceDiagnostic:String="Voice calls are unavailable in this build.",
     val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,
     val incomingRequests:List<MemberUi> = emptyList(),
+    val outgoingRequests:List<MemberUi> = emptyList(),
+    val contactPage:ContactPage=ContactPage.Menu,
+    val peopleQuery:String="",val peopleResults:List<com.peerchat.android.application.DirectoryAccountSnapshot> = emptyList(),
+    val peopleLoading:Boolean=false,val peopleError:String?=null,val contactBusy:Boolean=false,
+    val transferSettings:com.peerchat.android.application.TransferSettingsSnapshot?=null,
+    val transferSettingsBusy:Boolean=false,val transferSettingsError:String?=null,
     val groupInvitations:List<com.peerchat.android.application.GroupInvitationSnapshot> = emptyList(),
     val route: Route = Route.Welcome, val tab: Tab = Tab.Chats, val kind: ChatKind = ChatKind.Direct,
     val conversations: List<ConversationUi> = emptyList(), val selectedId: String? = null,
@@ -101,6 +108,12 @@ class UnconnectedAccountAccess : AccountAccess {
 }
 
 sealed interface UiAction {
+    data object OpenTransferSettings:UiAction
+    data class SaveTransferSettings(val value:com.peerchat.android.application.TransferSettingsSnapshot):UiAction
+    data class Contacts(val page:ContactPage=ContactPage.Menu):UiAction
+    data class PeopleQuery(val text:String):UiAction
+    data object RefreshContacts:UiAction
+    data class CancelFriend(val accountId:Long):UiAction
     data class CreateGroup(val name:String):UiAction
     data class InviteGroup(val group:String,val account:Long):UiAction
     data class RespondGroup(val id:String,val accept:Boolean):UiAction
@@ -158,6 +171,11 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
     fun updateSelected(transform: (ConversationUi) -> ConversationUi) = state.copy(conversations =
         state.conversations.map { if (it.id == state.selectedId) transform(it) else it })
     return when (action) {
+        UiAction.OpenTransferSettings -> state.copy(route=Route.TransferSettings,notice=null)
+        is UiAction.SaveTransferSettings -> state
+        is UiAction.Contacts -> state.copy(route=Route.Contacts,contactPage=action.page,notice=null)
+        is UiAction.PeopleQuery -> state.copy(peopleQuery=action.text.take(32))
+        UiAction.RefreshContacts,is UiAction.CancelFriend -> state
         is UiAction.CreateGroup,is UiAction.InviteGroup,is UiAction.RespondGroup -> state
         UiAction.Explore -> state.copy(route = Route.Home, notice = null)
         UiAction.ResetNetworkSession -> state.copy(route=Route.Login,startupStatus=null,loginBusy=false,connection=ConnectionState.Offline)
@@ -167,7 +185,9 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.Navigate -> state.copy(route = action.route, notice = null, loginError = null,
             serverReturn = if (action.route == Route.Server) state.route else state.serverReturn,
             diagnosticsReturn = if (action.route == Route.Diagnostics) state.route else state.diagnosticsReturn)
-        UiAction.Back -> if (state.route == Route.Home && state.tab != Tab.Chats) state.copy(tab = Tab.Chats) else state.copy(route = when (state.route) {
+        UiAction.Back -> if(state.route==Route.Contacts&&state.contactPage!=ContactPage.Menu)state.copy(contactPage=ContactPage.Menu) else if (state.route == Route.Home && state.tab != Tab.Chats) state.copy(tab = Tab.Chats) else state.copy(route = when (state.route) {
+            Route.Contacts -> Route.Home
+            Route.TransferSettings -> Route.Home
             Route.Conversation -> Route.Home
             Route.Details -> Route.Conversation
             Route.Diagnostics -> state.diagnosticsReturn

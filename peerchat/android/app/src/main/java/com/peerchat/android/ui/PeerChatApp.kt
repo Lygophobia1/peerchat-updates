@@ -125,6 +125,8 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             Route.Login, Route.Register -> Login(state, dispatch, login)
             Route.Server -> ServerSettings(state, dispatch)
             Route.Home -> Home(state, dispatch)
+            Route.Contacts -> ContactsScreen(state,dispatch)
+            Route.TransferSettings -> TransferSettingsScreen(state,dispatch)
             Route.Conversation -> state.selected?.let { ConversationScreen(it, state, dispatch) }
             Route.Details -> state.selected?.let { DetailsScreen(it, state, dispatch) }
             Route.Diagnostics -> DiagnosticsScreen(state, dispatch)

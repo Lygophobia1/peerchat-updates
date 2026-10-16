@@ -66,6 +66,7 @@ import com.peerchat.android.platform.NotificationPreview
         }
         Text("Settings", style = MaterialTheme.typography.titleLarge)
         if(!state.demo){
+            OutlinedButton({dispatch(UiAction.OpenTransferSettings)},Modifier.fillMaxWidth().testTag("open-transfer-settings")){Text("File Transfer Settings")}
             ArchiveDevicesSection(state,dispatch)
             Text("Offline encrypted mailbox storage",style=MaterialTheme.typography.titleMedium)
             Row(verticalAlignment=Alignment.CenterVertically){

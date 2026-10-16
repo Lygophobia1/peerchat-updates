@@ -34,11 +34,18 @@ import androidx.compose.ui.tooling.preview.Preview
                 }
             }
         })
+    }, floatingActionButton = {
+        if(state.tab==Tab.Chats)FloatingActionButton({dispatch(UiAction.Contacts())},shape=CircleShape,
+            modifier=Modifier.imePadding().testTag("chats-add")) {
+            Icon(Icons.Default.Add,contentDescription="New chat, people and invitations")
+        }
     }, bottomBar = {
         NavigationBar {
             Tab.entries.forEach { tab -> NavigationBarItem(selected = state.tab == tab,
                 onClick = { dispatch(UiAction.SelectTab(tab)) }, label = { Text(tab.name) }, icon = {
-                    Icon(when (tab) { Tab.Chats -> Icons.Default.Email; Tab.Calls -> Icons.Default.Call; Tab.You -> Icons.Default.Person }, null)
+                    BadgedBox(badge={if(tab==Tab.Chats&&(state.incomingRequests.size+state.groupInvitations.size)>0)Badge{Text((state.incomingRequests.size+state.groupInvitations.size).toString())}}){
+                        Icon(when (tab) { Tab.Chats -> Icons.Default.Email; Tab.Calls -> Icons.Default.Call; Tab.You -> Icons.Default.Person }, null)
+                    }
                 }) }
         }
     }) { padding ->
@@ -75,7 +82,7 @@ import androidx.compose.ui.tooling.preview.Preview
                         }
                         LoadState.Empty -> StatusPanel("No conversations yet", "Your conversations will appear here.") {}
                         LoadState.Ready -> if (state.visible.isEmpty()) StatusPanel("No matches", "Try a different search.") {} else
-                            LazyColumn(Modifier.fillMaxSize().testTag("conversation-list")) {
+                            LazyColumn(Modifier.fillMaxSize().testTag("conversation-list"),contentPadding=PaddingValues(bottom=88.dp)) {
                                 items(state.visible, key = { it.id }) { ConversationRow(it) { dispatch(UiAction.Select(it.id)) } }
                             }
                     }
