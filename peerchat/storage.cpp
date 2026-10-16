@@ -23,6 +23,8 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <functional>
+#include <tuple>
 #include <stdexcept>
 
 namespace peerchat {
@@ -281,6 +283,48 @@ DeliveryTargetRetry decodeTargetRetry(const Blob& bytes,const std::string& id,co
 
 using namespace storage_detail;
 struct Storage::Impl {
+    struct HistoryKey {
+        std::uint64_t time=0;
+        std::string sender,id,group;
+        std::int64_t sequence=0;
+        bool operator<(const HistoryKey& other) const {
+            return std::tie(time,sender,id)<std::tie(other.time,other.sender,other.id);
+        }
+    };
+    struct HistoryCache {std::string conversation;std::int64_t watermark=0,count=0;std::vector<HistoryKey> keys;};
+    // Ordering keys live only in memory: never persist decrypted timestamps.
+    // Cache at most eight conversations / 32768 keys. Larger conversations use
+    // a bounded top-page scan. Payloads are always read from protected storage.
+    std::vector<HistoryCache> historyCaches;
+    std::vector<HistoryKey> historyPageKeys(const std::string& conversation,std::int64_t watermark,std::int64_t count,
+        int limit,const std::optional<HistoryKey>& before,
+        const std::function<void(const std::function<void(HistoryKey)>&)>& scan){
+        auto cached=std::find_if(historyCaches.begin(),historyCaches.end(),[&](const HistoryCache& c){return c.conversation==conversation;});
+        std::vector<HistoryKey> keys;
+        if(cached!=historyCaches.end()&&cached->watermark==watermark&&cached->count==count){
+            keys=std::move(cached->keys);historyCaches.erase(cached);
+        }else{
+            if(cached!=historyCaches.end())historyCaches.erase(cached);
+            const bool cacheable=count<=32768;
+            scan([&](HistoryKey key){
+                if(cacheable)keys.push_back(std::move(key));
+                else if(!before||key<*before){
+                    auto position=std::lower_bound(keys.begin(),keys.end(),key);keys.insert(position,std::move(key));
+                    if(keys.size()>static_cast<size_t>(limit))keys.erase(keys.begin());
+                }
+            });
+            std::sort(keys.begin(),keys.end());
+            if(!cacheable)return keys;
+        }
+        auto end=before?std::lower_bound(keys.begin(),keys.end(),*before):keys.end();
+        const auto available=static_cast<size_t>(end-keys.begin());
+        std::vector<HistoryKey> page(end-std::min(available,static_cast<size_t>(limit)),end);
+        size_t total=keys.size();for(const auto& c:historyCaches)total+=c.keys.size();
+        while(!historyCaches.empty()&&(historyCaches.size()>=8||total>32768)){
+            total-=historyCaches.front().keys.size();historyCaches.erase(historyCaches.begin());
+        }
+        historyCaches.push_back({conversation,watermark,count,std::move(keys)});return page;
+    }
     std::shared_ptr<platform::SqlDatabase> database;
     std::shared_ptr<platform::RecordProtector> records;
     std::shared_ptr<platform::IdentityProvider> identity;
@@ -525,6 +569,16 @@ void Storage::saveTransferJournal(const std::string& device,const Blob& expected
     require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid transfer journal");
     Transaction transaction(impl_->sql);require(transferJournal(device)==expected,"Transfer journal changed concurrently");
     impl_->put("transfer-journal/v1/"+device,next);transaction.commit();
+}
+Blob Storage::transferTuning(const std::string& device){
+    require(identifier(device),"Invalid transfer tuning device");return impl_->get("transfer-tuning/v1/"+device);
+}
+void Storage::saveTransferTuning(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=8192,"Invalid transfer tuning");
+    Transaction transaction(impl_->sql);Secret previous{transferTuning(device)};
+    require(previous.data==expected,"Transfer tuning changed concurrently");
+    if(previous.data!=next)impl_->put("transfer-tuning/v1/"+device,next);
+    transaction.commit();
 }
 Blob Storage::attachmentMetadata(const std::string& id){
     require(identifier(id,32),"Invalid attachment identity");return impl_->get("attachment-history/v1/"+id);
@@ -864,13 +918,28 @@ void Storage::observeLogicalOrder(std::uint64_t remoteOrder) {
     transaction.commit();
 }
 std::vector<StoredMessage> Storage::history(const std::string& conversation,int limit,std::int64_t beforeSequence) {
-    require(identifier(conversation)&&limit>0&&limit<=1000,"Invalid history page request");
-    Statement s(impl_->sql,"SELECT rowid,id,b FROM messages WHERE peer=? AND rowid<? ORDER BY rowid DESC LIMIT ?");
-    s.text(1,conversation);s.number(2,beforeSequence);s.number(3,limit);std::vector<StoredMessage> result;
-    while(s.row()) {
-        auto id=s.text(1);Secret plain{impl_->protect(s.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);require(m.id==id,"Stored message ID mismatch");m.sequence=s.number(0);result.push_back(std::move(m));
+    require(identifier(conversation)&&limit>0&&limit<=1000&&beforeSequence>0,"Invalid history page request");
+    std::optional<Impl::HistoryKey> before;
+    // The ABI token remains a local rowid, but names an authenticated ordering
+    // key, not an arrival boundary. Account conversations can span device peers.
+    if(beforeSequence!=INT64_MAX){
+        Statement anchor(impl_->sql,"SELECT id,peer,b FROM messages WHERE rowid=?");anchor.number(1,beforeSequence);
+        require(anchor.row(),"Unknown history page cursor");auto id=anchor.text(0),peer=anchor.text(1);
+        Secret plain{impl_->protect(anchor.bytes(2),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);
+        require(m.id==id,"Stored history cursor identity mismatch");before=Impl::HistoryKey{m.utcMilliseconds,m.sender,m.id,{},beforeSequence};
     }
-    std::reverse(result.begin(),result.end());return result;
+    Statement revision(impl_->sql,"SELECT COALESCE(MAX(a.sequence),0),COUNT(*) FROM messages m JOIN message_archive_index a ON a.message_id=m.id WHERE m.peer=?");
+    revision.text(1,conversation);require(revision.row(),"History revision unavailable");
+    auto keys=impl_->historyPageKeys("dm/"+conversation,revision.number(0),revision.number(1),limit,before,[&](const auto& accept){
+        Statement rows(impl_->sql,"SELECT rowid,id,b FROM messages WHERE peer=?");rows.text(1,conversation);
+        while(rows.row()){
+            auto id=rows.text(1);Secret plain{impl_->protect(rows.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);
+            require(m.id==id,"Stored message ID mismatch");accept(Impl::HistoryKey{m.utcMilliseconds,m.sender,m.id,{},rows.number(0)});
+        }
+    });
+    std::vector<StoredMessage> result;
+    for(const auto& key:keys){auto m=message(key.id);require(m.has_value(),"History message disappeared");m->sequence=key.sequence;result.push_back(std::move(*m));}
+    return result;
 }
 void Storage::eraseHistory(const std::string& conversation) {
     require(identifier(conversation),"Invalid conversation identity");
@@ -1022,16 +1091,27 @@ AuthenticatedGroupMessage Storage::authenticatedGroupMessage(const std::string& 
 }
 std::vector<AuthenticatedGroupMessage> Storage::authenticatedGroupHistory(const std::string& local,int limit,std::int64_t before){
     require(identifier(local,32)&&limit>0&&limit<=100&&before>0,"Invalid group history page");
-    require(groupHistoryOrderingReady(local),"Group history ordering pending");
-    std::int64_t logical=INT64_MAX;std::string sender(64,'z'),message(64,'z');
-    if(before!=INT64_MAX){Statement cursor(impl_->sql,"SELECT CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END,o.sender,i.message_id FROM group_message_index i JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND i.sequence=?");cursor.text(1,local);cursor.number(2,before);require(cursor.row(),"Unknown group history page cursor");logical=cursor.number(0);sender=cursor.text(1);message=cursor.text(2);}
-    Statement query(impl_->sql,"SELECT i.server_group,i.message_id,i.sequence FROM group_message_index i JOIN group_message_order_v1 o ON o.sequence=i.sequence WHERE i.local_group=? AND (CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END,o.sender,i.message_id)<(?,?,?) ORDER BY CASE WHEN o.logical_order=0 THEN i.sequence ELSE o.logical_order END DESC,o.sender DESC,i.message_id DESC LIMIT ?");
-    query.text(1,local);query.number(2,logical);query.text(3,sender);query.text(4,message);query.number(5,limit);std::vector<AuthenticatedGroupMessage> page;
-    while(query.row()){
-        auto group=query.text(0),id=query.text(1);auto item=authenticatedGroupMessage(group,id);item.sequence=query.number(2);
-        page.push_back(std::move(item));
-    }
-    std::reverse(page.begin(),page.end());return page;
+    auto keyFor=[&](const std::string& group,const std::string& id,std::int64_t sequence){
+        auto row=authenticatedGroupMessage(group,id);Impl::HistoryKey key;key.id=id;key.group=group;key.sequence=sequence;
+        // These are already authenticated protected bodies. References/unknown
+        // body types have no timestamp; never invent one from local arrival.
+        try{protocol::Reader reader(row.plaintext);auto kind=reader.type();auto type=reader.string();
+            if((kind==protocol::Text&&type=="PeerChat.GroupText.v1")||
+                (kind==protocol::FileTransfer&&type=="PeerChat.GroupAttachment.v1"))key.time=reader.number();}
+        catch(const std::exception&){}
+        constexpr size_t senderOffset=4+2+32+8+8+32+8;
+        if(row.envelope.size()>=senderOffset+64)key.sender.assign(row.envelope.begin()+senderOffset,row.envelope.begin()+senderOffset+64);
+        std::fill(row.plaintext.begin(),row.plaintext.end(),0);return key;
+    };
+    std::optional<Impl::HistoryKey> anchor;
+    if(before!=INT64_MAX){Statement cursor(impl_->sql,"SELECT server_group,message_id FROM group_message_index WHERE local_group=? AND sequence=?");
+        cursor.text(1,local);cursor.number(2,before);require(cursor.row(),"Unknown group history page cursor");anchor=keyFor(cursor.text(0),cursor.text(1),before);}
+    Statement revision(impl_->sql,"SELECT COALESCE(MAX(sequence),0),COUNT(*) FROM group_message_index WHERE local_group=?");revision.text(1,local);require(revision.row(),"Group history revision unavailable");
+    auto keys=impl_->historyPageKeys("group/"+local,revision.number(0),revision.number(1),limit,anchor,[&](const auto& accept){
+        Statement rows(impl_->sql,"SELECT server_group,message_id,sequence FROM group_message_index WHERE local_group=?");rows.text(1,local);
+        while(rows.row())accept(keyFor(rows.text(0),rows.text(1),rows.number(2)));
+    });
+    std::vector<AuthenticatedGroupMessage> page;for(const auto& key:keys){auto item=authenticatedGroupMessage(key.group,key.id);item.sequence=key.sequence;page.push_back(std::move(item));}return page;
 }
 bool Storage::groupHistoryOrderingReady(const std::string& local,int batch){
     require(identifier(local,32)&&batch>0&&batch<=64,"Invalid group history indexing batch");

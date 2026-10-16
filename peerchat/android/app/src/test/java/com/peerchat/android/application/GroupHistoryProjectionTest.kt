@@ -46,6 +46,14 @@ class GroupHistoryProjectionTest {
         assertEquals(99L,groupHistoryBefore(listOf(message('b',100,1),message('e',1,99))))
         assertEquals(Long.MAX_VALUE,groupHistoryBefore(emptyList()))
     }
+    @Test fun chronologicalGroupOrderPreservesClockValuesAndStableEqualTimeTies(){
+        val a=message('a',99,1).copy(timestamp=2000)
+        val b=message('b',1,2).copy(timestamp=2000)
+        val late=message('f',1000,99).copy(timestamp=1000)
+        assertEquals(listOf(late,a,b),listOf(b,a,late).sortedWith(groupMessageOrder))
+        assertEquals(99L,groupHistoryBefore(listOf(a,b,late)))
+        assertEquals(listOf(1000L,99L,1L),listOf(b,late,a).sortedWith(groupMessageOrder).map{it.order})
+    }
     @Test fun publicReferenceHasNoInventedPrivateFieldsOrTextCursor(){
         val native=Native().apply{reference=true};val execution=GroupExecution(native::request)
         val group=execution.snapshot(1,7,1).single();val reference=group.messages.single{it.status=="attachment_reference"}

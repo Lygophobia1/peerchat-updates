@@ -17,12 +17,12 @@ internal sealed class ConversationTimelineEntry {
     }
 }
 
-/** Text retains native logical order. Transfers have no logical-order field in
- * the existing protocol/journal; insert their durable local creation timestamp
- * into that order, matching Windows. Never rewrite text order using wall clocks
- * or invent an attachment Lamport clock. Completion/progress cannot move a card. */
+/** Use authenticated message timestamps with stable sender/ID ties, matching
+ * Windows. Transfer cards keep their durable local creation timestamp;
+ * completion/progress cannot move a card. No persisted time is rewritten. */
 internal fun conversationTimeline(c:ConversationUi):List<ConversationTimelineEntry> {
-    val rows=c.messages.map{ConversationTimelineEntry.Text(it) as ConversationTimelineEntry}.toMutableList()
+    val rows=c.messages.sortedWith(compareBy<MessageUi>{it.timestamp}.thenBy{it.senderId}.thenBy{it.id})
+        .map{ConversationTimelineEntry.Text(it) as ConversationTimelineEntry}.toMutableList()
     val date=SimpleDateFormat("yyyy-MM-dd",Locale.getDefault())
     c.attachments.sortedWith(compareBy<AttachmentSnapshot>{it.created}.thenBy{it.id}).forEach{file->
         val position=rows.indexOfFirst{it is ConversationTimelineEntry.Text&&it.message.timestamp>file.created}

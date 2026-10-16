@@ -6,7 +6,7 @@ import org.json.JSONObject
 import java.util.Base64
 
 data class GroupMessageSnapshot(val id:String,val device:String,val account:Long,val timestamp:Long,val order:Long,val sequence:Long,val status:String,val text:String)
-internal val groupMessageOrder=compareBy<GroupMessageSnapshot>{it.order}.thenBy{it.device}.thenBy{it.id}
+internal val groupMessageOrder=compareBy<GroupMessageSnapshot>{it.timestamp}.thenBy{it.device}.thenBy{it.id}
 internal fun groupHistoryBefore(messages:List<GroupMessageSnapshot>):Long=messages.filter{it.sequence>0}.minWithOrNull(groupMessageOrder)?.sequence?:Long.MAX_VALUE
 data class GroupMemberSnapshot(val account:Long,val device:String,val role:Long,val invited:Boolean)
 data class GroupConversationSnapshot(val id:String,val legacyId:String,val epoch:Long,val name:String,val ready:Boolean,val members:Long,

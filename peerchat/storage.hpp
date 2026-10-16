@@ -125,6 +125,9 @@ public:
     std::uint64_t archiveHistoryCount(const std::string& conversation,std::uint64_t after,std::uint64_t through);
     Blob transferJournal(const std::string& device);
     void saveTransferJournal(const std::string& device,const Blob& expected,const Blob& next);
+    // Independent protected local transfer preferences; never a wire/journal record.
+    Blob transferTuning(const std::string& device);
+    void saveTransferTuning(const std::string& device,const Blob& expected,const Blob& next);
     // Supplemental immutable encrypted-group-attachment staging only. Uses the
     // existing protected object store, never the legacy transfer journal format.
     Blob groupAttachmentStaging(const std::string& device);
@@ -149,6 +152,9 @@ public:
     void saveMailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& receipt);
     std::uint64_t nextLogicalOrder();
     void observeLogicalOrder(std::uint64_t remoteOrder);
+    // Chronological authenticated timestamp/sender/ID order. beforeSequence is
+    // the opaque rowid of the earliest displayed message, never a numeric bound.
+    // A cold ordering cache scans protected records; no timestamp index on disk.
     std::vector<StoredMessage> history(const std::string& conversation,
         int limit=100, std::int64_t beforeSequence=INT64_MAX);
     // Removes only this local DM's encrypted message/outbox records. Contact, trust and account

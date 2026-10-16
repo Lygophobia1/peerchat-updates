@@ -148,7 +148,7 @@ public class ChatViewModel {
         string previous=conversation.Contact.peer??"";bool changed=!String.IsNullOrEmpty(previous)&&!String.IsNullOrEmpty(currentPeer)&&previous!=currentPeer;
         if(changed&&conversation.Contact.verified)conversation.PreviousVerifiedPeerId=previous;
         if(!String.IsNullOrEmpty(currentPeer)){conversation.KnownPeerIds.Add(currentPeer);conversationsByPeer[currentPeer]=conversation;if(changed)conversation.Contact=new ContactData{peer=currentPeer,name=username,host="",verified=false};else{conversation.Contact.peer=currentPeer;conversation.Contact.name=username;}}
-        conversation.Refresh();return conversation;
+        OrderMessages(conversation.Messages);conversation.Refresh();return conversation;
     }
     public void ReconcileFriends(ISet<long> activeAccounts){foreach(var conversation in Conversations.Values)if(conversation.AccountId>0)conversation.IsFriend=activeAccounts.Contains(conversation.AccountId);}
     // Social eligibility is independent of presence, route availability and trust.
@@ -160,7 +160,7 @@ public class ChatViewModel {
     }
     public void RemoveConversation(ConversationModel conversation){if(conversation==null)return;Conversations.Remove(conversation.ConversationId);foreach(var peer in conversation.KnownPeerIds.ToArray())if(conversationsByPeer.ContainsKey(peer)&&conversationsByPeer[peer]==conversation)conversationsByPeer.Remove(peer);}
     static void OrderMessages(ObservableCollection<MessageModel> messages){
-        var ordered=messages.Where(m=>m.Attachment==null).OrderBy(m=>m.Data.logical).ThenBy(m=>m.Data.sender,StringComparer.Ordinal).ThenBy(m=>m.Data.id,StringComparer.Ordinal).ToList();
+        var ordered=messages.Where(m=>m.Attachment==null).OrderBy(m=>m.Data.time).ThenBy(m=>m.Data.sender,StringComparer.Ordinal).ThenBy(m=>m.Data.id,StringComparer.Ordinal).ToList();
         foreach(var file in messages.Where(m=>m.Attachment!=null).OrderBy(m=>m.Data.time).ThenBy(m=>m.Data.id,StringComparer.Ordinal)){
             int position=ordered.FindIndex(item=>item.Data.time>file.Data.time);if(position<0)ordered.Add(file);else ordered.Insert(position,file);
         }

@@ -32,16 +32,24 @@ class ConversationTimelineTest {
         assertEquals(keys,conversationTimeline(c.copy(messages=c.messages.map{it.copy()},attachments=c.attachments.map{it.copy()})).map{it.key})
         assertEquals(2,conversationTimeline(c).filterIsInstance<ConversationTimelineEntry.Text>().size)
     }
-    @Test fun nativeProjectionPreservesReplyCausalityAndExactFields(){
+    @Test fun nativeProjectionUsesChronologyAndPreservesExactFields(){
         val sent=MessageSnapshot("1".repeat(32),local,peer,9000,50,9,0,"Sent fixture")
         val reply=MessageSnapshot("2".repeat(32),peer,local,1000,51,10,2,"Reply fixture")
         val snap=MessagingSnapshot(1,"Local",local,true,"Online",listOf(
             ConversationSnapshot(FriendIdentity(2,"Peer",peer,true),ConnectionSnapshot(),listOf(reply,sent))))
         val c=projectMessaging(snap,PeerChatUiState()).conversations.single()
-        assertEquals(listOf(sent.id,reply.id),c.messages.map{it.id})
-        assertEquals(listOf(50L,51L),c.messages.map{it.logicalOrder})
-        assertEquals(listOf(9000L,1000L),c.messages.map{it.timestamp})
-        assertEquals(listOf(sent.id,reply.id),conversationTimeline(c).filterIsInstance<ConversationTimelineEntry.Text>().map{it.message.id})
+        assertEquals(listOf(reply.id,sent.id),c.messages.map{it.id})
+        assertEquals(listOf(51L,50L),c.messages.map{it.logicalOrder})
+        assertEquals(listOf(1000L,9000L),c.messages.map{it.timestamp})
+        assertEquals(sent.text,c.preview)
+        assertEquals(listOf(reply.id,sent.id),conversationTimeline(c).filterIsInstance<ConversationTimelineEntry.Text>().map{it.message.id})
+    }
+    @Test fun lateEqualTimeMessagesAndFilesHaveStableOrderAcrossRefresh(){
+        val a=text("a",200,99);val b=text("b",200,1);val early=text("late-arrival",100,100)
+        val c=conversation(listOf(b,a,early),listOf(file("f",200)))
+        val expected=listOf("message-late-arrival","message-a","message-b","attachment-f")
+        assertEquals(expected,conversationTimeline(c).map{it.key})
+        assertEquals(expected,conversationTimeline(c.copy(messages=listOf(a,early,b))).map{it.key})
     }
     @Test fun composeUsesOneTimelineAndRefreshesInPlace(){
         val f=file("3".repeat(32),200)

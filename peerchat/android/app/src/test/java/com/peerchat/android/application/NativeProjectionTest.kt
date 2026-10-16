@@ -27,19 +27,21 @@ class NativeProjectionTest {
         assertNull(planMessageNotification(snapshot,offline,prior.copy(notifiedSequence=9),
             com.peerchat.android.platform.NotificationPreview.SenderOnly))
     }
-    @Test fun combinedPaginationUsesGlobalNativeRowsWithoutSkippingAnotherDevice() {
+    @Test fun combinedPaginationUsesOpaqueChronologicalAnchorsWithoutSkippingAnotherDevice() {
         val friend=FriendIdentity(8,"Jonah",a,false,listOf(a,b))
         val rows=(1L..24L).map{n->MessageSnapshot(n.toString(16).padStart(32,'0'),if(n<=12)a else b,c,
-            100,1,n,2,"Test fixture")}
+            100+(25-n)%7,1,n,2,"Test fixture")}
+        val ordered=chronologicalMessages(rows)
         fun page(before:Long)=accountHistoryPage(friend,before){peer,cursor->
             assertTrue(peer in friend.knownPeerIds)
-            historyWire(rows.filter{it.senderDevice==peer&&it.sequence<cursor}.takeLast(8))}
-        val first=page(Long.MAX_VALUE);val second=page(first.minOf{it.sequence});val third=page(second.minOf{it.sequence})
+            val eligible=if(cursor==Long.MAX_VALUE)ordered else ordered.takeWhile{it.sequence!=cursor}
+            historyWire(eligible.filter{it.senderDevice==peer}.takeLast(8))}
+        val first=page(Long.MAX_VALUE);val second=page(first.first().sequence);val third=page(second.first().sequence)
         assertEquals(24,(first+second+third).map{it.id}.distinct().size)
         assertEquals((1L..24L).toSet(),(first+second+third).map{it.sequence}.toSet())
-        assertTrue(page(third.minOf{it.sequence}).isEmpty())
+        assertTrue(page(third.first().sequence).isEmpty())
         assertEquals(first,chronologicalMessages(first.reversed()+first))
-        assertEquals(first.sortedBy{it.id},first) // equal timestamps/orders have a stable tie-breaker
+        assertEquals(ordered.takeLast(8),first)
     }
     @Test fun currentBindingsRetainHistoricalDeviceWithoutPromotingTrust() {
         val old=FriendIdentity(8,"Jonah",a,false)
@@ -50,17 +52,17 @@ class NativeProjectionTest {
         // This projection contains no verified/trusted flag or approval command.
         assertEquals("Jonah",current.single().username)
     }
-    @Test fun repliesUseNativeLogicalOrderDespiteClockSkewAndArrivalOrder() {
+    @Test fun authenticatedTimestampsDetermineChronologyWithoutRewritingClockSkew() {
         val sent=MessageSnapshot("1".repeat(32),a,b,9000,10,12,0,"Outgoing fixture")
         val reply=MessageSnapshot("2".repeat(32),b,a,1000,11,13,2,"Reply fixture")
         val delivered=sent.copy(delivery=2,sequence=14)
-        val expected=listOf(delivered,reply)
+        val expected=listOf(reply,delivered)
         assertEquals(expected,chronologicalMessages(listOf(reply,sent,delivered)))
         assertEquals(expected,chronologicalMessages(listOf(delivered,reply,sent)))
         assertEquals(expected,chronologicalMessages(expected.reversed()))
         // Projection never changes persisted timestamps, logical clocks or IDs.
-        assertEquals(9000L,expected.first().timestamp)
-        assertEquals(1000L,expected.last().timestamp)
+        assertEquals(1000L,expected.first().timestamp)
+        assertEquals(9000L,expected.last().timestamp)
     }
     @Test fun duplicateNamesRemainSeparateAccountDeviceBindings() {
         val result=reconcileFriends(emptyList(),listOf(FriendIdentity(8,"Jonah",a,true),FriendIdentity(9,"Jonah",b,false)))
