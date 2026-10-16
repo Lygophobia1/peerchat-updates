@@ -22,6 +22,11 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
     @Volatile var lastOutputIdleNanos=0L
         private set
     private var worker: Thread?=null
+    private val progress=RelayProgress()
+    fun diagnostics():String="relay_attempt=${request.attempt} remote_account=$remoteAccount peer_device=${request.peerId} purpose="+
+        (if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+
+        " attached=$attached finished=$finished ${progress.snapshot()} failure=${failureDiagnostic?:"none"}"
+    fun observedAuthenticatedPeer(){progress.enter(RelayStage.AuthenticatedPeer)}
     fun start() {
         check(worker==null)
         worker=Thread({run()},"PeerChat opaque relay").apply {isDaemon=true;start()}
@@ -29,6 +34,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
     private fun run() {
         var writer: Thread?=null
         var stage="relay_rendezvous"
+        progress.enter(RelayStage.RelayRendezvous)
         try {
             android.util.Log.i("PeerChatWake","stage=relay_attempt_started account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             val relay=accounts.openRelay(remoteAccount,request.peerId,request.group?.fields()?:request.archive?.fields(),request.attempt) {opened->
@@ -36,6 +42,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 if(stopping){opened.close();throw java.io.IOException("Relay cancelled before pairing")}
             }
             stage="native_peer_tls_open"
+            progress.enter(RelayStage.NativePeerTlsOpen)
             android.util.Log.i("PeerChatWake","stage=relay_rendezvous_ready account=$remoteAccount device=${request.peerId} attempt=${request.attempt}")
             channel=relay.channel
             if(stopping)return
@@ -43,6 +50,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             check(ReliableBridge.open(profile,request.attempt,relay.incoming,peer)==request.attempt)
             attached=true
             stage="peer_tls_receive"
+            progress.enter(RelayStage.PeerTlsReceive)
             check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,ByteArray(0))!=null)
             val frames=RelayFrames(relay.sessionId)
             writer=Thread({
@@ -76,12 +84,14 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             // No payload/session-token/exception-message logging. Native route
             // retirement and bounded retry stay with the current owner.
         } finally {
+            progress.enter(RelayStage.Cleanup)
             val retry=!stopping;stopping=true
             try {channel?.close()}catch(_: Exception){}
             if(writer!==Thread.currentThread())writer?.join(1500)
             ReliableBridge.close(profile,request.attempt,retry)
             if(request.archive!=null)android.util.Log.i("PeerChatArchive","event=attempt_cleanup attempt=${request.attempt} socket_closed=true retry=$retry")
             finished=true
+            progress.enter(RelayStage.Closed)
         }
     }
     override fun close() {

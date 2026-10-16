@@ -693,7 +693,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
         while(iterator.hasNext()) {
             val (attempt,execution)=iterator.next()
             if(execution.finished){
-                execution.failureDiagnostic?.let{relayFailureDiagnostics[attempt]="relay_attempt=$attempt $it";while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())}
+                // Retain successful retirement as well as failure: no invented
+                // sessions, only the last sixteen observed attempt snapshots.
+                relayFailureDiagnostics[attempt]=execution.diagnostics()
+                while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())
                 groupCompletionObserved.remove(attempt);iterator.remove();continue}
             if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
@@ -713,7 +716,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
             drainNativeEvents({ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0))}) { event ->
                 val record=NativeRecord(event,3);val kind=record.number();record.text();record.text();record.number()
-                if(kind==1L)android.util.Log.i("PeerChatWake","stage=peer_session_ready")
+                if(kind==1L){execution.observedAuthenticatedPeer();android.util.Log.i("PeerChatWake","stage=peer_session_ready")}
                 if(kind==2L){
                     lastNativeReceiveNanos=System.nanoTime();lastNativeReceiveAttempt=attempt
                     android.util.Log.i("PeerChatWake","stage=native_history_received_ack_queued")
@@ -835,10 +838,13 @@ class MessagingBackend(context: Context,private val profileName: String="default
             appendLine(mailboxExecution.inboundDiagnostic)
             appendLine(eligibilitySnapshots.diagnostic)
             appendLine(ownerTimings.summary())
+            appendLine("event_session_connected=${events?.connected==true} retry_at_monotonic_ms=$eventRetryAt retry_delay_ms=$eventRetryDelay next_mailbox_monotonic_ms=$mailboxAt next_archive_monotonic_ms=$archiveRetryAt")
+            appendLine(accounts?.diagnostics() ?: "network_history=not_retained_for_closed_session")
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
             relayFailureDiagnostics.values.forEach{appendLine(it)}
+            executions.values.take(32).forEach{appendLine(it.diagnostics())}
         })
         val native=checkNotNull(profile).handle
         val conversations=nativeConversationProjection(friends,
@@ -850,11 +856,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(diagnosticNow>=transferDiagnosticsAt){
             transferDiagnosticsAt=diagnosticNow+if(attachmentProjection.isNotEmpty())1000 else 10000
             val record=NativeRecord(transfer(5),30)
-            val measured=StringBuilder()
+            val measured=mutableListOf<String>()
             val currentIds=mutableSetOf<String>()
             repeat(record.number().toInt().coerceIn(0,64)){
                 val row=record.text();val id=row.substringBefore(' ');currentIds.add(id)
-                measured.appendLine(row.take(2048))
+                measured.add(row)
                 val signature=row.substringBefore(" elapsed_ms=");val previous=transferDiagnosticStates[id]
                 val active=!row.contains(" state=4 ")&&!row.contains(" state=5 ")&&!row.contains(" state=6 ")&&!row.contains(" state=8 ")
                 if(previous?.first!=signature||(active&&diagnosticNow-(previous?.second?:0L)>=10000)){
@@ -863,7 +869,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }
             }
             record.end()
-            mutable.value=mutable.value.copy(transferDiagnostics=measured.toString().take(32768))
+            mutable.value=mutable.value.copy(transferDiagnostics=transferDiagnosticReport(measured))
             transferDiagnosticStates.keys.retainAll(currentIds)
         }
         // Read failure diagnostics first: attachment setup itself can fail.

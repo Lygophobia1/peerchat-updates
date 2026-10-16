@@ -18,6 +18,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         private set
     private var supportsRpc=false
     private var rpcAuthorized=false
+    private val stages=ConnectionStageHistory()
+    fun diagnostics():String=stages.snapshot()
     private val rpcOwner=com.peerchat.android.platform.tls.BoundedRpc<ServerChannel>({
         val connection=channel("rpc")
         try {
@@ -53,7 +55,9 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
         android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
     }
-    fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true,allowRpc:Boolean=true): JSONObject {
+    fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true,allowRpc:Boolean=true): JSONObject =
+        stages.measure(type){requestMeasured(type,fields,authenticated,allowRpc)}
+    private fun requestMeasured(type:String,fields:JSONObject,authenticated:Boolean,allowRpc:Boolean):JSONObject {
         operations.check()
         val started=System.nanoTime()
         android.util.Log.i("PeerChatWake","stage=server_request_started operation="+safeOperation(type))
@@ -152,7 +156,9 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     }
     fun registerPush(token:String) {require(token.length in 1..2048);request("push_register",JSONObject().put("publicIdentity",device).put("provider","fcm").put("pushToken",token))}
     fun hint(peerAccount:Long,peerDevice:String){request("push_hint",JSONObject().put("publicIdentity",device).put("targetAccountId",peerAccount.toString()).put("targetPublicIdentity",peerDevice))}
-    fun openRelay(targetAccount: Long,targetDevice: String,archive:JSONObject?=null,diagnosticAttempt:Long=0,onOpened:(ServerChannel)->Unit={}): RelayConnection {
+    fun openRelay(targetAccount: Long,targetDevice: String,archive:JSONObject?=null,diagnosticAttempt:Long=0,onOpened:(ServerChannel)->Unit={}): RelayConnection =
+        stages.measure("relay_attach"){openRelayMeasured(targetAccount,targetDevice,archive,diagnosticAttempt,onOpened)}
+    private fun openRelayMeasured(targetAccount:Long,targetDevice:String,archive:JSONObject?,diagnosticAttempt:Long,onOpened:(ServerChannel)->Unit):RelayConnection {
         require(targetAccount>0 && targetDevice.matches(Regex("[0-9a-f]{64}")))
         val active=checkNotNull(session)
         val group=archive?.optString("purpose")=="group_control"
@@ -183,12 +189,14 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     fun openEvents(): ServerChannel = openSubscription("events",JSONObject().put("clientHeartbeats",true))
     // Opaque mailbox application RPC over the existing authenticated/pinned
     // server TLS request adapter. No plaintext, local outbox, or retry owner here.
-    fun archive(operation: String, payload: JSONObject = JSONObject()): JSONObject {
+    fun archive(operation:String,payload:JSONObject=JSONObject()):JSONObject=stages.measure(operation){archiveMeasured(operation,payload)}
+    private fun archiveMeasured(operation: String, payload: JSONObject): JSONObject {
         require(operation in setOf("archive_descriptor_register","archive_grant_register","archive_authorization_state"))
         check(supportsRpc&&rpcAuthorized&&session!=null) { "Archive requires authenticated RPC support" }
         return rpc(operation,payload)
     }
-    fun mailbox(operation: String, payload: JSONObject): JSONObject {
+    fun mailbox(operation: String, payload: JSONObject): JSONObject =stages.measure(operation){mailboxMeasured(operation,payload)}
+    private fun mailboxMeasured(operation:String,payload:JSONObject):JSONObject {
         require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts","mailbox_eligibility_snapshot","mailbox_eligibility_validate"))
         if(supportsRpc&&rpcAuthorized)return rpc(operation,payload)
         val requestId=java.util.UUID.randomUUID().toString().replace("-","")
@@ -209,7 +217,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             return reply
         } finally {connection.close()}
     }
-    private fun openSubscription(type: String, fields: JSONObject): ServerChannel {
+    private fun openSubscription(type:String,fields:JSONObject):ServerChannel=stages.measure(type){openSubscriptionMeasured(type,fields)}
+    private fun openSubscriptionMeasured(type: String, fields: JSONObject): ServerChannel {
         val channel=channel("events")
         try {
             fields.put("version",1).put("type",type).put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
