@@ -1,4 +1,4 @@
-param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b',[switch]$IndependentDeviceDelivery)
+param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b',[switch]$IndependentDeviceDelivery,[string]$CandidateScope='')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -34,6 +34,7 @@ try {
         [ordered]@{path=[IO.Path]::GetRelativePath($stage,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
     })
     $scope=if($IndependentDeviceDelivery){'Phase 2 frozen verified DM targets and independent ACKs; groups unchanged'}else{'Phase 1 repairs only'}
+    if($CandidateScope){$scope=$CandidateScope}
     $phase2=if($IndependentDeviceDelivery){'Authenticated snapshot contract; no fresh snapshot means canonical-only unresolved, not all-device Delivered'}else{'Blocked pending authenticated target-snapshot contract review'}
     [ordered]@{version=$Version;sourceCheckpoint=$source;branch='codex/native-unicode-emoji';physicalAcceptance='Pending';scope=$scope;independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;phase2=$phase2;piDeployed=$false;phoneInstalled=$false;payload=$payload}|
         ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $stage 'candidate-manifest.json') -Encoding utf8
@@ -51,7 +52,8 @@ try {
     }finally{$archive.Dispose()}
     Copy-Item -LiteralPath $apkSource -Destination $apk
     if((Get-FileHash $apkSource).Hash -ne (Get-FileHash $apk).Hash){throw 'APK copy hash mismatch'}
-    $artifacts=@($zip,$apk)+@(Get-ChildItem -LiteralPath (Join-Path $root "build/linux/$Version") -Filter '*.zip' -File|ForEach-Object FullName)
+    $linux=Join-Path $root "build/linux/$Version"
+    $artifacts=@($zip,$apk)+@(if(Test-Path -LiteralPath $linux){Get-ChildItem -LiteralPath $linux -Filter '*.zip' -File|ForEach-Object FullName})
     $records=@($artifacts|ForEach-Object {[ordered]@{path=$_;bytes=(Get-Item -LiteralPath $_).Length;sha256=(Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()}})
     [ordered]@{version=$Version;sourceCheckpoint=$source;physicalAcceptance='Pending';independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;artifacts=$records}|
         ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $out 'messaging-repair-package-audit.json') -Encoding utf8
