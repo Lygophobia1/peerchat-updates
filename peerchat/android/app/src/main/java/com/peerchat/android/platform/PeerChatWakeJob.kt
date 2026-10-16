@@ -78,25 +78,11 @@ class PeerChatWakeJob:JobService() {
                     // an ACK arriving later must wait for the next iteration.
                     val outputDrained=lease!!.backgroundOutputDrained(deadline-30_000_000_000L)
                     val snapshot=lease!!.state.value
-                    if(snapshot.authenticated&&snapshot.serverPresenceLive&&snapshot.accountId==credential.accountId){
-                        val saved=preferences.load()
-                        for(conversation in snapshot.conversations){
-                            val key=conversationPreferenceKey(accountKey,conversation.friend.accountId)
-                            val prior=saved.conversations[key]
-                            val incomingMax=conversation.messages.filter{it.senderDevice!=snapshot.localPeerId}.maxOfOrNull{it.sequence} ?: 0L
-                            if(prior==null){
-                                preferences.update{state->if(state.conversations.size>=128||state.conversations.containsKey(key))state else state.copy(conversations=state.conversations+(key to ConversationPreference(readSequence=incomingMax,notifiedSequence=incomingMax)))}
-                                continue
-                            }
-                            val planned=planMessageNotification(snapshot,conversation,prior,saved.preview)
-                            if(saved.notifications&&planned!=null&&show(accountKey,planned)){
-                                preferences.update{state->val row=state.conversations[key] ?: prior;state.copy(conversations=state.conversations+(key to row.copy(notifiedSequence=maxOf(row.notifiedSequence,incomingMax))))}
-                            }
-                        }
-                    }
+                    val completed=runWakeNotificationStep(snapshot,credential.accountId,accountKey,
+                        preferences,outputDrained){show(accountKey,it)}
                     // Real native receive/ACK completion is independent of OS
                     // notification permission, suppression or prior posting.
-                    if(outputDrained){
+                    if(completed){
                         reschedule=false
                         android.util.Log.i("PeerChatWake","stage=wake_delivery_complete elapsed_ms="+(30_000_000_000L-(deadline-System.nanoTime()))/1_000_000)
                         return@withTimeout
@@ -142,4 +128,40 @@ class PeerChatWakeJob:JobService() {
         return retry&&params.jobId==OpaquePushWake.RETRY_JOB_ID
     }
     override fun onDestroy(){execution++;admittedJobs.keys.forEach{OpaquePushWake.finished(it)};admittedJobs.clear();scope.cancel();super.onDestroy()}
+}
+
+/** One production wake iteration, including protected notification markers.
+ * Completion is evaluated only after processing the published snapshot. */
+internal fun runWakeNotificationStep(snapshot:MessagingSnapshot,expectedAccount:Long,
+    accountKey:String,preferences:AndroidQolRepository,outputDrained:Boolean,
+    show:(LocalMessageNotification)->Boolean):Boolean {
+    if(snapshot.authenticated&&snapshot.serverPresenceLive&&snapshot.accountId==expectedAccount)
+        publishWakeNotifications(snapshot,accountKey,preferences,show)
+    return outputDrained
+}
+
+/** This is the same protected marker/notification path used by the JobService.
+ * Fresh IDs originate only from native durable imports in this process. */
+internal fun publishWakeNotifications(snapshot:MessagingSnapshot,accountKey:String,
+    preferences:AndroidQolRepository,show:(LocalMessageNotification)->Boolean) {
+    val saved=preferences.load()
+    for(conversation in snapshot.conversations){
+        val key=conversationPreferenceKey(accountKey,conversation.friend.accountId)
+        val prior=saved.conversations[key]
+        val incoming=conversation.messages.filter{it.senderDevice!=snapshot.localPeerId}
+        val incomingMax=incoming.maxOfOrNull{it.sequence} ?: 0L
+        val effective=if(prior!=null)prior else {
+            val oldMax=incoming.filter{it.id !in snapshot.freshMailboxMessageIds}.maxOfOrNull{it.sequence} ?: 0L
+            ConversationPreference(readSequence=oldMax,notifiedSequence=oldMax)
+        }
+        if(prior==null){
+            preferences.update{state->if(state.conversations.size>=128||state.conversations.containsKey(key))state
+                else state.copy(conversations=state.conversations+(key to effective))}
+        }
+        val planned=planMessageNotification(snapshot,conversation,effective,saved.preview)
+        if(saved.notifications&&planned!=null&&show(planned)){
+            preferences.update{state->val row=state.conversations[key] ?: effective
+                state.copy(conversations=state.conversations+(key to row.copy(notifiedSequence=maxOf(row.notifiedSequence,incomingMax))))}
+        }
+    }
 }

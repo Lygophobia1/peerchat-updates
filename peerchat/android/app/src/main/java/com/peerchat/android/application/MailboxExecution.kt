@@ -3,6 +3,7 @@ package com.peerchat.android.application
 import com.peerchat.android.MailboxBridge
 import com.peerchat.android.ProfileBridge
 import com.peerchat.android.platform.ServerAccounts
+import com.peerchat.android.platform.ServerRejected
 import org.json.JSONObject
 import android.util.Base64
 import java.io.ByteArrayOutputStream
@@ -36,6 +37,11 @@ private object JniMailboxNative:MailboxNative {
 internal class MailboxExecution(private val native:MailboxNative=JniMailboxNative) {
     private var registeredBinding: ByteArray? = null
     private var receiptCursor = ""
+    private var fetchCursor = ""
+    private var legacyReceiptCursor = false
+    private val outgoingRetry = linkedMapOf<String,Pair<Long,Int>>()
+    private var outgoingOffset = 0
+    private val outgoingDeviceOffset=linkedMapOf<String,Int>()
     private var phase="not_started"
     var diagnostic="Not serviced"
         private set
@@ -48,6 +54,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         require(value.length <= ((maximum + 2) / 3) * 4)
         return Base64.decode(value, Base64.NO_WRAP).also { require(it.size in 1..maximum) }
     }
+    private fun opaqueCursor(value:String):String {require(value.length<=512);return value}
     private fun request(accounts: (String,JSONObject)->JSONObject, operation: String, body: JSONObject): JSONObject {
         phase=operation
         val reply=accounts(operation, body)
@@ -55,22 +62,23 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         diagnostic="stage=$phase state="+safeMailboxState(reply.optString("state"))
         return reply
     }
-    fun reset() { registeredBinding = null; receiptCursor = ""; needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
+    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;outgoingRetry.clear();outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
     // Completion callback is emitted only after native durable receipt creation
     // AND a real authenticated server acknowledgement. Duplicate native receives
     // still drain their ACK but do not invent another message/notification.
     fun service(accounts: ServerAccounts, handle: Long, storageAllowed: Boolean,
-                acknowledged: (Boolean) -> Unit) = service(accounts::mailbox,handle,storageAllowed,acknowledged)
+                committed: (String) -> Unit = {}, acknowledged: (Boolean) -> Unit) =
+        service(accounts::mailbox,handle,storageAllowed,committed,acknowledged)
     internal fun service(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
-                acknowledged: (Boolean) -> Unit) {
-        try { serviceAttempt(accounts,handle,storageAllowed,acknowledged) }
+                committed: (String) -> Unit = {}, acknowledged: (Boolean) -> Unit) {
+        try { serviceAttempt(accounts,handle,storageAllowed,committed,acknowledged) }
         catch(failure:Exception){
             diagnostic="stage=$phase result=${failure.javaClass.simpleName} $diagnostic".take(320)
             throw failure // Preserve legitimate session invalidation handling.
         }
     }
     private fun serviceAttempt(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
-                               acknowledged: (Boolean) -> Unit) {
+                               committed: (String) -> Unit, acknowledged: (Boolean) -> Unit) {
         phase="native_identity";diagnostic="stage=$phase"
         needsContinuation=true
         val identity = checkNotNull(native.identity(handle))
@@ -100,8 +108,9 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         inboundDiagnostic=if(receiving)"receive=registered" else "receive=blocked_native_registration"
         var accepted=0;var pendingValidation=0;var imported=0
         var fetchedCount=0
+        var processedCount=0
         if(receiving){
-            val fetched = request(accounts, "mailbox_fetch", JSONObject())
+            val fetched = request(accounts, "mailbox_fetch", JSONObject().put("cursor",fetchCursor))
             check(fetched.getString("state") == "ready")
             val envelopes = fetched.getJSONArray("envelopes"); require(envelopes.length() <= 64)
             // Small batches preserve the existing wake deadline; remaining envelopes
@@ -110,28 +119,42 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             inboundDiagnostic="receive=fetched fetched=$fetchedCount imported=0 acknowledged=0 pending_native_validation=0"
             for(index in 0 until envelopes.length()) {
                 if(accepted>=4)break
-                val wire = decoded(envelopes.getJSONObject(index).getString("envelope"), 70000)
+                val item=envelopes.getJSONObject(index)
+                val wire = decoded(item.getString("envelope"), 70000)
                 phase="native_envelope_validation";diagnostic="stage=$phase"
                 val result = native.receive(handle, wire)
                 if(result==null){
                     pendingValidation++
                     inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
+                    processedCount++
+                    fetchCursor=opaqueCursor(item.optString("cursor"))
                     continue // Trust, key, decrypt or storage failure: never ACK or invent trust.
                 }
                 val record = NativeRecord(result, 3)
                 val inserted = record.number().also { require(it in 0..1) } == 1L
-                val receipt = record.bytes(); record.text(); record.text(); record.end()
-                if(inserted)imported++
+                val receipt = record.bytes(); record.text(); val messageId=record.text(); record.end()
+                if(inserted){
+                    imported++
+                    committed(messageId) // Native history is durable even if ACK or later work fails.
+                }
                 inboundDiagnostic="receive=durable_import_receipt_ready fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
                 val reply = request(accounts, "mailbox_ack", JSONObject(signing.toString()).put("receipt", encoded(receipt)))
                 check(reply.getString("state") == "acknowledged")
                 acknowledged(inserted)
                 accepted++
+                processedCount++
+                fetchCursor=opaqueCursor(item.optString("cursor"))
                 inboundDiagnostic="receive=acknowledged fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
             }
+            // The authenticated server cursor is opaque. Older servers omit it;
+            // in that case the next ordinary pass retries the first page.
+            if(envelopes.length()==0)fetchCursor=""
+            else if(processedCount==envelopes.length())fetchCursor=opaqueCursor(fetched.optString("nextCursor"))
             android.util.Log.i("PeerChatWake","stage=mailbox_receive_batch fetched=${envelopes.length()} acknowledged=$accepted pending_validation=$pendingValidation")
         }
-        val reconciled = request(accounts, "mailbox_receipts", JSONObject().put("afterMessageId", receiptCursor))
+        val receiptRequest=if(legacyReceiptCursor)JSONObject().put("afterMessageId",receiptCursor)
+            else JSONObject().put("cursor",receiptCursor)
+        val reconciled = request(accounts, "mailbox_receipts", receiptRequest)
         check(reconciled.getString("state") == "ready")
         val receipts = reconciled.getJSONArray("receipts"); require(receipts.length() <= 64)
         repeat(receipts.length()) { index ->
@@ -139,12 +162,14 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             val id = item.getString("messageId"); require(id.matches(Regex("[0-9a-f]{32}")))
             phase="native_receipt_validation";diagnostic="stage=$phase"
             check(native.receipt(handle, decoded(item.getString("receipt"), 2048)) == 0)
-            receiptCursor = id
         }
         // Sweep periodically from the beginning: a late receipt may sort before
         // the last cursor. Native verification/dedupe makes reconciliation safe.
-        if (receipts.length() < 64) receiptCursor = ""
-        needsContinuation=(accepted>=4&&fetchedCount>accepted)||receipts.length()==64
+        legacyReceiptCursor=!reconciled.has("nextCursor")
+        receiptCursor=if(receipts.length()==0)"" else if(legacyReceiptCursor){
+            if(receipts.length()==64)receipts.getJSONObject(receipts.length()-1).getString("messageId") else ""
+        }else opaqueCursor(reconciled.optString("nextCursor"))
+        needsContinuation=fetchCursor.isNotEmpty()||receiptCursor.isNotEmpty()
         if (!storageAllowed) {diagnostic="stage=complete registered=$receiving outgoing_storage_allowed=false acknowledged=$accepted pending_native_validation=$pendingValidation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration";return}
         phase="native_pending_uploads";diagnostic="stage=$phase"
@@ -152,10 +177,16 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         val count = pending.number(); require(count <= 64)
         val candidates = List(count.toInt()) { Triple(pending.text(), pending.text(), pending.number()) }
         pending.end()
-        needsContinuation=needsContinuation||count>4
-        for ((id, _, account) in candidates.take(4)) {
+        val now=System.nanoTime()/1_000_000
+        val eligible=candidates.filter{(id,_,_)->(outgoingRetry[id]?.first?:0L)<=now}
+        val selected=if(eligible.isEmpty())emptyList() else List(minOf(4,eligible.size)){eligible[(outgoingOffset+it)%eligible.size]}
+        if(eligible.isNotEmpty())outgoingOffset=(outgoingOffset+selected.size)%eligible.size
+        needsContinuation=needsContinuation||eligible.size>selected.size
+        var failed=0
+        var failureReason="none"
+        for ((id, _, account) in selected) try {
             val keysReply = request(accounts, "mailbox_keys", JSONObject().put("recipientAccountId", account))
-            check(keysReply.getString("state") == "ready")
+            if(keysReply.getString("state")!="ready")throw MailboxItemRefused(safeMailboxState(keysReply.optString("state")))
             val keys = keysReply.getJSONArray("keys"); require(keys.length() <= 32)
             val batch = ByteArrayOutputStream()
             DataOutputStream(batch).use { stream ->
@@ -167,19 +198,42 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             val devices = prepared.number().also { require(it <= 32) }
             val bindings = List(devices.toInt()) { prepared.bytes() }; prepared.end()
             needsContinuation=needsContinuation||devices>4
-            for (binding in bindings.take(4)) {
+            val offset=outgoingDeviceOffset[id]?:0
+            val selectedBindings=if(bindings.isEmpty())emptyList() else List(minOf(4,bindings.size)){bindings[(offset+it)%bindings.size]}
+            if(bindings.isNotEmpty())outgoingDeviceOffset[id]=(offset+selectedBindings.size)%bindings.size
+            while(outgoingDeviceOffset.size>128)outgoingDeviceOffset.remove(outgoingDeviceOffset.keys.first())
+            for (binding in selectedBindings) {
                 phase="native_envelope_prepare";diagnostic="stage=$phase"
                 val wire = native.prepare(handle, id.toByteArray(Charsets.US_ASCII),
                     binding, true) ?: continue
                 if (wire.isEmpty()) continue // Live route or already Delivered.
                 val reply = request(accounts, "mailbox_store", JSONObject(signing.toString()).put("envelope", encoded(wire)))
                 if (reply.getString("state") == "stored") check(native.stored(handle, wire) == 0)
+                else throw MailboxItemRefused(safeMailboxState(reply.optString("state")))
             }
+            outgoingRetry.remove(id)
+        }catch(failure:Exception){
+            if(failure is ServerRejected&&com.peerchat.android.application.expiredServerSession(failure))throw failure
+            failed++
+            failureReason=when(failure){
+                is MailboxItemRefused->failure.state
+                is ServerRejected->safeMailboxState(failure.code)
+                is java.io.IOException->"network_unavailable"
+                else->"native_or_validation_unavailable"
+            }
+            val old=outgoingRetry[id]?.second?:0
+            val attempts=(old+1).coerceAtMost(8)
+            val terminal=failure is MailboxItemRefused&&failure.state in setOf("not_authorized","revoked","recipient_disabled","malformed_request","invalid_key_or_signature")
+            val delay=if(terminal)900000L else (30000L shl (attempts-1)).coerceAtMost(900000L)
+            outgoingRetry[id]=now+delay to attempts
+            while(outgoingRetry.size>128)outgoingRetry.remove(outgoingRetry.keys.first())
         }
-        diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation continuation=$needsContinuation"+
+        diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation outgoing_retry=$failed retry_reason=$failureReason continuation=$needsContinuation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration"
     }
 }
+
+private class MailboxItemRefused(val state:String):Exception()
 
 internal fun safeMailboxState(state:String):String=if(state in setOf("accepted","ready","stored","acknowledged",
     "not_authorized","invalid_timestamp","key_conflict_or_revoked","invalid_generation","unknown_key",

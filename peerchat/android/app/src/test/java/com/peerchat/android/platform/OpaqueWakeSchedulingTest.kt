@@ -19,7 +19,18 @@ class OpaqueWakeSchedulingTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val scheduler=context.getSystemService(JobScheduler::class.java)
     private val hint=mapOf("event" to "peerchat_pending","version" to "1")
-    @Before fun reset(){scheduler.cancelAll();OpaquePushWake.finished(OpaquePushWake.JOB_ID);OpaquePushWake.finished(OpaquePushWake.RETRY_JOB_ID)}
+    @Before fun reset(){scheduler.cancelAll();OpaquePushWake.finished(OpaquePushWake.JOB_ID);OpaquePushWake.finished(OpaquePushWake.RETRY_JOB_ID);OpaquePushWake.finished(OpaquePushWake.PERIODIC_JOB_ID)}
+    @Test fun periodicRecoveryIsPersistedNetworkConstrainedAndCancelable(){
+        assertTrue(OpaquePushWake.maintainPeriodic(context,true))
+        assertTrue(OpaquePushWake.maintainPeriodic(context,true))
+        val job=checkNotNull(scheduler.getPendingJob(OpaquePushWake.PERIODIC_JOB_ID))
+        assertTrue(job.isPersisted)
+        assertTrue(job.isPeriodic)
+        assertEquals(JobInfo.NETWORK_TYPE_ANY,job.networkType)
+        assertEquals(6*60*60*1000L,job.intervalMillis)
+        assertTrue(OpaquePushWake.maintainPeriodic(context,false))
+        assertNull(scheduler.getPendingJob(OpaquePushWake.PERIODIC_JOB_ID))
+    }
     @Test fun freshWakeIsImmediateExpedited(){
         assertTrue(OpaquePushWake.schedule(context,hint))
         val job=checkNotNull(scheduler.getPendingJob(OpaquePushWake.JOB_ID))

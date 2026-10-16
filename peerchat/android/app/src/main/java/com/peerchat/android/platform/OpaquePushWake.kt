@@ -12,6 +12,7 @@ object OpaquePushWake {
     // Keep the old identity for its durable, possibly backed-off reconciliation.
     const val RETRY_JOB_ID=7341
     const val JOB_ID=7342
+    const val PERIODIC_JOB_ID=7343
     private val running=mutableSetOf<Int>()
     @Synchronized internal fun started(id:Int){running.add(id)}
     @Synchronized internal fun finished(id:Int){running.remove(id)}
@@ -32,6 +33,16 @@ object OpaquePushWake {
         return scheduler.schedule(JobInfo.Builder(RETRY_JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setMinimumLatency(30000)
             .setBackoffCriteria(30000,JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())==JobScheduler.RESULT_SUCCESS
+    }
+    /** One persisted, network-constrained recovery window for an opted-in
+     * remembered profile. JobScheduler owns reboot and connectivity deferral. */
+    @Synchronized internal fun maintainPeriodic(context:Context,enabled:Boolean):Boolean {
+        val scheduler=context.getSystemService(JobScheduler::class.java)
+        if(!enabled){scheduler.cancel(PERIODIC_JOB_ID);return true}
+        if(scheduler.getPendingJob(PERIODIC_JOB_ID)!=null)return true
+        return scheduler.schedule(JobInfo.Builder(PERIODIC_JOB_ID,ComponentName(context,PeerChatWakeJob::class.java))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setPersisted(true)
+            .setPeriodic(6*60*60*1000L,60*60*1000L).build())==JobScheduler.RESULT_SUCCESS
     }
     fun valid(data:Map<String,String>)=data==mapOf("event" to "peerchat_pending","version" to "1")
     @Synchronized fun schedule(context:Context,data:Map<String,String>):Boolean {

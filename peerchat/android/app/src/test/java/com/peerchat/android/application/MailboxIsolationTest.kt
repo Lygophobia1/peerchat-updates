@@ -134,12 +134,12 @@ class MailboxIsolationTest {
         val n=Native().apply{binding=byteArrayOf(7);receiveResult=received(1)}
         val s=Server().apply{withReceipt=false;keysState="rejected_or_storage_unavailable"}
         val execution=MailboxExecution(n);val notifications=mutableListOf<Boolean>()
-        assertThrows(IllegalStateException::class.java){execution.service(s::request,1,true){notifications.add(it)}}
+        execution.service(s::request,1,true){notifications.add(it)}
         assertEquals(listOf(true),notifications)
         assertTrue(execution.inboundDiagnostic.contains("receive=acknowledged"))
         assertTrue(execution.inboundDiagnostic.contains("imported=1 acknowledged=1"))
-        assertTrue(execution.diagnostic.contains("stage=mailbox_keys"))
-        assertTrue(execution.diagnostic.contains("state=rejected_or_storage_unavailable"))
+        assertTrue(execution.diagnostic.contains("outgoing_retry=1"))
+        assertTrue(execution.diagnostic.contains("retry_reason=rejected_or_storage_unavailable"))
         assertEquals(0,n.stored)
     }
     @Test fun lostServerAckReopensRegistrationAndDrainsDuplicateWithoutAnotherImport(){

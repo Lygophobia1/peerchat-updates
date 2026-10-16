@@ -11,7 +11,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** Records the current post-ACK failure boundary for the background wake audit. */
+/** Faults in later phases must not hide committed receive or starve outgoing work. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class MailboxAuditFaultTest {
@@ -40,6 +40,7 @@ class MailboxAuditFaultTest {
     @Test fun acknowledgedInboundCanBeFollowedByReceiptFailureBeforeServiceReturns() {
         val operations = mutableListOf<String>()
         val callbacks = mutableListOf<Boolean>()
+        val committed = mutableListOf<String>()
         val execution = MailboxExecution(Native())
         val receiptFailure = java.io.IOException("controlled receipt lookup failure")
         val request = { operation: String, _: JSONObject ->
@@ -55,14 +56,15 @@ class MailboxAuditFaultTest {
         }
 
         assertEquals(receiptFailure, assertThrows(java.io.IOException::class.java) {
-            execution.service(request, 1, true) { callbacks += it }
+            execution.service(request, 1, true,committed={committed+=it}) { callbacks += it }
         })
         assertEquals(listOf("mailbox_register", "mailbox_fetch", "mailbox_ack", "mailbox_receipts"), operations)
         assertEquals(listOf(true), callbacks)
+        assertEquals(listOf("message"),committed)
         assertTrue(execution.inboundDiagnostic.contains("receive=acknowledged"))
     }
 
-    @Test fun stableRejectedFirstFourOutgoingCandidatesStarveFifthAcrossPasses() {
+    @Test fun stableRejectedFirstFourOutgoingCandidatesDoNotStarveFifthAcrossPasses() {
         val ids = (1..5).map { it.toString(16).padStart(32, '0') }
         val native = Native().apply { outgoingIds = ids }
         val execution = MailboxExecution(native)
@@ -83,7 +85,7 @@ class MailboxAuditFaultTest {
         }
 
         repeat(2) { execution.service(request, 1, true) { error("No inbound ACK expected") } }
-        assertEquals(ids.take(4) + ids.take(4), storedAttempts)
-        assertTrue(execution.needsContinuation)
+        assertEquals(ids, storedAttempts)
+        assertTrue(execution.diagnostic.contains("outgoing_retry=1"))
     }
 }

@@ -52,7 +52,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var loggedTickFailure:String?=null
     private var lastNativeReceiveNanos=0L
     private var lastNativeReceiveAttempt=0L
-    private var lastMailboxAcknowledgedNanos=0L
+    private val mailboxPublication=MailboxPublicationGate({publish()})
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
     private val groupExecution=GroupExecution()
@@ -77,6 +77,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             requireMailboxConsentChangeAllowed(MailboxBridge.hasScopedEnrollment(native.handle))
         }
         mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
+        OpaquePushWake.maintainPeriodic(context,allowed&&remembered.load()?.revocationPending==false)
         mailboxExecution.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
     private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
@@ -265,6 +266,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 refresh();refreshAt=System.nanoTime()/1_000_000+900000
                 if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
                     try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}
+                    if(mailboxAllowed())OpaquePushWake.maintainPeriodic(context,true)
                     // Enrollment leaves the password-login bearer unbound. Push
                     // registration requires the signed device-bound resume token
                     // immediately, not only after the next process restart.
@@ -287,6 +289,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         try{ServerAccounts(saved.endpoint,saved.device,operations).revoke(saved,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}
         catch(failure:ServerRejected){if(failure.code!="remember_revoked")throw failure}
         remembered.clear()
+        OpaquePushWake.maintainPeriodic(context,false)
     }
     override suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean = withContext(Dispatchers.IO) {
         val start=System.nanoTime()
@@ -447,7 +450,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
-        mailboxExecution.reset();lastMailboxAcknowledgedNanos=0L;mailboxAt=0L
+        mailboxExecution.reset();mailboxPublication.reset();mailboxAt=0L
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
@@ -583,13 +586,21 @@ class MessagingBackend(context: Context,private val profileName: String="default
             try {
                 measured("mailbox_service") {
                     configureMailboxEnrollment(checkNotNull(accounts),native)
-                    mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed()) { inserted ->
-                        lastMailboxAcknowledgedNanos=System.nanoTime()
+                    mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed(),committed={ messageId ->
+                        // Publish at the durable-import boundary. A later ACK,
+                        // receipt lookup or outgoing failure cannot hide this row.
+                        mailboxPublication.committed(messageId)
+                        android.util.Log.i("PeerChatWake","stage=mailbox_native_history_published")
+                    }) { inserted ->
                         if(inserted)android.util.Log.i("PeerChatWake","stage=mailbox_native_history_received_server_acknowledged")
+                        // The publication above happens before this completion
+                        // marker can release a background wake.
+                        mailboxPublication.acknowledged()
                     }
                 }
                 mutable.value=mutable.value.copy(mailboxRecoveryError=null)
                 publish()
+                mailboxPublication.servicePublished()
             } catch(failure:Exception) {
                 if(expiredServerSession(failure))throw failure
                 if(mailboxExecution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
@@ -800,11 +811,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
             mutable.value=mutable.value.copy(transferDiagnostics=measured.toString().take(32768))
             transferDiagnosticStates.keys.retainAll(currentIds)
         }
-        mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed())
+        mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
         val receiver=executions[lastNativeReceiveAttempt]
-        lastMailboxAcknowledgedNanos>=afterNanos||
+        mailboxPublication.outputDrained(afterNanos,mailboxExecution.needsContinuation)||
             (receiver!=null&&nativeWakeOutputComplete(lastNativeReceiveNanos,afterNanos,receiver.attached,receiver.finished,receiver.lastOutputIdleNanos))
     }
     override fun close() {

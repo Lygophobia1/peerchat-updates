@@ -47,10 +47,19 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             val frames=RelayFrames(relay.sessionId)
             writer=Thread({
                 try {
+                    var nextStatusAt=0L
                     while(!stopping) {
                         val bytes=checkNotNull(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.OUTPUT,ByteArray(0)))
                         if(bytes.isNotEmpty())relay.channel.write(frames.wrap(bytes),43+65536)
-                        else {lastOutputIdleNanos=System.nanoTime();Thread.sleep(10)} // Readout, not a reconnect decision.
+                        else {
+                            val now=System.nanoTime()
+                            if(now>=nextStatusAt){
+                                check(nativeRelayOpen(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.STATUS,ByteArray(0))))
+                                nextStatusAt=now+100_000_000L
+                            }
+                            lastOutputIdleNanos=now
+                            Thread.sleep(10)
+                        }
                     }
                 } catch(failure: Exception) {failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=relay_output reason="+relayFailureCode(failure);try {relay.channel.close()}catch(_: Exception){}}
             },"PeerChat relay output").apply {isDaemon=true;start()}
@@ -82,6 +91,8 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         // Do not join while holding any native/application gate.
     }
 }
+
+internal fun nativeRelayOpen(status:ByteArray?):Boolean=status?.size==2&&status[1].toInt()==0
 
 // Fixed classification only; no server bodies, credentials or exception messages.
 internal fun relayFailureCode(failure:Exception):String = when {
