@@ -33,6 +33,7 @@ class NativePresenterTest {
     private class Commands:MessagingApplication {
         override val state=MutableStateFlow(MessagingSnapshot())
         var reject=true;var sends=0;var failSend=false;var closed=false
+        var sendBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
         var signIns=0;var endpoint:ServerEndpoint?=null
         var registrations=0
         override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession {
@@ -77,7 +78,7 @@ class NativePresenterTest {
                 ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())),serverPresenceLive=true)
             return AccountSession(19,"Jonah","test-only-token",true)
         }
-        override suspend fun send(peerId:String,text:String):String {sends++;if(failSend)error("test failure");return "c".repeat(32)}
+        override suspend fun send(peerId:String,text:String):String {sends++;sendBlocker?.await();if(failSend)error("test failure");return "c".repeat(32)}
         override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
         override suspend fun requestFriend(username:String) {}
         val searches=mutableListOf<String>()
@@ -247,7 +248,52 @@ class NativePresenterTest {
         assertEquals(Route.Home,p.state.value.route);assertNull(p.state.value.startupStatus)
         assertEquals("Persisted test history",p.state.value.conversations.single().messages.single().text)
         assertEquals(ConnectionState.Offline,p.state.value.connection);assertTrue(p.state.value.loginBusy)
+        p.dispatch(UiAction.Select("account:8"))
         dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(Route.Conversation,p.state.value.route);assertEquals("account:8",p.state.value.selectedId)
+    }
+    @Test fun savingBubbleIsImmediateAndNewTypingSurvivesDurableReturn(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.sendBlocker=blocker
+        p.dispatch(UiAction.Draft("account:8","sent draft"));p.dispatch(UiAction.PreviewMessage("sent draft"))
+        assertEquals(MessageStatus.Saving,p.state.value.selected!!.messages.single().status)
+        assertEquals(0,commands.sends)
+        dispatcher.scheduler.runCurrent();assertTrue(p.state.value.sendBusy);assertEquals(1,commands.sends)
+        p.dispatch(UiAction.Draft("account:8","new typing"));blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("new typing",p.state.value.drafts["account:8"])
+        assertEquals(MessageStatus.Queued,p.state.value.selected!!.messages.single().status)
+        assertFalse(p.state.value.sendBusy)
+    }
+    @Test fun accountChangeInvalidatesBusySendAndRejectsStaleCompletion(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.sendBlocker=blocker
+        p.dispatch(UiAction.PreviewMessage("fixture"));dispatcher.scheduler.runCurrent();assertTrue(p.state.value.sendBusy)
+        commands.state.value=commands.state.value.copy(accountId=20);dispatcher.scheduler.runCurrent()
+        assertFalse(p.state.value.sendBusy);assertNull(p.state.value.selectedId)
+        blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(p.state.value.sendAccepted);assertFalse(p.state.value.sendBusy)
+    }
+    @Test fun typingBeforeProtectedPreferencesLoadIsMergedAndSaved(){
+        val tasks=java.util.ArrayDeque<Runnable>()
+        val configuration=object:kotlinx.coroutines.CoroutineDispatcher(){
+            override fun dispatch(context:kotlin.coroutines.CoroutineContext,block:Runnable){tasks.addLast(block)}
+        }
+        val settings=Settings().apply{saved=ServerEndpoint("server.example",7443,"f".repeat(64))}
+        val preferences=Preferences();val commands=Commands().apply{localHistory=true}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,configuration,preferences,Preferences())
+        store.put("early-draft",p);dispatcher.scheduler.runCurrent()
+        // Server configuration was queued before the independently loaded QoL
+        // preferences. Admit local history while preference IO is still pending.
+        tasks.removeFirst().run();dispatcher.scheduler.runCurrent()
+        assertEquals(Route.Home,p.state.value.route)
+        p.dispatch(UiAction.Draft("account:8","new local typing"))
+        repeat(10){if(tasks.isNotEmpty())tasks.removeFirst().run();dispatcher.scheduler.runCurrent()}
+        dispatcher.scheduler.advanceTimeBy(300);dispatcher.scheduler.runCurrent()
+        repeat(10){if(tasks.isNotEmpty())tasks.removeFirst().run();dispatcher.scheduler.runCurrent()}
+        assertEquals("new local typing",p.state.value.drafts["account:8"])
+        assertTrue(preferences.value.conversations.values.any{it.draft=="new local typing"})
     }
     @Test fun rememberedAuthenticationIsNotOnlineUntilOwnerPublishesPresence() {
         val settings=Settings().apply {saved=ServerEndpoint("server.example",7443,"a".repeat(64))}
@@ -481,7 +527,9 @@ class NativePresenterTest {
         p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.PreviewMessage("hello"))
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(1,commands.sends);assertTrue(p.state.value.sendAccepted)
-        assertTrue(p.state.value.selected!!.messages.isEmpty())
+        assertTrue(commands.state.value.conversations.single().messages.isEmpty())
+        assertEquals(MessageStatus.Queued,p.state.value.selected!!.messages.single().status)
+        assertEquals("c".repeat(32),p.state.value.selected!!.messages.single().id)
         commands.failSend=true;p.dispatch(UiAction.PreviewMessage("keep draft"));dispatcher.scheduler.advanceUntilIdle()
         assertFalse(p.state.value.sendAccepted);assertEquals(2,p.state.value.sendCompletion)
         assertTrue(p.state.value.notice!!.contains("draft"))

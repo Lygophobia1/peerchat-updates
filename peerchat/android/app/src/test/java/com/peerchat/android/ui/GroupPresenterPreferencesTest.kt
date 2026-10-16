@@ -55,6 +55,18 @@ class GroupPresenterPreferencesTest {
     }
     private fun key(account:Long=19,server:ServerEndpoint=endpoint)=groupPreferenceKey(accountPreferenceKey(server,account),groupId)
 
+    @Test fun savedGroupSelectionWaitsForAuthorizedGroupProjection(){
+        val commands=Commands();val preferences=Preferences()
+        val saved=androidx.lifecycle.SavedStateHandle(mapOf("owner" to accountPreferenceKey(endpoint,19),"conversation" to conversation))
+        val settings=object:ServerConfigurationRepository{override fun load()=endpoint;override fun save(endpoint:ServerEndpoint){}}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences(),preferences,saved)
+        lifecycle.put("saved-group",p);dispatcher.scheduler.advanceUntilIdle()
+        commands.state.value=snapshot(emptyList()).copy(groups=emptyList(),localHistoryReady=true)
+        dispatcher.scheduler.advanceUntilIdle();assertNull(p.state.value.selectedId)
+        commands.state.value=snapshot(listOf(message(1)));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(conversation,p.state.value.selectedId);assertEquals(Route.Conversation,p.state.value.route)
+    }
+
     @Test fun historicalRowsBaselineOnceAndNativePagingIsPreserved(){
         val commands=Commands();val preferences=Preferences();val p=presenter(commands,preferences)
         commands.state.value=snapshot(listOf(message(10),message(11)),hasOlder=false);dispatcher.scheduler.advanceUntilIdle()
@@ -98,6 +110,9 @@ class GroupPresenterPreferencesTest {
         other.state.value=snapshot(emptyList());dispatcher.scheduler.advanceUntilIdle();assertEquals("",otherPresenter.state.value.drafts[conversation])
         commands.state.value=snapshot(emptyList(),account=20);dispatcher.scheduler.advanceUntilIdle();assertEquals("",p.state.value.drafts[conversation])
         commands.state.value=snapshot(emptyList());dispatcher.scheduler.advanceUntilIdle();assertEquals("Private 😀",p.state.value.drafts[conversation])
+        // Account changes no longer carry a selected conversation into another
+        // account with the same group identifier. Reopen explicitly.
+        assertNull(p.state.value.selectedId);p.dispatch(UiAction.Select(conversation));dispatcher.scheduler.advanceUntilIdle()
         commands.failSend=false;p.dispatch(UiAction.PreviewMessage("Private 😀"));dispatcher.scheduler.advanceUntilIdle()
         assertEquals("",preferences.value.conversations[key()]!!.draft)
     }

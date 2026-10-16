@@ -32,6 +32,16 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var accounts: ServerAccounts?=null
     private var index: FriendIdentityIndex?=null
     private var friends=emptyList<FriendIdentity>()
+    private val historyProjection=LocalHistoryProjection()
+    private data class LocalReadContext(val handle:Long,val account:Long,val endpoint:ServerEndpoint,val friends:List<FriendIdentity>)
+    @Volatile private var localReadContext:LocalReadContext?=null
+    @Volatile private var preferredLocalAccount=0L
+    private var projectedHistoryRevision=-1L
+    private fun publishLocalReadContext(handle:Long,account:Long,endpoint:ServerEndpoint){
+        val next=LocalReadContext(handle,account,endpoint,friends.map{it.copy(online=false)})
+        localReadContext?.let{old->if(old.handle!=handle||old.account!=account||old.endpoint!=endpoint)historyProjection.clear()}
+        if(localReadContext!=next)localReadContext=next
+    }
     private val localContexts=LocalConversationContextStore(this.context,profileName)
     private var localEndpoint:ServerEndpoint?=null
     private var generation=0L
@@ -309,23 +319,27 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private fun restoreLocalLocked(endpoint:ServerEndpoint):Boolean {
         check(!stopped&&inUse)
         if(mutable.value.localHistoryReady&&localEndpoint==endpoint)return true
-        if(mutable.value.localHistoryReady){friends=emptyList();mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
-        val cached=localContexts.load(endpoint) ?: remembered.load()?.takeIf{it.endpoint==endpoint}?.let{saved->
+        if(mutable.value.localHistoryReady){localReadContext=null;historyProjection.clear();friends=emptyList();mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
+        val cached=ownerTimings.measure(OwnerStage.LocalIndex){localContexts.load(endpoint)} ?: remembered.load()?.takeIf{it.endpoint==endpoint}?.let{saved->
             // Upgrade the existing protected display index in place; no remote
             // connection or trust promotion is needed to view old local history.
             LocalConversationContext(saved.accountId,"Account ${saved.accountId}",saved.device,
                 FriendIdentityIndex(context,profileName,endpoint,saved.accountId).localHistoryBindings())
         } ?: return false
-        val native=profile ?: measured("profile_open"){NativeProfile(context,profileName)}.also{profile=it}
+        val native=profile ?: ownerTimings.measure(OwnerStage.ProfileOpen){measured("profile_open"){NativeProfile(context,profileName)}}.also{profile=it}
         val identity=measured("local_history_identity"){PeerIdentityFormat.peerId(checkNotNull(ProfileBridge.publicKey(native.handle)))}
         check(identity==cached.device)
         // Cached names/bindings project local Storage ONLY. Never install them
         // into ReliableBridge.friends or grant route/mailbox authorization.
         friends=cached.friends
         localEndpoint=endpoint
+        historyProjection.clear()
+        publishLocalReadContext(native.handle,cached.account,endpoint)
         mutable.value=MessagingSnapshot(cached.account,cached.username,identity,false,"Offline; local history available",
             localHistoryReady=true)
-        measured("local_history_projection"){publish()}
+        // Publish the protected conversation index before authentication, native
+        // history decryption for other chats, attachment scans or server work.
+        mutable.value=mutable.value.copy(conversations=friends.map{ConversationSnapshot(it.copy(online=false),ConnectionSnapshot(),emptyList())})
         android.util.Log.i("PeerChatWake","stage=local_history_projected contacts=${friends.size}")
         return true
     }
@@ -365,27 +379,36 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
     }
     override suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
+        val waiting=System.nanoTime()
         synchronized(gate) {
+            ownerTimings.record(OwnerStage.SendWait,System.nanoTime()-waiting)
             check(!stopped&&friends.any {it.peerId==peerId}&&(accounts?.session!=null||mutable.value.localHistoryReady))
             val utf8=text.toByteArray(Charsets.UTF_8);require(utf8.size<=512*1024&&!text.contains('\u0000'))
-            val result=if(text.length>4096){check(authorizationSnapshotInstalled);checkNotNull(com.peerchat.android.TransferBridge.offerText(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
-                else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))
+            val result=ownerTimings.measure(OwnerStage.LocalCommit){if(text.length>4096){check(authorizationSnapshotInstalled);checkNotNull(com.peerchat.android.TransferBridge.offerText(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
+                else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
             val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
             mailboxAt=0L
-            publish()
+            historyProjection.invalidate(friends.first{it.peerId==peerId})
+            // The durable command already succeeded. A later projection/network
+            // failure must not turn it into a failed Send or cause a second ID.
+            val committedProfile=profile
+            try{executor.execute{try{synchronized(gate){if(!stopped&&profile===committedProfile)publish()}}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
             val friend=friends.first{it.peerId==peerId};val owner=accounts
             // Best effort after native durable queueing. Not another retry policy.
-            executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}
+            try{executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
             id
         }
     }
     override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
-        synchronized(gate) {
-            check(!stopped)
-            val friend=friends.single{it.knownPeerIds.contains(peerId)}
-            accountHistoryPage(friend,before){peer,cursor->
-                checkNotNull(ReliableBridge.history(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII),cursor))}
-        }
+        // Read-only JNI lookup admits its own native instance lease and mutex.
+        // Do not wait behind authenticated RPCs holding the application gate.
+        val scope=checkNotNull(localReadContext);check(!stopped&&!resetting)
+        val friend=scope.friends.single{it.knownPeerIds.contains(peerId)}
+        preferredLocalAccount=friend.accountId
+        val rows=ownerTimings.measure(OwnerStage.LocalPage){accountHistoryPage(friend,before){peer,cursor->
+            checkNotNull(ReliableBridge.history(scope.handle,peer.toByteArray(Charsets.US_ASCII),cursor))}}
+        check(localReadContext===scope&&!stopped&&!resetting){"Local history scope changed"}
+        rows
     }
     override suspend fun createGroup(name:String)=withContext(Dispatchers.IO){synchronized(gate){
         check(authorizationSnapshotInstalled&&livePeerWorkAllowed);val s=mutable.value
@@ -515,6 +538,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             OpaquePushWake.maintainPeriodic(context,false)
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000
             generation++;clearAuthorization()
+            localReadContext=null;historyProjection.clear()
             val old=accounts;accounts=null;friends=emptyList();index=null
             pushRegisteredToken=null
             try {profile?.let{revokeSaved(it,checkNotNull(ProfileBridge.publicKey(it.handle)))};old?.logout()}
@@ -548,6 +572,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val changed=authoritative!=friends
         friends=authoritative
         localEndpoint=accounts.endpoint
+        publishLocalReadContext(native,active.accountId,accounts.endpoint)
         if(changed||bootstrap)localContexts.save(accounts.endpoint,LocalConversationContext(active.accountId,active.username,mutable.value.localPeerId,authoritative))
         val outgoing=state.getJSONArray("outgoing");require(outgoing.length()<=128)
         val sent=List(outgoing.length()){i->val row=outgoing.getJSONObject(i);val id=row.getLong("accountId");val name=row.getString("username");require(id>0&&name.length<=64);AccountRequestSnapshot(id,name)}
@@ -625,6 +650,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 ownerTimings.measure(OwnerStage.Mailbox){measured("mailbox_service") {
                     configureMailboxEnrollment(checkNotNull(accounts),native)
                     mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed(),committed={ messageId ->
+                        historyProjection.invalidate()
                         // Publish at the durable-import boundary. A later ACK,
                         // receipt lookup or outgoing failure cannot hide this row.
                         mailboxPublication.committed(messageId)
@@ -637,6 +663,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     }
                 }}
                 mutable.value=mutable.value.copy(mailboxRecoveryError=null)
+                historyProjection.invalidate()
                 publish()
                 mailboxPublication.servicePublished()
             } catch(failure:Exception) {
@@ -721,6 +748,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     lastNativeReceiveNanos=System.nanoTime();lastNativeReceiveAttempt=attempt
                     android.util.Log.i("PeerChatWake","stage=native_history_received_ack_queued")
                 }
+                if(kind==2L||kind==3L)friends.filter{execution.requestPeerId in it.knownPeerIds}.forEach{historyProjection.invalidate(it)}
                 if(kind==3L)android.util.Log.i("PeerChatWake","stage=delivery_ack_received")
                 if(kind==0L) {
                     val accepted=ReliableBridge.exchange(native,attempt,ReliableBridge.INITIAL_AUTHENTICATED_FRIEND_PIN,ByteArray(0))
@@ -841,15 +869,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
             appendLine("event_session_connected=${events?.connected==true} retry_at_monotonic_ms=$eventRetryAt retry_delay_ms=$eventRetryDelay next_mailbox_monotonic_ms=$mailboxAt next_archive_monotonic_ms=$archiveRetryAt")
             appendLine(accounts?.diagnostics() ?: "network_history=not_retained_for_closed_session")
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
+            appendLine(profile?.localDiagnostics() ?: "local_storage=unavailable")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}
             relayFailureDiagnostics.values.forEach{appendLine(it)}
             executions.values.take(32).forEach{appendLine(it.diagnostics())}
         })
         val native=checkNotNull(profile).handle
-        val conversations=nativeConversationProjection(friends,
-            {peer->checkNotNull(ReliableBridge.state(native,peer.toByteArray(Charsets.US_ASCII)))},
-            {peer->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),Long.MAX_VALUE))})
+        if(projectedHistoryRevision!=mutable.value.archiveProgress.historyRevision){historyProjection.invalidate();projectedHistoryRevision=mutable.value.archiveProgress.historyRevision}
+        ownerTimings.measure(OwnerStage.LocalPage){historyProjection.refreshOne(friends.sortedBy{it.accountId!=preferredLocalAccount},System.nanoTime()/1_000_000){friend->
+            accountHistoryPage(friend,Long.MAX_VALUE){peer,cursor->checkNotNull(ReliableBridge.history(native,peer.toByteArray(Charsets.US_ASCII),cursor))}}}
+        val conversations=friends.map{friend->ConversationSnapshot(friend,
+            connectionSnapshot(checkNotNull(ReliableBridge.state(native,friend.peerId.toByteArray(Charsets.US_ASCII)))),historyProjection.rows(friend))}
         val diagnosticNow=android.os.SystemClock.elapsedRealtime()
         // Failed offers may never create an attachment row. Keep their bounded
         // native failure projection visible without polling an idle profile fast.
@@ -895,6 +926,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // Do not block the UI waiting for an in-progress bounded server request.
         executor.execute {synchronized(gate){
             generation++;clearAuthorization();try {if(remembered.load()==null)accounts?.logout()}catch(_: Exception){}
+            localReadContext=null;historyProjection.clear()
             accounts?.closeRpc();accounts=null;friends=emptyList();index=null;profile?.close();profile=null
         }}
         executor.shutdown()

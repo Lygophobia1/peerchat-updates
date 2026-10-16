@@ -57,6 +57,12 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 }
 @Composable fun PeerChatApp(model: PeerChatPresenter) {
     val state by model.state.collectAsState()
+    val conversation=state.selected?.takeIf{state.route==Route.Conversation}
+    val ids=conversation?.messages?.map{it.id}?.toSet()?:emptySet()
+    LaunchedEffect(state.account?.accountId,state.conversations.size,conversation?.id,ids){
+        withFrameNanos{ }
+        model.rendered(conversation?.id,ids)
+    }
     val dark = when (state.theme) { ThemeChoice.System -> isSystemInDarkTheme(); ThemeChoice.Dark -> true; ThemeChoice.Light -> false }
     PeerChatTheme(dark) { PeerChatShell(state, model::dispatch, model::login) }
 }
@@ -138,7 +144,11 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             Route.Home -> Home(state, dispatch)
             Route.Contacts -> ContactsScreen(state,dispatch)
             Route.TransferSettings -> TransferSettingsScreen(state,dispatch)
-            Route.Conversation -> state.selected?.let { ConversationScreen(it, state, dispatch) }
+            Route.Conversation -> if(state.selected!=null)ConversationScreen(checkNotNull(state.selected),state,dispatch) else Column(Modifier.fillMaxSize().padding(24.dp)){
+                Text("This conversation is currently unavailable for this profile. Existing local history has not been deleted.")
+                TextButton({dispatch(UiAction.Navigate(Route.Home))}){Text("Return to chats")}
+                TextButton({dispatch(UiAction.RefreshContacts)}){Text("Refresh contacts")}
+            }
             Route.Details -> state.selected?.let { DetailsScreen(it, state, dispatch) }
             Route.Diagnostics -> DiagnosticsScreen(state, dispatch)
         }
@@ -147,7 +157,7 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 
 internal fun diagnosticReport(state:PeerChatUiState):String =
     "PeerChat Android diagnostics\nBuild: ${com.peerchat.android.BuildConfig.VERSION_NAME}\n"+
-        if(state.demo)"Explicit demo mode: no live transport or identity." else state.diagnostics
+        if(state.demo)"Explicit demo mode: no live transport or identity." else state.diagnostics+"\nUI frame timing observations:\n"+state.presentationDiagnostics
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun DiagnosticsScreen(state:PeerChatUiState,dispatch:(UiAction)->Unit){

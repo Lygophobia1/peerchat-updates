@@ -18,7 +18,7 @@ enum class Tab { Chats, Calls, You }
 enum class ChatKind { Direct, Group }
 enum class LoadState { Ready, Loading, Empty, Error }
 enum class ConnectionState { Online, Offline, Reconnecting }
-enum class MessageStatus { Received, Queued, Sent, Stored, Delivered, Read, Failed, Preview }
+enum class MessageStatus { Received, Queued, Sent, Stored, Delivered, Read, Failed, Preview, Saving }
 enum class ThemeChoice { System, Dark, Light }
 data class MemberUi(val accountId: String, val name: String, val online: Boolean, val role: String = "Member")
 data class MessageUi(
@@ -87,6 +87,7 @@ data class PeerChatUiState(
     val diagnosticsReturn: Route = Route.Details,
     val theme: ThemeChoice = ThemeChoice.System, val incomingCallPreview: Boolean = false,
     val olderLoading: Boolean = false,
+    val presentationDiagnostics:String="",
     val recentCalls: List<CallUi> = listOf(CallUi("sample-missed", "Alex", "Missed call · Yesterday", true),
         CallUi("sample-call", "Sammy", "Outgoing · Monday, 14:10"))
 ) {
@@ -262,6 +263,7 @@ interface PeerChatPresenter {
     val state: StateFlow<PeerChatUiState>
     fun dispatch(action: UiAction)
     fun login(username: String, password: String)
+    fun rendered(conversation:String?,messageIds:Set<String>) {}
 }
 class PeerChatUiModel(
     source: ConversationSource = DemoConversations(), private val accounts: AccountAccess = UnconnectedAccountAccess()

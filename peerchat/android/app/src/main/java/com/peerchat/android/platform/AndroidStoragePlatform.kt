@@ -53,6 +53,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     private val identity: AndroidIdentityProvider
     private val records: AndroidRecordProtector
     private val database: SQLiteDatabase
+    val databaseOpenUs:Long
     private var nextStatement = 1L
     private val statements = mutableMapOf<Long, Statement>()
     private var closed = false
@@ -64,7 +65,9 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         identity = AndroidIdentityProvider(context, profile)
         records = AndroidRecordProtector(context, profile)
         if (!directory.isDirectory && !directory.mkdirs()) throw ProviderFailure("STORAGE_OPEN_FAILED")
+        val opening=System.nanoTime()
         database = SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.CREATE_IF_NECESSARY)
+        databaseOpenUs=(System.nanoTime()-opening)/1000
     }
     private class Statement(val sql: String) {
         val bindings = sortedMapOf<Int, Any>()

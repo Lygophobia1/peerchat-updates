@@ -2,6 +2,7 @@ package com.peerchat.android.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.peerchat.android.application.*
 import com.peerchat.android.platform.ServerEndpoint
@@ -115,17 +116,42 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val configurationDispatcher:CoroutineDispatcher=Dispatchers.IO,
     private val qol:AndroidQolRepository=AndroidQolStore(application),
     private val groupQol:AndroidQolRepository=AndroidGroupQolStore(application),
+    private val navigationState:SavedStateHandle=SavedStateHandle(),
     private val inspectServer:(ServerEndpoint)->String={ServerChannel.inspectCertificate(it.host,it.port)}
 ):AndroidViewModel(application),PeerChatPresenter {
     // Preserve the original explicit six-argument constructor as well as
     // trailing-lambda call sites when injecting the separate group repository.
     constructor(application:Application,backend:MessagingApplication,serverConfiguration:ServerConfigurationRepository,
         configurationDispatcher:CoroutineDispatcher,qol:AndroidQolRepository,inspectServer:(ServerEndpoint)->String):
-        this(application,backend,serverConfiguration,configurationDispatcher,qol,AndroidGroupQolStore(application),inspectServer)
+        this(application,backend,serverConfiguration,configurationDispatcher,qol,AndroidGroupQolStore(application),inspectServer=inspectServer)
     constructor(application:Application):this(application,AndroidMessagingRuntime.acquire(application))
+    constructor(application:Application,savedState:SavedStateHandle):this(application,AndroidMessagingRuntime.acquire(application),navigationState=savedState)
     private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList(),startupStatus="Checking saved sign-in…"))
     override val state:StateFlow<PeerChatUiState> = mutable.asStateFlow()
     private var current=MessagingSnapshot()
+    private val localSends=linkedMapOf<String,LocalSendPresentation>()
+    private var navigationRestored=false
+    private val uiTimings=OwnerStageTimings()
+    private val uiCreatedAt=System.nanoTime()
+    private var firstLocalFrame=false
+    private var chatOpenedAt=0L
+    private val localSendStarted=linkedMapOf<String,Pair<Long,String?>>()
+    override fun rendered(conversation:String?,messageIds:Set<String>){
+        val now=System.nanoTime();var changed=false
+        if(!firstLocalFrame&&mutable.value.conversations.isNotEmpty()){
+            firstLocalFrame=true;changed=true;uiTimings.record(OwnerStage.UiLocalListFrame,now-uiCreatedAt)
+        }
+        if(conversation!=null&&conversation==mutable.value.selectedId&&messageIds.isNotEmpty()&&chatOpenedAt>0){
+            uiTimings.record(OwnerStage.UiChatFrame,now-chatOpenedAt);chatOpenedAt=0;changed=true
+        }
+        val iterator=localSendStarted.iterator()
+        while(iterator.hasNext()){
+            val (token,observation)=iterator.next();val pending=localSends[token]
+            if(token in messageIds||observation.second in messageIds){uiTimings.record(OwnerStage.UiSendFrame,now-observation.first);iterator.remove();changed=true}
+            else if(pending==null&&observation.second==null)iterator.remove()
+        }
+        if(changed)mutable.value=mutable.value.copy(presentationDiagnostics=uiTimings.summary())
+    }
     private var configurationReady=false
     private var configurationInvalid=false
     private var configurationSaving=false
@@ -195,6 +221,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val retainedDiagnostics=ArrayDeque<String>()
     private val previewLoading=mutableSetOf<String>()
     private val largeDrafts=mutableMapOf<String,String>()
+    private val earlyDrafts=mutableMapOf<String,String>()
+    private val earlyGroupDrafts=mutableMapOf<String,String>()
     private fun retainDiagnostic(category:String,reason:String) {
         if(retainedDiagnostics.size>=16)retainedDiagnostics.removeFirst()
         retainedDiagnostics.addLast("generation=$uiGeneration category=$category $reason")
@@ -213,11 +241,11 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         if(recovering)return
         retainDiagnostic("Network recovery","reason=$reason destination=$destination authenticated=${current.authenticated}")
         android.util.Log.i("PeerChatNetwork","event=login_navigation reason=$reason ui_generation=$uiGeneration authenticated=${current.authenticated}")
-        recovering=true;automaticResumeSuppressed=true;uiGeneration++
+        recovering=true;automaticResumeSuppressed=true;uiGeneration++;localSends.clear();localSendStarted.clear()
         peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
         mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline,
-            peopleLoading=false,peopleResults=emptyList(),peopleError=null)
+            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false)
         viewModelScope.launch {
             var completed=false
             try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
@@ -290,8 +318,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->
             if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
         })}
+        val nativeIds=mutable.value.conversations.flatMap{c->c.messages.map{it.id}+c.attachments.map{it.id}}.toSet()
+        localSends.entries.removeAll{it.value.nativeId in nativeIds}
+        mutable.value=mutable.value.copy(conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
         if(retainedDiagnostics.isNotEmpty())mutable.value=mutable.value.copy(diagnostics=mutable.value.diagnostics+"\nRetained application diagnostics:\n"+retainedDiagnostics.joinToString("\n"))
         val accountKey=preferenceAccountKey() ?: return
+        if(!navigationRestored&&(current.localHistoryReady||current.authenticated)){
+            val selected=navigationState.get<String>("conversation")
+            if(navigationState.get<String>("owner")!=accountKey||selected==null)navigationRestored=true
+            if(navigationState.get<String>("owner")==accountKey&&selected!=null&&mutable.value.route in setOf(Route.Home,Route.Welcome)&&mutable.value.conversations.any{it.id==selected}){
+                navigationRestored=true
+                dispatch(UiAction.Select(selected))
+            }
+        }
         pendingOpen?.let{(owner,id)->if(current.authenticated){
             if(owner!=accountKey)pendingOpen=null
             else if(mutable.value.conversations.any{it.id==id}){pendingOpen=null;mutable.value=reduceUi(mutable.value,UiAction.Select(id))}
@@ -342,7 +381,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 c.copy(unread=if(row==null||row.baselinePending)group.unread else incoming.count{it.sequence>row.readSequence})
             }
             mutable.value=mutable.value.copy(conversations=rows,drafts=mutable.value.drafts+rows.filter{it.kind==ChatKind.Group}.associate{c->
-                c.id to (groupQolState.conversations[groupPreferenceKey(accountKey,c.id.removePrefix("group:"))]?.draft ?: "")
+                c.id to (largeDrafts[c.id] ?: groupQolState.conversations[groupPreferenceKey(accountKey,c.id.removePrefix("group:"))]?.draft ?: "")
             })
         }
     }
@@ -357,7 +396,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 peopleError=if(snapshot.accountId!=current.accountId)null else if(mutable.value.peopleLoading)"Search interrupted by a connection change. Reconnect and retry." else mutable.value.peopleError)
         }
         if(snapshot.accountId!=current.accountId)mutable.value=mutable.value.copy(transferSettings=null,transferSettingsBusy=false,transferSettingsError=null)
-        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
+        if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();localSends.clear();localSendStarted.clear();chatOpenedAt=0
+            mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=false)
+            if(current.accountId>0){navigationState.remove<String>("conversation");navigationState.remove<String>("owner");mutable.value=mutable.value.copy(selectedId=null,route=if(mutable.value.route in setOf(Route.Conversation,Route.Details))Route.Home else mutable.value.route)}
+            mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
         current=snapshot
         if(foreground&&mutable.value.route==Route.Conversation){
             val group=snapshot.groups.find{"group:${it.id}"==mutable.value.selectedId&&it.unread>0}
@@ -370,7 +412,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
         if(mutable.value.startupStatus!=null) {
             mutable.value=when {
-                snapshot.authenticated&&snapshot.serverPresenceLive -> mutable.value.copy(startupStatus=null,route=Route.Home,rememberMe=true)
+                snapshot.authenticated&&snapshot.serverPresenceLive -> finishLocalStartup(mutable.value,true).copy(rememberMe=true)
                 snapshot.authenticated -> mutable.value.copy(startupStatus="Connecting…")
                 snapshot.status.startsWith("Reconnecting") -> mutable.value.copy(startupStatus="Reconnecting…")
                 else -> mutable.value
@@ -385,19 +427,33 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     }}
     startupJob=viewModelScope.launch {
         watchStartup()
-        try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true}
+        // Protected preferences do not gate the protected local conversation
+        // index. Publish them independently when ready, without network work.
+        viewModelScope.launch {
+        try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true
+            earlyDrafts.forEach{(key,text)->
+                qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key] ?: ConversationPreference()).copy(draft=text)))
+                savePreference(key){it.copy(draft=text)}
+            };earlyDrafts.clear()}
         catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notificationsEnabled=false,notice="Local preferences could not be verified; notifications remain unavailable.")}
-        try{groupQolState=withContext(configurationDispatcher){groupQol.load()};groupQolReady=true}
+        try{groupQolState=withContext(configurationDispatcher){groupQol.load()};groupQolReady=true
+            earlyGroupDrafts.forEach{(key,text)->
+                val update:(ConversationPreference)->ConversationPreference={it.copy(draft=text)}
+                if(updateGroupPreference(key,update))saveGroupPreference(key,update)
+            };earlyGroupDrafts.clear()}
         catch(failure:Exception){if(failure is CancellationException)throw failure;mutable.value=mutable.value.copy(notice="Saved group drafts and read position could not be verified.")}
+        project()
+        }
         var settingsVerified=false
         try {
             val saved=withContext(configurationDispatcher){serverConfiguration.load()}
             settingsVerified=true
             if(saved!=null){
                 mutable.value=mutable.value.copy(server=ServerUi(saved.host,saved.port.toString(),saved.certificatePin),loginBusy=true,startupStatus="Signing in…")
-                if(backend.restoreLocalHistory(saved))mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
+                if(backend.restoreLocalHistory(saved))mutable.value=finishLocalStartup(mutable.value,true)
                 try{if(backend.restoreRemembered(saved)) {
-                    mutable.value=mutable.value.copy(rememberMe=true,startupStatus=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)null else "Connecting…",route=if(backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady)Route.Home else mutable.value.route)
+                    val available=backend.state.value.serverPresenceLive||backend.state.value.localHistoryReady
+                    mutable.value=finishLocalStartup(mutable.value,available).copy(rememberMe=true,startupStatus=if(available)null else "Connecting…")
                 } else mutable.value=mutable.value.copy(startupStatus=null)}
                 catch(failure:Exception){
                     if(failure is CancellationException)throw failure
@@ -447,7 +503,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(creating)backend.createAccountRemembered(endpoint,username,password,s.rememberMe)
                 else backend.signInRemembered(endpoint,username,password,s.rememberMe)
                 coroutineContext.ensureActive()
-                mutable.value=mutable.value.copy(loginBusy=false,loginError=null,route=Route.Home)
+                mutable.value=finishLocalStartup(mutable.value,true).copy(loginBusy=false,loginError=null)
             } catch(failure:Exception) {
                 if(failure is CancellationException)throw failure
                 retainDiagnostic(if(failure is MessagingStartupFailure)"Messaging startup" else if(ServerChannel.identityChange(failure)!=null)"Server trust" else "Authentication","Sign-in attempt failed")
@@ -479,16 +535,76 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
         }
     }
+    private fun beginLocalSend(conversation:String,text:String,command:suspend()->String,clear:()->Unit){
+        if(mutable.value.sendBusy)return
+        if(localSends.size>=16){mutable.value=mutable.value.copy(notice="Wait for the local history view to settle before sending more messages.");return}
+        val epoch=uiGeneration;val account=current.accountId
+        val token="local-saving-"+java.util.UUID.randomUUID().toString()
+        val row=LocalSendPresentation(token,conversation,text,System.currentTimeMillis(),mutable.value.conversations.find{it.id==conversation}?.messages?.map{it.id}?.toSet()?:emptySet())
+        localSends[token]=row
+        val started=System.nanoTime()
+        if(localSendStarted.size>=16)localSendStarted.remove(localSendStarted.keys.first())
+        localSendStarted[token]=started to null
+        mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false,
+            conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
+        viewModelScope.launch {
+            var accepted=false
+            try{
+                val id=command();require(id.matches(Regex("[0-9a-f]{32}")))
+                if(epoch!=uiGeneration||account!=current.accountId)return@launch
+                localSendStarted[token]?.let{localSendStarted[token]=it.first to id}
+                uiTimings.record(OwnerStage.UiDurableReturn,System.nanoTime()-started);mutable.value=mutable.value.copy(presentationDiagnostics=uiTimings.summary())
+                accepted=true;localSends[token]=row.copy(nativeId=id)
+                if(mutable.value.drafts[conversation]==text)clear()
+            }catch(failure:Exception){
+                if(failure is CancellationException)throw failure
+                if(epoch==uiGeneration&&account==current.accountId){localSends[token]=row.copy(failed=true);mutable.value=mutable.value.copy(notice="Local save was not confirmed. Your draft is retained; check history before retrying.")}
+            }finally{
+                if(epoch==uiGeneration&&account==current.accountId){project();mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)}
+            }
+        }
+    }
     override fun dispatch(action:UiAction) {
         when(action) {
+            UiAction.Back -> {
+                if(mutable.value.route==Route.Conversation)navigationState.remove<String>("conversation")
+                mutable.value=reduceUi(mutable.value,action)
+            }
+            is UiAction.Select -> {
+                mutable.value=reduceUi(mutable.value,action)
+                if(mutable.value.selectedId!=action.id||mutable.value.route!=Route.Conversation)return
+                navigationRestored=true
+                chatOpenedAt=System.nanoTime()
+                preferenceAccountKey()?.let{navigationState["owner"]=it;navigationState["conversation"]=action.id}
+                project()
+                if(action.id.startsWith("group:")){
+                    viewModelScope.launch{try{backend.groupHistory(action.id.removePrefix("group:"))}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history requires current verified authorization.")}}
+                    return
+                }
+                val conversation=current.conversations.find{"account:${it.friend.accountId}"==action.id} ?: return
+                val epoch=uiGeneration;val account=current.accountId
+                mutable.value=mutable.value.copy(olderLoading=true)
+                viewModelScope.launch {
+                    try{
+                        val page=backend.older(conversation.friend.peerId,Long.MAX_VALUE)
+                        if(epoch==uiGeneration&&account==current.accountId){older[conversation.friend.accountId]=chronologicalMessages((older[conversation.friend.accountId]?:emptyList())+page);if(page.size<8)exhausted.add(conversation.friend.accountId);project()}
+                    }catch(_:Exception){if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice="Local history could not be read. Existing data is retained; retry opening this conversation.")}
+                    finally{if(epoch==uiGeneration&&account==current.accountId&&mutable.value.selectedId==action.id)mutable.value=mutable.value.copy(olderLoading=false)}
+                }
+            }
             is UiAction.Draft -> {
+                if(action.conversationId !in largeDrafts&&largeDrafts.size>=128){mutable.value=mutable.value.copy(notice="The local draft limit has been reached.");return}
                 if(action.conversationId.startsWith("group:")){
                     val group=current.groups.find{"group:${it.id}"==action.conversationId} ?: return
                     if(action.text.toByteArray(Charsets.UTF_8).size>4096)return
                     val owner=preferenceAccountKey() ?: return
                     val key=groupPreferenceKey(owner,group.id)
                     val update:(ConversationPreference)->ConversationPreference={it.copy(draft=action.text)}
-                    if(!updateGroupPreference(key,update))return
+                    if(!groupQolReady){
+                        if(key !in earlyGroupDrafts&&earlyGroupDrafts.size>=128)return
+                        earlyGroupDrafts[key]=action.text
+                    }else if(!updateGroupPreference(key,update))return
+                    largeDrafts[action.conversationId]=action.text
                     mutable.value=reduceUi(mutable.value,action)
                     draftSaves[key]?.cancel();draftSaves[key]=viewModelScope.launch{delay(250);saveGroupPreference(key,update)}
                     return
@@ -496,9 +612,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val c=current.conversations.find{"account:${it.friend.accountId}"==action.conversationId} ?: return
                 if(action.text.toByteArray().size>512*1024)return
                 if(action.text.length>4096){largeDrafts[action.conversationId]=action.text;mutable.value=reduceUi(mutable.value,action);return}
-                largeDrafts.remove(action.conversationId)
                 val accountKey=preferenceAccountKey() ?: return
                 val key=conversationPreferenceKey(accountKey,c.friend.accountId)
+                if(!qolReady){if(key !in earlyDrafts&&earlyDrafts.size>=128)return;earlyDrafts[key]=action.text}
+                largeDrafts[action.conversationId]=action.text
                 mutable.value=reduceUi(mutable.value,action)
                 qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key] ?: ConversationPreference()).copy(draft=action.text)))
                 draftSaves[key]?.cancel();draftSaves[key]=viewModelScope.launch{delay(250);savePreference(key){it.copy(draft=action.text)}}
@@ -562,9 +679,6 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     }finally{if(epoch==uiGeneration)mutable.value=mutable.value.copy(archiveBusy=false)}
                 }
             }
-            is UiAction.Select -> {mutable.value=reduceUi(mutable.value,action);project()
-                if(action.id.startsWith("group:"))viewModelScope.launch{try{backend.groupHistory(action.id.removePrefix("group:"))}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history requires current verified authorization.")}}
-            }
             is UiAction.CreateGroup -> viewModelScope.launch{try{backend.createGroup(action.name)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group creation failed; no server membership is claimed.")}}
             is UiAction.InviteGroup -> viewModelScope.launch{try{backend.inviteGroup(action.group,action.account)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group invitation was not accepted by the server.")}}
             UiAction.OpenTransferSettings,is UiAction.SaveTransferSettings -> {
@@ -623,29 +737,25 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(group!=null){
                     if(action.text.isBlank()||action.text.toByteArray(Charsets.UTF_8).size>4096)return
                     val key=preferenceAccountKey()?.let{groupPreferenceKey(it,group.id)}
-                    val epoch=uiGeneration;val account=current.accountId
-                    mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false)
-                    viewModelScope.launch{var accepted=false;try{backend.sendGroup(group.id,action.text);accepted=true
+                    beginLocalSend("group:${group.id}",action.text,{backend.sendGroup(group.id,action.text)}){
+                            largeDrafts["group:${group.id}"]=""
+                            if(key!=null&&!groupQolReady)earlyGroupDrafts[key]=""
                             if(key!=null){draftSaves.remove(key)?.cancel();val update:(ConversationPreference)->ConversationPreference={it.copy(draft="")};if(updateGroupPreference(key,update))saveGroupPreference(key,update)}
-                            if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(drafts=mutable.value.drafts+("group:${group.id}" to ""))}
-                        catch(_:Exception){mutable.value=mutable.value.copy(notice="Native group send could not complete. Check current membership and key synchronization; your draft is retained.")}
-                        finally{mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)}}
+                            mutable.value=mutable.value.copy(drafts=mutable.value.drafts+("group:${group.id}" to ""))
+                    }
                     return
                 }
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 if(action.text.isBlank()||action.text.toByteArray().size>512*1024)return
-                mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false)
-                viewModelScope.launch {
-                    var accepted=false
-                    try {backend.send(c.friend.peerId,action.text);accepted=true
-                        largeDrafts.remove("account:${c.friend.accountId}")
-                        val accountKey=preferenceAccountKey();if(accountKey!=null)savePreference(conversationPreferenceKey(accountKey,c.friend.accountId)){it.copy(draft="")}
+                beginLocalSend("account:${c.friend.accountId}",action.text,{backend.send(c.friend.peerId,action.text)}){
+                        largeDrafts["account:${c.friend.accountId}"]=""
+                        val accountKey=preferenceAccountKey();if(accountKey!=null){
+                            val key=conversationPreferenceKey(accountKey,c.friend.accountId);draftSaves.remove(key)?.cancel()
+                            if(!qolReady)earlyDrafts[key]=""
+                            qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key]?:ConversationPreference()).copy(draft="")))
+                            savePreference(key){it.copy(draft="")}
+                        }
                         mutable.value=mutable.value.copy(drafts=mutable.value.drafts+("account:${c.friend.accountId}" to ""))
-                    } catch(_:Exception) {
-                        mutable.value=mutable.value.copy(notice="Message was not accepted. Your draft is retained.")
-                    }finally {
-                        mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)
-                    }
                 }
             }
             UiAction.BeginOlder,UiAction.Older -> {
@@ -674,7 +784,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             UiAction.ResetNetworkSession -> recoverNetwork(Route.Login)
             UiAction.DisconnectChangeServer -> recoverNetwork(Route.Server)
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
-            is UiAction.RetryPreview -> {val selected=mutable.value.selectedId
+            is UiAction.RetryPreview -> {
+                val failed=localSends.values.firstOrNull{it.token==action.messageId&&it.failed}
+                if(failed!=null){localSends.remove(failed.token);dispatch(UiAction.Draft(failed.conversation,failed.text));project();mutable.value=mutable.value.copy(notice="Draft restored. Review local history, then press Send to retry explicitly.");return}
+                val selected=mutable.value.selectedId
                 if(selected?.startsWith("group:")==true)viewModelScope.launch{try{backend.retryGroup(selected.removePrefix("group:"),action.messageId)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Exact group retry requires the current epoch and a live event channel. The saved message is retained.")}}
                 else mutable.value=mutable.value.copy(notice="This retry capability is unavailable.")
             }

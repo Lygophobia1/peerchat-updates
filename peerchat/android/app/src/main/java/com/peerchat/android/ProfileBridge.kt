@@ -18,12 +18,19 @@ class NativeProfile(context: Context, profile: String = "default") : AutoCloseab
     val handle = NativeBridge.create()
     private var platform: AndroidStoragePlatform? = null
     private var closed = false
+    private var platformOpenUs=0L
+    private var nativeBindUs=0L
     internal fun recipientDiagnostics():String=platform?.recipientDiagnostic ?: "stage=profile_closed"
+    internal fun localDiagnostics():String="local_storage database_open_us=${platform?.databaseOpenUs?:0} platform_open_us=$platformOpenUs native_profile_bind_us=$nativeBindUs"
     init {
         check(handle != 0L) { "Native instance unavailable" }
         try {
+            val opening=System.nanoTime()
             platform = AndroidStoragePlatform(context, profile)
+            platformOpenUs=(System.nanoTime()-opening)/1000
+            val binding=System.nanoTime()
             check(ProfileBridge.bind(handle, checkNotNull(platform)) == 0) { "Native profile provider binding failed" }
+            nativeBindUs=(System.nanoTime()-binding)/1000
         } catch (failure: Exception) { NativeBridge.destroy(handle); platform?.close(); throw failure }
     }
     override fun close() {

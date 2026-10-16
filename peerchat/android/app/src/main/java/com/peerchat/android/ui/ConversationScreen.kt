@@ -28,8 +28,8 @@ import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ConversationScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
-    var draft by rememberSaveable(c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
-    var sending by remember(c.id) { mutableStateOf(false) }
+    var draft by rememberSaveable(state.account?.accountId,c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
+    var sending by remember(state.account?.accountId,c.id) { mutableStateOf(false) }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
     val timeline=remember(c.messages,c.attachments){conversationTimeline(c)}
     var followingLatest by remember(c.id){mutableStateOf(true)}
@@ -64,7 +64,7 @@ import kotlinx.coroutines.delay
         }
     }
     LaunchedEffect(state.sendCompletion) {
-        if(!state.demo&&sending){if(state.sendAccepted){draft="";dispatch(UiAction.Draft(c.id,""))};sending=false}
+        if(!state.demo&&sending){draft=state.drafts[c.id] ?: draft;sending=false}
     }
     Scaffold(topBar = {
         TopAppBar(title = {
@@ -95,7 +95,7 @@ import kotlinx.coroutines.delay
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                 if(c.kind==ChatKind.Direct)ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)picker.launch(arrayOf("*/*")) })
                 OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null) && !sending, minLines = 1, maxLines = 5,
+                    enabled = (state.demo&&state.connection==ConnectionState.Online&&!sending||!state.demo&&state.account!=null), minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
                 IconButton({followingLatest=true;scrollRequest++;sending=true}, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
                     if (sending) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -169,6 +169,7 @@ import kotlinx.coroutines.delay
                 else SelectionContainer { Text(linkedText(m.text)) }
                 Text("${m.time}" + if (m.outgoing) " · ${when (m.status) {
                     MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
+                    MessageStatus.Saving -> "Saving locally…";
                     MessageStatus.Queued -> "Queued";
                     MessageStatus.Stored -> "Stored · awaiting recipient";
                     MessageStatus.Preview -> "Local preview · not sent"; else -> "Sent"
