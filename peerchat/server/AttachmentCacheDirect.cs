@@ -84,6 +84,7 @@ sealed partial class AccountDatabase {
  }}
 }
 internal sealed partial class AttachmentCacheRuntime {
+ internal void DirectNotExpired(string id){lock(gate){Check();Require(Inspect(id).Expires>Now(),"cache_attachment_expired");}}
  internal long DirectPreparationExpires(){lock(gate){Check();return checked(Now()+options.RetentionSeconds);}}
  internal DirectCacheAudience DirectAudience(string id){lock(gate){Check();var d=Descriptor(id);Require(d.Direct,"cache_scope_mismatch");
   var bytes=Binary("SELECT roster FROM attachment_contexts WHERE object_id="+Quote(id));Require(bytes!=null,"cache_dm_audience_unavailable");
@@ -104,11 +105,11 @@ internal sealed partial class AttachmentCacheAdmission {
    return cache.Admit(d,recipients,audience.Wire);
   });
  }
- T AuthorizedDirect<T>(long account,string device,Func<bool> current,string id,Func<AttachmentCacheDescriptor,T> action){
+ T AuthorizedDirect<T>(long account,string device,Func<bool> current,string id,Func<AttachmentCacheDescriptor,T> action,bool allowExpiredRelease=false){
   var d=cache.Describe(id);Require(d.Direct,"cache_scope_mismatch");var audience=cache.DirectAudience(id);
   return accounts.WithDirectCacheAuthority(d,audience,account,device,current,false,()=>{
    var local=account==d.Account&&device==d.Sender?audience.Source:audience.Recipients.FirstOrDefault(x=>x.Account==account&&x.Device==device);
-   Require(local!=null&&cache.OriginalMembership(id,account,device)==DirectCacheAudience.DeviceBinding(local),"cache_dm_original_recipient_required");return action(d);
+   Require(local!=null&&cache.OriginalMembership(id,account,device)==DirectCacheAudience.DeviceBinding(local),"cache_dm_original_recipient_required");if(!allowExpiredRelease)cache.DirectNotExpired(id);return action(d);
   });
  }
  internal Dictionary<string,object> DirectContext(long account,string device,Func<bool> current,string id){return AuthorizedDirect(account,device,current,id,d=>{
@@ -123,7 +124,7 @@ internal sealed partial class AttachmentCacheAdmission {
   return AuthorizedDirect(account,device,current,id,d=>{Require(cache.LeaseObject(lease,device,true)==id,"cache_completion_evidence_mismatch");cache.CommitCompletion(lease,evidence);return true;});
  }
  internal byte[] ReadDirect(long account,string device,Func<bool> current,string lease,long offset,int maximum){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,false),d=>cache.Read(lease,offset,maximum));}
- internal bool ReleaseDirect(long account,string device,Func<bool> current,string lease,bool upload){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,upload),d=>{cache.Release(lease);return true;});}
+ internal bool ReleaseDirect(long account,string device,Func<bool> current,string lease,bool upload){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,upload),d=>{cache.Release(lease);return true;},true);}
  internal bool ProgressDirect(long account,string device,Func<bool> current,string lease,long offset){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,false),d=>{cache.RecipientProgress(lease,offset,false);return true;});}
  internal bool PublishDirect(long account,string device,Func<bool> current,string id,byte[] wire){return AuthorizedDirect(account,device,current,id,d=>{
   Require(account==d.Account&&device==d.Sender,"cache_sender_binding_mismatch");cache.ContextExpires(id);

@@ -111,8 +111,18 @@ partial class AttachmentCacheRuntimeTest {
     Reject(()=>admission.PrepareDirect(1,source,()=>true,2),"cache_dm_recipient_upgrade_required");
     admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,rotated));
     Reject(()=>admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire),"cache_dm_audience_changed");
-    long beforeExpiry=now;now+=options.RetentionSeconds+1;
-    Reject(()=>admission.AcquireDirect(2,sibling,()=>true,descriptor.Id,false),"cache_attachment_expired");now=beforeExpiry;
+    long beforeExpiry=now;now=cache.Inspect(descriptor.Id).Expires-1;
+    string expiryLease=admission.AcquireDirect(2,sibling,()=>true,descriptor.Id,false);
+    Check(admission.ReadDirect(2,sibling,()=>true,expiryLease,0,65536).Length==65536,"Pre-expiry lease read failed");now+=2;
+    Reject(()=>admission.AcquireDirect(2,sibling,()=>true,descriptor.Id,false),"cache_attachment_expired");
+    Reject(()=>admission.ReadDirect(2,sibling,()=>true,expiryLease,0,65536),"cache_attachment_expired");
+    Reject(()=>admission.ProgressDirect(2,sibling,()=>true,expiryLease,65536),"cache_attachment_expired");
+    Reject(()=>admission.InspectDirect(2,sibling,()=>true,descriptor.Id),"cache_attachment_expired");
+    Check(admission.ReleaseDirect(2,sibling,()=>true,expiryLease,false),"Expired attachment lease could not be released");now=beforeExpiry;
+    // The expiry clock advance deliberately retired old leases. Establish a
+    // fresh authorized retired-key lease before testing explicit revocation.
+    download=admission.AcquireDirect(2,reader,()=>true,descriptor.Id,false);
+    Check(admission.ReadDirect(2,reader,()=>true,download,0,65536).Length==65536,"Retired-key lease was not authorized before revocation");
     DRevoke(db,first,2,firstKey);Reject(()=>admission.ReadDirect(2,reader,()=>true,download,65536,65536),"cache_dm_original_recipient_required");Check(admission.InspectDirect(2,sibling,()=>true,descriptor.Id).Complete,"Revoked sibling blocked eligible recipient");
     // A newly verified recipient is not silently granted access to an old blob.
     Check(db.AddDevice(2,other)==false,"Foreign identity moved account");using(var late=new ECDsaCng(256)){Check(db.AddDevice(2,DId(late)),"Late fixture device");var lateBinding=RecipientBinding(late,2);DRegister(db,late,2,lateBinding);admission.RegisterDirect(2,DId(late),()=>true,DCapability(late,2,lateBinding));Reject(()=>admission.InspectDirect(2,DId(late),()=>true,descriptor.Id),"cache_dm_original_recipient_required");}
