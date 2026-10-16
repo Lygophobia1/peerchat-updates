@@ -86,8 +86,12 @@ class EligibilitySnapshotExecutionTest {
         assertFalse(execution.refreshWith(1,10,4,device,emptyList(),200){fail("Unexpected fetch");response})
         assertEquals(0,calls)
         utc=1000;execution.refreshWith(1,10,4,device,listOf(20),60100){response}
+        utc=1410
+        assertFalse(execution.refreshWith(1,10,4,device,emptyList(),60101){fail("Unexpected fetch");response})
+        assertEquals(0,calls)
+        utc=1000;execution.refreshWith(1,10,4,device,listOf(20),121100){response}
         execution.reset();utc=1410
-        assertFalse(execution.refreshWith(1,10,4,device,emptyList(),60200){response})
+        assertFalse(execution.refreshWith(1,10,4,device,emptyList(),121200){response})
         assertEquals(0,calls)
     }
     @Test fun largeClockMismatchIsNotDeferredOrAcceptedByTheAdapter() {
