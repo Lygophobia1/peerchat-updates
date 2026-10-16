@@ -18,12 +18,12 @@ public final class ReliableProfileProof {
     static byte[] empty=new byte[0];
     static long number(byte[] bytes){return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getLong();}
     public static final class Facade {
-        final PeerTlsProof.Identity identity;final long db;boolean closed;
+        final PeerTlsProof.Identity identity;final long db;boolean closed,failAttachments;
         Facade(PeerTlsProof.Identity identity,String directory){this.identity=identity;db=ReliableProfileProof.number(database(utf8(directory)));}
         public byte[] publicKey(){return identity.publicKey();}
         // Required by the current native owner even for text-only sessions.
         // The host attachment adapter refuses all file operations.
-        public byte[] attachmentDirectory(){return utf8("/host-messaging-proof-attachments-unavailable");}
+        public byte[] attachmentDirectory(){if(failAttachments)throw new IllegalStateException("synthetic-private-path-never-log");return utf8("/host-messaging-proof-attachments-unavailable");}
         public byte[] sign(byte[] original)throws Exception{return identity.sign(original);}
         public PeerTls createPeerTls(boolean incoming,byte[] pin)throws Exception{
             if(closed)throw new IllegalStateException("Closed fixture");
@@ -61,7 +61,16 @@ public final class ReliableProfileProof {
         final long handle;final String id,other;long peer;
         Side(PeerTlsProof.Identity identity,String directory,String other,long account,long remote)throws Exception{
             id=PeerTls.peerId(identity.pub);this.other=other;handle=core.create();PeerTlsProof.check(handle!=0);
-            PeerTlsProof.check(com.peerchat.android.ProfileBridge.bind(handle,new Facade(identity,directory))==0);
+            Facade facade=new Facade(identity,directory);PeerTlsProof.check(com.peerchat.android.ProfileBridge.bind(handle,facade)==0);
+            // Read failure diagnostics while the original initialization still
+            // fails; diagnostics must not retry cache/journal construction.
+            facade.failAttachments=true;
+            Record diagnostic=new Record(30);
+            PeerTlsProof.check(com.peerchat.android.TransferBridge.request(handle,0,diagnostic.bytes())==null);
+            Reader failure=new Reader(com.peerchat.android.TransferBridge.request(handle,5,diagnostic.bytes()),30);
+            PeerTlsProof.check(failure.num()==2);String row=failure.str();failure.str();failure.end();
+            PeerTlsProof.check(row.contains("stage=attachment_prepare reason=native_operation_rejected")&&!row.contains("synthetic-private"));
+            facade.failAttachments=false;
             PeerTlsProof.check(Arrays.equals(com.peerchat.android.ProfileBridge.publicKey(handle),identity.pub));
             Record record=new Record(1);record.num(1);record.num(remote);record.str(other);record.num(1);record.str(other);
             PeerTlsProof.check(com.peerchat.android.ReliableBridge.friends(handle,account,1,record.bytes())==0);
@@ -105,12 +114,26 @@ public final class ReliableProfileProof {
             PeerTlsProof.check(text.equals("Native JNI message 日本語 😀"));if(id.equals(expectedId))return delivered;
         }throw new AssertionError("Message missing from native history");
     }
+    static void diagnosticBounds(Side side){
+        byte[] oversized=new byte[65537];Arrays.fill(oversized,(byte)'x');
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.exchange(side.handle,side.peer,0,oversized)==null);
+        PeerTlsProof.check(com.peerchat.android.TransferBridge.request(side.handle,1,new byte[4097])==null);
+        Record command=new Record(30);Reader read=new Reader(com.peerchat.android.TransferBridge.request(side.handle,5,command.bytes()),30);
+        long count=read.num();PeerTlsProof.check(count==2);
+        String request=read.str(),exchange=read.str();read.end();
+        PeerTlsProof.check(request.contains("operation=1 stage=jni_input reason=native_operation_rejected input_bytes=4097"));
+        PeerTlsProof.check(exchange.contains("operation=0 stage=jni_input reason=input_bound_rejected input_bytes=65537"));
+        PeerTlsProof.check(request.length()<512&&exchange.length()<512&&!request.contains(side.id)&&!exchange.contains(side.other));
+        PeerTlsProof.check(side.operation(2).length==2&&side.ready());
+    }
     public static void main(String[] args)throws Exception{
         PeerTlsProof.Identity a=new PeerTlsProof.Identity(),b=new PeerTlsProof.Identity();
         String aid=PeerTls.peerId(a.pub),bid=PeerTls.peerId(b.pub),pending=null;
         for(int cycle=0;cycle<8;cycle++){
             try(Side left=new Side(a,args[0]+"/a",bid,10,20);Side right=new Side(b,args[0]+"/b",aid,20,10)){
                 left.attach(false);right.attach(true);exchange(left,right);
+                diagnosticBounds(left);
+                if(cycle==0)System.out.println("PASS: bounded native op5 failure diagnostics preserve operation/stage/reason/input length, omit identities/payloads and keep STATUS exactly2 bytes/winner live");
                 if(pending!=null){PeerTlsProof.check(history(left,pending,cycle)==2);PeerTlsProof.check(history(right,pending,cycle)==2);}
                 byte[] result=com.peerchat.android.ReliableBridge.send(left.handle,utf8(bid),utf8("Native JNI message 日本語 😀"));PeerTlsProof.check(result!=null);
                 pending=new String(result,StandardCharsets.US_ASCII);

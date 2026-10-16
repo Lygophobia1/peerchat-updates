@@ -169,7 +169,9 @@ private:
             if(reader.type()>=protocol::CallMediaRestart)protocol::check(runtime_.remoteCapabilities&protocol::CapabilityMediaRecovery);
             voice_->receive(runtime_.peerId,bytes,now_);
         }else if(reader.type()==protocol::FileTransfer){
+            stage_="transfer_capability_gate";
             protocol::check(bool(transfer_)&&(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)!=0);
+            stage_="transfer_receive";
             try{transfer_(runtime_.peerId,bytes,now_);}catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(refusal);}
         }else if(reader.type()==protocol::Text){
             auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_,friends_.localAccount());
