@@ -120,19 +120,38 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             for(index in 0 until envelopes.length()) {
                 if(accepted>=4)break
                 val item=envelopes.getJSONObject(index)
-                val wire = decoded(item.getString("envelope"), 70000)
+                val rowCursor=opaqueCursor(item.optString("cursor"))
                 phase="native_envelope_validation";diagnostic="stage=$phase"
-                val result = native.receive(handle, wire)
+                val result=try {
+                    native.receive(handle,decoded(item.getString("envelope"),70000))
+                }catch(failure:Exception){
+                    if(expiredServerSession(failure))throw failure
+                    pendingValidation++
+                    processedCount++
+                    if(rowCursor.isNotEmpty())fetchCursor=rowCursor
+                    inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
+                    continue // Malformed/undecryptable row stays server-owned; a safe cursor allows later rows.
+                }
                 if(result==null){
                     pendingValidation++
                     inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
                     processedCount++
-                    fetchCursor=opaqueCursor(item.optString("cursor"))
+                    if(rowCursor.isNotEmpty())fetchCursor=rowCursor
                     continue // Trust, key, decrypt or storage failure: never ACK or invent trust.
                 }
-                val record = NativeRecord(result, 3)
-                val inserted = record.number().also { require(it in 0..1) } == 1L
-                val receipt = record.bytes(); record.text(); val messageId=record.text(); record.end()
+                val parsed=try {
+                    val record=NativeRecord(result,3)
+                    val inserted=record.number().also{require(it in 0..1)}==1L
+                    val receipt=record.bytes();record.text();val messageId=record.text();record.end()
+                    Triple(inserted,receipt,messageId)
+                }catch(failure:Exception){
+                    pendingValidation++
+                    processedCount++
+                    if(rowCursor.isNotEmpty())fetchCursor=rowCursor
+                    inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
+                    continue // No valid receipt available; never ACK this row.
+                }
+                val (inserted,receipt,messageId)=parsed
                 if(inserted){
                     imported++
                     committed(messageId) // Native history is durable even if ACK or later work fails.
@@ -143,7 +162,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                 acknowledged(inserted)
                 accepted++
                 processedCount++
-                fetchCursor=opaqueCursor(item.optString("cursor"))
+                if(rowCursor.isNotEmpty())fetchCursor=rowCursor
                 inboundDiagnostic="receive=acknowledged fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
             }
             // The authenticated server cursor is opaque. Older servers omit it;
@@ -157,11 +176,19 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         val reconciled = request(accounts, "mailbox_receipts", receiptRequest)
         check(reconciled.getString("state") == "ready")
         val receipts = reconciled.getJSONArray("receipts"); require(receipts.length() <= 64)
+        var receiptValidationFailures=0
         repeat(receipts.length()) { index ->
             val item = receipts.getJSONObject(index)
-            val id = item.getString("messageId"); require(id.matches(Regex("[0-9a-f]{32}")))
+            val rowCursor=opaqueCursor(item.optString("cursor"))
             phase="native_receipt_validation";diagnostic="stage=$phase"
-            check(native.receipt(handle, decoded(item.getString("receipt"), 2048)) == 0)
+            try {
+                val id=item.getString("messageId");require(id.matches(Regex("[0-9a-f]{32}")))
+                check(native.receipt(handle, decoded(item.getString("receipt"), 2048)) == 0)
+            }catch(failure:Exception){
+                if(expiredServerSession(failure))throw failure
+                receiptValidationFailures++ // Unverified row remains on server and is retried next sweep.
+            }
+            if(rowCursor.isNotEmpty())receiptCursor=rowCursor
         }
         // Sweep periodically from the beginning: a late receipt may sort before
         // the last cursor. Native verification/dedupe makes reconciliation safe.
@@ -170,7 +197,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             if(receipts.length()==64)receipts.getJSONObject(receipts.length()-1).getString("messageId") else ""
         }else opaqueCursor(reconciled.optString("nextCursor"))
         needsContinuation=fetchCursor.isNotEmpty()||receiptCursor.isNotEmpty()
-        if (!storageAllowed) {diagnostic="stage=complete registered=$receiving outgoing_storage_allowed=false acknowledged=$accepted pending_native_validation=$pendingValidation"+
+        if (!storageAllowed) {diagnostic="stage=complete registered=$receiving outgoing_storage_allowed=false acknowledged=$accepted pending_native_validation=$pendingValidation receipt_pending_validation=$receiptValidationFailures"+
             if(receiving)"" else " receive_blocked=native_recipient_registration";return}
         phase="native_pending_uploads";diagnostic="stage=$phase"
         val pending = NativeRecord(checkNotNull(native.pending(handle)), 4)
@@ -228,7 +255,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             outgoingRetry[id]=now+delay to attempts
             while(outgoingRetry.size>128)outgoingRetry.remove(outgoingRetry.keys.first())
         }
-        diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation outgoing_retry=$failed retry_reason=$failureReason continuation=$needsContinuation"+
+        diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation receipt_pending_validation=$receiptValidationFailures outgoing_retry=$failed retry_reason=$failureReason continuation=$needsContinuation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration"
     }
 }

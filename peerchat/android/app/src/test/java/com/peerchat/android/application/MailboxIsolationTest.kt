@@ -19,6 +19,7 @@ class MailboxIsolationTest {
         var registrationReads=0
         var acceptance=0
         var receiptResult=0
+        var rejectedReceiptFirstByte:Int?=null
         var receiveResult:ByteArray?=null
         var prepared:ByteArray?=byteArrayOf(5)
         var stored=0
@@ -32,7 +33,7 @@ class MailboxIsolationTest {
         }
         override fun registered(handle:Long,binding:ByteArray)=acceptance
         override fun receive(handle:Long,wire:ByteArray):ByteArray? {receives++;return receiveResult}
-        override fun receipt(handle:Long,wire:ByteArray):Int {receipts++;return receiptResult}
+        override fun receipt(handle:Long,wire:ByteArray):Int {receipts++;return if(wire.firstOrNull()?.toInt()==rejectedReceiptFirstByte)1 else receiptResult}
         override fun pending(handle:Long)=NativeRecordWriter(4).also {w->
             w.number(if(uploads)1 else 0)
             if(uploads){w.text("a".repeat(32));w.text("b".repeat(64));w.number(2)}
@@ -108,10 +109,65 @@ class MailboxIsolationTest {
         assertEquals(listOf("mailbox_register","mailbox_register"),s.operations)
         assertEquals(3,n.registrationReads);assertEquals(0,n.stored)
     }
-    @Test fun badReceiptStopsBeforeUploads(){
+    @Test fun badReceiptRemainsUnacceptedButDoesNotStopIndependentUploads(){
         val n=Native().apply{receiptResult=1};val s=Server()
-        assertThrows(IllegalStateException::class.java){MailboxExecution(n).service(s::request,1,true){fail()}}
-        assertEquals(listOf("mailbox_receipts"),s.operations);assertEquals(0,n.stored)
+        val execution=MailboxExecution(n)
+        execution.service(s::request,1,true){fail()}
+        assertEquals(listOf("mailbox_receipts","mailbox_keys","mailbox_store"),s.operations)
+        assertEquals(1,n.stored)
+        assertTrue(execution.diagnostic.contains("receipt_pending_validation=1"))
+    }
+    @Test fun invalidFirstReceiptCannotStarveLaterValidReceipt(){
+        val n=Native().apply{uploads=false;rejectedReceiptFirstByte=1}
+        val execution=MailboxExecution(n)
+        val seenCursors=mutableListOf<String>()
+        val rpc={op:String,body:JSONObject->
+            when(op){
+                "mailbox_receipts"->{
+                    seenCursors+=body.optString("cursor")
+                    if(body.optString("cursor").isNotEmpty())JSONObject().put("state","ready").put("receipts",JSONArray()).put("nextCursor","")
+                    else JSONObject().put("state","ready").put("receipts",JSONArray()
+                        .put(JSONObject().put("messageId","a".repeat(32)).put("receipt",encoded(byteArrayOf(1))).put("cursor","first"))
+                        .put(JSONObject().put("messageId","b".repeat(32)).put("receipt",encoded(byteArrayOf(2))).put("cursor","second")))
+                        .put("nextCursor","second")
+                }
+                else->error("Unexpected $op")
+            }
+        }
+        execution.service(rpc,1,true){fail()}
+        assertEquals(2,n.receipts)
+        assertTrue(execution.diagnostic.contains("receipt_pending_validation=1"))
+        execution.service(rpc,1,true){fail()}
+        assertEquals(listOf("","second"),seenCursors)
+        assertEquals(2,n.receipts)
+    }
+    @Test fun malformedFetchedRowWithCursorDoesNotBlockLaterDurableImport(){
+        val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
+        val execution=MailboxExecution(n)
+        val seenCursors=mutableListOf<String>()
+        val rpc={op:String,body:JSONObject->
+            when(op){
+                "mailbox_register"->JSONObject().put("state","accepted")
+                "mailbox_fetch"->{
+                    seenCursors+=body.optString("cursor")
+                    if(body.optString("cursor").isNotEmpty())JSONObject().put("state","ready").put("envelopes",JSONArray()).put("nextCursor","")
+                    else JSONObject().put("state","ready").put("envelopes",JSONArray()
+                        .put(JSONObject().put("envelope","").put("cursor","first"))
+                        .put(JSONObject().put("envelope",encoded(byteArrayOf(2))).put("cursor","second")))
+                        .put("nextCursor","second")
+                }
+                "mailbox_ack"->JSONObject().put("state","acknowledged")
+                "mailbox_receipts"->JSONObject().put("state","ready").put("receipts",JSONArray()).put("nextCursor","")
+                else->error("Unexpected $op")
+            }
+        }
+        val committed=mutableListOf<String>()
+        execution.service(rpc,1,true,committed={committed+=it}){assertTrue(it)}
+        assertEquals(1,n.receives)
+        assertEquals(listOf("message"),committed)
+        assertTrue(execution.inboundDiagnostic.contains("pending_native_validation=1"))
+        execution.service(rpc,1,true){fail()}
+        assertEquals(listOf("","second"),seenCursors)
     }
     @Test fun notificationWaitsForDurableNativeReceiptAndServerAckIncludingDuplicates(){
         val n=Native().apply{binding=byteArrayOf(7);uploads=false}
