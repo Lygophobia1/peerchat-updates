@@ -25,12 +25,26 @@ public final class NativeTransferProof {
         byte[] value=ReliableBridge.exchange(target.handle,target.peer,0,encrypted);
         if(value==null){Reader d=new Reader(TransferBridge.request(target.handle,5,command()),30);long n=d.num();for(int i=0;i<n;i++)System.out.println(d.str());throw new AssertionError("Production callback rejected encrypted input_bytes="+encrypted.length);}}
     static void pump(Side a,Side b){a.events();b.events();deliver(b,a.operation(1));deliver(a,b.operation(1));}
+    static void timing(Side side,String id,boolean receiver){
+        Reader d=new Reader(TransferBridge.request(side.handle,5,command()),30);long count=d.num();boolean found=false,nativeTiming=false;
+        for(int i=0;i<count;i++){
+            String line=d.str();
+            if(line.startsWith("native_reliable_exchange_failure"))nativeTiming=line.contains("native_receive_gate_wait_us=")&&line.contains("native_output_processing_us=");
+            if(line.startsWith("transfer="+id+" ")){
+                String field=receiver?"receiver_samples":"ack_samples";
+                PeerTlsProof.check(java.util.regex.Pattern.compile(" "+field+"=[1-9][0-9]* ").matcher(line).find());
+                PeerTlsProof.check(!receiver||java.util.regex.Pattern.compile(" receiver_ack_samples=[1-9][0-9]* ").matcher(line).find());
+                PeerTlsProof.check(line.length()<=2048);System.out.println("HOST_FIXTURE_TIMING "+line);found=true;
+            }
+        }
+        d.end();PeerTlsProof.check(found&&nativeTiming);
+    }
     static void transfer(Side a,Side b,int count)throws Exception{
         byte[] payload=new byte[count];new Random(91+count).nextBytes(payload);String id=offer(a,payload);boolean accepted=false;
         for(int i=0;i<2000;i++){pump(a,b);for(Row row:rows(b))if(row.id.equals(id)){
             if(!accepted&&row.state==2){PeerTlsProof.check(TransferBridge.request(b.handle,2,command(id))!=null);accepted=true;}
             if(row.state==4){PeerTlsProof.check(accepted&&row.done==count&&!row.path.isEmpty());PeerTlsProof.check(Arrays.equals(payload,Files.readAllBytes(Path.of(row.path))));
-                for(int j=0;j<5;j++)pump(a,b);System.out.println("PASS production JNI file bytes="+count+" largest_tls_output="+largest);return;}
+                for(int j=0;j<5;j++)pump(a,b);timing(a,id,false);timing(b,id,true);System.out.println("PASS production JNI file bytes="+count+" largest_tls_output="+largest);return;}
         }Thread.sleep(2);}throw new AssertionError("Transfer did not complete");
     }
     static void rejected(String directory,int mode)throws Exception{

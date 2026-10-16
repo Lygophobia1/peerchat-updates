@@ -24,6 +24,8 @@
 #include "../tls.hpp"
 #include "../archive_attachment_transfer.hpp"
 #include "transfer_storage.hpp"
+#include "operation_timing.hpp"
+#include "../windows_transfer_timing.hpp"
 #include "transfer_statistics_storage.hpp"
 #include "attachment_file_io.hpp"
 #include "../protected_text_source.hpp"
@@ -71,6 +73,10 @@ struct Instance {
     // No exception messages, filenames, private identities or payload bytes;
     // only authenticated public peer / validated transfer IDs may correlate.
     NativeOperationFailure transferRequestFailure,reliableExchangeFailure;
+    // Reuse the existing platform-independent packet observer. Its historical
+    // windows namespace does not introduce a platform dependency or transfer owner.
+    peerchat::transfer::windows::TransferTiming transferTiming;
+    peerchat::portable::OperationTiming reliableReceiveTiming,reliableOutputTiming;
     std::string receivingTransferPeer,receivingTransferId;
     std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
         using namespace peerchat;auto open=[&](const transfer::DurableState& row){return transfer::posix::FileSource::reopen(attachmentCache,row);};
@@ -125,7 +131,11 @@ struct Instance {
             transfers->tickScoped(now,[&](const transfer::Snapshot& row)->std::uint64_t{auto route=routeFor(row);if(!route||!route->connected)return 0;auto peer=peers.find(route->activeTransport.value);bool ready=peer!=peers.end()&&peer->second->ready();transfers->capability(row.peer,ready?route->activeTransport.value:0,ready&&!transferScope(row.metadata.id)&&peer->second->permitsTransferPipeline());return ready?route->activeTransport.value:0;},
                 [&](const transfer::Snapshot& row,const Blob& bytes){auto route=routeFor(row);if(!route)return false;auto peer=peers.find(route->activeTransport.value);if(peer==peers.end()||!peer->second->ready())return false;
                     auto scope=transferScope(row.metadata.id);
-                    try{if(scope){peer->second->sendArchiveControl(archiveTransfers->outgoing(*scope,bytes));return true;}return peer->second->sendTransfer(bytes);}catch(...){peer->second->close(true);return false;}});
+                    try{if(scope){peer->second->sendArchiveControl(archiveTransfers->outgoing(*scope,bytes));return true;}
+                        const auto began=transfer::windows::TransferTiming::now();const bool submitted=peer->second->sendTransfer(bytes);
+                        if(submitted){transferTiming.sent(bytes,route->activeTransport.value,began,transfer::windows::TransferTiming::now());}
+                        return submitted;
+                    }catch(...){peer->second->close(true);return false;}});
             archive::AttachmentCatalog catalog(*storage);
             for(auto row:transfers->completedRecords())if(!cataloguedTransfers.count(row.metadata.id)&&(!archiveTransfers||!archiveTransfers->wasArchiveTransfer(row.metadata.id))){
                 if(!row.sending)row.location=transfer::posix::FileSink::reopen(attachmentCache,row)->sourceToken();
@@ -882,7 +892,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
                 std::string transferId;try{transferId=peerchat::transfer::packetId(frame);}catch(...){throw peerchat::transfer::ReceiveFailure("transfer_header");}
                 owner->receivingTransferPeer=peer;owner->receivingTransferId=transferId;
                 if(owner->archiveTransfers&&owner->archiveTransfers->wasArchiveTransfer(transferId))throw peerchat::transfer::ReceiveFailure("transfer_archive_identity");
-                auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline());owner->transfers->receive(peer,frame,now);
+                auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline());
+                const auto began=peerchat::transfer::windows::TransferTiming::now();owner->transfers->receive(peer,frame,now);
+                owner->transferTiming.received(frame,id,began,peerchat::transfer::windows::TransferTiming::now());
             },std::move(group),
             peerchat::portable::ReliableEndpoint::VoiceAdmission{[]{return peerchat::androidVoiceAvailable();},
                 [owner](const std::string& peer,const peerchat::Blob& frame,std::uint64_t now){peerchat::protocol::check(bool(owner->voice));owner->voice->app.receive(peer,frame,now);}});
@@ -893,7 +905,9 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_exchange(JNIEnv* env,jobject,jlong handle,jlong token,jint operation,jbyteArray input){
     try{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        const auto waiting=peerchat::portable::OperationTiming::now();
         std::lock_guard<std::mutex> lock(instance->gate);const auto began=runtimeNow();const auto length=input?env->GetArrayLength(input):0;
+        peerchat::portable::OperationTiming::Scope timing(operation==0?&instance->reliableReceiveTiming:operation==1?&instance->reliableOutputTiming:nullptr,waiting);
         if(!input||length>65536){instance->reliableExchangeFailure.record(operation,static_cast<std::uint64_t>(length),"jni_input","input_bound_rejected",0);return nullptr;}
         auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return nullptr;
         auto& endpoint=*found->second;peerchat::Blob output;endpoint.tick(runtimeNow());
@@ -997,7 +1011,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             r.end();protocol::check(bool(instance->storage));
             auto rows=instance->transfers?instance->transfers->diagnostics(now):std::vector<std::string>{};if(rows.size()>62)rows.resize(62);
             w.number(rows.size()+2);w.string(instance->transferRequestFailure.line("native_transfer_request_failure"));
-            w.string(instance->reliableExchangeFailure.line("native_reliable_exchange_failure"));for(const auto& row:rows)w.string(row);
+            w.string(instance->reliableExchangeFailure.line("native_reliable_exchange_failure")+
+                instance->reliableReceiveTiming.line("native_receive")+instance->reliableOutputTiming.line("native_output"));
+            for(const auto& row:rows){const auto end=row.find(' ');const auto id=row.substr(std::string("transfer=").size(),end-std::string("transfer=").size());w.string(row+instance->transferTiming.diagnostics(id));}
             return platform::android::Context::input(env,w.data);
         }
         stage="attachment_prepare";instance->prepareAttachments(now);

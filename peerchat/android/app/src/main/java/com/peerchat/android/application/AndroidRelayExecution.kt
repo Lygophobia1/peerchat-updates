@@ -23,9 +23,10 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         private set
     private var worker: Thread?=null
     private val progress=RelayProgress()
+    private val ioTimings=RelayIoTimings()
     fun diagnostics():String="relay_attempt=${request.attempt} remote_account=$remoteAccount peer_device=${request.peerId} purpose="+
         (if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+
-        " attached=$attached finished=$finished ${progress.snapshot()} failure=${failureDiagnostic?:"none"}"
+        " attached=$attached finished=$finished ${progress.snapshot()} ${ioTimings.snapshot()} failure=${failureDiagnostic?:"none"}"
     fun observedAuthenticatedPeer(){progress.enter(RelayStage.AuthenticatedPeer)}
     fun start() {
         check(worker==null)
@@ -57,8 +58,8 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 try {
                     var nextStatusAt=0L
                     while(!stopping) {
-                        val bytes=checkNotNull(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.OUTPUT,ByteArray(0)))
-                        if(bytes.isNotEmpty())relay.channel.write(frames.wrap(bytes),43+65536)
+                        val bytes=ioTimings.measure(RelayIoStage.NativeOutput){checkNotNull(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.OUTPUT,ByteArray(0)))}
+                        if(bytes.isNotEmpty())ioTimings.measure(RelayIoStage.SocketWrite){relay.channel.write(frames.wrap(bytes),43+65536)}
                         else {
                             val now=System.nanoTime()
                             if(now>=nextStatusAt){
@@ -72,8 +73,8 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 } catch(failure: Exception) {failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=relay_output reason="+relayFailureCode(failure);try {relay.channel.close()}catch(_: Exception){}}
             },"PeerChat relay output").apply {isDaemon=true;start()}
             while(!stopping) {
-                val bytes=frames.unwrap(relay.channel.read(43+65536))
-                check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)
+                val bytes=frames.unwrap(ioTimings.measure(RelayIoStage.SocketRead){relay.channel.read(43+65536)})
+                ioTimings.measure(RelayIoStage.NativeReceive){check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)}
             }
         } catch(failure: Exception) {
             if(!stopping&&failureDiagnostic==null)failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=$stage reason="+relayFailureCode(failure)
