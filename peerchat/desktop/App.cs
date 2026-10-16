@@ -4496,13 +4496,13 @@ public partial class DesktopApplication {
         var viewer=Find<ScrollViewer>("MessageScroll");
         if(model.Groups){
             var group=model.SelectedGroup;if(group==null||group.HistoryLoading||group.HistoryExhausted)return;
-            long before=group.Messages.Where(message=>message.IsGroupMessage&&message.Data.sequence>0).OrderBy(message=>message.Data.logical).ThenBy(message=>message.Data.sender,StringComparer.Ordinal).ThenBy(message=>message.Data.id,StringComparer.Ordinal).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).First();
+            long before=group.Messages.Where(message=>message.IsGroupMessage&&message.Data.sequence>0).OrderBy(message=>message.Data.time).ThenBy(message=>message.Data.sender,StringComparer.Ordinal).ThenBy(message=>message.Data.id,StringComparer.Ordinal).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).First();
             group.HistoryLoading=true;historyScrollKey="group:"+group.Id;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.GroupHistory(group.Id,before);return;
         }
         var conversation=model.Selected;if(conversation==null||conversation.HistoryLoading||conversation.HistoryExhausted)return;
         string peer=(new[]{conversation.Contact==null?"":conversation.Contact.peer}.Concat(conversation.KnownPeerIds)).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal).FirstOrDefault(value=>!conversation.HistoryExhaustedPeers.Contains(value));
         if(String.IsNullOrEmpty(peer)){conversation.HistoryExhausted=true;Refresh();return;}
-        long dmBefore=conversation.Messages.Where(message=>message.Data.sequence>0).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).Min();
+        long dmBefore=conversation.Messages.Where(message=>message.Attachment==null&&message.Data.sequence>0).OrderBy(message=>message.Data.time).ThenBy(message=>message.Data.sender,StringComparer.Ordinal).ThenBy(message=>message.Data.id,StringComparer.Ordinal).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).First();
         conversation.HistoryLoading=true;conversation.LoadingHistoryPeer=peer;conversation.RequestedPeerHistory.Add(peer);historyScrollKey=conversation.ConversationId;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.History(peer,dmBefore);
     }
     bool directSendInFlight;

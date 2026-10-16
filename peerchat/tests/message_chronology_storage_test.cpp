@@ -54,9 +54,9 @@ int main(){try{
         rejects([&]{store.saveTransferTuning(profile.peerId,tuning,Blob(8193,1));});
         // The conversation-count bound evicts old metadata rather than keeping
         // an unbounded per-friend map alive for the lifetime of the process.
-        for(char digit='0';digit<='8';++digit){std::string device(64,digit);StoredMessage m{Storage::newMessageId(),device,profile.peerId,L"cache eviction fixture",1,Delivery::Delivered,0,1};store.append(device,m);store.history(device);}
-        const auto beforeCold=records->reads;store.history(std::string(64,'0'));
-        require(records->reads-beforeCold==2,"Ordering cache exceeded eight conversations");
+        for(unsigned n=0;n<129;++n){std::string device=std::string(61,'0')+std::to_string(100+n);StoredMessage m{Storage::newMessageId(),device,profile.peerId,L"cache eviction fixture",1,Delivery::Delivered,0,1};store.append(device,m);store.history(device);}
+        const auto beforeCold=records->reads;store.history(std::string(61,'0')+"100");
+        require(records->reads-beforeCold==2,"Ordering cache exceeded 128 conversations");
     }
     {
         Storage reopened(root.wstring());require(reopened.profile().peerId==profile.peerId,"Reopen changed identity");

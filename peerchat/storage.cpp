@@ -293,7 +293,10 @@ struct Storage::Impl {
     };
     struct HistoryCache {std::string conversation;std::int64_t watermark=0,count=0;std::vector<HistoryKey> keys;};
     // Ordering keys live only in memory: never persist decrypted timestamps.
-    // Cache at most eight conversations / 32768 keys. Larger conversations use
+    // Cache at most 128 conversations / 32768 keys. The Android publisher reads
+    // up to 128 contacts per pass; a smaller conversation count would thrash
+    // even small histories on every publication. Key memory remains bounded.
+    // Larger conversations use
     // a bounded top-page scan. Payloads are always read from protected storage.
     std::vector<HistoryCache> historyCaches;
     std::vector<HistoryKey> historyPageKeys(const std::string& conversation,std::int64_t watermark,std::int64_t count,
@@ -320,7 +323,7 @@ struct Storage::Impl {
         const auto available=static_cast<size_t>(end-keys.begin());
         std::vector<HistoryKey> page(end-std::min(available,static_cast<size_t>(limit)),end);
         size_t total=keys.size();for(const auto& c:historyCaches)total+=c.keys.size();
-        while(!historyCaches.empty()&&(historyCaches.size()>=8||total>32768)){
+        while(!historyCaches.empty()&&(historyCaches.size()>=128||total>32768)){
             total-=historyCaches.front().keys.size();historyCaches.erase(historyCaches.begin());
         }
         historyCaches.push_back({conversation,watermark,count,std::move(keys)});return page;

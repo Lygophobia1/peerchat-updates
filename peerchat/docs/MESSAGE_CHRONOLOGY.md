@@ -15,7 +15,7 @@ conversation can merge bounded pages across its known device histories.
 
 Authenticated ordering keys are cached only in process memory. A cold conversation
 read decrypts its protected records to derive keys; no plaintext timestamps or
-message bodies are added to database indexes. The cache retains at most eight
+message bodies are added to database indexes. The cache retains at most 128
 conversations and 32768 keys in total, evicting older entries. A watermark/count
 query detects inserts and erasure, including writes through another connection.
 Warm reads decrypt only the selected page's payloads. A conversation larger than
