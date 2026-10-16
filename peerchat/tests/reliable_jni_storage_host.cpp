@@ -1,6 +1,12 @@
 // TEST ONLY. Not referenced by Android/Windows product build definitions.
 // Real Windows SQLite/DPAPI provide host platform primitives; the production
 // Android JNI/Profile/shared runtime and Java TLS implementation remain intact.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef NOMINMAX // storage.cpp defines it itself; MinGW's C++ runtime already defined it.
 #include "../storage.cpp"
 #include "../portable/peerchat_core.cpp"
 

@@ -116,8 +116,15 @@ public final class ServerRelayProof {
         do{
             String result=request(host,port,pin,"{\"version\":1,\"type\":\"friend_state\",\"sessionToken\":\""+token+"\"}");
             PeerTlsProof.check(flag(result,"ok"));
-            Matcher row=Pattern.compile("\\{[^{}]*\"publicIdentity\"\\s*:\\s*\""+device+"\"[^{}]*\\}").matcher(result);
-            if(row.find()&&flag(row.group(),"online")==online)return;
+            // This isolated fixture has exactly one friend. The current
+            // response nests devicesOnline entries without an account-level
+            // online flag on each device; do not mistake a nested row for its
+            // parent or infer device presence from aggregate account presence.
+            Matcher rows=Pattern.compile("\"devicesOnline\"\\s*:\\s*\\[([^\\]]*)\\]").matcher(result);
+            PeerTlsProof.check(rows.find());
+            boolean present=Pattern.compile("\"publicIdentity\"\\s*:\\s*\""+device+"\"").matcher(rows.group(1)).find();
+            PeerTlsProof.check(!rows.find());
+            if(present==online)return;
             Thread.sleep(20);
         }while(System.nanoTime()<deadline);
         throw new IOException("Fresh device presence was not observed");

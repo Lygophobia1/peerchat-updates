@@ -17,8 +17,26 @@ $classpath=(@($pins.Keys|Sort-Object|ForEach-Object{
 New-Item -ItemType Directory -Path $out|Out-Null
 Push-Location $root
 try {
-    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -shared -static-libgcc -static-libstdc++ -D__ANDROID__ -DPEERCHAT_PORTABLE_TEXT '-Iportable' ("-I$JavaHome\include") ("-I$JavaHome\include\win32") tests/reliable_jni_storage_host.cpp portable/tls_android.cpp group.cpp -o "$out\peerchat_messaging.dll" ("-Wl,--out-implib,$out\libpeerchat_messaging.a") -lbcrypt -lcrypt32
-    if($LASTEXITCODE -ne 0){throw 'Reliable production JNI host fixture compilation failed'}
+    # Build a test-only source mirror. The ONLY source substitution is this
+    # Android POSIX attachment include; messaging, auth, ACK and Storage stay
+    # byte-for-byte production code. Fail if the source changed unexpectedly.
+    $hostPortable=Join-Path $out 'portable'
+    $hostTests=Join-Path $out 'tests'
+    New-Item -ItemType Directory -Path $hostPortable,$hostTests|Out-Null
+    $corePath=Join-Path $root 'portable\peerchat_core.cpp'
+    $before=(Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash
+    $core=[IO.File]::ReadAllText($corePath)
+    $original='#include "attachment_file_io.hpp"'
+    if(([regex]::Matches($core,[regex]::Escape($original))).Count -ne 1){throw 'Expected exactly one Android attachment include in production core'}
+    $core=$core.Replace($original,'#include "attachment_file_io_unavailable.hpp"')
+    if((Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash -ne $before){throw 'Production core changed during host fixture preparation'}
+    [IO.File]::WriteAllText((Join-Path $hostPortable 'peerchat_core.cpp'),$core)
+    Copy-Item -LiteralPath 'tests\portable\attachment_file_io_unavailable.hpp' -Destination $hostPortable
+    Copy-Item -LiteralPath 'tests\reliable_jni_storage_host.cpp' -Destination $hostTests
+    Copy-Item -LiteralPath 'storage.cpp' -Destination $out
+    Write-Host 'JNI messaging host proof uses fail-closed attachment and voice adapters; Android POSIX I/O, Keystore, media and OS lifecycle are not covered.'
+    & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -Wno-error=misleading-indentation -shared -static-libgcc -static-libstdc++ -D_WIN32_WINNT=0x0601 -D__ANDROID__ -DPEERCHAT_PORTABLE_TEXT '-I.' '-Itests' '-Iportable' '-include' 'windows.h' ("-I$JavaHome\include") ("-I$JavaHome\include\win32") (Join-Path $hostTests 'reliable_jni_storage_host.cpp') portable/tls_android.cpp group.cpp group_message_envelope.cpp android/voice-media/media_capabilities.cpp tests/portable/voice_media_unavailable.cpp -o "$out\peerchat_messaging.dll" ("-Wl,--out-implib,$out\libpeerchat_messaging.a") -lbcrypt -lcrypt32 2> "$out\compile.stderr.txt"
+    if($LASTEXITCODE -ne 0){Get-Content -LiteralPath "$out\compile.stderr.txt" -TotalCount 50|Write-Host;throw 'Reliable production JNI host fixture compilation failed'}
     & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -shared -static-libgcc -static-libstdc++ '-Iportable' ("-I$JavaHome\include") ("-I$JavaHome\include\win32") android/app/src/main/cpp/peerchat_jni.cpp ("-L$out") -lpeerchat_messaging -o "$out\peerchat_jni.dll"
     if($LASTEXITCODE -ne 0){throw 'Foundation JNI host fixture compilation failed'}
     & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp $classpath -d $out tests/jni-host/com/peerchat/android/NativeBridge.java tests/jni-host/com/peerchat/android/ProfileBridge.java tests/jni-host/com/peerchat/android/PeerTlsBridge.java tests/jni-host/com/peerchat/android/ReliableBridge.java android/app/src/main/java/com/peerchat/android/platform/tls/OpaqueTlsSigner.java android/app/src/main/java/com/peerchat/android/platform/tls/PeerTls.java android/app/src/main/java/com/peerchat/android/platform/tls/ServerChannel.java android/app/src/main/java/com/peerchat/android/platform/tls/RelayFrames.java tests/tls-host/PeerTlsProof.java tests/tls-host/ReliableProfileProof.java tests/tls-host/ServerRelayProof.java

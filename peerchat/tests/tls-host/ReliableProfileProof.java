@@ -21,6 +21,9 @@ public final class ReliableProfileProof {
         final PeerTlsProof.Identity identity;final long db;boolean closed;
         Facade(PeerTlsProof.Identity identity,String directory){this.identity=identity;db=ReliableProfileProof.number(database(utf8(directory)));}
         public byte[] publicKey(){return identity.publicKey();}
+        // Required by the current native owner even for text-only sessions.
+        // The host attachment adapter refuses all file operations.
+        public byte[] attachmentDirectory(){return utf8("/host-messaging-proof-attachments-unavailable");}
         public byte[] sign(byte[] original)throws Exception{return identity.sign(original);}
         public PeerTls createPeerTls(boolean incoming,byte[] pin)throws Exception{
             if(closed)throw new IllegalStateException("Closed fixture");
@@ -66,7 +69,10 @@ public final class ReliableProfileProof {
             // Explicit verification/control operation; presence alone is not demand.
             PeerTlsProof.check(com.peerchat.android.ReliableBridge.demand(handle,utf8(other))==0);
             Reader request=new Reader(com.peerchat.android.ReliableBridge.requests(handle),1);
-            PeerTlsProof.check(request.num()==1);peer=request.num();PeerTlsProof.check(request.str().equals(other)&&request.num()==1);request.end();
+            PeerTlsProof.check(request.num()==1);peer=request.num();PeerTlsProof.check(request.str().equals(other)&&request.num()==1);
+            // Production relay requests include an explicit scope blob. This
+            // direct-message fixture must receive an empty (not group/archive) scope.
+            PeerTlsProof.check(request.num()==0);request.end();
         }
         void attach(boolean incoming){PeerTlsProof.check(com.peerchat.android.ReliableBridge.open(handle,peer,incoming,utf8(other))==peer);receive(empty);}
         byte[] operation(int op){byte[] result=com.peerchat.android.ReliableBridge.exchange(handle,peer,op,empty);PeerTlsProof.check(result!=null);return result;}
