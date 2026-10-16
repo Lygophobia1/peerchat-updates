@@ -27,14 +27,14 @@ internal sealed partial class AttachmentCacheAdmission {
  internal AttachmentCacheAdmission(AccountDatabase accounts,AttachmentCacheRuntime cache){this.accounts=accounts;this.cache=cache;accounts.EnsureAttachmentMembership();}
  static void Require(bool ok,string reason){if(!ok)throw new InvalidOperationException(reason);}
  internal AttachmentCacheRuntime.Status Admit(long account,string device,Func<bool> current,byte[] descriptor){
-  var signed=AttachmentCacheDescriptor.Parse(descriptor);Require(signed.Account==account&&signed.Sender==device,"cache_sender_binding_mismatch");AttachmentCacheRuntime.Status result=null;
+  var signed=AttachmentCacheDescriptor.Parse(descriptor);Require(!signed.Direct,"cache_scope_mismatch");Require(signed.Account==account&&signed.Sender==device,"cache_sender_binding_mismatch");AttachmentCacheRuntime.Status result=null;
   bool allowed=accounts.WithGroupRosterAuthorization(signed.Group,account,device,roster=>{
    Require(current()&&Convert.ToInt64(roster["rosterGeneration"])==signed.Epoch,"cache_session_or_epoch_stale");result=cache.Admit(signed,accounts.AttachmentRecipients(signed.Group),AttachmentCacheContext.Snapshot(roster));
    Require(cache.OriginalMembership(signed.Id,account,device)==accounts.AttachmentMembership(signed.Group,account,device),"cache_membership_replaced");
   });Require(allowed&&result!=null,"cache_group_not_authorized");return result;
  }
  T Authorized<T>(long account,string device,Func<bool> current,string id,Func<AttachmentCacheDescriptor,T> action){
-  var descriptor=cache.Describe(id);T result=default(T);bool executed=false;
+  var descriptor=cache.Describe(id);Require(!descriptor.Direct,"cache_scope_mismatch");T result=default(T);bool executed=false;
   bool allowed=accounts.WithGroupRosterAuthorization(descriptor.Group,account,device,roster=>{
    Require(current(),"cache_session_invalid");string binding=accounts.AttachmentMembership(descriptor.Group,account,device);
    Require(!String.IsNullOrEmpty(binding)&&cache.OriginalMembership(id,account,device)==binding,"cache_original_membership_required");result=action(descriptor);executed=true;

@@ -17,13 +17,20 @@ internal sealed class AttachmentCacheDescriptor {
  internal long CipherBytes {get;private set;}
  internal string CipherDigest {get;private set;}
  internal byte[] Wire {get;private set;}
+ internal bool Direct {get;private set;}
+ internal long RecipientAccount {get;private set;}
+ internal string Relationship {get;private set;}
+ internal string AudienceDigest {get;private set;}
  byte[] signingKey;
+ internal byte[] PublicIdentity {get{return (byte[])signingKey.Clone();}}
  internal bool VerifySource(byte[] original,byte[] signature){return MailboxProtocol.Verify(original,signature,signingKey,Sender);}
  internal bool MatchesAnnouncement(byte[] wire){string message;return GroupCiphertextFanout.Route(wire,Group,Epoch,new GroupFanoutSession{Account=Account,Device=Sender},out message)&&message==Message&&MailboxProtocol.Verify(wire.Take(wire.Length-64).ToArray(),wire.Skip(wire.Length-64).ToArray(),signingKey,Sender);}
  AttachmentCacheDescriptor(){}
  internal static AttachmentCacheDescriptor Parse(byte[] wire){
   try{
-   if(wire==null||wire.Length>2048||wire.Length<4||wire[0]!=80||wire[1]!=84||wire[2]!=1||wire[3]!=5)throw new InvalidOperationException();
+   if(wire==null||wire.Length>2048||wire.Length<4||wire[0]!=80||wire[1]!=84||wire[2]!=1)throw new InvalidOperationException();
+   if(wire[3]==30)return ParseDirect(wire);
+   if(wire[3]!=5)throw new InvalidOperationException();
    int at=4;if(GroupRosterProof.Text(wire,ref at,64)!="PeerChat/group-cache-upload/v1")throw new InvalidOperationException();
    var result=new AttachmentCacheDescriptor{Id=GroupRosterProof.Text(wire,ref at,32),Group=GroupRosterProof.Text(wire,ref at,32),Message=GroupRosterProof.Text(wire,ref at,32),Sender=GroupRosterProof.Text(wire,ref at,64)};
    ulong account=GroupRosterProof.Number(wire,ref at),epoch=GroupRosterProof.Number(wire,ref at),plain=GroupRosterProof.Number(wire,ref at),cipher=GroupRosterProof.Number(wire,ref at);
@@ -31,6 +38,14 @@ internal sealed class AttachmentCacheDescriptor {
    if(at!=wire.Length||!MailboxProtocol.Id(result.Id,32)||!MailboxProtocol.Id(result.Group,32)||!MailboxProtocol.Id(result.Message,32)||!MailboxProtocol.Id(result.Sender,64)||account==0||account>long.MaxValue||epoch==0||epoch>long.MaxValue||plain>(ulong)MaximumPlainBytes||cipher!=20+plain+Math.Max(1UL,(plain+32767)/32768)*16||digest.Length!=32||key.Length!=72||signature.Length!=64||!MailboxProtocol.Verify(wire.Take(signedEnd).ToArray(),signature,key,result.Sender))throw new InvalidOperationException();
    result.Account=(long)account;result.Epoch=(long)epoch;result.PlainBytes=(long)plain;result.CipherBytes=(long)cipher;result.CipherDigest=String.Concat(digest.Select(b=>b.ToString("x2")));result.Wire=(byte[])wire.Clone();result.signingKey=(byte[])key.Clone();return result;
   }catch(Exception error){if(error is OutOfMemoryException)throw;throw new InvalidOperationException("Invalid signed encrypted attachment descriptor.");}
+ }
+ static AttachmentCacheDescriptor ParseDirect(byte[] wire){
+  int at=4;if(GroupRosterProof.Text(wire,ref at,64)!="PeerChat/dm-cache-upload/v1")throw new InvalidOperationException();
+  var d=new AttachmentCacheDescriptor{Direct=true,Group="",Id=GroupRosterProof.Text(wire,ref at,32),Message=GroupRosterProof.Text(wire,ref at,32),Sender=GroupRosterProof.Text(wire,ref at,64)};
+  ulong account=GroupRosterProof.Number(wire,ref at),recipient=GroupRosterProof.Number(wire,ref at);d.Relationship=GroupRosterProof.Text(wire,ref at,32);d.AudienceDigest=GroupRosterProof.Text(wire,ref at,64);
+  ulong codec=GroupRosterProof.Number(wire,ref at),size=GroupRosterProof.Number(wire,ref at);var digest=GroupRosterProof.Bytes(wire,ref at,32);var key=GroupRosterProof.Bytes(wire,ref at,72);int end=at;var signature=GroupRosterProof.Bytes(wire,ref at,64);
+  if(at!=wire.Length||!MailboxProtocol.Id(d.Id,32)||!MailboxProtocol.Id(d.Message,32)||!MailboxProtocol.Id(d.Sender,64)||account==0||account>long.MaxValue||recipient==0||recipient>long.MaxValue||account==recipient||!MailboxProtocol.Id(d.Relationship,32)||!MailboxProtocol.Id(d.AudienceDigest,64)||codec!=1||size<36||size>(ulong)(20+MaximumPlainBytes+((MaximumPlainBytes+32767)/32768)*16)||digest.Length!=32||key.Length!=72||signature.Length!=64||!MailboxProtocol.Verify(wire.Take(end).ToArray(),signature,key,d.Sender))throw new InvalidOperationException();
+  d.Account=(long)account;d.RecipientAccount=(long)recipient;d.CipherBytes=(long)size;d.CipherDigest=String.Concat(digest.Select(b=>b.ToString("x2")));d.Wire=(byte[])wire.Clone();d.signingKey=(byte[])key.Clone();return d;
  }
 }
 internal sealed class CacheRecipient {

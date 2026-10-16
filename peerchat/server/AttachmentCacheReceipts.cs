@@ -10,14 +10,23 @@ internal sealed class AttachmentVerificationReceipt {
  internal const int MaximumWire=4096;
  internal AttachmentCacheDescriptor Descriptor;internal long Account,VerifiedUtc;
  internal string Device,Digest;internal byte[] Wire;
- internal static AttachmentVerificationReceipt Parse(byte[] wire){try{
+ internal static AttachmentVerificationReceipt Parse(byte[] wire,AttachmentCacheDescriptor descriptor=null){try{
   if(wire==null||wire.Length>MaximumWire||wire.Length<4||wire[0]!=80||wire[1]!=84||wire[2]!=1||wire[3]!=30)throw new InvalidOperationException();
-  int at=4;if(GroupRosterProof.Text(wire,ref at,64)!="PeerChat/group-attachment-verified/v1")throw new InvalidOperationException();
+  int at=4;string domain=GroupRosterProof.Text(wire,ref at,64);
+  if(domain=="PeerChat/dm-attachment-verified-file/v1")return ParseDirect(wire,at,descriptor);
+  if(domain!="PeerChat/group-attachment-verified/v1")throw new InvalidOperationException();
   var result=new AttachmentVerificationReceipt{Descriptor=AttachmentCacheDescriptor.Parse(GroupRosterProof.Bytes(wire,ref at,2048))};
   ulong account=GroupRosterProof.Number(wire,ref at);result.Device=GroupRosterProof.Text(wire,ref at,64);var key=GroupRosterProof.Bytes(wire,ref at,72);ulong verified=GroupRosterProof.Number(wire,ref at);int signedEnd=at;var signature=GroupRosterProof.Bytes(wire,ref at,64);
-  if(at!=wire.Length||account==0||account>long.MaxValue||verified==0||verified>253402300799000UL||key.Length!=72||signature.Length!=64||!MailboxProtocol.Id(result.Device,64)||!MailboxProtocol.Verify(wire.Take(signedEnd).ToArray(),signature,key,result.Device))throw new InvalidOperationException();
+  if(at!=wire.Length||result.Descriptor.Direct||account==0||account>long.MaxValue||verified==0||verified>253402300799000UL||key.Length!=72||signature.Length!=64||!MailboxProtocol.Id(result.Device,64)||!MailboxProtocol.Verify(wire.Take(signedEnd).ToArray(),signature,key,result.Device))throw new InvalidOperationException();
   result.Account=(long)account;result.VerifiedUtc=(long)verified;result.Wire=(byte[])wire.Clone();result.Digest=MailboxProtocol.Digest(wire);return result;
  }catch(Exception error){if(error is OutOfMemoryException)throw;throw new InvalidOperationException("cache_verification_receipt_invalid");}}
+ static AttachmentVerificationReceipt ParseDirect(byte[] wire,int at,AttachmentCacheDescriptor d){
+  ulong sender=GroupRosterProof.Number(wire,ref at);string source=GroupRosterProof.Text(wire,ref at,64);ulong account=GroupRosterProof.Number(wire,ref at);string device=GroupRosterProof.Text(wire,ref at,64);string keyId=GroupRosterProof.Text(wire,ref at,32);ulong generation=GroupRosterProof.Number(wire,ref at);
+  string message=GroupRosterProof.Text(wire,ref at,32),id=GroupRosterProof.Text(wire,ref at,32),digest=GroupRosterProof.Text(wire,ref at,64),audience=GroupRosterProof.Text(wire,ref at,64);var key=GroupRosterProof.Bytes(wire,ref at,72);ulong verified=GroupRosterProof.Number(wire,ref at);int end=at;var signature=GroupRosterProof.Bytes(wire,ref at,64);
+  if(d==null||!d.Direct||sender!=(ulong)d.Account||source!=d.Sender||account!=(ulong)d.RecipientAccount||id!=d.Id||message!=d.Message||digest!=MailboxProtocol.Digest(d.Wire)||audience!=d.AudienceDigest||!MailboxProtocol.Id(keyId,32)||generation==0||generation>long.MaxValue||verified==0||verified>253402300799000UL||at!=wire.Length||!MailboxProtocol.Verify(wire.Take(end).ToArray(),signature,key,device))throw new InvalidOperationException();
+  return new AttachmentVerificationReceipt{Descriptor=d,Account=(long)account,Device=device,VerifiedUtc=(long)verified,Wire=(byte[])wire.Clone(),Digest=MailboxProtocol.Digest(wire),RecipientKey=keyId,RecipientGeneration=(long)generation};
+ }
+ internal string RecipientKey;internal long RecipientGeneration;
 }
 internal sealed partial class AttachmentCacheRuntime {
  void InitializeVerificationReceipts(){
@@ -40,7 +49,7 @@ internal sealed partial class AttachmentCacheRuntime {
  }}
  internal Dictionary<string,object> Verification(string id,CacheRecipient recipient){lock(gate){Check();var descriptor=Descriptor(id);ContextExpires(id);
   var wire=Binary("SELECT wire FROM attachment_verification_receipts WHERE object_id="+Quote(id)+" AND device="+Quote(recipient.Device));string digest="";
-  if(wire!=null){var receipt=AttachmentVerificationReceipt.Parse(wire);var rows=Rows("SELECT digest FROM attachment_verification_receipts WHERE object_id="+Quote(id)+" AND device="+Quote(recipient.Device),1);
+  if(wire!=null){var receipt=AttachmentVerificationReceipt.Parse(wire,descriptor);var rows=Rows("SELECT digest FROM attachment_verification_receipts WHERE object_id="+Quote(id)+" AND device="+Quote(recipient.Device),1);
    Require(receipt.Descriptor.Wire.SequenceEqual(descriptor.Wire)&&receipt.Account==recipient.Account&&receipt.Device==recipient.Device&&rows.Count==1&&rows[0][0]==receipt.Digest&&RecipientOffset(id,recipient.Device)==descriptor.CipherBytes,"cache_verification_index_invalid");digest=receipt.Digest;
   }
   return new Dictionary<string,object>{{"accountId",recipient.Account},{"device",recipient.Device},{"durableOffset",RecipientOffset(id,recipient.Device)},{"plaintextVerified",wire!=null},{"receipt",wire==null?"":AttachmentCacheRequests.Encode(wire)},{"receiptDigest",digest}};

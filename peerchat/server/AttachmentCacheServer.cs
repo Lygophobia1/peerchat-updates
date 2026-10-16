@@ -16,6 +16,11 @@ sealed partial class DiscoveryServer {
 #else
  const bool AttachmentCacheTransportReady=false;
 #endif
+#if PEERCHAT_CACHE_TESTS || PEERCHAT_DM_CACHE_CANDIDATE
+ const bool DirectCacheTransportReady=true;
+#else
+ const bool DirectCacheTransportReady=false;
+#endif
  partial void ProcessAttachmentCacheRequest(long account,string device,Func<bool> current,Dictionary<string,object> request,ref Dictionary<string,object> reply){
   lock(attachmentCacheGate){
    reply=new Dictionary<string,object>{{"state",config.AttachmentCache.Enabled?"cache_feature_gated":"cache_disabled"}};
@@ -23,7 +28,7 @@ sealed partial class DiscoveryServer {
    if(attachmentCache==null){
     try{
      var opened=new AttachmentCacheRuntime(config.AttachmentCache,()=>DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-     try{attachmentCacheRequests=new AttachmentCacheRequests(new AttachmentCacheAdmission(accounts,opened));attachmentCache=opened;}
+     try{attachmentCacheRequests=new AttachmentCacheRequests(new AttachmentCacheAdmission(accounts,opened),DirectCacheTransportReady);attachmentCache=opened;}
      catch{opened.Dispose();throw;}
     }catch(Exception error){if(error is OutOfMemoryException)throw;reply["state"]="cache_storage_unavailable";return;}
    }

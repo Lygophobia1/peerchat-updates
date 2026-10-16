@@ -15,6 +15,9 @@
   <PropertyGroup Condition="'$(AttachmentCacheCandidate)' == 'true'">
     <DefineConstants>$(DefineConstants);PEERCHAT_CACHE_CANDIDATE</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(DirectAttachmentCacheCandidate)' == 'true'">
+    <DefineConstants>$(DefineConstants);PEERCHAT_DM_CACHE_CANDIDATE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../AttachmentCache*.cs" />
     <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../ArchiveAuthorization.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;../../shared/VersionInfo.cs;PortableJson.cs;PortablePlatform.cs" />
