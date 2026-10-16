@@ -53,7 +53,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
         android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
     }
-    fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true): JSONObject {
+    fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true,allowRpc:Boolean=true): JSONObject {
         operations.check()
         val started=System.nanoTime()
         android.util.Log.i("PeerChatWake","stage=server_request_started operation="+safeOperation(type))
@@ -61,7 +61,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         if(authenticated) fields.put("sessionToken", checkNotNull(session).token)
         val bytes = fields.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 4096)
-        val response=try {if(authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
+        val response=try {if(allowRpc&&authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
             JSONObject(channel.read(16384).toString(Charsets.UTF_8))

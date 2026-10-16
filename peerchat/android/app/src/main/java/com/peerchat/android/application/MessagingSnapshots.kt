@@ -14,6 +14,7 @@ data class ConversationSnapshot(val friend: FriendIdentity,val connection: Conne
 data class MessagingSnapshot(val accountId: Long=0,val username: String="",val localPeerId: String="",
     val authenticated: Boolean=false,val status: String="Not signed in",val conversations: List<ConversationSnapshot> = emptyList(),
     val incomingRequests:List<AccountRequestSnapshot> = emptyList(),
+    val outgoingRequests:List<AccountRequestSnapshot> = emptyList(),
     // Authentication alone is not evidence of a currently refreshed device lease.
     val serverPresenceLive:Boolean=false,val mailboxStorageAllowed:Boolean=false,
     val localHistoryReady:Boolean=false,val archiveProgress:ArchiveSyncProgress=ArchiveSyncProgress(),
@@ -51,10 +52,11 @@ internal fun serverRefreshFailure(failure:Exception):String = when(failure) {
     else -> "Server presence/session refresh validation failed"
 }
 data class AccountRequestSnapshot(val accountId:Long,val username:String)
+data class DirectoryAccountSnapshot(val accountId:Long,val username:String,val online:Boolean)
 
 /** Network quiescence never destroys the local-history projection. */
 internal fun localOfflineSnapshot(snapshot:MessagingSnapshot,status:String):MessagingSnapshot = snapshot.copy(
-    authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null,status=status,
+    authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),outgoingRequests=emptyList(),deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null,status=status,
     freshMailboxMessageIds=emptySet(),
     groups=snapshot.groups.map{it.copy(ready=false)},groupInvitations=emptyList(),voice=VoiceSnapshot(diagnostic="Voice authorization unavailable"),
     conversations=snapshot.conversations.map{it.copy(friend=it.friend.copy(online=false),connection=ConnectionSnapshot())})
@@ -67,8 +69,8 @@ internal fun nativeConversationProjection(friends:List<FriendIdentity>,connectio
         accountHistoryPage(friend,Long.MAX_VALUE){peer,_->history(peer)})
 }
 
-/** Native Storage.sequence is messages.rowid in ONE profile database, not a
- * per-device counter. Page by that durable cursor, then order for presentation.
+/** Native Storage.sequence is an opaque messages.rowid in ONE profile database.
+ * Native history resolves it to a timestamp/sender/ID key across device peers.
  * No new identity authority: these IDs come only from the protected account index.
  * At most 32 native eight-row reads; return eight logical messages per page. */
 internal fun accountHistoryPage(friend:FriendIdentity,before:Long,
@@ -76,16 +78,16 @@ internal fun accountHistoryPage(friend:FriendIdentity,before:Long,
     val devices=friend.knownPeerIds.distinct().sorted()
     require(before>0&&devices.size in 1..32&&friend.peerId in devices&&
         devices.all{it.matches(Regex("[0-9a-f]{64}"))})
-    val rows=devices.flatMap{peer->messageSnapshots(history(peer,before)).also{page->require(page.all{it.sequence<before})}}
+    val rows=devices.flatMap{peer->messageSnapshots(history(peer,before))}
     // Keep the newest native row for duplicate logical IDs. Delivery/identity
     // fields remain native values; never renumber or rewrite stored messages.
-    return chronologicalMessages(rows.sortedByDescending{it.sequence}.distinctBy{it.id}.take(8))
+    return chronologicalMessages(rows).takeLast(8)
 }
 
 internal fun chronologicalMessages(rows:List<MessageSnapshot>):List<MessageSnapshot> =
     rows.sortedWith(compareByDescending<MessageSnapshot>{it.sequence}
         .thenByDescending{when(it.delivery){2L->3;3L->2;1L->1;else->0}})
-        .distinctBy{it.id}.sortedWith(compareBy<MessageSnapshot>{it.logicalOrder}
+        .distinctBy{it.id}.sortedWith(compareBy<MessageSnapshot>{it.timestamp}
             .thenBy{it.senderDevice}.thenBy{it.id}.thenBy{it.recipientDevice})
 
 internal fun nativeWakeOutputComplete(receivedNanos:Long,wakeStartedNanos:Long,

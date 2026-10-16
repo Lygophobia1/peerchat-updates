@@ -45,7 +45,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8,attachments=c.attachments)
     }+snapshot.groups.map {g->
-        val messages=g.messages.map{m->val outgoing=m.device==snapshot.localPeerId
+        val messages=g.messages.sortedWith(groupMessageOrder).map{m->val outgoing=m.device==snapshot.localPeerId
             MessageUi(m.id,m.device,if(outgoing)snapshot.username else accountName(m.account),m.text,outgoing,
                 if(m.status=="attachment_reference")"Time unavailable" else SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
                 if(m.status=="attachment_reference")"Attachment references · original order unavailable" else SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
@@ -90,6 +90,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         mailboxRecoveryError=if(snapshot.authenticated)snapshot.mailboxRecoveryError else null,
         diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
+        outgoingRequests=snapshot.outgoingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
             snapshot.authenticated->ConnectionState.Reconnecting
@@ -122,6 +123,43 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var recovering=false
     private var automaticResumeSuppressed=false
     private var uiGeneration=0L
+    private var peopleSearch:Job?=null
+    private val peopleSearchMutex=Mutex()
+    private var peopleRevision=0L
+    private fun searchPeople(text:String){
+        peopleSearch?.cancel();val revision=++peopleRevision
+        val query=text.trim().take(32);val epoch=uiGeneration;val account=current.accountId
+        mutable.value=mutable.value.copy(peopleQuery=query,peopleResults=emptyList(),peopleLoading=false,peopleError=null)
+        if(!validPeopleQuery(query))return
+        if(!current.authenticated||!current.serverPresenceLive){mutable.value=mutable.value.copy(peopleError="Search unavailable while offline. Reconnect and retry.");return}
+        mutable.value=mutable.value.copy(peopleLoading=true)
+        peopleSearch=viewModelScope.launch{
+            delay(350)
+            try{
+                val result=peopleSearchMutex.withLock {coroutineContext.ensureActive();backend.searchPeople(query)}
+                if(revision==peopleRevision&&epoch==uiGeneration&&account==current.accountId&&current.authenticated)
+                    mutable.value=mutable.value.copy(peopleResults=result,peopleLoading=false)
+            }catch(error:Exception){
+                if(error is CancellationException)throw error
+                if(revision==peopleRevision&&epoch==uiGeneration&&account==current.accountId)
+                    mutable.value=mutable.value.copy(peopleLoading=false,peopleError=when{
+                        error is ServerRejected && error.code=="search_rate_limited"->"Search is temporarily limited. Wait a moment and try again."
+                        error is ServerRejected && error.code=="unsupported_request"->"This server does not support authorized partial search. Ask the operator to update it."
+                        else->"People search unavailable. Check your connection and try again."})
+            }
+        }
+    }
+    private fun contactOperation(success:String,operation:suspend ()->Unit){
+        if(mutable.value.contactBusy||!current.authenticated||!current.serverPresenceLive)return
+        val epoch=uiGeneration;val account=current.accountId
+        mutable.value=mutable.value.copy(contactBusy=true,notice=null)
+        viewModelScope.launch{
+            try{operation();if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice=success)}
+            catch(error:Exception){if(error is CancellationException)throw error
+                if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice="Request could not complete. Refresh to check its current server state; authorization is unchanged.")}
+            finally{if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(contactBusy=false)}
+        }
+    }
     private val retainedDiagnostics=ArrayDeque<String>()
     private val previewLoading=mutableSetOf<String>()
     private val largeDrafts=mutableMapOf<String,String>()
@@ -278,6 +316,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     // Collect during authentication, rather than only after restore completes.
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(recovering)return@collect
+        if(snapshot.accountId!=current.accountId||!snapshot.authenticated||!snapshot.serverPresenceLive){
+            peopleSearch?.cancel();peopleRevision++
+            mutable.value=mutable.value.copy(peopleResults=emptyList(),peopleLoading=false,contactBusy=false,
+                peopleQuery=if(snapshot.accountId!=current.accountId)"" else mutable.value.peopleQuery)
+        }
+        if(snapshot.accountId!=current.accountId)mutable.value=mutable.value.copy(transferSettings=null,transferSettingsBusy=false,transferSettingsError=null)
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
         current=snapshot
         if(foreground&&mutable.value.route==Route.Conversation){
@@ -488,15 +532,36 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             is UiAction.CreateGroup -> viewModelScope.launch{try{backend.createGroup(action.name)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group creation failed; no server membership is claimed.")}}
             is UiAction.InviteGroup -> viewModelScope.launch{try{backend.inviteGroup(action.group,action.account)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group invitation was not accepted by the server.")}}
-            is UiAction.RespondGroup -> viewModelScope.launch{try{backend.respondGroup(action.id,action.accept)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group invitation response failed.")}}
-            is UiAction.RequestFriend -> viewModelScope.launch {
-                try {backend.requestFriend(action.username);mutable.value=mutable.value.copy(notice="Friend request sent through authenticated server.")}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Friend request was not accepted by server.")}
+            UiAction.OpenTransferSettings,is UiAction.SaveTransferSettings -> {
+                if(mutable.value.transferSettingsBusy)return
+                val epoch=uiGeneration;val account=current.accountId
+                mutable.value=mutable.value.copy(route=Route.TransferSettings,transferSettingsBusy=true,transferSettingsError=null,notice=null,
+                    transferSettings=if(action==UiAction.OpenTransferSettings)null else mutable.value.transferSettings)
+                viewModelScope.launch{
+                    try{
+                        if(action is UiAction.SaveTransferSettings)backend.saveTransferSettings(action.value)
+                        val saved=backend.transferSettings()
+                        if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(transferSettings=saved,
+                            notice=if(action is UiAction.SaveTransferSettings)"Transfer settings saved." else null)
+                    }catch(error:Exception){if(error is CancellationException)throw error
+                        if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(transferSettingsError="Transfer settings could not be read or saved. Retry to verify the current saved values.")}
+                    finally{if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(transferSettingsBusy=false)}
+                }
             }
-            is UiAction.RespondFriend -> viewModelScope.launch {
-                try {backend.respondFriend(action.accountId,action.accept)}
-                catch(_:Exception){mutable.value=mutable.value.copy(notice="Friend response failed; authorization unchanged.")}
+            is UiAction.Contacts -> {
+                mutable.value=reduceUi(mutable.value,action)
+                contactOperation("Requests and invitations refreshed."){backend.refreshContacts()}
+                if(action.page==ContactPage.FindPeople)searchPeople(mutable.value.peopleQuery)
             }
+            is UiAction.PeopleQuery -> searchPeople(action.text)
+            UiAction.RefreshContacts -> {
+                contactOperation("Requests and invitations refreshed."){backend.refreshContacts()}
+                if(mutable.value.contactPage==ContactPage.FindPeople)searchPeople(mutable.value.peopleQuery)
+            }
+            is UiAction.CancelFriend -> contactOperation("Outgoing request cancelled."){backend.cancelFriend(action.accountId)}
+            is UiAction.RespondGroup -> contactOperation(if(action.accept)"Invitation accepted. Enrollment waits for signed membership and the current group key." else "Invitation declined."){backend.respondGroup(action.id,action.accept)}
+            is UiAction.RequestFriend -> contactOperation("Friend request sent through the authenticated server."){backend.requestFriend(action.username)}
+            is UiAction.RespondFriend -> contactOperation(if(action.accept)"Friend request accepted. Any required device verification remains active." else "Friend request declined."){backend.respondFriend(action.accountId,action.accept)}
             is UiAction.AttachmentPreview -> {
                 if(action.id in mutable.value.attachmentPreviews||!previewLoading.add(action.id))return
                 val account=current.accountId;val requestGeneration=uiGeneration
@@ -558,7 +623,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 viewModelScope.launch {
                     try {
                         val existing=(older[c.friend.accountId] ?: emptyList())+c.messages
-                        val before=existing.minOfOrNull {it.sequence} ?: Long.MAX_VALUE
+                        val before=chronologicalMessages(existing).firstOrNull()?.sequence ?: Long.MAX_VALUE
                         val page=backend.older(c.friend.peerId,before)
                         if(current.accountId==account&&current.conversations.any {it.friend.accountId==c.friend.accountId}) {
                             older[c.friend.accountId]=((older[c.friend.accountId] ?: emptyList())+page).distinctBy {it.id}

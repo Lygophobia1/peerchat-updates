@@ -186,13 +186,15 @@ class MessagingBackend(context: Context,private val profileName: String="default
     @Volatile private var inUse=true
     @Volatile private var operationDeadline=Long.MAX_VALUE
     @Volatile private var livePeerWorkAllowed=true
+    @Volatile private var archiveWorkAllowed=true
     @Volatile private var quiescent=java.util.concurrent.CountDownLatch(0)
-    internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE) {
+    internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE,allowArchiveWork:Boolean=allowPeerWork) {
         inUse=value
         operationDeadline=deadlineNanos
-        // A finite wake lease services server mailbox only. It never starts a
-        // friend reconnect cycle to obtain history or bootstrap sender trust.
+        // Background archive capability is separate from friend/transfer work;
+        // signed native grants still admit every archive attempt.
         livePeerWorkAllowed=allowPeerWork
+        archiveWorkAllowed=allowArchiveWork
         operations.configure(value&&!resetting,deadlineNanos)
         if(!value){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
             executor.execute {try{synchronized(gate){if(!inUse&&!stopped){
@@ -436,8 +438,35 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val owner=checkNotNull(accounts)
         val found=owner.request("search",org.json.JSONObject().put("username",username))
         val account=found.getLong("accountId");require(account>0&&account!=owner.session?.accountId)
+        check(friends.none{it.accountId==account}&&mutable.value.incomingRequests.none{it.accountId==account}&&mutable.value.outgoingRequests.none{it.accountId==account}){"Relationship already exists or a request is pending"}
         owner.request("friend_request",org.json.JSONObject().put("accountId",account.toString()))
         refresh();publish()
+    }}
+    override suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot> = withContext(Dispatchers.IO){
+        val value=query.trim();require(value.length in 1..32&&value.all{it.isLetterOrDigit()||it=='-'||it=='_'}&&(value.length>=2||value.toLongOrNull()!=null))
+        val scope=synchronized(gate){check(!stopped&&authorizationSnapshotInstalled&&mutable.value.authenticated);Triple(checkNotNull(accounts),generation,mutable.value.accountId)}
+        // Optional directory lookup never holds the message/archive owner lock
+        // or monopolizes its authenticated persistent RPC channel.
+        val rows=scope.first.request("people_search",org.json.JSONObject().put("query",value),allowRpc=false).getJSONArray("accounts");require(rows.length()<=15)
+        synchronized(gate){check(!stopped&&accounts===scope.first&&generation==scope.second&&mutable.value.accountId==scope.third&&authorizationSnapshotInstalled)
+            List(rows.length()){i->val row=rows.getJSONObject(i);val id=row.getLong("accountId");val name=row.getString("username");require(id>0&&id!=scope.third&&name.length<=64);DirectoryAccountSnapshot(id,name,row.optBoolean("online"))}}
+    }
+    override suspend fun cancelFriend(accountId:Long)=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled&&mutable.value.outgoingRequests.any{it.accountId==accountId})
+        checkNotNull(accounts).request("friend_cancel",org.json.JSONObject().put("accountId",accountId.toString()));refresh();publish()
+    }}
+    override suspend fun refreshContacts()=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&authorizationSnapshotInstalled);refresh()
+        val native=checkNotNull(profile).handle
+        groupExecution.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation)
+        mutable.value=mutable.value.copy(groups=groupExecution.snapshot(native,mutable.value.accountId,generation),groupInvitations=groupExecution.invitations,groupDiagnostics=groupExecution.diagnostic)
+        groupRefreshAt=0L;publish()
+    }}
+    override suspend fun transferSettings():TransferSettingsSnapshot=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&profile!=null);TransferSettingsSnapshot.decode(transfer(6))
+    }}
+    override suspend fun saveTransferSettings(value:TransferSettingsSnapshot)=withContext(Dispatchers.IO){synchronized(gate){
+        check(!stopped&&profile!=null);value.validate();TransferSettingsSnapshot.decode(transfer(7){it.number(value.preferredChunkBytes.toLong());it.number(value.preferredWindow.toLong());it.number(value.uploadBitsPerSecond);it.number(value.downloadBitsPerSecond)});Unit
     }}
     override suspend fun respondFriend(accountId:Long,accept:Boolean) = withContext(Dispatchers.IO) {synchronized(gate){
         require(accountId>0&&mutable.value.incomingRequests.any {it.accountId==accountId})
@@ -514,7 +543,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         friends=authoritative
         localEndpoint=accounts.endpoint
         if(changed||bootstrap)localContexts.save(accounts.endpoint,LocalConversationContext(active.accountId,active.username,mutable.value.localPeerId,authoritative))
-        mutable.value=mutable.value.copy(incomingRequests=requests.toList())
+        val outgoing=state.getJSONArray("outgoing");require(outgoing.length()<=128)
+        val sent=List(outgoing.length()){i->val row=outgoing.getJSONObject(i);val id=row.getLong("accountId");val name=row.getString("username");require(id>0&&name.length<=64);AccountRequestSnapshot(id,name)}
+        mutable.value=mutable.value.copy(incomingRequests=requests.toList(),outgoingRequests=sent)
         friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
         val presenceLive=!livePeerWorkAllowed||events?.connected==true
         mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated server presence available; message delivery requires a verified peer or mailbox ACK" else "Connecting authenticated server events; local history available")
@@ -534,7 +565,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             return
         }
         val native=checkNotNull(profile).handle
-        if(livePeerWorkAllowed||!mailboxAllowed()){
+        if(livePeerWorkAllowed||archiveWorkAllowed||!mailboxAllowed()){
             if(events==null&&now>=eventRetryAt){events=ForegroundEvents(checkNotNull(accounts));android.util.Log.i("PeerChatNetwork","event=connecting")}
             events?.let {stream->
                 if(stream.connected&&!eventWasConnected){
@@ -628,9 +659,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
-        if(!livePeerWorkAllowed&&mailboxAllowed()){publish();return}
+        if(!livePeerWorkAllowed&&!archiveWorkAllowed&&mailboxAllowed()){publish();return}
         val initialArchive=archiveLoadedGeneration!=generation
-        if(livePeerWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
+        if(archiveWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
             val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId
             val execution=archiveExecution(owner,checkNotNull(profile))
             try{if(initialArchive||now>=archiveMetadataAt){
@@ -702,6 +733,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }
         for(request in relayExecutions(checkNotNull(ReliableBridge.requests(native)))) {
+            // A bounded archive wake must never broaden into a friend reconnect
+            // or group transfer. Existing explicit transfer leases retain those.
+            if(!livePeerWorkAllowed&&(request.archive==null||!archiveWorkAllowed)){
+                ReliableBridge.close(native,request.attempt,false);continue
+            }
             val friend=friends.find {it.peerId==request.peerId}
             val archive=request.archive;val session=accounts?.session
             val group=request.group
@@ -736,7 +772,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     return
                 }
                 if(event.optString("purpose")=="archive_history"){
-                    if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
+                    if(!archiveWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                     try {
                         val scope=ArchiveRelayScope.event(event);val owner=checkNotNull(accounts);val session=checkNotNull(owner.session)
                         // Source attachment echoes reach the reader on this same
@@ -750,11 +786,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     }catch(failure:Exception){
                         if(expiredServerSession(failure))throw failure
                         android.util.Log.w("PeerChatArchive","event=demand_failed generation=$generation result=${failure.javaClass.simpleName} cleanup=archive_only")
-                        mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive source unavailable; retry pending"))
+                        mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(state="Archive source unavailable; retry pending",complete=false,projectionFresh=false))
                     }
                     return
                 }
-                if(event.optString("purpose")!="friend"||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
+                if(!livePeerWorkAllowed||event.optString("purpose")!="friend"||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                 val peer=event.optString("publicIdentity")
                 val friend=friends.singleOrNull{it.accountId==event.optLong("accountId")&&it.peerId==peer} ?: run{contactsDirty=true;return}
                 check(ReliableBridge.demand(checkNotNull(profile).handle,friend.peerId.toByteArray(Charsets.US_ASCII))==0)
@@ -828,6 +864,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
+        // Mailbox publication may finish before the first archive pass. Keep the
+        // same bounded job alive until a fresh native projection settles, or its
+        // deadline releases the lease and the scheduler defers recovery.
+        if(archiveWorkAllowed&&(archiveLoadedGeneration!=generation||archiveWakePending(mutable.value.archiveProgress)))return@synchronized false
         val receiver=executions[lastNativeReceiveAttempt]
         mailboxPublication.outputDrained(afterNanos,mailboxExecution.needsContinuation)||
             (receiver!=null&&nativeWakeOutputComplete(lastNativeReceiveNanos,afterNanos,receiver.attached,receiver.finished,receiver.lastOutputIdleNanos))

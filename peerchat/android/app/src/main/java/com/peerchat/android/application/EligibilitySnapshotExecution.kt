@@ -34,15 +34,21 @@ internal class EligibilitySnapshotExecution {
         offset=(offset+selected.size)%targets.size
         var installed=false
         for(recipient in selected) {
+            var stage="authenticated_rpc"
+            var reason="transport_or_rpc_unavailable"
             try {
                 val reply=accounts.mailbox("mailbox_eligibility_snapshot",JSONObject().put("recipientAccountId",recipient.toString()))
+                stage="snapshot_response";reason=safeState(reply.optString("state"))
+                check(reply.optString("state")=="ready")
+                stage="snapshot_scope_and_format";reason="response_scope_or_format_rejected"
                 val wire=encode(reply,account,generation,device,recipient)
+                stage="native_verified_eligibility";reason="native_scope_freshness_or_binding_rejected"
                 check(MailboxBridge.eligibility(handle,wire)==0)
                 diagnostic="eligibility=authenticated_snapshot_cached"
                 refreshAfter[recipient]=now+60_000;installed=true
             } catch(failure:Exception) {
                 if(expiredServerSession(failure))throw failure
-                diagnostic="eligibility=unavailable_primary_delivery_independent reason=${failure.javaClass.simpleName}"
+                diagnostic="eligibility=unavailable_primary_delivery_independent stage=$stage reason=$reason exception=${failure.javaClass.simpleName}"
                 refreshAfter[recipient]=now+15_000
             }
         }
@@ -51,6 +57,10 @@ internal class EligibilitySnapshotExecution {
     }
 
     companion object {
+        internal fun safeState(value:String):String=when(value){
+            "ready","rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature","eligibility_too_large","unsupported_request"->value
+            else->"snapshot_not_ready"
+        }
         internal fun encode(reply:JSONObject,account:Long,generation:Long,device:String,recipient:Long):ByteArray {
             fun number(key:String):Long {
                 val value=reply.get(key);require(value is Number)
