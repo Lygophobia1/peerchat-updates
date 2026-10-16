@@ -9,9 +9,30 @@ using System.Security.Cryptography;
 using PeerChat.Server;
 
 class DirectCacheTest {
- static int Main(string[] args){try{AttachmentCacheRuntimeTest.DirectChecks(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
+ static int Main(string[] args){try{if(args.Length==3&&args[0]=="--legacy-runtime"){string root=Path.GetFullPath(args[2]);AttachmentCacheRuntimeTest.DirectChecks(root);AttachmentCacheRuntimeTest.DirectLegacyRollback(Path.GetFullPath(args[1]),Path.Combine(root,"encrypted-cache"));}else AttachmentCacheRuntimeTest.DirectChecks(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }
 partial class AttachmentCacheRuntimeTest {
+ internal static void DirectLegacyRollback(string assemblyPath,string directory){
+  // Exercise the previous shipping assembly on an isolated cache created by
+  // the new DM implementation. No live cache or older database is restored.
+  var assembly=System.Reflection.Assembly.LoadFrom(assemblyPath);
+  var optionsType=assembly.GetType("PeerChat.ServerShared.AttachmentCacheConfiguration",true);
+  var oldOptions=Activator.CreateInstance(optionsType);var options=Options(directory);options.RetentionSeconds=48*60*60;
+  foreach(var field in options.GetType().GetFields())optionsType.GetField(field.Name).SetValue(oldOptions,field.GetValue(options));
+  var runtime=assembly.GetType("PeerChat.Server.AttachmentCacheRuntime",true);var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.Public|System.Reflection.BindingFlags.NonPublic;
+  var constructor=runtime.GetConstructor(flags,null,new[]{optionsType,typeof(Func<long>)},null);Check(constructor!=null,"Previous cache constructor missing");
+  long clock=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+  using(var old=(IDisposable)constructor.Invoke(new object[]{oldOptions,new Func<long>(()=>clock)})){
+   var rows=runtime.GetMethod("Rows",flags);Check(rows!=null,"Previous cache bounded query missing");
+   var before=(List<string[]>)rows.Invoke(old,new object[]{"SELECT id,durable_offset,digest FROM objects ORDER BY id",128,3});Check(before.Count>=3,"Rollback fixture missing new DM objects");
+   runtime.GetMethod("Cleanup",flags).Invoke(old,new object[]{1});
+   var retained=(List<string[]>)rows.Invoke(old,new object[]{"SELECT id,durable_offset,digest FROM objects ORDER BY id",128,3});Check(before.Select(x=>String.Join("|",x)).SequenceEqual(retained.Select(x=>String.Join("|",x))),"Previous runtime altered unexpired DM bytes");
+   clock+=8*24*60*60;runtime.GetMethod("Cleanup",flags).Invoke(old,new object[]{256});
+   Check(((List<string[]>)rows.Invoke(old,new object[]{"SELECT id FROM objects",128,1})).Count==0,"Previous cleanup could not expire new DM objects");
+  }
+  using(var reopened=new AttachmentCacheRuntime(options,()=>clock)){Check(reopened.ChargedBytes<=options.MaximumBytes,"New runtime rejected safely cleaned rollback cache");}
+  Console.WriteLine("PASS previous shipping cache assembly opens new DM storage, preserves unexpired offsets/digests, expires objects with legacy cleanup and reopens under new runtime; isolated cache only");
+ }
  static string DId(ECDsaCng signer){return MailboxProtocol.Digest(signer.Key.Export(CngKeyBlobFormat.EccPublicBlob));}
  static AttachmentCacheDescriptor DirectDescriptor(ECDsaCng key,long sender,long recipient,DirectCacheAudience audience,byte[] ciphertext){
   using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){

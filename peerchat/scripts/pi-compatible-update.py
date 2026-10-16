@@ -4,6 +4,7 @@ Existing validation helper owns checked SIGTERM/start; rollback reuses current D
 """
 import argparse, hashlib, json, os, pathlib, shutil, sqlite3, ssl, socket
 import subprocess, time, zipfile
+from contextlib import closing
 
 ROOT = pathlib.Path('/opt/peerchat-test').resolve()
 def confined(path):
@@ -42,6 +43,22 @@ def identities(database, reference=None):
     return result
 def tree_hashes(directory):
     return {str(p.relative_to(directory)):digest(p) for p in sorted(directory.rglob('*')) if p.is_file()}
+
+def backup_cache(directory, destination):
+    # Called only after the checked server has stopped. Preserve ciphertext,
+    # partials, index and ownership marker together; never restore this over
+    # newer writes automatically during binary rollback.
+    entries=list(directory.rglob('*'))
+    assert not any(p.is_symlink() for p in entries), 'Unexpected cache backup symlink'
+    required=sum(p.stat().st_size for p in entries if p.is_file())
+    stats=os.statvfs(destination.parent)
+    reserve=max(2*1024**3,(stats.f_blocks*stats.f_frsize*20+99)//100)
+    assert stats.f_bavail*stats.f_frsize-required>=reserve, 'Insufficient safe backup space'
+    shutil.copytree(directory,destination)
+    assert tree_hashes(directory)==tree_hashes(destination), 'Restorable cache backup hash mismatch'
+    with closing(sqlite3.connect('file:'+str(destination/'cache.sqlite')+'?mode=ro',uri=True)) as db:
+        assert db.execute('pragma integrity_check').fetchone()[0]=='ok', 'Cache backup integrity'
+    return {'bytes':required,'file_count':sum(p.is_file() for p in entries),'hashes_verified':True,'index_integrity':'ok'}
 
 def cache_health(config, check_index=False):
     cache = config.get('AttachmentCache', {})
@@ -153,6 +170,7 @@ def main():
         if cache_before['enabled']:
             report['cache_stopped_integrity']=cache_health(config,True)
             snapshot(confined(config['AttachmentCache']['Directory'])/'cache.sqlite',backup/'cache-stopped.sqlite')
+            report['cache_backup']=backup_cache(confined(config['AttachmentCache']['Directory']),backup/'cache-files')
         before=identities(database);report['identity_grant_snapshot']=before
         run(['python3',helper,'start','--version',args.new,'--port','7443'])
         report['health']=health(config,args.pin.upper())
