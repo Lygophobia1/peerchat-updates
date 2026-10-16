@@ -22,6 +22,12 @@ sealed partial class DiscoveryServer {
             else if(type=="mailbox_keys") {
                 long target;if(!Int64.TryParse(Text(request,"recipientAccountId"),out target)||target<=0)throw new InvalidOperationException();
                 reply["keys"]=accounts.MailboxKeys(account,device,target);reply["state"]="ready";
+            } else if(type=="mailbox_eligibility_snapshot"||type=="mailbox_eligibility_validate") {
+                long target;if(!Int64.TryParse(Text(request,"recipientAccountId"),out target)||target<=0)throw new InvalidOperationException();
+                var result=type=="mailbox_eligibility_snapshot"
+                    ?accounts.MailboxEligibilitySnapshot(account,device,target)
+                    :accounts.ValidateMailboxEligibility(account,device,target,Text(request,"snapshotId"));
+                foreach(var field in result)reply[field.Key]=field.Value;
             } else if(type=="mailbox_store") {
                 byte[] wire=MailboxProtocol.Decode(Text(request,"envelope"),MailboxProtocol.MaxWire);
                 string state=accounts.StoreMailbox(account,device,identity,wire);reply["state"]=state;

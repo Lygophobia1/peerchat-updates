@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 
 namespace PeerChat.Server {
 // Application persistence only: no socket, session, timer, route or reconnect
@@ -10,7 +11,10 @@ sealed partial class AccountDatabase {
         "CREATE TABLE IF NOT EXISTS mailbox_recipient_keys(device TEXT NOT NULL,key_id TEXT NOT NULL,account_id INTEGER NOT NULL,generation INTEGER NOT NULL,state TEXT NOT NULL,allowed INTEGER NOT NULL,proof BLOB NOT NULL,PRIMARY KEY(device,key_id),UNIQUE(device,generation));"+
         "CREATE TABLE IF NOT EXISTS encrypted_mailbox(sender_device TEXT NOT NULL,message_id TEXT NOT NULL,recipient_device TEXT NOT NULL,sender_account INTEGER NOT NULL,recipient_account INTEGER NOT NULL,key_id TEXT NOT NULL,generation INTEGER NOT NULL,digest TEXT NOT NULL,envelope BLOB,receipt BLOB,created INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(sender_device,message_id,recipient_device));"+
         "CREATE INDEX IF NOT EXISTS mailbox_recipient ON encrypted_mailbox(recipient_device,created,message_id);"+
-        "CREATE INDEX IF NOT EXISTS mailbox_sender_receipts ON encrypted_mailbox(sender_device,expires);");PurgeMailbox();}}
+        "CREATE INDEX IF NOT EXISTS mailbox_sender_receipts ON encrypted_mailbox(sender_device,expires);"+
+        "CREATE TABLE IF NOT EXISTS mailbox_eligibility_snapshots(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,sender_account INTEGER NOT NULL,sender_device TEXT NOT NULL,recipient_account INTEGER NOT NULL,issued INTEGER NOT NULL,fresh_until INTEGER NOT NULL,validate_until INTEGER NOT NULL,digest TEXT NOT NULL);"+
+        "CREATE TABLE IF NOT EXISTS mailbox_eligibility_members(snapshot_id TEXT NOT NULL,device TEXT NOT NULL,was_online INTEGER NOT NULL,binding BLOB,PRIMARY KEY(snapshot_id,device));"+
+        "CREATE INDEX IF NOT EXISTS mailbox_eligibility_expiry ON mailbox_eligibility_snapshots(validate_until);");PurgeMailbox();PurgeEligibilitySnapshots();}}
     byte[] MailboxBlob(string sql){IntPtr statement=IntPtr.Zero;try{
         if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Mailbox database read failed.");
         int result=SqliteNative.step(statement);if(result==101)return null;
@@ -39,6 +43,134 @@ sealed partial class AccountDatabase {
     internal List<Dictionary<string,object>> MailboxKeys(long account,string device,long recipient){lock(gate){
         if(!OwnsDevice(account,device)||recipient==account||!Friends(account,recipient)||Blocked(account,recipient))throw new InvalidOperationException("Mailbox access not authorized.");
         return MailboxRows("SELECT device,proof FROM mailbox_recipient_keys k WHERE account_id="+recipient+" AND state='active' AND allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) ORDER BY device LIMIT 32",32,"device","binding");
+    }}
+    const long EligibilityFreshMilliseconds=120000;
+    const long EligibilityValidationMilliseconds=600000;
+    const int EligibilityMaximumDevices=32;
+    sealed class EligibilityMember {
+        internal string Device;
+        internal bool Online;
+        internal byte[] Binding;
+    }
+    void PurgeEligibilitySnapshots(){
+        long now=MailboxNow();
+        Execute("BEGIN IMMEDIATE;");try{
+            Execute("DELETE FROM mailbox_eligibility_members WHERE snapshot_id IN (SELECT id FROM mailbox_eligibility_snapshots WHERE validate_until<="+now+");"+
+                "DELETE FROM mailbox_eligibility_snapshots WHERE validate_until<="+now+";"+
+                "DELETE FROM mailbox_eligibility_members WHERE NOT EXISTS(SELECT 1 FROM mailbox_eligibility_snapshots s WHERE s.id=mailbox_eligibility_members.snapshot_id);");
+            Execute("COMMIT;");
+        }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+    }
+    bool MailboxFriendScope(long account,string device,long recipient){
+        return account>0&&recipient>0&&recipient!=account&&OwnsDevice(account,device)&&Friends(account,recipient)&&!Blocked(account,recipient);
+    }
+    HashSet<string> AuthenticatedRecipientPresence(long recipient){
+        var result=new HashSet<string>(StringComparer.Ordinal);
+        foreach(var lease in Live.Snapshot(recipient)){
+            // A bare remembered presence row or an expired/revoked session is not
+            // an authenticated recipient device eligibility claim.
+            if(lease.Account==recipient&&MailboxProtocol.Id(lease.Identity,64)&&OwnsDevice(recipient,lease.Identity)&&
+               !String.IsNullOrEmpty(lease.Session)&&Authenticate(lease.Session)==recipient&&SessionAllowsDevice(lease.Session,lease.Identity))result.Add(lease.Identity);
+        }
+        return result;
+    }
+    List<EligibilityMember> EligibilityBindings(long recipient){
+        var result=new List<EligibilityMember>();IntPtr statement=IntPtr.Zero;
+        try{
+            string sql="SELECT k.device,k.proof FROM mailbox_recipient_keys k WHERE k.account_id="+recipient+
+                " AND k.state='active' AND k.allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) ORDER BY k.device LIMIT 33";
+            if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Eligibility read failed.");
+            int step;while((step=SqliteNative.step(statement))==100){
+                byte[] proof=SqliteNative.columnBlob(statement,1);
+                if(proof.Length>4096||result.Count>=EligibilityMaximumDevices)throw new InvalidOperationException("Eligibility exceeds bound.");
+                result.Add(new EligibilityMember{Device=SqliteNative.columnText(statement,0),Binding=proof});
+            }
+            if(step!=101)throw new InvalidOperationException("Eligibility read failed.");
+            return result;
+        }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+    }
+    List<EligibilityMember> CurrentEligibility(long recipient){
+        var members=EligibilityBindings(recipient).ToDictionary(x=>x.Device,x=>x,StringComparer.Ordinal);
+        foreach(string device in AuthenticatedRecipientPresence(recipient)){
+            EligibilityMember row;if(!members.TryGetValue(device,out row))members.Add(device,new EligibilityMember{Device=device,Online=true});
+            else row.Online=true;
+            if(members.Count>EligibilityMaximumDevices)throw new InvalidOperationException("Eligibility exceeds bound.");
+        }
+        return members.Values.OrderBy(x=>x.Device,StringComparer.Ordinal).ToList();
+    }
+    static string EligibilityDigest(IEnumerable<EligibilityMember> members){
+        var canonical=new StringBuilder();foreach(var member in members){
+            canonical.Append(member.Device).Append('|').Append(member.Online?'1':'0').Append('|');
+            if(member.Binding!=null)canonical.Append(MailboxProtocol.Digest(member.Binding));
+            canonical.Append('\n');
+        }
+        return MailboxProtocol.Digest(Encoding.UTF8.GetBytes(canonical.ToString()));
+    }
+    static List<Dictionary<string,object>> EligibilityResponse(IEnumerable<EligibilityMember> members,bool validated){
+        var result=new List<Dictionary<string,object>>();foreach(var member in members){
+            var row=new Dictionary<string,object>{{"device",member.Device},{"online",member.Online},{"binding",member.Binding==null?"":Convert.ToBase64String(member.Binding)}};
+            if(validated)row["eligible"]=member.Online||member.Binding!=null;
+            result.Add(row);
+        }return result;
+    }
+    internal Dictionary<string,object> MailboxEligibilitySnapshot(long account,string device,long recipient){lock(gate){
+        if(!MailboxFriendScope(account,device,recipient))throw new InvalidOperationException("Mailbox access not authorized.");
+        PurgeEligibilitySnapshots();
+        // Never return a truncated candidate set. The caller must not mistake a
+        // partial page for a complete pre-send frozen-target upper bound.
+        List<EligibilityMember> members;
+        try{members=CurrentEligibility(recipient);}catch(InvalidOperationException e){
+            if(e.Message=="Eligibility exceeds bound.")return new Dictionary<string,object>{{"state","too_many_eligible_devices"}};
+            throw;
+        }
+        if(ScalarLong(database,"SELECT count(*) FROM mailbox_eligibility_snapshots")>=4096||
+           ScalarLong(database,"SELECT count(*) FROM mailbox_eligibility_snapshots WHERE sender_account="+account+" AND sender_device="+Quote(device))>=64)
+            return new Dictionary<string,object>{{"state","snapshot_quota_exceeded"}};
+        long now=MailboxNow(),freshUntil=now+EligibilityFreshMilliseconds,validateUntil=now+EligibilityValidationMilliseconds;
+        string id=Guid.NewGuid().ToString("N"),digest=EligibilityDigest(members);
+        Execute("BEGIN IMMEDIATE;");try{
+            Execute("INSERT INTO mailbox_eligibility_snapshots(id,sender_account,sender_device,recipient_account,issued,fresh_until,validate_until,digest) VALUES("+
+                Quote(id)+","+account+","+Quote(device)+","+recipient+","+now+","+freshUntil+","+validateUntil+","+Quote(digest)+");");
+            long sequence=ScalarLong(database,"SELECT last_insert_rowid()");
+            foreach(var member in members)Execute("INSERT INTO mailbox_eligibility_members(snapshot_id,device,was_online,binding) VALUES("+
+                Quote(id)+","+Quote(member.Device)+","+(member.Online?1:0)+","+(member.Binding==null?"NULL":MailboxData(member.Binding))+");");
+            Execute("COMMIT;");
+            return new Dictionary<string,object>{{"state","ready"},{"snapshotVersion",1},{"snapshotId",id},{"snapshotSequence",sequence},
+                {"senderAccountId",account},{"senderDevice",device},{"recipientAccountId",recipient},{"issuedUtcMs",now},{"freshUntilUtcMs",freshUntil},{"validateUntilUtcMs",validateUntil},
+                {"eligibilityDigest",digest},{"candidates",EligibilityResponse(members,false)}};
+        }catch{try{Execute("ROLLBACK;");}catch{}throw;}
+    }}
+    internal Dictionary<string,object> ValidateMailboxEligibility(long account,string device,long recipient,string id){lock(gate){
+        if(!MailboxProtocol.Id(id,32)||!MailboxFriendScope(account,device,recipient))throw new InvalidOperationException("Mailbox access not authorized.");
+        PurgeEligibilitySnapshots();
+        string where="id="+Quote(id)+" AND sender_account="+account+" AND sender_device="+Quote(device)+" AND recipient_account="+recipient;
+        if(ScalarLong(database,"SELECT count(*) FROM mailbox_eligibility_snapshots WHERE "+where)!=1)
+            return new Dictionary<string,object>{{"state","snapshot_unavailable"}};
+        var originally=new List<EligibilityMember>();IntPtr statement=IntPtr.Zero;
+        try{
+            if(SqliteNative.prepare(database,"SELECT device,was_online,binding FROM mailbox_eligibility_members WHERE snapshot_id="+Quote(id)+" ORDER BY device",out statement)!=0)throw new InvalidOperationException("Eligibility read failed.");
+            int step;while((step=SqliteNative.step(statement))==100){
+                if(originally.Count>=EligibilityMaximumDevices)throw new InvalidOperationException("Eligibility exceeds bound.");
+                byte[] proof=SqliteNative.columnBlob(statement,2);
+                originally.Add(new EligibilityMember{Device=SqliteNative.columnText(statement,0),Online=SqliteNative.columnLong(statement,1)==1,Binding=proof.Length==0?null:proof});
+            }if(step!=101)throw new InvalidOperationException("Eligibility read failed.");
+        }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+        string originalDigest=ScalarText(database,"SELECT digest FROM mailbox_eligibility_snapshots WHERE "+where);
+        if(originalDigest!=EligibilityDigest(originally))return new Dictionary<string,object>{{"state","snapshot_unavailable"}};
+        var live=AuthenticatedRecipientPresence(recipient);
+        var current=new List<EligibilityMember>();foreach(var original in originally){
+            bool owned=OwnsDevice(recipient,original.Device);
+            byte[] binding=null;
+            if(owned&&original.Binding!=null){
+                if(ScalarLong(database,"SELECT count(*) FROM mailbox_recipient_keys WHERE account_id="+recipient+" AND device="+Quote(original.Device)+" AND state='active' AND allowed=1 AND proof="+MailboxData(original.Binding))==1)binding=original.Binding;
+            }
+            current.Add(new EligibilityMember{Device=original.Device,Online=owned&&live.Contains(original.Device),Binding=binding});
+        }
+        return new Dictionary<string,object>{{"state","ready"},{"snapshotVersion",1},{"snapshotId",id},{"snapshotSequence",ScalarLong(database,"SELECT sequence FROM mailbox_eligibility_snapshots WHERE "+where)},
+            {"senderAccountId",account},{"senderDevice",device},{"recipientAccountId",recipient},{"issuedUtcMs",ScalarLong(database,"SELECT issued FROM mailbox_eligibility_snapshots WHERE "+where)},
+            {"freshUntilUtcMs",ScalarLong(database,"SELECT fresh_until FROM mailbox_eligibility_snapshots WHERE "+where)},
+            {"validateUntilUtcMs",ScalarLong(database,"SELECT validate_until FROM mailbox_eligibility_snapshots WHERE "+where)},
+            {"eligibilityDigest",originalDigest},{"candidates",EligibilityResponse(current,true)}};
     }}
     internal string RevokeMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var revoke=MailboxProtocol.Revocation.Parse(wire);
