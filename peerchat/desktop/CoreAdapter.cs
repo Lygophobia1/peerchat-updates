@@ -24,6 +24,15 @@ public static class SelectedTransferFile {
 // This is the only managed/native boundary. Returned strings belong to the DLL
 // and are copied before another native call. Never pass C++ objects across ABI.
 public sealed partial class CoreAdapter : IDisposable {
+    readonly object queueDiagnosticGate=new object();
+    long queueCommitMilliseconds,queueCommitUtcTicks;
+    int queueCommitCount,queueRejectCount;
+    // Send returns only after native durable local enqueue has completed.
+    public string LocalQueueDiagnostics {get{string result;lock(queueDiagnosticGate){
+        result="Local queue committed: "+queueCommitCount+"; local queue refused: "+queueRejectCount+
+            "; last local commit duration: "+(queueCommitUtcTicks==0?"N/A":queueCommitMilliseconds+" ms")+
+            "; last commit UTC: "+(queueCommitUtcTicks==0?"N/A":new DateTime(queueCommitUtcTicks,DateTimeKind.Utc).ToString("O"));
+    }return result+"\n"+MailboxIssueDiagnostics();}}
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
     public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer,saveState,savePath,saveError;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable;}
@@ -41,6 +50,10 @@ public sealed partial class CoreAdapter : IDisposable {
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_mailbox_supported();
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern int ui_mailbox(IntPtr handle,uint operation,byte[] input,uint length,string messageId,int allowed,[Out] byte[] output,uint capacity);
     public bool MailboxSupported {get{return ui_mailbox_supported()!=0;}}
+    public string MailboxIssueDiagnostics(){
+        try{return new UTF8Encoding(false,true).GetString(Mailbox(10));}
+        catch{return "mailbox_action_required=diagnostics_unavailable";}
+    }
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl)] static extern int ui_archive(IntPtr handle,uint operation,byte[] input,uint length,[Out] byte[] output,uint capacity);
     public byte[] Archive(uint operation,byte[] input){lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
@@ -172,7 +185,13 @@ public sealed partial class CoreAdapter : IDisposable {
     public void RelayClosed(ulong attempt,string reason){ui_relay_closed(handle,attempt,reason??"Relay closed");}
     public int TakeRelayOutput(ulong attempt,byte[] bytes,int waitMilliseconds){return ui_relay_take_output(handle,attempt,bytes,(uint)bytes.Length,(uint)Math.Max(0,waitMilliseconds));}
     public void Approve(string peer,bool accepted){ui_approve(handle,peer,accepted?1:0);}
-    public bool Send(string peer,string text){return ui_send(handle,peer,text)!=0;}
+    public bool Send(string peer,string text){
+        var started=System.Diagnostics.Stopwatch.GetTimestamp();
+        bool committed=ui_send(handle,peer,text)!=0;
+        long elapsed=(long)((System.Diagnostics.Stopwatch.GetTimestamp()-started)*1000.0/System.Diagnostics.Stopwatch.Frequency);
+        lock(queueDiagnosticGate){if(committed){queueCommitCount++;queueCommitMilliseconds=elapsed;queueCommitUtcTicks=DateTime.UtcNow.Ticks;}else queueRejectCount++;}
+        return committed;
+    }
     public bool Remove(string peer){return ui_remove(handle,peer)!=0;}
     public void History(string peer,long before){ui_history(handle,peer,before);}
     public bool EraseHistory(string peer){return ui_erase_history(handle,peer)!=0;}

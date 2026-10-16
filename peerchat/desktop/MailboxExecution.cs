@@ -11,6 +11,24 @@ namespace PeerChatDesktop {
 internal sealed class MailboxExecution {
     readonly Func<uint,byte[],string,bool,byte[]> invoke;
     readonly CancellationTokenSource lifetime=new CancellationTokenSource();
+    readonly object diagnosticsGate=new object();
+    sealed class Timing { internal long Count,LastMilliseconds,MaximumMilliseconds; }
+    readonly Dictionary<string,Timing> timings=new Dictionary<string,Timing>(StringComparer.Ordinal);
+    readonly Queue<string> recentStages=new Queue<string>();
+    DateTime lastStageUtc=DateTime.MinValue;
+    string retrySummary="Retry pending: none";
+    void Note(string stage){lock(diagnosticsGate){lastStageUtc=DateTime.UtcNow;recentStages.Enqueue(lastStageUtc.ToString("O")+" "+stage);while(recentStages.Count>32)recentStages.Dequeue();}}
+    void Measure(string stage,long started){
+        long elapsed=(long)((System.Diagnostics.Stopwatch.GetTimestamp()-started)*1000.0/System.Diagnostics.Stopwatch.Frequency);
+        lock(diagnosticsGate){Timing sample;if(!timings.TryGetValue(stage,out sample))timings[stage]=sample=new Timing();sample.Count++;sample.LastMilliseconds=elapsed;sample.MaximumMilliseconds=Math.Max(sample.MaximumMilliseconds,elapsed);}
+    }
+    public string DiagnosticsSnapshot(){lock(diagnosticsGate){
+        var result=new StringBuilder();result.Append("Mailbox last stage UTC: ").Append(lastStageUtc==DateTime.MinValue?"N/A":lastStageUtc.ToString("O"));
+        result.Append("\n").Append(retrySummary);
+        foreach(var item in timings.OrderBy(x=>x.Key,StringComparer.Ordinal))result.Append("\n").Append(item.Key).Append(": count=").Append(item.Value.Count).Append(" last=").Append(item.Value.LastMilliseconds).Append("ms max=").Append(item.Value.MaximumMilliseconds).Append("ms");
+        foreach(var stage in recentStages)result.Append("\n").Append(stage);
+        return result.ToString();
+    }}
     public void Stop(){lifetime.Cancel();}
     internal static bool CanStart(long account,long publishedAccount,bool stopping){
         return !stopping&&account>0&&account==publishedAccount;
@@ -19,7 +37,10 @@ internal sealed class MailboxExecution {
     internal static bool IsOperationFailure(CoreEvent value){return value.kind==8&&(value.peer??"")=="mailbox-control:operation"&&value.attempt==0;}
     byte[] Native(uint operation,byte[] input=null,string id="",bool allowed=false){
         lifetime.Token.ThrowIfCancellationRequested();
-        return invoke(operation,input,id,allowed);
+        long started=System.Diagnostics.Stopwatch.GetTimestamp();
+        try{return invoke(operation,input,id,allowed);}finally{
+            if(operation==3||operation==8)Measure(operation==3?"Native envelope encryption/preparation":"Native recipient selection",started);
+        }
     }
     internal byte[] PendingUploads(bool allowed){return Native(2,null,"",allowed);}
     string receiptCursor="";
@@ -32,7 +53,7 @@ internal sealed class MailboxExecution {
     public DateTime NextRetryUtc {get;private set;}
     public MailboxExecution(CoreAdapter core):this((operation,input,id,allowed)=>core.Mailbox(operation,input,id,allowed)){}
     internal MailboxExecution(Func<uint,byte[],string,bool,byte[]> invoke){this.invoke=invoke;}
-    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();NextRetryUtc=DateTime.MinValue;}
+    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();NextRetryUtc=DateTime.MinValue;lock(diagnosticsGate){timings.Clear();recentStages.Clear();lastStageUtc=DateTime.MinValue;retrySummary="Retry pending: none";}}
     static void Require(bool value){if(!value)throw new InvalidOperationException("Mailbox result rejected.");}
     static string Text(Dictionary<string,object> item,string key){object value;return item.TryGetValue(key,out value)?value as string:null;}
     static byte[] Decode(string text,int max){Require(text!=null&&text.Length<=((max+2)/3)*4);var result=Convert.FromBase64String(text);Require(result.Length>0&&result.Length<=max);return result;}
@@ -51,6 +72,7 @@ internal sealed class MailboxExecution {
     bool Ready(string key,DateTime now){Retry state;return !retries.TryGetValue(key,out state)||state.Due<=now;}
     void Succeeded(string key){retries.Remove(key);}
     void Failed(string key,string reason,Action<string> trace){
+        if(String.IsNullOrEmpty(reason)||reason.Length>64||reason.Any(c=>!(c>='a'&&c<='z')&&!(c>='0'&&c<='9')&&c!='_'))reason="unclassified_server_refusal";
         Retry state;if(!retries.TryGetValue(key,out state)){
             if(retries.Count>=512)retries.Remove(retries.OrderBy(x=>x.Value.Due).First().Key);
             retries[key]=state=new Retry();
@@ -64,6 +86,8 @@ internal sealed class MailboxExecution {
     void ScheduleRetries(){
         var future=retries.Values.Where(x=>x.Due>DateTime.UtcNow).Select(x=>x.Due).ToArray();
         NextRetryUtc=future.Length==0?DateTime.MinValue:future.Min();
+        string reasons=String.Join(", ",retries.Values.GroupBy(x=>x.Reason??"unknown",StringComparer.Ordinal).OrderBy(x=>x.Key,StringComparer.Ordinal).Select(x=>x.Key+"="+x.Count()));
+        lock(diagnosticsGate)retrySummary="Retry pending: "+retries.Count+(retries.Count==0?"":"; reasons: "+reasons+"; next due UTC: "+(NextRetryUtc==DateTime.MinValue?"now":NextRetryUtc.ToString("O")));
     }
     internal sealed class Record : IDisposable {
         readonly BinaryReader input;readonly MemoryStream stream;
@@ -78,14 +102,23 @@ internal sealed class MailboxExecution {
     internal void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged,Action<string> diagnostic,Func<string,Dictionary<string,object>,Dictionary<string,object>> requestOverride){
         NeedsContinuation=false;
         NextRetryUtc=DateTime.MinValue;
-        Action<string> trace=diagnostic??(_=>{});
+        Action<string> trace=message=>{
+            string safe=message;
+            int marker=safe.IndexOf("message=",StringComparison.Ordinal);
+            if(marker>=0){int end=safe.IndexOf(' ',marker+8);safe=safe.Substring(0,marker+8)+"[message id]"+(end<0?"":safe.Substring(end));}
+            Note(safe);
+            if(diagnostic!=null)diagnostic(message);
+        };
         trace("mailbox policy="+(allowed?"allowed":"forbidden"));
         var identity=Native(7);
         Func<string,Dictionary<string,object>,Dictionary<string,object>> request=(operation,body)=>{
             lifetime.Token.ThrowIfCancellationRequested();
-            var result=requestOverride!=null?requestOverride(operation,body):accounts.Mailbox(operation,device,body);
-            lifetime.Token.ThrowIfCancellationRequested();
-            return result;
+            long started=System.Diagnostics.Stopwatch.GetTimestamp();
+            try{
+                var result=requestOverride!=null?requestOverride(operation,body):accounts.Mailbox(operation,device,body);
+                lifetime.Token.ThrowIfCancellationRequested();
+                return result;
+            }finally{Measure("Authenticated "+operation+" RPC",started);}
         };
         Func<Dictionary<string,object>> signing=()=>new Dictionary<string,object>{{"signingPublicKey",Convert.ToBase64String(identity)}};
         if(!registered){var binding=Native(0,null,"",allowed);

@@ -2,6 +2,7 @@
 #include "../windows_transfer_io.hpp"
 #include <filesystem>
 #include <iostream>
+#include <chrono>
 
 namespace {
 struct MemoryFile final:peerchat::transfer::Source {
@@ -26,7 +27,7 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     delivery::DeliveryManager ad(a,alice.peerId),bd(b,bob.peerId);
     session::SessionTransportManager as(alice.peerId,alice.peerId,{1}),bs(bob.peerId,bob.peerId,{1});
     reliable::AuthenticatedFriendSnapshot af,bf;af.replace(10,1,{{20,bob.peerId,{bob.peerId}}});bf.replace(20,1,{{10,alice.peerId,{alice.peerId}}});
-    std::uint64_t now=1;unsigned received=0,delivered=0;
+    std::uint64_t now=1;unsigned received=0,delivered=0;std::vector<std::uint64_t> ackMicroseconds;
     auto route=[](std::uint64_t token,bool incoming){return session::RouteObservation{{token},"relay:fixture","authenticated server","opaque relay",incoming,1,session::TransportKind::Relay,session::RouteClass::ServerRelay};};
     auto drain=[&](ReliableEndpoint& endpoint){while(auto event=endpoint.poll()){
         if(event->kind==ReliableEndpoint::EventKind::TrustRequired){
@@ -53,13 +54,17 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         left.receive({},++now);right.receive({},++now);exchange(left,right);
         require(left.ready()&&right.ready(),"Shared runtime TLS/Hello/trust/Accepted did not activate");
         StoredMessage message{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",42,Delivery::Queued,0,a.nextLogicalOrder()};
+        const auto queuedAt=std::chrono::steady_clock::now();
         require(a.append(bob.peerId,message),"Durable send failed");left.pump();exchange(left,right);
         require(a.pending(bob.peerId).empty(),"ACK failed to clear outbox");
         require(received==cycle+1&&delivered==cycle+1,"Duplicate/missing message or receipt");
+        ackMicroseconds.push_back(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-queuedAt).count()));
         left.close(false);right.close(false);bool retired=false;
         try{left.receive({},++now);}catch(const std::exception&){retired=true;}
         require(retired&&left.takeOutput().empty(),"Retired endpoint used TLS/output");
     }
+    std::sort(ackMicroseconds.begin(),ackMicroseconds.end());std::uint64_t totalMicros=0;for(auto value:ackMicroseconds)totalMicros+=value;
+    std::cout<<"HOST LATENCY: n=100 boundary=before-local-append-to-validated-durable-recipient-ACK median_us="<<ackMicroseconds[49]<<" p95_us="<<ackMicroseconds[94]<<" mean_us="<<totalMicros/ackMicroseconds.size()<<"; in-memory opaque carriage, real Schannel/SQLite, handshake excluded, no physical RTT/FCM claim\n";
     require(a.history(bob.peerId,100).size()==100&&b.history(alice.peerId,100).size()==100,"Persistent history changed");
     std::string pending;
     {

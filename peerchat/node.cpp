@@ -1840,7 +1840,7 @@ Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
 void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name,bool startDirectListener){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name,startDirectListener]{impl_->run(directory,port,name,startDirectListener);});}
 void Node::stop(){impl_->stop();}
 Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messageId,bool storageAllowed){
-    if(operation>9||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
+    if(operation>10||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed))||(operation==10&&(!input.empty()||!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.mailbox=true;command.sourceKind=operation;command.bytes=input;command.id=messageId;command.accepted=storageAllowed;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");

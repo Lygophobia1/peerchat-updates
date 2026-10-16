@@ -79,8 +79,11 @@ public:
     }
     std::vector<StoredMessage> mailboxCandidates(){
         auto page=storage_.mailboxCandidates(mailboxCursor_);
-        if(page.empty()&&mailboxCursor_){mailboxCursor_=0;page=storage_.mailboxCandidates(0);}
-        if(!page.empty())mailboxCursor_=page.back().sequence;
+        if(page.size()<64&&mailboxCursor_){
+            auto first=storage_.mailboxCandidates(0);std::set<std::string> seen;for(const auto& row:page)seen.insert(row.id);
+            for(auto& row:first){if(page.size()==64)break;if(seen.insert(row.id).second)page.push_back(std::move(row));}
+        }
+        mailboxCursor_=page.empty()?0:page.back().sequence;
         return page;
     }
 

@@ -42,6 +42,9 @@ internal static class MailboxExecutionReliabilityTest {
         Check(stored.SequenceEqual(new[]{"m5"}));
         Check(diagnostics.Count(x=>x.Contains("reason=recipient_key_retired"))==4);
         Check(execution.NextRetryUtc>DateTime.UtcNow);
+        string snapshot=execution.DiagnosticsSnapshot();
+        Check(snapshot.Contains("Authenticated mailbox_store RPC")&&snapshot.Contains("Native envelope encryption/preparation"));
+        Check(snapshot.Contains("Retry pending: 4")&&snapshot.Contains("recipient_key_retired=4")&&!snapshot.Contains("message=m5"));
 
         var fetched=new List<string>();var cursorRequests=new List<string>();
         var receiver=new MailboxExecution((op,input,id,allowed)=>{

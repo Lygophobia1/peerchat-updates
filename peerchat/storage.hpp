@@ -125,6 +125,7 @@ public:
     bool mailboxHasPendingEnvelope(const std::string& messageId);
     void mailboxIssue(const std::string& messageId,const std::string& recipientDevice,const std::string& reason);
     std::string mailboxIssue(const std::string& messageId,const std::string& recipientDevice);
+    std::string mailboxDiagnostics();
     bool mailboxUploadAccepted(const std::string& messageId,const std::string& recipientDevice);
     Blob mailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& envelopeDigest);
     void saveMailboxReceipt(const std::string& messageId,const std::string& senderDevice,const Blob& receipt);

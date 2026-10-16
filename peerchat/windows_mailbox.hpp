@@ -71,6 +71,7 @@ public:
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
                  session::SessionTransportManager& sessions){
         if(operation==9){require(id.empty()&&!allowed);return rememberedDeviceProof(input,storage.groupAccount().accountId,friends.localAccount());}
+        if(operation==10){require(id.empty()&&input.empty()&&!allowed);auto text=storage.mailboxDiagnostics();return Blob(text.begin(),text.end());}
         if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
         require(input.size()<=MaxWire);
         if(operation==0){

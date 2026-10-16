@@ -358,7 +358,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
             " native_recipient_provider=AndroidKeyStore "+instance->mailboxEnvelopeDiagnostic+
             " "+(instance->keyCoordinator?instance->keyCoordinator->bindingDiagnostic():"binding_inspection=coordinator_unavailable")+
             " native_storage="+(instance->storage?"ready":"missing")+" native_delivery="+(instance->deliveries?"ready":"missing")+
-            " native_authenticated_account="+std::to_string(instance->friends.localAccount())+" native_authentication_generation="+std::to_string(instance->friends.generation()));
+            " native_authenticated_account="+std::to_string(instance->friends.localAccount())+" native_authentication_generation="+std::to_string(instance->friends.generation())+
+            "\n"+(instance->storage?instance->storage->mailboxDiagnostics():"mailbox_action_required=storage_unavailable"));
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_MailboxBridge_registered(JNIEnv* env,jobject,jlong handle,jbyteArray input){

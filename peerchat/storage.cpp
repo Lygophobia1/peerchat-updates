@@ -581,7 +581,7 @@ bool Storage::mailboxUploadAccepted(const std::string& id,const std::string& dev
 }
 std::vector<StoredMessage> Storage::mailboxCandidates(std::int64_t afterSequence,int limit){
     require(afterSequence>=0&&limit>0&&limit<=64,"Invalid mailbox candidate page");
-    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND (EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
+    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND ((EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k LIKE 'mailbox-uploaded/'||m.id||'/%')) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
     query.number(1,afterSequence);query.number(2,limit);std::vector<StoredMessage> result;
     while(query.row()){const auto sequence=query.number(0);auto id=query.text(1),peer=query.text(2);Secret plain{impl_->protect(query.bytes(3),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox candidate identity mismatch");m.sequence=sequence;result.push_back(std::move(m));}
     return result;
@@ -595,6 +595,15 @@ void Storage::mailboxIssue(const std::string& id,const std::string& device,const
 }
 std::string Storage::mailboxIssue(const std::string& id,const std::string& device){
     require(identifier(id,32)&&identifier(device),"Invalid mailbox issue identity");auto value=impl_->get("mailbox-issue/"+id+"/"+device);return std::string(value.begin(),value.end());
+}
+std::string Storage::mailboxDiagnostics(){
+    std::string result;Statement query(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'mailbox-issue/%' ORDER BY k LIMIT 32");
+    while(query.row()){
+        const auto key=query.text(0);auto saved=impl_->get(key);std::string reason(saved.begin(),saved.end());
+        require(reason.size()<=128&&std::all_of(reason.begin(),reason.end(),[](char c){return(c>='a'&&c<='z')||c=='_';}),"Invalid retained mailbox issue");
+        result+="mailbox_action_required message="+key.substr(14,32)+" device="+key.substr(47)+" reason="+reason+" action=preserve_queued_message_and_request_verified_attempt_reconciliation\n";
+    }
+    return result.empty()?"mailbox_action_required=none\n":result;
 }
 Blob Storage::mailboxReceipt(const std::string& id,const std::string& device,const Blob& digest){
     require(identifier(id,32)&&identifier(device)&&digest.size()==32,"Invalid mailbox receipt identity");return impl_->get("mailbox-receipt/"+id+"/"+device+"/"+hex(digest));

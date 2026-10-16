@@ -67,6 +67,8 @@ int main(int argc,char** argv){try{
     auditReject([&]{outgoing.mailboxStored(message.id,target.peerId,wire);},"upload-marker fault did not occur");
     auditNeed(senderStore.message(message.id)->delivery==Delivery::Stored&&!senderStore.mailboxUploadAccepted(message.id,target.peerId)&&!senderStore.pendingMailboxUploads().empty(),"Stored/marker interruption lost pending ciphertext");
     outgoing.mailboxStored(message.id,target.peerId,wire);auditNeed(senderStore.mailboxUploadAccepted(message.id,target.peerId),"exact retry did not settle upload marker");
+    const auto settledCandidates=senderStore.mailboxCandidates(0);
+    auditNeed(std::none_of(settledCandidates.begin(),settledCandidates.end(),[&](const auto& row){return row.id==message.id;}),"stored envelopes cause repeated upload polling while awaiting recipient ACK");
     std::cout<<"SAFE: interrupted local Stored marker retains immutable upload retry\n";
 
     // Actual shared owner records no timestamp/deadline per submitted message.
@@ -87,6 +89,7 @@ int main(int argc,char** argv){try{
     auditReject([&]{outgoing.prepareMailbox(pending.id,7,8,rotated,target,sender,*hpke,now+mailbox::MaxTtlMilliseconds,true,false);},"expired immutable envelope was not rejected");
     const auto uploads=senderStore.pendingMailboxUploads();auditNeed(std::any_of(uploads.begin(),uploads.end(),[&](const auto& row){return row.id==pending.id;}),"expired envelope no longer appears as pending");
     auditNeed(senderStore.mailboxIssue(pending.id,target.peerId)=="attempt_expired_requires_review","expiry lacks actionable issue");
+    auditNeed(senderStore.mailboxDiagnostics().find("attempt_expired_requires_review")!=std::string::npos,"durable action required state is not available in diagnostics");
     std::cout<<"SAFE: stale-key and expired attempts preserve immutable ciphertext and durable actionable state\n";
 
     auto stalled=queue();auditNeed(outgoing.authorizeTransport({901},target.peerId)&&outgoing.submittedMessage(target.peerId,stalled.id,{901},1000),"deadline admission failed");
