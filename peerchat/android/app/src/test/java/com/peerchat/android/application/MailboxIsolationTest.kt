@@ -65,6 +65,23 @@ class MailboxIsolationTest {
             }
         }
     }
+    @Test fun refusedDeviceDoesNotBlockItsHealthySiblingAndRetryDeadlineIsScheduled(){
+        val base=Native();val server=Server();server.withReceipt=false
+        val native=object:MailboxNative by base {
+            override fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean)=
+                NativeRecordWriter(4).also{it.number(2);it.blob(byteArrayOf(4));it.blob(byteArrayOf(5))}.bytes()
+            override fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean)=binding
+        }
+        val attempts=mutableListOf<Int>();val execution=MailboxExecution(native)
+        execution.service({op,body->
+            if(op=="mailbox_store"){
+                val device=Base64.decode(body.getString("envelope"),Base64.NO_WRAP)[0].toInt();attempts.add(device)
+                JSONObject().put("state",if(device==4)"invalid_key_or_signature" else "stored")
+            }else server.request(op,body)
+        },1,true){}
+        assertEquals(listOf(4,5),attempts);assertEquals(1,base.stored)
+        assertTrue(execution.nextRetryAt>System.nanoTime()/1_000_000)
+    }
     @Test fun missingLocalRecipientStillReconcilesAndUploadsWithoutReceiving(){
         val n=Native();val s=Server();val execution=MailboxExecution(n)
         execution.service(s::request,1,true){fail("No receive ACK permitted")}

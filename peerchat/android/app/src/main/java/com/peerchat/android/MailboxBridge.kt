@@ -13,6 +13,8 @@ object MailboxBridge {
     external fun registrationDiagnostic(handle:Long):ByteArray?
     external fun registered(handle: Long, binding: ByteArray): Int
     external fun pending(handle: Long): ByteArray?
+    external fun eligibility(handle:Long,snapshot:ByteArray):Int
+    external fun storeFailure(handle:Long,retry:ByteArray):Int
     external fun prepare(handle: Long, messageId: ByteArray, binding: ByteArray, storageAllowed: Boolean): ByteArray?
     external fun prepareDevices(handle: Long, messageId: ByteArray, bindings: ByteArray, storageAllowed: Boolean): ByteArray?
     external fun stored(handle: Long, envelope: ByteArray): Int

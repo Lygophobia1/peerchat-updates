@@ -50,6 +50,8 @@ internal sealed class MailboxExecution {
     sealed class Retry { internal int Failures;internal DateTime Due;internal string Reason; }
     readonly Dictionary<string,Retry> retries=new Dictionary<string,Retry>(StringComparer.Ordinal);
     readonly Dictionary<string,int> bindingOffset=new Dictionary<string,int>(StringComparer.Ordinal);
+    readonly Dictionary<string,DateTime> deviceDeferredUntil=new Dictionary<string,DateTime>(StringComparer.Ordinal);
+    static string DeviceRetryKey(string id,byte[] binding){using(var hash=System.Security.Cryptography.SHA256.Create())return "outgoing-device:"+id+":"+Convert.ToBase64String(hash.ComputeHash(binding));}
     readonly Dictionary<long,DateTime> eligibilityRefreshUtc=new Dictionary<long,DateTime>();
     int eligibilityOffset;
     long eligibilityGeneration,eligibilityLocalAccount;
@@ -60,7 +62,7 @@ internal sealed class MailboxExecution {
     public DateTime NextEligibilityUtc {get;private set;}
     public MailboxExecution(CoreAdapter core):this((operation,input,id,allowed)=>core.Mailbox(operation,input,id,allowed)){}
     internal MailboxExecution(Func<uint,byte[],string,bool,byte[]> invoke){this.invoke=invoke;}
-    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();eligibilityRefreshUtc.Clear();eligibilityOffset=0;eligibilityGeneration=eligibilityLocalAccount=0;eligibilityLocalDevice="";NextRetryUtc=NextEligibilityUtc=DateTime.MinValue;lock(diagnosticsGate){timings.Clear();recentStages.Clear();lastStageUtc=DateTime.MinValue;retrySummary="Retry pending: none";eligibilitySummary="Eligibility refresh: no active recipient";}}
+    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();deviceDeferredUntil.Clear();eligibilityRefreshUtc.Clear();eligibilityOffset=0;eligibilityGeneration=eligibilityLocalAccount=0;eligibilityLocalDevice="";NextRetryUtc=NextEligibilityUtc=DateTime.MinValue;lock(diagnosticsGate){timings.Clear();recentStages.Clear();lastStageUtc=DateTime.MinValue;retrySummary="Retry pending: none";eligibilitySummary="Eligibility refresh: no active recipient";}}
     static void Require(bool value){if(!value)throw new InvalidOperationException("Mailbox result rejected.");}
     static string Text(Dictionary<string,object> item,string key){object value;return item.TryGetValue(key,out value)?value as string:null;}
     static byte[] Decode(string text,int max){Require(text!=null&&text.Length<=((max+2)/3)*4);var result=Convert.FromBase64String(text);Require(result.Length>0&&result.Length<=max);return result;}
@@ -110,6 +112,14 @@ internal sealed class MailboxExecution {
     static bool Permanent(string reason){return reason=="invalid_mailbox_record"||reason=="invalid_key_or_signature"||reason=="recipient_key_retired"||reason=="recipient_key_unavailable"||reason=="expired_or_invalid_timestamp"||reason=="envelope_conflict"||reason=="not_authorized"||reason=="no_eligible_recipient_device";}
     bool Ready(string key,DateTime now){Retry state;return !retries.TryGetValue(key,out state)||state.Due<=now;}
     void Succeeded(string key){retries.Remove(key);}
+    void RetainStoreRetry(string deviceKey,byte[] wire,string reason){
+        Retry retry;if(!retries.TryGetValue(deviceKey,out retry))return;
+        try{using(var output=new MemoryStream()){
+            var domain=Encoding.ASCII.GetBytes("PeerChat/mailbox-store-retry/v1\0");output.Write(domain,0,domain.Length);
+            UInt64(output,new DateTimeOffset(retry.Due).ToUnixTimeMilliseconds());TextField(output,reason);Field(output,wire);
+            Require(Native(12,output.ToArray()).SequenceEqual(new byte[]{1}));
+        }}catch(Exception){Note("Per-device retry metadata unavailable; exact encrypted attempt retained");}
+    }
     void Failed(string key,string reason,Action<string> trace){
         if(String.IsNullOrEmpty(reason)||reason.Length>64||reason.Any(c=>!(c>='a'&&c<='z')&&!(c>='0'&&c<='9')&&c!='_'))reason="unclassified_server_refusal";
         Retry state;if(!retries.TryGetValue(key,out state)){
@@ -266,7 +276,8 @@ internal sealed class MailboxExecution {
         foreach(var message in pending){
             if(attempted>=4){if(Ready("outgoing:"+message.Item1,DateTime.UtcNow))NeedsContinuation=true;continue;}
             string messageKey="outgoing:"+message.Item1;
-            if(!Ready(messageKey,DateTime.UtcNow))continue;
+            DateTime deviceDue;
+            if(!Ready(messageKey,DateTime.UtcNow)||(deviceDeferredUntil.TryGetValue(message.Item1,out deviceDue)&&deviceDue>DateTime.UtcNow))continue;
             attempted++;
             try{
             trace("mailbox message="+message.Item1+" fallback=no usable winner after bounded attempt or no eligible route");
@@ -282,26 +293,35 @@ internal sealed class MailboxExecution {
             }
             var prepared=new List<byte[]>();
             using(var record=new Record(Native(8,batch,message.Item1,true),4)){long count=record.Number();Require(count<=32);for(long i=0;i<count;i++)prepared.Add(record.Bytes());record.End();}
-            if(prepared.Count==0){Failed(messageKey,"no_eligible_recipient_device",trace);continue;}
+            if(prepared.Count==0){Succeeded(messageKey);trace("mailbox upload waiting for eligible target, retry deadline, or receipt");continue;}
             int offset;bindingOffset.TryGetValue(message.Item1,out offset);
             if(prepared.Count>0){offset%=prepared.Count;bindingOffset[message.Item1]=(offset+Math.Min(4,prepared.Count))%prepared.Count;}
             NeedsContinuation|=prepared.Count>4;
-            bool failed=false;
             foreach(var binding in prepared.Skip(offset).Concat(prepared.Take(offset)).Take(4)){
+                string deviceKey=DeviceRetryKey(message.Item1,binding);
+                if(!Ready(deviceKey,DateTime.UtcNow))continue;
+                try{
                 var wire=Native(3,binding,message.Item1,true);if(wire.Length==0)continue;
                 var body=signing();body["envelope"]=Convert.ToBase64String(wire);
                 trace("mailbox message="+message.Item1+" submission=started");
                 string storeState=Text(request("mailbox_store",body),"state");
                 if(storeState=="stored"){
                     Require(Native(4,wire).SequenceEqual(new byte[]{1}));
+                    Succeeded(deviceKey);
                     trace("mailbox message="+message.Item1+" submission=accepted state=Stored; opaque wake is server-owned, receipt not yet confirmed");
-                }else{failed=true;Failed(messageKey,storeState??"store_rejected",trace);}
+                }else{Failed(deviceKey,storeState??"store_rejected",trace);RetainStoreRetry(deviceKey,wire,storeState??"store_rejected");}
+                }catch(Exception error){if(AuthenticationFailure(error))throw;Failed(deviceKey,FailureReason(error),trace);}
             }
-            if(!failed)Succeeded(messageKey);
+            var deferred=prepared.Select(binding=>DeviceRetryKey(message.Item1,binding)).ToArray();
+            if(deferred.All(key=>!Ready(key,DateTime.UtcNow)))deviceDeferredUntil[message.Item1]=deferred.Min(key=>retries[key].Due);
+            else deviceDeferredUntil.Remove(message.Item1);
+            Succeeded(messageKey);
             }catch(Exception error){if(AuthenticationFailure(error))throw;Failed(messageKey,FailureReason(error),trace);}
         }
         var pendingIds=new HashSet<string>(pending.Select(x=>x.Item1),StringComparer.Ordinal);
         foreach(var id in bindingOffset.Keys.ToArray())if(!pendingIds.Contains(id))bindingOffset.Remove(id);
+        foreach(var id in deviceDeferredUntil.Keys.ToArray())if(!pendingIds.Contains(id))deviceDeferredUntil.Remove(id);
+        foreach(var key in retries.Keys.Where(x=>x.StartsWith("outgoing-device:",StringComparison.Ordinal)).ToArray())if(!pendingIds.Contains(key.Substring(16,key.IndexOf(':',16)-16)))retries.Remove(key);
         ScheduleRetries();
     }
 }

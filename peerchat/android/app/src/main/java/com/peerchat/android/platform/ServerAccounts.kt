@@ -189,7 +189,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         return rpc(operation,payload)
     }
     fun mailbox(operation: String, payload: JSONObject): JSONObject {
-        require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"))
+        require(operation in setOf("mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts","mailbox_eligibility_snapshot","mailbox_eligibility_validate"))
         if(supportsRpc&&rpcAuthorized)return rpc(operation,payload)
         val requestId=java.util.UUID.randomUUID().toString().replace("-","")
         val connection=channel("mailbox")

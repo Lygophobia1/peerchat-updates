@@ -663,11 +663,11 @@ bool Storage::settleTarget(const std::string& id,const std::string& device){
     Statement removeTarget(impl_->sql,"DELETE FROM delivery_target_outbox WHERE id=? AND device=?");removeTarget.text(1,id);removeTarget.text(2,device);removeTarget.row();
     const bool all= !manifest->selectionUnresolved&&std::all_of(manifest->targets.begin(),manifest->targets.end(),
         [](const auto& item){return item.status==DeliveryTargetStatus::Acknowledged;});
-    if(all){
-        message.delivery=Delivery::Delivered;Writer writer;encodeMessage(writer,message);
+    if(all||deliveryRank(message.delivery)<deliveryRank(Delivery::Sent)){
+        message.delivery=all?Delivery::Delivered:Delivery::Sent;Writer writer;encodeMessage(writer,message);
         auto encrypted=impl_->protect(writer.data,"PeerChat.v1/message/"+id+"/"+manifest->canonicalRecipient,true);
         Statement update(impl_->sql,"UPDATE messages SET b=? WHERE id=?");update.blob(1,encrypted);update.text(2,id);update.row();
-        Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE id=?");removeOutbox.text(1,id);removeOutbox.row();
+        if(all){Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE id=?");removeOutbox.text(1,id);removeOutbox.row();}
     }
     transaction.commit();return true;
 }

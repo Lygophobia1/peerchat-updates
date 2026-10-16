@@ -169,14 +169,18 @@ inline std::string queueRecipient(const std::string& requested,const std::vector
 inline StoredMessage queueText(Storage& store,const Profile& local,const Contact* contact,
                               const std::string& destination,const std::string& messageId,
                               const std::wstring& text,std::uint64_t utcMilliseconds,
-                              const AuthenticatedFriendSnapshot* friends=nullptr) {
+                              const AuthenticatedFriendSnapshot* friends=nullptr,delivery::DeliveryManager* deliveryOwner=nullptr) {
     const bool pinned=contact&&contact->peerId==destination&&contact->verified&&
         !contact->publicKey.empty()&&Storage::publicKeyId(contact->publicKey)==destination;
     const bool accountAdmitted=friends&&friends->contains(destination)&&friends->accountFor(destination)>0;
     protocol::check((pinned||accountAdmitted)&&protocol::id(destination)&&
         protocol::id(messageId,32)&&!text.empty()&&unicode::utf16Units(text)<=protocol::MaxChatCharacters);
     StoredMessage message{messageId,local.peerId,destination,text,utcMilliseconds,Delivery::Queued,0,store.nextLogicalOrder()};
-    store.append(destination,message);return message;
+    if(friends&&deliveryOwner&&friends->localAccount()>0&&friends->accountFor(destination)>0){
+        auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        deliveryOwner->queueMessageWithCachedSnapshot(message,friends->localAccount(),friends->accountFor(destination),friends->generation(),utcMilliseconds,monotonic);
+    }else store.append(destination,message);
+    return message;
 }
 
 inline protocol::Writer textPacket(const StoredMessage& message,bool logicalOrdering) {

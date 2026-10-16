@@ -22,6 +22,7 @@ internal interface MailboxNative {
     fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean):ByteArray?
     fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean):ByteArray?
     fun stored(handle:Long,wire:ByteArray):Int
+    fun storeFailure(handle:Long,retry:ByteArray):Int=-1
 }
 private object JniMailboxNative:MailboxNative {
     override fun identity(handle:Long)=ProfileBridge.publicKey(handle)
@@ -33,6 +34,7 @@ private object JniMailboxNative:MailboxNative {
     override fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean)=MailboxBridge.prepareDevices(handle,id,bindings,allowed)
     override fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean)=MailboxBridge.prepare(handle,id,binding,allowed)
     override fun stored(handle:Long,wire:ByteArray)=MailboxBridge.stored(handle,wire)
+    override fun storeFailure(handle:Long,retry:ByteArray)=MailboxBridge.storeFailure(handle,retry)
 }
 internal class MailboxExecution(private val native:MailboxNative=JniMailboxNative) {
     private var registeredBinding: ByteArray? = null
@@ -40,6 +42,9 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
     private var fetchCursor = ""
     private var legacyReceiptCursor = false
     private val outgoingRetry = linkedMapOf<String,Pair<Long,Int>>()
+    private val deviceRetry = linkedMapOf<String,Pair<Long,Int>>()
+    var nextRetryAt=0L
+        private set
     private var outgoingOffset = 0
     private val outgoingDeviceOffset=linkedMapOf<String,Int>()
     private var phase="not_started"
@@ -62,7 +67,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         diagnostic="stage=$phase state="+safeMailboxState(reply.optString("state"))
         return reply
     }
-    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;outgoingRetry.clear();outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
+    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;outgoingRetry.clear();deviceRetry.clear();nextRetryAt=0;outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
     // Completion callback is emitted only after native durable receipt creation
     // AND a real authenticated server acknowledgement. Duplicate native receives
     // still drain their ACK but do not invent another message/notification.
@@ -80,6 +85,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
     private fun serviceAttempt(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
                                committed: (String) -> Unit, acknowledged: (Boolean) -> Unit) {
         phase="native_identity";diagnostic="stage=$phase"
+        nextRetryAt=0
         needsContinuation=true
         val identity = checkNotNull(native.identity(handle))
         val signing = JSONObject().put("signingPublicKey", encoded(identity))
@@ -230,15 +236,42 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             if(bindings.isNotEmpty())outgoingDeviceOffset[id]=(offset+selectedBindings.size)%bindings.size
             while(outgoingDeviceOffset.size>128)outgoingDeviceOffset.remove(outgoingDeviceOffset.keys.first())
             for (binding in selectedBindings) {
+                val deviceKey=id+":"+encoded(java.security.MessageDigest.getInstance("SHA-256").digest(binding))
+                if((deviceRetry[deviceKey]?.first?:0L)>now)continue
+                try {
                 phase="native_envelope_prepare";diagnostic="stage=$phase"
                 val wire = native.prepare(handle, id.toByteArray(Charsets.US_ASCII),
                     binding, true) ?: continue
                 if (wire.isEmpty()) continue // Live route or already Delivered.
                 val reply = request(accounts, "mailbox_store", JSONObject(signing.toString()).put("envelope", encoded(wire)))
-                if (reply.getString("state") == "stored") check(native.stored(handle, wire) == 0)
-                else throw MailboxItemRefused(safeMailboxState(reply.optString("state")))
+                if (reply.getString("state") == "stored") {check(native.stored(handle, wire) == 0);deviceRetry.remove(deviceKey)}
+                else {
+                    val reason=safeMailboxState(reply.optString("state"))
+                    val permanent=reason in setOf("not_authorized","invalid_key_or_signature","recipient_key_retired","recipient_key_unavailable","expired_or_invalid_timestamp","conflicting_message")
+                    val retry=ByteArrayOutputStream()
+                    DataOutputStream(retry).use{ stream ->
+                        stream.write("PeerChat/mailbox-store-retry/v1\u0000".toByteArray(Charsets.US_ASCII))
+                        val attempts=((deviceRetry[deviceKey]?.second?:0)+1).coerceAtMost(8)
+                        stream.writeLong(System.currentTimeMillis()+if(permanent)900_000L else (30_000L shl (attempts-1)).coerceAtMost(900_000L))
+                        val text=reason.toByteArray(Charsets.US_ASCII);stream.writeInt(text.size);stream.write(text)
+                        stream.writeInt(wire.size);stream.write(wire)
+                    }
+                    try{native.storeFailure(handle,retry.toByteArray())}catch(_:Exception){/* Supplemental metadata cannot discard the attempt. */}
+                    throw MailboxItemRefused(reason)
+                }
+                } catch(failure:Exception) {
+                    if(expiredServerSession(failure))throw failure
+                    failed++
+                    failureReason=if(failure is MailboxItemRefused)failure.state else "device_attempt_unavailable"
+                    val attempts=((deviceRetry[deviceKey]?.second?:0)+1).coerceAtMost(8)
+                    val permanent=failureReason in setOf("not_authorized","invalid_key_or_signature","recipient_key_retired","recipient_key_unavailable","expired_or_invalid_timestamp","conflicting_message")
+                    deviceRetry[deviceKey]=now+(if(permanent)900_000L else (30_000L shl (attempts-1)).coerceAtMost(900_000L)) to attempts
+                    while(deviceRetry.size>256)deviceRetry.remove(deviceRetry.keys.first())
+                }
             }
-            outgoingRetry.remove(id)
+            val deferred=bindings.map{id+":"+encoded(java.security.MessageDigest.getInstance("SHA-256").digest(it))}
+            if(deferred.isNotEmpty()&&deferred.all{(deviceRetry[it]?.first?:0L)>now})outgoingRetry[id]=deferred.minOf{checkNotNull(deviceRetry[it]).first} to 0
+            else outgoingRetry.remove(id)
         }catch(failure:Exception){
             if(failure is ServerRejected&&com.peerchat.android.application.expiredServerSession(failure))throw failure
             failed++
@@ -255,6 +288,9 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             outgoingRetry[id]=now+delay to attempts
             while(outgoingRetry.size>128)outgoingRetry.remove(outgoingRetry.keys.first())
         }
+        val pendingIds=candidates.map{it.first}.toSet()
+        deviceRetry.keys.removeAll{it.substringBefore(':') !in pendingIds}
+        nextRetryAt=(outgoingRetry.values+deviceRetry.values).map{it.first}.filter{it>now}.minOrNull()?:0L
         diagnostic="stage=complete registered=$receiving acknowledged=$accepted pending_native_validation=$pendingValidation receipt_pending_validation=$receiptValidationFailures outgoing_retry=$failed retry_reason=$failureReason continuation=$needsContinuation"+
             if(receiving)"" else " receive_blocked=native_recipient_registration"
     }
@@ -265,4 +301,5 @@ private class MailboxItemRefused(val state:String):Exception()
 internal fun safeMailboxState(state:String):String=if(state in setOf("accepted","ready","stored","acknowledged",
     "not_authorized","invalid_timestamp","key_conflict_or_revoked","invalid_generation","unknown_key",
     "revoked","recipient_unavailable","recipient_disabled","quota_exceeded",
-    "rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature"))state else "unrecognized_or_missing"
+    "rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature",
+    "recipient_key_retired","recipient_key_unavailable","expired_or_invalid_timestamp","conflicting_message"))state else "unrecognized_or_missing"

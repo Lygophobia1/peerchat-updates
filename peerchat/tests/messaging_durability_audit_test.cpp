@@ -197,7 +197,7 @@ int main(int argc,char** argv){try{
     auditNeed(outgoing.authorizeTransport({904},target.peerId)&&outgoing.submittedMessage(target.peerId,unresolved.id,{904})&&
         outgoing.acknowledgeMessage(target.peerId,{904},unresolved.id),"unresolved primary live delivery failed");
     const auto pendingAfterUnresolvedAck=senderStore.pending(target.peerId);
-    auditNeed(senderStore.message(unresolved.id)->delivery!=Delivery::Delivered&&
+    auditNeed(senderStore.message(unresolved.id)->delivery==Delivery::Sent&&
         std::none_of(pendingAfterUnresolvedAck.begin(),pendingAfterUnresolvedAck.end(),
             [&](const auto& row){return row.id==unresolved.id;})&&
         senderStore.mailboxDiagnostics().find("selection=unresolved")!=std::string::npos,

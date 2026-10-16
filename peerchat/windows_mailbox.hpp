@@ -74,6 +74,19 @@ public:
         if(operation==10){require(id.empty()&&input.empty()&&!allowed);auto text=storage.mailboxDiagnostics();return Blob(text.begin(),text.end());}
         if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
         require(input.size()<=MaxWire);
+        if(operation==12){
+            require(id.empty()&&!allowed);Reader reader(input,"PeerChat/mailbox-store-retry/v1");
+            auto deadline=reader.number(8);auto reason=reader.text(64);auto wire=reader.field(MaxWire);reader.end();
+            auto envelope=parse(wire);require(envelope.header.senderAccount==friends.localAccount());
+            contact(storage,friends,envelope.header.recipientDevice,envelope.header.recipientAccount);
+            deliveries.noteMailboxStoreFailure(wire,reason,deadline,now());return {1};
+        }
+        if(operation==11){
+            require(id.empty()&&!allowed);
+            auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            require(deliveries.installEligibility(input,friends.localAccount(),friends.generation(),[&](const std::string& device){return friends.accountFor(device);},storage.contacts(),now(),monotonic));
+            return {1};
+        }
         if(operation==0){
             auto binding=coordinator_.prepare(friends.localAccount(),allowed,[&](std::uint32_t generation){
                 return "PeerChat.Recipient."+profile_.peerId+".v"+std::to_string(generation);
@@ -84,7 +97,8 @@ public:
             std::vector<StoredMessage> pending;
             for(auto& message:deliveries.mailboxCandidates())if(friends.accountFor(message.recipient)>0){
                 auto route=sessions.snapshot(message.recipient);
-                if(storage.mailboxHasPendingEnvelope(message.id)||delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)==delivery::MailboxRoutePolicy::Unavailable)pending.push_back(std::move(message));
+                auto targets=storage.deliveryTargets(message.id);
+                if((targets&&!targets->selectionUnresolved)||storage.mailboxHasPendingEnvelope(message.id)||delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)==delivery::MailboxRoutePolicy::Unavailable)pending.push_back(std::move(message));
             }
             protocol::Writer result(protocol::Accepted);result.number(pending.size());
             for(const auto& message:pending){result.string(message.id);result.string(message.recipient);result.number(friends.accountFor(message.recipient));}
@@ -93,6 +107,7 @@ public:
         if(operation==3){
             require(mailbox::id(id,32));auto binding=parseBinding(input);auto verified=contact(storage,friends,binding.device,binding.accountId);
             auto message=storage.message(id);require(message.has_value());auto canonical=contact(storage,friends,message->recipient,binding.accountId);
+            if(!storage.deliveryTargets(id)&&binding.device!=message->recipient&&storage.mailboxEnvelope(id,binding.device).empty())return {};
             auto route=sessions.snapshot(binding.device);
             const bool waitForLive=delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)!=delivery::MailboxRoutePolicy::Unavailable;
             return deliveries.prepareMailbox(id,friends.localAccount(),binding.accountId,binding,verified,identity_,*hpke_,now(),allowed,waitForLive,&canonical);
@@ -116,14 +131,18 @@ public:
             require(allowed&&mailbox::id(id,32));auto message=storage.message(id);require(message.has_value());
             const auto accountId=friends.accountFor(message->recipient);auto canonical=contact(storage,friends,message->recipient,accountId);
             auto primaryRoute=sessions.snapshot(canonical.peerId);std::vector<RecipientBinding> prepared;
-            if(delivery::mailboxRoutePolicy(allowed,primaryRoute?&*primaryRoute:nullptr)==delivery::MailboxRoutePolicy::Unavailable)for(const auto& binding:parseBindingBatch(input)){
+            auto targets=storage.deliveryTargets(id);
+            if((targets&&!targets->selectionUnresolved)||delivery::mailboxRoutePolicy(allowed,primaryRoute?&*primaryRoute:nullptr)==delivery::MailboxRoutePolicy::Unavailable)for(const auto& binding:parseBindingBatch(input)){
                 require(binding.accountId==accountId);
+                if(!targets&&binding.device!=message->recipient&&storage.mailboxEnvelope(id,binding.device).empty())continue;
                 // Server authorization never substitutes for an existing native
                 // identity pin. An unverified device is not silently trusted.
                 auto known=storage.contacts();auto found=std::find_if(known.begin(),known.end(),[&](const auto& c){return c.peerId==binding.device&&c.verified;});
                 if(found==known.end()||friends.accountFor(binding.device)!=accountId)continue;
                 auto verified=contact(storage,friends,binding.device,accountId);
                 try{
+                    auto route=sessions.snapshot(binding.device);
+                    if(targets&&delivery::mailboxRoutePolicy(allowed,route?&*route:nullptr)!=delivery::MailboxRoutePolicy::Unavailable)continue;
                     if(storage.mailboxUploadAccepted(id,binding.device))continue;
                     auto wire=deliveries.prepareMailbox(id,friends.localAccount(),accountId,binding,verified,identity_,*hpke_,now(),allowed,false,&canonical);
                     if(!wire.empty())prepared.push_back(binding);

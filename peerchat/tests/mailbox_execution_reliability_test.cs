@@ -22,6 +22,14 @@ internal static class MailboxExecutionReliabilityTest {
     static long BigEndian(byte[] bytes,ref int position,int width){long value=0;for(int i=0;i<width;i++)value=(value<<8)|bytes[position++];return value;}
     static string WireText(byte[] bytes,ref int position){int length=checked((int)BigEndian(bytes,ref position,4));string value=Encoding.UTF8.GetString(bytes,position,length);position+=length;return value;}
     public static void Main(){
+        var view=new ChatViewModel();var local=new string('a',64);var remote=new string('b',64);var logicalId=new string('c',32);
+        view.Apply(new CoreEvent{kind=0,peer=local,text="Fixture"});
+        view.Apply(new CoreEvent{kind=5,peer=remote,messages=new[]{new MessageData{id=logicalId,sender=local,text="fixture",delivery=0}}});
+        var bubble=view.Conversations.Values.Single().Messages.Single();
+        view.Apply(new CoreEvent{kind=7,peer=remote,messages=new[]{new MessageData{id=logicalId,sender=local,delivery=1}}});
+        Check(bubble.Data.delivery==1&&!bubble.Stamp.Contains("✓✓")&&bubble.Stamp.Contains("not fully confirmed"));
+        view.Apply(new CoreEvent{kind=7,peer=remote,messages=new[]{new MessageData{id=logicalId,sender=local,delivery=2}}});
+        Check(bubble.Data.delivery==2&&bubble.Stamp.Contains("✓✓"));
         var stored=new List<string>();var diagnostics=new List<string>();
         var execution=new MailboxExecution((op,input,id,allowed)=>{
             if(op==7)return new byte[]{1};
@@ -53,6 +61,24 @@ internal static class MailboxExecutionReliabilityTest {
         string snapshot=execution.DiagnosticsSnapshot();
         Check(snapshot.Contains("Authenticated mailbox_store RPC")&&snapshot.Contains("Native envelope encryption/preparation"));
         Check(snapshot.Contains("Retry pending: 4")&&snapshot.Contains("recipient_key_retired=4")&&!snapshot.Contains("message=m5"));
+
+        // A refused device must not back off another device of the same message.
+        var deviceStores=new List<byte>();
+        var twoDevices=new MailboxExecution((op,input,id,allowed)=>{
+            if(op==7)return new byte[]{1};if(op==0)return new byte[]{2};if(op==1||op==4||op==12)return new byte[]{1};
+            if(op==2)return Record(4,w=>{Number(w,1);Text(w,new string('d',32));Text(w,"peer");Number(w,2);});
+            if(op==8)return Record(4,w=>{Number(w,2);Bytes(w,new byte[]{3});Bytes(w,new byte[]{4});});
+            if(op==3)return input;
+            throw new Exception("Unexpected native operation "+op);
+        });
+        twoDevices.Service(null,"device",true,(peer,inserted)=>{},diagnostics.Add,(operation,body)=>{
+            if(operation=="mailbox_store"){
+                byte device=Convert.FromBase64String((string)body["envelope"])[0];deviceStores.Add(device);
+                return Reply(device==3?"recipient_key_retired":"stored");
+            }
+            return rpc(operation,body);
+        });
+        Check(deviceStores.SequenceEqual(new byte[]{3,4})&&twoDevices.NextRetryUtc>DateTime.UtcNow);
 
         var fetched=new List<string>();var cursorRequests=new List<string>();
         var receiver=new MailboxExecution((op,input,id,allowed)=>{

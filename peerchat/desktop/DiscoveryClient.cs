@@ -261,7 +261,7 @@ public sealed partial class DiscoveryClient {
         return Rpc(operation,device,payload,expectedSession,expectedCertificate,expectedAccount);
     }
     public Dictionary<string,object> Mailbox(string operation,string device,Dictionary<string,object> payload){
-        if(!new[]{"mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts"}.Contains(operation))throw new ArgumentException("Unsupported mailbox operation.");
+        if(!new[]{"mailbox_register","mailbox_revoke","mailbox_keys","mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts","mailbox_eligibility_snapshot","mailbox_eligibility_validate"}.Contains(operation))throw new ArgumentException("Unsupported mailbox operation.");
         if(supportsRpc)return Rpc(operation,device,payload);
         string requestId=Guid.NewGuid().ToString("N");var wireJson=new JavaScriptSerializer{MaxJsonLength=100000};
         TcpClient tcp;using(var tls=OpenAuthenticatedStream(out tcp))using(tcp){

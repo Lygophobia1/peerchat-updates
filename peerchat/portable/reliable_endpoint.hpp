@@ -292,8 +292,8 @@ public:
         for(const auto& message:deliveries_.pendingMessages(runtime_.peerId,100)){
             if(deliveries_.wasSubmittedMessage(runtime_.peerId,message.id,id_))continue;
             if(deliveries_.inFlightCount(id_)>=16||output_.size()>MaxOutput/2)break;
+            if(!deliveries_.submittedMessage(runtime_.peerId,message.id,id_,now_))continue;
             auto value=reliable::textPacket(message,runtime_.logicalOrdering);packet(value);
-            protocol::check(deliveries_.submittedMessage(runtime_.peerId,message.id,id_,now_));
         }
     }
     void tick(std::uint64_t now){

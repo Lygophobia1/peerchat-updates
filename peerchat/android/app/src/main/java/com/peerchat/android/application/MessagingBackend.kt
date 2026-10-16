@@ -55,6 +55,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val mailboxPublication=MailboxPublicationGate({publish()})
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
+    private val eligibilitySnapshots=EligibilitySnapshotExecution()
     private val groupExecution=GroupExecution()
     private val voiceExecution=VoiceExecution()
     private val groupNotifications=GroupNotifications(this.context,profileName)
@@ -450,7 +451,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
-        mailboxExecution.reset();mailboxPublication.reset();mailboxAt=0L
+        mailboxExecution.reset();mailboxPublication.reset();eligibilitySnapshots.reset();mailboxAt=0L
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
@@ -612,7 +613,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
             } finally {
                 try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
                 mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
+                if(mailboxExecution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,mailboxExecution.nextRetryAt)
             }
+        }
+        if(mutable.value.authenticated&&authorizationSnapshotInstalled) {
+            // Receiving/publication above takes priority. A finite background
+            // wake refreshes only actual pending send destinations, not contacts.
+            val recipients=if(livePeerWorkAllowed)friends.map{it.accountId} else try {
+                val rows=NativeRecord(checkNotNull(com.peerchat.android.MailboxBridge.pending(native)),4)
+                val count=rows.number();require(count<=64)
+                List(count.toInt()){rows.text();rows.text();rows.number()}.also{rows.end()}
+            }catch(_:Exception){emptyList()}
+            if(eligibilitySnapshots.refresh(checkNotNull(accounts),native,mutable.value.accountId,generation,mutable.value.localPeerId,recipients,now))mailboxAt=0L
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
@@ -778,6 +790,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(messagingDiagnostics=buildString {
             appendLine("mailbox_storage_allowed=${mailboxAllowed()} ${mailboxExecution.diagnostic}")
             appendLine(mailboxExecution.inboundDiagnostic)
+            appendLine(eligibilitySnapshots.diagnostic)
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
             peerAuthenticationDiagnostics.values.forEach{appendLine(it)}

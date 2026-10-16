@@ -879,8 +879,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         for(const auto& m:deliveries->pendingMessages(c.peerId,100)) {
             if(deliveries->wasSubmittedMessage(c.peerId,m.id,transport))continue;
             if(deliveries->inFlightCount(transport)>=16||c.output.size()-c.sent>MaxQueue/2)break;
+            if(!deliveries->submittedMessage(c.peerId,m.id,transport,nowMilliseconds()))continue;
             auto w=reliable::textPacket(m,c.logicalOrdering);packet(c,w);
-            if(!deliveries->submittedMessage(c.peerId,m.id,transport,nowMilliseconds()))throw std::runtime_error("Could not record authenticated message submission");
         }
     }
     std::set<std::string> groupPeers(const GroupState& state){std::set<std::string> peers;for(const auto& member:state.members)peers.insert(member.second.peerId);for(const auto& invitation:state.invitations)peers.insert(invitation.second.peerId);peers.erase(profile.peerId);return peers;}
@@ -1248,7 +1248,11 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         }else if(r.type()==protocol::Ack){
             auto id=reliable::receiveAck(r);
             // A peer can acknowledge only an ID actually sent on this connection.
-            if(deliveries&&deliveries->acknowledgeMessage(c.peerId,{c.attemptId},id)){NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=c.peerId;StoredMessage m;m.id=id;m.delivery=Delivery::Delivered;e.messages.push_back(m);emit(std::move(e));outbox(c);}
+            if(deliveries&&deliveries->acknowledgeMessage(c.peerId,{c.attemptId},id)){
+                auto message=store->message(id);protocol::check(message.has_value());
+                NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=message->recipient;e.messages.push_back(*message);
+                emit(std::move(e));outbox(c);
+            }
         }else if(r.type()==protocol::GroupEvent){
             bool oversizedMessage=false;auto event=decodeGroupEvent(frame,true,&oversizedMessage);protocol::check(protocol::id(event.groupId,32)&&protocol::id(event.eventId));if(oversizedMessage){notice(NodeEvent::Kind::Error,L"Oversized group message rejected",c.peerId);return;}
             if(event.kind==GroupEventKind::Message||(groupKeys&&groupKeys->isAuthoritativeGroup(event.groupId))){
@@ -1345,6 +1349,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(command.mailbox){
                 if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);
                 auto output=mailboxApplication->execute(command.sourceKind,command.bytes,command.id,command.accepted,*store,*deliveries,authenticatedFriends,*sessionTransports);
+                if(command.sourceKind==11){for(const auto& device:store->pendingTargetDevices())liveOutboxPeers.insert(device);demandCheckAt=0;}
                 if(command.sourceKind==5){protocol::Reader record(output);auto inserted=record.number();record.bytes();auto sender=record.string(),id=record.string();record.end();
                     if(inserted){auto message=store->message(id);if(message){NodeEvent event;event.kind=NodeEvent::Kind::Message;event.peerId=sender;event.messages.push_back(*message);emit(std::move(event));}}
                 }else if(command.sourceKind==4){auto envelope=mailbox::parse(command.bytes);auto message=store->message(envelope.header.messageId);
@@ -1442,6 +1447,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     }
                 }
                 authenticatedFriends=std::move(validatedFriends);
+                if(deliveries)deliveries->invalidateEligibility(authenticatedFriends.localAccount(),authenticatedFriends.generation());
             }
             else if(command.action==Action::PinInitialAuthenticatedFriendIdentity){
                 Connection* connection=nullptr;
@@ -1503,11 +1509,12 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 command.peer=reliable::queueRecipient(requested,store->contacts(),authenticatedFriends);
                 auto known=contacts.find(command.peer);
                 auto m=reliable::queueText(*store,profile,known==contacts.end()?nullptr:&known->second,command.peer,command.id,command.text,
-                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()),&authenticatedFriends);
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()),&authenticatedFriends,deliveries.get());
                 // The caller may clear its draft only after queueText committed
                 // the existing history/outbox transaction, never on command admission.
                 if(command.response)command.response->set_value(std::wstring(m.id.begin(),m.id.end()));
                 liveOutboxPeers.insert(command.peer);
+                for(const auto& device:store->pendingTargetDevices())liveOutboxPeers.insert(device);
                 sessionTransports->demandLiveRoute(command.peer,nowMilliseconds()+45000);
                 if(requested!=command.peer)sessionTransports->demandLiveRoute(requested,nowMilliseconds()+45000);
                 NodeEvent e;e.kind=NodeEvent::Kind::Message;e.peerId=command.peer;e.messages.push_back(m);emit(std::move(e));
@@ -1741,7 +1748,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
-            liveOutboxPeers.clear();for(const auto& c:contacts)if(!store->pending(c.first,1).empty())liveOutboxPeers.insert(c.first);
+            liveOutboxPeers.clear();for(const auto& c:contacts)if(!deliveries->pendingMessages(c.first,1).empty())liveOutboxPeers.insert(c.first);
             groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){auto ledger=group_devices::Replica::restoreStored(*store,groupId);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
             startupDirectListener=startDirectListener;
@@ -1840,7 +1847,7 @@ Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
 void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name,bool startDirectListener){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name,startDirectListener]{impl_->run(directory,port,name,startDirectListener);});}
 void Node::stop(){impl_->stop();}
 Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messageId,bool storageAllowed){
-    if(operation>10||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed))||(operation==10&&(!input.empty()||!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
+    if(operation>12||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed))||(operation==10&&(!input.empty()||!messageId.empty()||storageAllowed))||(operation>=11&&(!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.mailbox=true;command.sourceKind=operation;command.bytes=input;command.id=messageId;command.accepted=storageAllowed;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");
