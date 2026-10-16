@@ -158,6 +158,7 @@ public partial class DesktopApplication {
         .ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
             if(closing||discovery!=service)return;
             mailboxNextUtc=task.IsFaulted?DateTime.UtcNow.AddSeconds(30):execution.NeedsContinuation?DateTime.UtcNow.AddSeconds(1):mailboxNextUtc;
+            if(execution.NextRetryUtc!=DateTime.MinValue&&execution.NextRetryUtc<mailboxNextUtc)mailboxNextUtc=execution.NextRetryUtc;
             if(task.IsFaulted)TraceUi("mailbox servicing failed: "+task.Exception.GetBaseException().GetType().Name);
             else if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);
         })));
