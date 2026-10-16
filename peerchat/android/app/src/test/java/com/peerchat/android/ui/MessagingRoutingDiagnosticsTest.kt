@@ -10,6 +10,20 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[28])
 class MessagingRoutingDiagnosticsTest {
+    @Test fun transferIdentityContextsAreBoundedFreshAndExcludePrivateAttachmentFields(){
+        val local="a".repeat(64);val peer="b".repeat(64)
+        val files=(1..70).map{n->AttachmentSnapshot(n.toString().padStart(32,'0'),peer,"PRIVATE_FILENAME",100,3,n%2==0,25,1,"PRIVATE_ERROR","/data/private/attachment")}
+        val snapshot=MessagingSnapshot(accountId=5,localPeerId=local,authenticated=true,serverPresenceLive=true,
+            conversations=listOf(ConversationSnapshot(FriendIdentity(4,"Peer",peer,true),ConnectionSnapshot(networkRevision=7),emptyList(),files)))
+        val first=projectMessaging(snapshot,PeerChatUiState())
+        val again=projectMessaging(snapshot,first)
+        assertEquals(first.diagnostics,again.diagnostics)
+        assertEquals(64,Regex("transfer_identity transfer_id=").findAll(first.diagnostics).count())
+        assertTrue(first.diagnostics.contains("sender_device=$peer recipient_device=$local authenticated=true server_presence_live=true network_revision=7 outgoing=false"))
+        assertTrue(first.diagnostics.contains("sender_device=$local recipient_device=$peer authenticated=true server_presence_live=true network_revision=7 outgoing=true"))
+        listOf("PRIVATE_FILENAME","PRIVATE_ERROR","/data/private/attachment").forEach{assertFalse(first.diagnostics.contains(it))}
+        assertFalse(first.diagnostics.contains("transfer_id="+70.toString().padStart(32,'0')))
+    }
     @Test fun accountSelectionAndActualDeviceAttributionStaySeparateWithoutPlaintext(){
         val local="a".repeat(64);val phone="b".repeat(64);val desktop="c".repeat(64)
         val rows=(1L..4L).map{n->MessageSnapshot(n.toString().padStart(32,'0'),local,desktop,n,n,n,0,"PRIVATE_MESSAGE_CONTENT")}

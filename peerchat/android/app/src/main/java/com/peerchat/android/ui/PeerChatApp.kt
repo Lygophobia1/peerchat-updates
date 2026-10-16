@@ -28,6 +28,17 @@ import androidx.compose.ui.tooling.preview.Preview
 import com.peerchat.android.platform.ServerEndpoint
 import com.peerchat.android.platform.ServerTrustState
 import com.peerchat.android.platform.serverTrustState
+import com.peerchat.android.platform.DiagnosticsSnapshot
+import com.peerchat.android.platform.DiagnosticsExport
+import com.peerchat.android.platform.DiagnosticsCreateDocument
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import java.time.Instant
+import android.content.Intent
 
 private val Dark = darkColorScheme(primary = Color(0xFF85BBFF), onPrimary = Color(0xFF002F64),
     primaryContainer = Color(0xFF1E4773), onPrimaryContainer = Color(0xFFD6E6FF),
@@ -141,18 +152,56 @@ internal fun diagnosticReport(state:PeerChatUiState):String =
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun DiagnosticsScreen(state:PeerChatUiState,dispatch:(UiAction)->Unit){
     val clipboard=LocalClipboardManager.current
-    val report=diagnosticReport(state)
-    var copied by remember(report){mutableStateOf(false)}
+    val context=LocalContext.current
+    val scope=rememberCoroutineScope()
+    val source=if(state.demo)"Explicit demo mode: no live transport or identity." else state.diagnostics
+    // Avoid a second full-size concatenation just to render/copy a preview.
+    val report=remember(source){if(source.length<=65000)diagnosticReport(state) else null}
+    val preview=remember(source){"PeerChat Android diagnostics\nBuild: ${com.peerchat.android.BuildConfig.VERSION_NAME}\n"+source.take(32768)}
+    var copied by remember(source){mutableStateOf(false)}
+    var busy by remember{mutableStateOf(false)}
+    var exportStatus by remember{mutableStateOf<String?>(null)}
+    // Kept only in memory across the system picker, never saved instance state.
+    // Later runtime updates cannot alter the snapshot the user chose to export.
+    var pending by remember{mutableStateOf<DiagnosticsSnapshot?>(null)}
+    fun capture()=DiagnosticsSnapshot(com.peerchat.android.BuildConfig.VERSION_NAME,Instant.now(),
+        if(state.demo)"Explicit demo mode: no live transport or identity." else state.diagnostics)
+    val save=rememberLauncherForActivityResult(DiagnosticsCreateDocument()){uri->
+        val frozen=pending;pending=null
+        if(uri==null){busy=false;exportStatus="Export cancelled."}
+        else if(frozen==null){busy=false;exportStatus="Snapshot no longer available. Tap Export Diagnostics again."}
+        else scope.launch{
+            try{withContext(Dispatchers.IO){DiagnosticsExport.save(context,uri,frozen)};exportStatus="Complete diagnostic snapshot saved."}
+            catch(error:Exception){if(error is CancellationException)throw error;exportStatus="Diagnostics could not be saved. Choose a writable location and retry; an incomplete file may remain."}
+            finally{busy=false}
+        }
+    }
     Scaffold(topBar={TopAppBar(title={Text("Diagnostics")},navigationIcon={
         ActionIcon(Icons.AutoMirrored.Filled.ArrowBack,"Back",{dispatch(UiAction.Back)})
-    },actions={TextButton({clipboard.setText(AnnotatedString(report));copied=true},Modifier.testTag("diagnostics-copy")){
+    },actions={TextButton({try{clipboard.setText(AnnotatedString(checkNotNull(report)));copied=true}catch(_:Exception){exportStatus="Clipboard unavailable. Use Export Diagnostics to save the complete report."}},Modifier.testTag("diagnostics-copy"),enabled=report!=null){
         Text(if(copied)"Copied" else "Copy diagnostics")
     }})}){padding->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp).testTag("diagnostics-scroll")){
             Text(if(state.demo)"UI demo — no live diagnostics" else "Native connection diagnostics",style=MaterialTheme.typography.titleLarge)
-            // Copy the complete existing safe projection, never a viewport slice
-            // or a second raw native/log/credential source.
-            SelectionContainer{Text(report,Modifier.padding(top=16.dp).testTag("diagnostics-full-text"))}
+            Button({
+                try{val frozen=capture();pending=frozen;busy=true;exportStatus=null;save.launch(frozen.suggestedName)}
+                catch(_:Exception){pending=null;busy=false;exportStatus="Diagnostics could not be prepared. Retry with the current snapshot."}
+            },enabled=!busy,modifier=Modifier.fillMaxWidth().padding(top=12.dp).testTag("diagnostics-export")){Text("Export Diagnostics")}
+            OutlinedButton({
+                try{val frozen=capture();busy=true;exportStatus=null;scope.launch{
+                    try{
+                        val intent=withContext(Dispatchers.IO){DiagnosticsExport.share(context,frozen)}
+                        context.startActivity(Intent.createChooser(intent,"Share diagnostics"));exportStatus="Diagnostic file prepared for sharing. Choose a destination in the Android Share menu."
+                    }catch(error:Exception){if(error is CancellationException)throw error;exportStatus="Diagnostics could not be shared. Use Export Diagnostics to save a file."}
+                    finally{busy=false}
+                }}catch(_:Exception){busy=false;exportStatus="Diagnostics could not be prepared. Retry with the current snapshot."}
+            },enabled=!busy,modifier=Modifier.fillMaxWidth().testTag("diagnostics-share")){Text("Share diagnostic file")}
+            if(busy)LinearProgressIndicator(Modifier.fillMaxWidth())
+            exportStatus?.let{Text(it,Modifier.padding(top=8.dp).testTag("diagnostics-export-status"))}
+            Text("Save or share the complete snapshot as a UTF-8 text file. Sharing happens only when you choose an app; PeerChat does not upload this report.",Modifier.padding(top=8.dp),style=MaterialTheme.typography.bodySmall)
+            if(report==null)Text("This report is too large for Copy. Use Export Diagnostics or Share diagnostic file.",style=MaterialTheme.typography.bodySmall)
+            if(source.length>32768)Text("Preview shortened for display. File export includes the complete available snapshot.",style=MaterialTheme.typography.bodySmall)
+            SelectionContainer{Text(preview,Modifier.padding(top=16.dp).testTag("diagnostics-full-text"))}
             Text("End of diagnostics",Modifier.padding(top=16.dp).testTag("diagnostics-end"),style=MaterialTheme.typography.labelSmall)
         }
     }

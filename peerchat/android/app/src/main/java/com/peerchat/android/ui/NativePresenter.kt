@@ -71,6 +71,18 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         appendLine(snapshot.archiveAuthorizationDiagnostics)
         appendLine("File transfer measurements (native, confirmed/durable bytes):")
         appendLine(snapshot.transferDiagnostics)
+        // Fresh, bounded projection from typed native transfer rows. Never
+        // append the previous report or copy filenames, paths or payload data.
+        appendLine("Transfer identity context (maximum 64 current transfers):")
+        snapshot.conversations.asSequence().flatMap{conversation->conversation.attachments.asSequence().map{conversation to it}}
+            .filter{(conversation,file)->file.id.matches(Regex("[0-9a-f]{32}"))&&file.peer.matches(Regex("[0-9a-f]{64}"))&&
+                snapshot.localPeerId.matches(Regex("[0-9a-f]{64}"))&&file.peer in conversation.friend.knownPeerIds}
+            .distinctBy{it.second.id}.take(64).forEach{(conversation,file)->
+                appendLine("transfer_identity transfer_id=${file.id} local_account=${snapshot.accountId} peer_account=${conversation.friend.accountId}"+
+                    " sender_device=${if(file.outgoing)snapshot.localPeerId else file.peer} recipient_device=${if(file.outgoing)file.peer else snapshot.localPeerId}"+
+                    " authenticated=${snapshot.authenticated} server_presence_live=${snapshot.serverPresenceLive} network_revision=${conversation.connection.networkRevision}"+
+                    " outgoing=${file.outgoing} native_state=${file.state} durable_or_acknowledged_bytes=${file.done} total_bytes=${file.size}")
+            }
         for(c in snapshot.conversations) {
             appendLine("${c.friend.username}:${c.friend.accountId} · Server Relay")
             appendLine("Resolved account=${c.friend.accountId} current_device=${c.friend.peerId} known_devices=${c.friend.knownPeerIds.joinToString(",")}")
