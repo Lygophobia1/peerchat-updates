@@ -12,6 +12,26 @@ import org.junit.Test
 /** UI-only: does not create native handles, identities, aliases or secure records. */
 abstract class UiFlowChecks {
     @get:Rule val compose = createComposeRule()
+    @Test fun sendCapturesAndClearsComposerBeforeLocalCommitAndKeepsNewTyping(){
+        val chat=ConversationUi("account:8","Sammy",ChatKind.Direct,false,"","")
+        var state by mutableStateOf(PeerChatUiState(demo=false,route=Route.Conversation,account=AccountUi("account:19","Jonah"),
+            selectedId=chat.id,conversations=listOf(chat)))
+        val sent=mutableListOf<String>()
+        compose.setContent{PeerChatTheme(true){ConversationScreen(state.selected!!,state,{action->
+            when(action){
+                is UiAction.Draft->state=state.copy(drafts=state.drafts+(action.conversationId to action.text))
+                is UiAction.PreviewMessage->{sent.add(action.text);state=state.copy(sendBusy=true,drafts=state.drafts+(chat.id to ""))}
+                else->Unit
+            }
+        })}}
+        compose.onNodeWithTag("composer").performTextInput("captured before commit")
+        compose.onNodeWithContentDescription("Send message").performClick()
+        compose.onNodeWithTag("composer").assert(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.EditableText,androidx.compose.ui.text.AnnotatedString(""))).performTextInput("next message")
+        compose.onNodeWithContentDescription("Send message").assertIsEnabled().performClick()
+        compose.onNodeWithTag("composer").assert(SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.EditableText,androidx.compose.ui.text.AnnotatedString(""))).performTextInput("third draft")
+        compose.runOnIdle{assertEquals(listOf("captured before commit","next message"),sent);state=state.copy(sendBusy=false,sendCompletion=state.sendCompletion+1)}
+        compose.onNodeWithTag("composer").assertTextEquals("third draft")
+    }
     @Test fun diagnosticsScrollsAndCopiesTheFullSafeReport(){
         val safe=(1..180).joinToString("\n"){"archive_transport attempt=$it stage=archive_control"}+"\nlast_safe_record"
         var state by mutableStateOf(PeerChatUiState(demo=false,route=Route.Diagnostics,diagnostics=safe))

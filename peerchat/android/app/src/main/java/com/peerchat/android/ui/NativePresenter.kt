@@ -245,7 +245,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
         mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline,
-            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false)
+            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false,localSendCount=0)
         viewModelScope.launch {
             var completed=false
             try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
@@ -320,7 +320,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         })}
         val nativeIds=mutable.value.conversations.flatMap{c->c.messages.map{it.id}+c.attachments.map{it.id}}.toSet()
         localSends.entries.removeAll{it.value.nativeId in nativeIds}
-        mutable.value=mutable.value.copy(conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
+        mutable.value=mutable.value.copy(localSendCount=localSends.size,conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
         if(retainedDiagnostics.isNotEmpty())mutable.value=mutable.value.copy(diagnostics=mutable.value.diagnostics+"\nRetained application diagnostics:\n"+retainedDiagnostics.joinToString("\n"))
         val accountKey=preferenceAccountKey() ?: return
         if(!navigationRestored&&(current.localHistoryReady||current.authenticated)){
@@ -397,7 +397,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
         if(snapshot.accountId!=current.accountId)mutable.value=mutable.value.copy(transferSettings=null,transferSettingsBusy=false,transferSettingsError=null)
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();localSends.clear();localSendStarted.clear();chatOpenedAt=0
-            mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=false)
+            mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=false,localSendCount=0)
             if(current.accountId>0){navigationState.remove<String>("conversation");navigationState.remove<String>("owner");mutable.value=mutable.value.copy(selectedId=null,route=if(mutable.value.route in setOf(Route.Conversation,Route.Details))Route.Home else mutable.value.route)}
             mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
         current=snapshot
@@ -536,16 +536,20 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
     }
     private fun beginLocalSend(conversation:String,text:String,command:suspend()->String,clear:()->Unit){
-        if(mutable.value.sendBusy)return
         if(localSends.size>=16){mutable.value=mutable.value.copy(notice="Wait for the local history view to settle before sending more messages.");return}
+        // Retain the captured draft through the existing protected preference
+        // path. Clearing the visible composer must not persist an empty draft
+        // before the native owner confirms its local commit.
+        dispatch(UiAction.Draft(conversation,text))
         val epoch=uiGeneration;val account=current.accountId
         val token="local-saving-"+java.util.UUID.randomUUID().toString()
         val row=LocalSendPresentation(token,conversation,text,System.currentTimeMillis(),mutable.value.conversations.find{it.id==conversation}?.messages?.map{it.id}?.toSet()?:emptySet())
         localSends[token]=row
+        largeDrafts[conversation]=""
         val started=System.nanoTime()
         if(localSendStarted.size>=16)localSendStarted.remove(localSendStarted.keys.first())
         localSendStarted[token]=started to null
-        mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false,
+        mutable.value=mutable.value.copy(sendBusy=true,sendAccepted=false,localSendCount=localSends.size,drafts=mutable.value.drafts+(conversation to ""),
             conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
         viewModelScope.launch {
             var accepted=false
@@ -555,12 +559,16 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 localSendStarted[token]?.let{localSendStarted[token]=it.first to id}
                 uiTimings.record(OwnerStage.UiDurableReturn,System.nanoTime()-started);mutable.value=mutable.value.copy(presentationDiagnostics=uiTimings.summary())
                 accepted=true;localSends[token]=row.copy(nativeId=id)
-                if(mutable.value.drafts[conversation]==text)clear()
+                localSends.replaceAll{other,pending->if(other!=token&&pending.conversation==conversation)pending.copy(baseline=pending.baseline+id)else pending}
+                val nextDraft=mutable.value.drafts[conversation].orEmpty()
+                if(localSends.values.none{it.conversation==conversation&&it.nativeId==null}){
+                    if(nextDraft.isEmpty())clear() else dispatch(UiAction.Draft(conversation,nextDraft))
+                }
             }catch(failure:Exception){
                 if(failure is CancellationException)throw failure
-                if(epoch==uiGeneration&&account==current.accountId){localSends[token]=row.copy(failed=true);mutable.value=mutable.value.copy(notice="Local save was not confirmed. Your draft is retained; check history before retrying.")}
+                if(epoch==uiGeneration&&account==current.accountId){localSends[token]=row.copy(failed=true);mutable.value=mutable.value.copy(notice="Local save was not confirmed. The captured message is retained in its failed bubble and saved draft; check history before restoring it.")}
             }finally{
-                if(epoch==uiGeneration&&account==current.accountId){project();mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)}
+                if(epoch==uiGeneration&&account==current.accountId){project();mutable.value=mutable.value.copy(sendBusy=localSends.values.any{it.nativeId==null&&!it.failed},sendAccepted=accepted,sendCompletion=mutable.value.sendCompletion+1)}
             }
         }
     }
@@ -594,6 +602,16 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             is UiAction.Draft -> {
                 if(action.conversationId !in largeDrafts&&largeDrafts.size>=128){mutable.value=mutable.value.copy(notice="The local draft limit has been reached.");return}
+                if(localSends.values.any{it.conversation==action.conversationId&&it.nativeId==null}){
+                    // Keep the captured message's protected draft until its
+                    // commit is confirmed. New typing remains in the composer;
+                    // on success it is flushed through the normal draft path.
+                    val limit=if(action.conversationId.startsWith("group:"))4096 else 512*1024
+                    if(action.text.toByteArray(Charsets.UTF_8).size>limit)return
+                    largeDrafts[action.conversationId]=action.text
+                    mutable.value=reduceUi(mutable.value,action)
+                    return
+                }
                 if(action.conversationId.startsWith("group:")){
                     val group=current.groups.find{"group:${it.id}"==action.conversationId} ?: return
                     if(action.text.toByteArray(Charsets.UTF_8).size>4096)return
@@ -732,7 +750,6 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.AttachmentAction -> viewModelScope.launch{try{backend.attachmentAction(action.id,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}
             is UiAction.PreviewMessage -> {
-                if(mutable.value.sendBusy)return
                 val group=mutable.value.selectedId?.removePrefix("group:")?.let{id->current.groups.find{it.id==id}}
                 if(group!=null){
                     if(action.text.isBlank()||action.text.toByteArray(Charsets.UTF_8).size>4096)return
@@ -786,7 +803,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
             is UiAction.RetryPreview -> {
                 val failed=localSends.values.firstOrNull{it.token==action.messageId&&it.failed}
-                if(failed!=null){localSends.remove(failed.token);dispatch(UiAction.Draft(failed.conversation,failed.text));project();mutable.value=mutable.value.copy(notice="Draft restored. Review local history, then press Send to retry explicitly.");return}
+                if(failed!=null){
+                    if(!mutable.value.drafts[failed.conversation].isNullOrEmpty()){
+                        mutable.value=mutable.value.copy(notice="Your new typing is retained. Clear or send it before restoring the captured message from this failed bubble.");return
+                    }
+                    localSends.remove(failed.token);dispatch(UiAction.Draft(failed.conversation,failed.text));project();mutable.value=mutable.value.copy(notice="Draft restored. Review local history, then press Send to retry explicitly.");return
+                }
                 val selected=mutable.value.selectedId
                 if(selected?.startsWith("group:")==true)viewModelScope.launch{try{backend.retryGroup(selected.removePrefix("group:"),action.messageId)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Exact group retry requires the current epoch and a live event channel. The saved message is retained.")}}
                 else mutable.value=mutable.value.copy(notice="This retry capability is unavailable.")

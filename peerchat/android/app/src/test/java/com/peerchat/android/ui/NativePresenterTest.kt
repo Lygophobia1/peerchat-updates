@@ -34,6 +34,8 @@ class NativePresenterTest {
         override val state=MutableStateFlow(MessagingSnapshot())
         var reject=true;var sends=0;var failSend=false;var closed=false
         var sendBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
+        val sendBlockers=mutableMapOf<String,kotlinx.coroutines.CompletableDeferred<Unit>>()
+        val sendIds=mutableMapOf<String,String>()
         var signIns=0;var endpoint:ServerEndpoint?=null
         var registrations=0
         override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession {
@@ -78,7 +80,7 @@ class NativePresenterTest {
                 ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())),serverPresenceLive=true)
             return AccountSession(19,"Jonah","test-only-token",true)
         }
-        override suspend fun send(peerId:String,text:String):String {sends++;sendBlocker?.await();if(failSend)error("test failure");return "c".repeat(32)}
+        override suspend fun send(peerId:String,text:String):String {sends++;(sendBlockers[text]?:sendBlocker)?.await();if(failSend)error("test failure");return sendIds[text]?:"c".repeat(32)}
         override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
         override suspend fun requestFriend(username:String) {}
         val searches=mutableListOf<String>()
@@ -257,6 +259,7 @@ class NativePresenterTest {
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
         val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.sendBlocker=blocker
         p.dispatch(UiAction.Draft("account:8","sent draft"));p.dispatch(UiAction.PreviewMessage("sent draft"))
+        assertEquals("",p.state.value.drafts["account:8"])
         assertEquals(MessageStatus.Saving,p.state.value.selected!!.messages.single().status)
         assertEquals(0,commands.sends)
         dispatcher.scheduler.runCurrent();assertTrue(p.state.value.sendBusy);assertEquals(1,commands.sends)
@@ -274,6 +277,63 @@ class NativePresenterTest {
         assertFalse(p.state.value.sendBusy);assertNull(p.state.value.selectedId)
         blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
         assertFalse(p.state.value.sendAccepted);assertFalse(p.state.value.sendBusy)
+    }
+    @Test fun twoCapturedSendsProgressIndependentlyAndCompleteInReverseOrder(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        val hello=kotlinx.coroutines.CompletableDeferred<Unit>();val second=kotlinx.coroutines.CompletableDeferred<Unit>()
+        commands.sendBlockers["Hello"]=hello;commands.sendBlockers["How are you"]=second
+        commands.sendIds["Hello"]="c".repeat(32);commands.sendIds["How are you"]="d".repeat(32)
+        p.dispatch(UiAction.Draft("account:8","Hello"));p.dispatch(UiAction.PreviewMessage("Hello"))
+        assertEquals("",p.state.value.drafts["account:8"])
+        p.dispatch(UiAction.Draft("account:8","How are you"));p.dispatch(UiAction.PreviewMessage("How are you"))
+        assertEquals("",p.state.value.drafts["account:8"])
+        assertEquals(listOf(MessageStatus.Saving,MessageStatus.Saving),p.state.value.selected!!.messages.map{it.status})
+        dispatcher.scheduler.runCurrent();assertEquals(2,commands.sends)
+        p.dispatch(UiAction.Draft("account:8","third draft"))
+        second.complete(Unit);dispatcher.scheduler.runCurrent()
+        assertTrue(p.state.value.sendBusy);assertEquals("third draft",p.state.value.drafts["account:8"])
+        assertEquals(MessageStatus.Queued,p.state.value.selected!!.messages.single{it.id=="d".repeat(32)}.status)
+        assertEquals(MessageStatus.Saving,p.state.value.selected!!.messages.single{it.text=="Hello"}.status)
+        hello.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(p.state.value.sendBusy);assertEquals("third draft",p.state.value.drafts["account:8"])
+        assertEquals(setOf("c".repeat(32),"d".repeat(32)),p.state.value.selected!!.messages.map{it.id}.toSet())
+    }
+    @Test fun failedCapturedMessageCannotReplaceNewTypingAndRetainsItsProtectedDraft(){
+        val commands=Commands().apply{reject=false;failSend=true}
+        val preferences=Preferences();val settings=Settings().apply{saved=ServerEndpoint("localhost",7443,"a".repeat(64))}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,preferences)
+        store.put("capture-failure",p);dispatcher.scheduler.runCurrent()
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        p.dispatch(UiAction.Draft("account:8","captured original"));dispatcher.scheduler.advanceUntilIdle()
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.sendBlocker=blocker
+        p.dispatch(UiAction.PreviewMessage("captured original"));dispatcher.scheduler.runCurrent()
+        assertEquals("",p.state.value.drafts["account:8"])
+        p.dispatch(UiAction.Draft("account:8","new typing"));dispatcher.scheduler.advanceTimeBy(300);dispatcher.scheduler.runCurrent()
+        assertTrue(preferences.value.conversations.values.any{it.draft=="captured original"})
+        blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
+        val failed=p.state.value.selected!!.messages.single()
+        assertEquals(MessageStatus.Failed,failed.status);assertEquals("captured original",failed.text)
+        p.dispatch(UiAction.RetryPreview(failed.id))
+        assertEquals("new typing",p.state.value.drafts["account:8"])
+        assertEquals(1,commands.sends)
+        p.dispatch(UiAction.Draft("account:8",""));p.dispatch(UiAction.RetryPreview(failed.id));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("captured original",p.state.value.drafts["account:8"])
+        assertEquals(1,commands.sends)
+    }
+    @Test fun localSendBoundRejectsSeventeenthWithoutClearingItsDraft(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();commands.sendBlocker=blocker
+        repeat(16){index->val text="message $index";commands.sendIds[text]=(index+1).toString(16).padStart(32,'0')
+            p.dispatch(UiAction.Draft("account:8",text));p.dispatch(UiAction.PreviewMessage(text))
+        }
+        assertEquals(16,p.state.value.localSendCount)
+        assertEquals(16,p.state.value.selected!!.messages.count{it.status==MessageStatus.Saving})
+        p.dispatch(UiAction.Draft("account:8","retained seventeenth"));p.dispatch(UiAction.PreviewMessage("retained seventeenth"))
+        assertEquals("retained seventeenth",p.state.value.drafts["account:8"])
+        dispatcher.scheduler.runCurrent();assertEquals(16,commands.sends)
+        blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
     }
     @Test fun typingBeforeProtectedPreferencesLoadIsMergedAndSaved(){
         val tasks=java.util.ArrayDeque<Runnable>()

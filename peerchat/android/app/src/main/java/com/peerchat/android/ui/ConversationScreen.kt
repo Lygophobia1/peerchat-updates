@@ -29,7 +29,6 @@ import kotlinx.coroutines.delay
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ConversationScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var draft by rememberSaveable(state.account?.accountId,c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
-    var sending by remember(state.account?.accountId,c.id) { mutableStateOf(false) }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
     val timeline=remember(c.messages,c.attachments){conversationTimeline(c)}
     var followingLatest by remember(c.id){mutableStateOf(true)}
@@ -40,7 +39,7 @@ import kotlinx.coroutines.delay
     val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
         if(uri!=null)dispatch(UiAction.SendAttachment(uri))
     }
-    LaunchedEffect(c.id,state.drafts[c.id]){if(!sending&&!state.demo)draft=state.drafts[c.id] ?: ""}
+    LaunchedEffect(c.id,state.drafts[c.id]){if(!state.demo)draft=state.drafts[c.id] ?: ""}
     LaunchedEffect(c.id) {
         // Observe the anchored row, not total row count: appending/importing
         // messages must not reinterpret an unchanged viewport as user scrolling.
@@ -56,15 +55,6 @@ import kotlinx.coroutines.delay
             try{list.scrollToItem(timeline.size+dateSeparators);followingLatest=true;initialScroll=false}
             finally{positioning=false}
         }
-    }
-    LaunchedEffect(sending) {
-        if (sending) {
-            if(state.demo){delay(150);dispatch(UiAction.PreviewMessage(draft));draft="";sending=false}
-            else dispatch(UiAction.PreviewMessage(draft))
-        }
-    }
-    LaunchedEffect(state.sendCompletion) {
-        if(!state.demo&&sending){draft=state.drafts[c.id] ?: draft;sending=false}
     }
     Scaffold(topBar = {
         TopAppBar(title = {
@@ -95,11 +85,16 @@ import kotlinx.coroutines.delay
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                 if(c.kind==ChatKind.Direct)ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)picker.launch(arrayOf("*/*")) })
                 OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    enabled = (state.demo&&state.connection==ConnectionState.Online&&!sending||!state.demo&&state.account!=null), minLines = 1, maxLines = 5,
+                    enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null), minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
-                IconButton({followingLatest=true;scrollRequest++;sending=true}, enabled = draft.isNotBlank() && !sending && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
-                    if (sending) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                    else Icon(Icons.AutoMirrored.Filled.Send, if(state.demo) "Send local preview" else "Send message", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton({
+                    val captured=draft
+                    if(captured.isNotBlank()){
+                        followingLatest=true;scrollRequest++;draft=""
+                        dispatch(UiAction.PreviewMessage(captured))
+                    }
+                }, enabled = draft.isNotBlank() && state.localSendCount<16 && (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null)) {
+                    Icon(Icons.AutoMirrored.Filled.Send, if(state.demo) "Send local preview" else "Send message", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

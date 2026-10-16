@@ -57,7 +57,7 @@ sealed interface LoginResult {
 data class PeerChatUiState(
     val demo: Boolean = true, val diagnostics: String = "UI demo — no live diagnostics",
     val voiceAvailable:Boolean=false,val voiceDiagnostic:String="Voice calls are unavailable in this build.",
-    val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,
+    val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,val localSendCount:Int=0,
     val incomingRequests:List<MemberUi> = emptyList(),
     val outgoingRequests:List<MemberUi> = emptyList(),
     val contactPage:ContactPage=ContactPage.Menu,

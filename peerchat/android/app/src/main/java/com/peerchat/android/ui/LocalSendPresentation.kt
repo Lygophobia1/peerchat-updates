@@ -13,7 +13,8 @@ internal fun presentLocalSends(conversations:List<ConversationUi>,pending:List<L
     // newly published local rows for that one pending command, never match text
     // heuristically or duplicate the row before its exact native ID is known.
     val temporary=local.map{it.token}.toSet()
-    val visible=conversation.messages.filter{it.id !in temporary&&(saving==null||!it.outgoing||it.id in saving.baseline)}
+    val confirmed=local.mapNotNull{it.nativeId}.toSet()
+    val visible=conversation.messages.filter{it.id !in temporary&&(saving==null||!it.outgoing||it.id in saving.baseline||it.id in confirmed)}
     val ids=conversation.messages.map{it.id}.toSet()+conversation.attachments.map{it.id}
     val added=local.filter{it.nativeId==null||it.nativeId !in ids}.map{row->
         MessageUi(row.nativeId?:row.token,sender,name,row.text,true,
