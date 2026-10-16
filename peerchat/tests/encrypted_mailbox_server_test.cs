@@ -109,6 +109,9 @@ internal static class EncryptedMailboxServerTest {
                 Check(db.FetchMailbox(8,b).Count==1);
                 var fetched=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>());
                 var rows=(System.Collections.IEnumerable)fetched["envelopes"];var values=rows.Cast<object>().Cast<Dictionary<string,object>>().ToArray();Check(values.Length==1&&Convert.FromBase64String((string)values[0]["envelope"]).SequenceEqual(envelope));
+                string fetchCursor=(string)fetched["nextCursor"];Check(fetchCursor==(string)values[0]["cursor"]);
+                var fetchedTail=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>{{"cursor",fetchCursor}});
+                Check(((System.Collections.IEnumerable)fetchedTail["envelopes"]).Cast<object>().Count()==0&&(string)fetchedTail["nextCursor"]=="");
                 var fetchedAgain=receiving.Mailbox("mailbox_fetch",b,new Dictionary<string,object>());
                 var replay=((System.Collections.IEnumerable)fetchedAgain["envelopes"]).Cast<object>().Cast<Dictionary<string,object>>().ToArray();
                 Check(replay.Length==1&&Convert.FromBase64String((string)replay[0]["envelope"]).SequenceEqual(envelope));
@@ -122,7 +125,10 @@ internal static class EncryptedMailboxServerTest {
                 // ACK/cleanup. It reconciles the durable proof, not a live ACK.
                 sending.SessionToken=Guid.NewGuid().ToString("N");sending.AccountId=7;
                 using(var sha=SHA256.Create())db.CreateSession(BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sending.SessionToken))).Replace("-","").ToLowerInvariant(),7,DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds());
-                var proofs=sending.Mailbox("mailbox_receipts",a,new Dictionary<string,object>());Check(((System.Collections.IEnumerable)proofs["receipts"]).Cast<object>().Count()==1);
+                var proofs=sending.Mailbox("mailbox_receipts",a,new Dictionary<string,object>());var proofRows=((System.Collections.IEnumerable)proofs["receipts"]).Cast<object>().Cast<Dictionary<string,object>>().ToArray();Check(proofRows.Length==1);
+                string proofCursor=(string)proofs["nextCursor"];Check(proofCursor==(string)proofRows[0]["cursor"]&&(string)proofRows[0]["recipientDevice"]==b);
+                var proofTail=sending.Mailbox("mailbox_receipts",a,new Dictionary<string,object>{{"cursor",proofCursor}});
+                Check(((System.Collections.IEnumerable)proofTail["receipts"]).Cast<object>().Count()==0&&(string)proofTail["nextCursor"]=="");
                 Reject(()=>sending.Mailbox("mailbox_fetch",b,new Dictionary<string,object>()));
                 var wrong=new DiscoveryClient("localhost",port,new string('0',64)){SessionToken=sending.SessionToken};Reject(()=>wrong.Mailbox("mailbox_fetch",a,new Dictionary<string,object>()));
                 Console.WriteLine("PASS: pinned TLS recipient offline during store, sender logged out, recipient reconnect/same-binding registration, failed fetch retains ciphertext, repeated fetch and signed ACK; recipient cleanup precedes sender reopen/receipt reconciliation; duplicate/wrong-device/pin rejection.");

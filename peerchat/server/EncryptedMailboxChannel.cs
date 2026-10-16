@@ -32,7 +32,10 @@ sealed partial class DiscoveryServer {
                     Notify(envelope.Recipient,new Dictionary<string,object>{{"event","mailbox_ready"}});
                     pushWakes.Hint(envelope.Recipient,envelope.RecipientDevice);
                 }
-            } else if(type=="mailbox_fetch") {reply["envelopes"]=accounts.FetchMailbox(account,device);reply["state"]="ready";}
+            } else if(type=="mailbox_fetch") {
+                var rows=accounts.FetchMailbox(account,device,Text(request,"cursor")??"");
+                reply["envelopes"]=rows;reply["nextCursor"]=rows.Count==0?"":rows[rows.Count-1]["cursor"];reply["state"]="ready";
+            }
             else if(type=="mailbox_ack") {
                 byte[] wire=MailboxProtocol.Decode(Text(request,"receipt"),2048);
                 string state=accounts.AckMailbox(account,device,identity,wire);reply["state"]=state;
@@ -41,7 +44,10 @@ sealed partial class DiscoveryServer {
                     long senderAccount=accounts.MailboxReceiptSender(receipt);
                     if(senderAccount>0)Notify(senderAccount,new Dictionary<string,object>{{"event","mailbox_receipt_ready"}});
                 }
-            } else if(type=="mailbox_receipts") {reply["receipts"]=accounts.MailboxReceipts(account,device,Text(request,"afterMessageId")??"");reply["state"]="ready";}
+            } else if(type=="mailbox_receipts") {
+                var rows=accounts.MailboxReceipts(account,device,Text(request,"afterMessageId")??"",Text(request,"cursor"));
+                reply["receipts"]=rows;reply["nextCursor"]=rows.Count==0?"":rows[rows.Count-1]["cursor"];reply["state"]="ready";
+            }
         }catch(InvalidOperationException){reply["state"]="rejected_or_storage_unavailable";}
         catch(FormatException){reply["state"]="malformed_request";}
         catch(System.Security.Cryptography.CryptographicException){reply["state"]="invalid_key_or_signature";}

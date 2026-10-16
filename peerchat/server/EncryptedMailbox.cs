@@ -73,7 +73,7 @@ sealed partial class AccountDatabase {
             Execute("COMMIT;");return "stored";
         }catch{try{Execute("ROLLBACK;");}catch{}throw;}
     }}
-    List<Dictionary<string,object>> MailboxRows(string sql,int maximum,string idLabel,string wireLabel){
+    List<Dictionary<string,object>> MailboxRows(string sql,int maximum,string idLabel,string wireLabel,bool includeCursor=false,bool receipt=false){
         var rows=new List<Dictionary<string,object>>();IntPtr statement=IntPtr.Zero;int bytes=0;
         try{if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Mailbox database read failed.");
             int result;while((result=SqliteNative.step(statement))==100){
@@ -81,13 +81,22 @@ sealed partial class AccountDatabase {
                 // Fits the existing bounded server frame; cursorless repeated fetch
                 // returns remaining rows after real recipient ACK removes payloads.
                 if(rows.Count>0&&bytes+wire.Length>64000)break;bytes+=wire.Length;
-                rows.Add(new Dictionary<string,object>{{idLabel,SqliteNative.columnText(statement,0)},{wireLabel,Convert.ToBase64String(wire)}});
+                var item=new Dictionary<string,object>{{idLabel,SqliteNative.columnText(statement,0)},{wireLabel,Convert.ToBase64String(wire)}};
+                if(includeCursor){item["cursor"]=SqliteNative.columnText(statement,2);if(receipt)item["recipientDevice"]=SqliteNative.columnText(statement,3);}
+                rows.Add(item);
             }if(result!=100&&result!=101)throw new InvalidOperationException("Mailbox database read failed.");return rows;
         }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
     }
-    internal List<Dictionary<string,object>> FetchMailbox(long account,string device){lock(gate){
+    // The cursor is scoped by the authenticated account and destination device in
+    // the query. It names a position, never an authorization grant or ACK.
+    internal List<Dictionary<string,object>> FetchMailbox(long account,string device,string cursor=""){lock(gate){
         if(!OwnsDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
-        return MailboxRows("SELECT message_id,envelope FROM encrypted_mailbox m WHERE recipient_account="+account+" AND recipient_device="+Quote(device)+" AND envelope IS NOT NULL AND EXISTS(SELECT 1 FROM mailbox_recipient_keys k WHERE k.device=m.recipient_device AND k.key_id=m.key_id AND k.state IN ('active','retired')) AND EXISTS(SELECT 1 FROM friendships f WHERE f.account_low=MIN(m.sender_account,m.recipient_account) AND f.account_high=MAX(m.sender_account,m.recipient_account)) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=m.sender_account AND b.blocked_id=m.recipient_account) OR (b.blocker_id=m.recipient_account AND b.blocked_id=m.sender_account)) ORDER BY created,message_id LIMIT 64",64,"messageId","envelope");
+        string after="";
+        if(cursor.Length>0){var parts=cursor.Split(':');long created;
+            if(parts.Length!=5||parts[0]!=account.ToString()||parts[1]!=device||!Int64.TryParse(parts[2],out created)||created<=0||parts[2]!=created.ToString()||!MailboxProtocol.Id(parts[3],32)||!MailboxProtocol.Id(parts[4],64))throw new InvalidOperationException("Invalid mailbox cursor.");
+            after=" AND (m.created>"+created+" OR (m.created="+created+" AND (m.message_id>"+Quote(parts[3])+" OR (m.message_id="+Quote(parts[3])+" AND m.sender_device>"+Quote(parts[4])+"))))";
+        }
+        return MailboxRows("SELECT message_id,envelope,'"+account+":"+device+":'||CAST(created AS TEXT)||':'||message_id||':'||sender_device FROM encrypted_mailbox m WHERE recipient_account="+account+" AND recipient_device="+Quote(device)+" AND envelope IS NOT NULL AND EXISTS(SELECT 1 FROM mailbox_recipient_keys k WHERE k.device=m.recipient_device AND k.key_id=m.key_id AND k.state IN ('active','retired')) AND EXISTS(SELECT 1 FROM friendships f WHERE f.account_low=MIN(m.sender_account,m.recipient_account) AND f.account_high=MAX(m.sender_account,m.recipient_account)) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=m.sender_account AND b.blocked_id=m.recipient_account) OR (b.blocker_id=m.recipient_account AND b.blocked_id=m.sender_account))"+after+" ORDER BY created,message_id,sender_device LIMIT 64",64,"messageId","envelope",true);
     }}
     internal string AckMailbox(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var ack=MailboxProtocol.Receipt.Parse(wire);PurgeMailbox();
@@ -100,10 +109,17 @@ sealed partial class AccountDatabase {
         if(prior!=null&&prior.Length>0)return "acknowledged";
         Execute("UPDATE encrypted_mailbox SET receipt="+MailboxData(wire)+",envelope=NULL,expires="+(MailboxNow()+MailboxProtocol.MaxTtl)+" WHERE "+predicate+";");return "acknowledged";
     }}
-    internal List<Dictionary<string,object>> MailboxReceipts(long account,string device,string afterMessage=""){lock(gate){
+    internal List<Dictionary<string,object>> MailboxReceipts(long account,string device,string afterMessage="",string cursor=null){lock(gate){
         if(!OwnsDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
-        if(afterMessage.Length>0&&!MailboxProtocol.Id(afterMessage,32))throw new InvalidOperationException("Invalid receipt cursor.");
-        return MailboxRows("SELECT message_id,receipt FROM encrypted_mailbox WHERE sender_account="+account+" AND sender_device="+Quote(device)+" AND message_id>"+Quote(afterMessage)+" AND receipt IS NOT NULL ORDER BY message_id LIMIT 64",64,"messageId","receipt");
+        string after;
+        if(cursor!=null){after="";if(cursor.Length>0){var parts=cursor.Split(':');
+            if(parts.Length!=4||parts[0]!=account.ToString()||parts[1]!=device||!MailboxProtocol.Id(parts[2],32)||!MailboxProtocol.Id(parts[3],64))throw new InvalidOperationException("Invalid receipt cursor.");
+            after=" AND (message_id>"+Quote(parts[2])+" OR (message_id="+Quote(parts[2])+" AND recipient_device>"+Quote(parts[3])+"))";
+        }}else{
+            if(afterMessage.Length>0&&!MailboxProtocol.Id(afterMessage,32))throw new InvalidOperationException("Invalid receipt cursor.");
+            after=" AND message_id>"+Quote(afterMessage);
+        }
+        return MailboxRows("SELECT message_id,receipt,'"+account+":"+device+":'||message_id||':'||recipient_device,recipient_device FROM encrypted_mailbox WHERE sender_account="+account+" AND sender_device="+Quote(device)+after+" AND receipt IS NOT NULL ORDER BY message_id,recipient_device LIMIT 64",64,"messageId","receipt",true,true);
     }}
     internal long MailboxReceiptSender(MailboxProtocol.Receipt receipt){lock(gate){
         return ScalarLong(database,"SELECT sender_account FROM encrypted_mailbox WHERE sender_device="+Quote(receipt.SenderDevice)+" AND recipient_device="+Quote(receipt.Device)+" AND message_id="+Quote(receipt.Message)+" AND digest="+Quote(receipt.DigestHex)+" AND receipt IS NOT NULL");
