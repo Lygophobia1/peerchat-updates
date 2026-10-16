@@ -17,6 +17,7 @@ internal sealed class MailboxExecution {
     readonly Queue<string> recentStages=new Queue<string>();
     DateTime lastStageUtc=DateTime.MinValue;
     string retrySummary="Retry pending: none";
+    string eligibilitySummary="Eligibility refresh: no active recipient";
     void Note(string stage){lock(diagnosticsGate){lastStageUtc=DateTime.UtcNow;recentStages.Enqueue(lastStageUtc.ToString("O")+" "+stage);while(recentStages.Count>32)recentStages.Dequeue();}}
     void Measure(string stage,long started){
         long elapsed=(long)((System.Diagnostics.Stopwatch.GetTimestamp()-started)*1000.0/System.Diagnostics.Stopwatch.Frequency);
@@ -25,6 +26,7 @@ internal sealed class MailboxExecution {
     public string DiagnosticsSnapshot(){lock(diagnosticsGate){
         var result=new StringBuilder();result.Append("Mailbox last stage UTC: ").Append(lastStageUtc==DateTime.MinValue?"N/A":lastStageUtc.ToString("O"));
         result.Append("\n").Append(retrySummary);
+        result.Append("\n").Append(eligibilitySummary);
         foreach(var item in timings.OrderBy(x=>x.Key,StringComparer.Ordinal))result.Append("\n").Append(item.Key).Append(": count=").Append(item.Value.Count).Append(" last=").Append(item.Value.LastMilliseconds).Append("ms max=").Append(item.Value.MaximumMilliseconds).Append("ms");
         foreach(var stage in recentStages)result.Append("\n").Append(stage);
         return result.ToString();
@@ -39,7 +41,7 @@ internal sealed class MailboxExecution {
         lifetime.Token.ThrowIfCancellationRequested();
         long started=System.Diagnostics.Stopwatch.GetTimestamp();
         try{return invoke(operation,input,id,allowed);}finally{
-            if(operation==3||operation==8)Measure(operation==3?"Native envelope encryption/preparation":"Native recipient selection",started);
+            if(operation==3||operation==8||operation==11)Measure(operation==3?"Native envelope encryption/preparation":operation==8?"Native recipient selection":"Native eligibility snapshot install",started);
         }
     }
     internal byte[] PendingUploads(bool allowed){return Native(2,null,"",allowed);}
@@ -48,16 +50,53 @@ internal sealed class MailboxExecution {
     sealed class Retry { internal int Failures;internal DateTime Due;internal string Reason; }
     readonly Dictionary<string,Retry> retries=new Dictionary<string,Retry>(StringComparer.Ordinal);
     readonly Dictionary<string,int> bindingOffset=new Dictionary<string,int>(StringComparer.Ordinal);
+    readonly Dictionary<long,DateTime> eligibilityRefreshUtc=new Dictionary<long,DateTime>();
+    int eligibilityOffset;
+    long eligibilityGeneration,eligibilityLocalAccount;
+    string eligibilityLocalDevice="";
     bool registered;
     public bool NeedsContinuation {get;private set;}
     public DateTime NextRetryUtc {get;private set;}
+    public DateTime NextEligibilityUtc {get;private set;}
     public MailboxExecution(CoreAdapter core):this((operation,input,id,allowed)=>core.Mailbox(operation,input,id,allowed)){}
     internal MailboxExecution(Func<uint,byte[],string,bool,byte[]> invoke){this.invoke=invoke;}
-    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();NextRetryUtc=DateTime.MinValue;lock(diagnosticsGate){timings.Clear();recentStages.Clear();lastStageUtc=DateTime.MinValue;retrySummary="Retry pending: none";}}
+    public void Reset(){registered=false;receiptCursor=legacyReceiptCursor=fetchCursor="";retries.Clear();bindingOffset.Clear();eligibilityRefreshUtc.Clear();eligibilityOffset=0;eligibilityGeneration=eligibilityLocalAccount=0;eligibilityLocalDevice="";NextRetryUtc=NextEligibilityUtc=DateTime.MinValue;lock(diagnosticsGate){timings.Clear();recentStages.Clear();lastStageUtc=DateTime.MinValue;retrySummary="Retry pending: none";eligibilitySummary="Eligibility refresh: no active recipient";}}
     static void Require(bool value){if(!value)throw new InvalidOperationException("Mailbox result rejected.");}
     static string Text(Dictionary<string,object> item,string key){object value;return item.TryGetValue(key,out value)?value as string:null;}
     static byte[] Decode(string text,int max){Require(text!=null&&text.Length<=((max+2)/3)*4);var result=Convert.FromBase64String(text);Require(result.Length>0&&result.Length<=max);return result;}
     static IEnumerable<Dictionary<string,object>> Rows(Dictionary<string,object> reply,string key){object rows;Require(reply.TryGetValue(key,out rows));return ((System.Collections.IEnumerable)rows).Cast<object>().Select(x=>(Dictionary<string,object>)x);}
+    static long Integer(Dictionary<string,object> item,string key){object value;Require(item.TryGetValue(key,out value)&&(value is int||value is long));long number=Convert.ToInt64(value);Require(number>=0);return number;}
+    static bool Boolean(Dictionary<string,object> item,string key){object value;Require(item.TryGetValue(key,out value)&&value is bool);return (bool)value;}
+    static bool Hex(string value,int length){return value!=null&&value.Length==length&&value.All(c=>c>='0'&&c<='9'||c>='a'&&c<='f'||c>='A'&&c<='F');}
+    static void UInt32(Stream output,long value){Require(value>=0&&value<=uint.MaxValue);for(int shift=24;shift>=0;shift-=8)output.WriteByte((byte)(value>>shift));}
+    static void UInt64(Stream output,long value){Require(value>=0);for(int shift=56;shift>=0;shift-=8)output.WriteByte((byte)(value>>shift));}
+    static void Field(Stream output,byte[] value){UInt32(output,value.Length);output.Write(value,0,value.Length);}
+    static void TextField(Stream output,string value){Field(output,new UTF8Encoding(false,true).GetBytes(value));}
+    // The authenticated RPC response is still treated as untrusted input here.
+    // Native operation 11 independently checks the current identity/generation.
+    internal static byte[] EligibilitySnapshotWire(Dictionary<string,object> reply,long localAccount,string localDevice,long friendGeneration,long recipientAccount,DateTime now){
+        Require(reply!=null&&Text(reply,"state")=="ready"&&localAccount>0&&recipientAccount>0&&friendGeneration>0&&Hex(localDevice,64));
+        Require(Integer(reply,"snapshotVersion")==1&&Integer(reply,"senderAccountId")==localAccount&&String.Equals(Text(reply,"senderDevice"),localDevice,StringComparison.OrdinalIgnoreCase));
+        Require(Integer(reply,"recipientAccountId")==recipientAccount);
+        string snapshotId=Text(reply,"snapshotId");Require(Hex(snapshotId,32));
+        long sequence=Integer(reply,"snapshotSequence"),issued=Integer(reply,"issuedUtcMs"),freshUntil=Integer(reply,"freshUntilUtcMs");
+        long current=new DateTimeOffset(now.ToUniversalTime()).ToUnixTimeMilliseconds();
+        Require(sequence>0&&issued>0&&freshUntil>issued&&freshUntil-issued<=120000&&issued<=current+30000&&freshUntil>current);
+        var candidates=Rows(reply,"candidates").OrderBy(x=>Text(x,"device"),StringComparer.Ordinal).ToArray();Require(candidates.Length<=32);
+        var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using(var output=new MemoryStream()){
+            var domain=Encoding.ASCII.GetBytes("PeerChat/mailbox-eligibility-snapshot/v1\0");output.Write(domain,0,domain.Length);
+            UInt64(output,localAccount);UInt64(output,friendGeneration);TextField(output,localDevice);UInt64(output,recipientAccount);
+            UInt32(output,1);TextField(output,snapshotId);UInt64(output,sequence);UInt64(output,issued);UInt64(output,freshUntil);output.WriteByte((byte)candidates.Length);
+            foreach(var candidate in candidates){
+                string device=Text(candidate,"device"),encoded=Text(candidate,"binding");
+                Require(Hex(device,64)&&seen.Add(device)&&encoded!=null&&encoded.Length<=5464);
+                byte[] binding=encoded.Length==0?new byte[0]:Convert.FromBase64String(encoded);Require(binding.Length<=4096);
+                TextField(output,device);output.WriteByte(Boolean(candidate,"online")?(byte)1:(byte)0);Field(output,binding);
+            }
+            Require(output.Length<=70000);return output.ToArray();
+        }
+    }
     static bool AuthenticationFailure(Exception error){
         var rejected=error as DiscoveryRequestException;
         if(rejected!=null)return true;
@@ -98,10 +137,54 @@ internal sealed class MailboxExecution {
         public void End(){Require(stream.Position==stream.Length);}
         public void Dispose(){input.Dispose();}
     }
+    void RefreshEligibility(long[] recipients,long friendGeneration,long localAccount,string localDevice,Func<string,Dictionary<string,object>,Dictionary<string,object>> request,Action<string> trace){
+        if(recipients==null||recipients.Length==0||friendGeneration<=0||localAccount<=0||!Hex(localDevice,64)){NextEligibilityUtc=DateTime.MinValue;lock(diagnosticsGate)eligibilitySummary="Eligibility refresh: no active authenticated recipient";return;}
+        if(eligibilityGeneration!=friendGeneration||eligibilityLocalAccount!=localAccount||!String.Equals(eligibilityLocalDevice,localDevice,StringComparison.OrdinalIgnoreCase)){
+            eligibilityRefreshUtc.Clear();eligibilityOffset=0;eligibilityGeneration=friendGeneration;eligibilityLocalAccount=localAccount;eligibilityLocalDevice=localDevice;
+        }
+        var active=recipients.Where(x=>x>0&&x!=localAccount).Distinct().OrderBy(x=>x).ToArray();
+        var activeSet=new HashSet<long>(active);
+        foreach(long stale in eligibilityRefreshUtc.Keys.Where(x=>!activeSet.Contains(x)).ToArray())eligibilityRefreshUtc.Remove(stale);
+        if(active.Length==0){NextEligibilityUtc=DateTime.MinValue;lock(diagnosticsGate)eligibilitySummary="Eligibility refresh: no active authenticated recipient";return;}
+        eligibilityOffset%=active.Length;int attempts=0,installed=0,unavailable=0;
+        for(int step=0;step<active.Length;step++){
+            long recipient=active[(eligibilityOffset+step)%active.Length];DateTime due;
+            if(eligibilityRefreshUtc.TryGetValue(recipient,out due)&&due>DateTime.UtcNow)continue;
+            if(attempts>=4){NeedsContinuation=true;continue;}
+            attempts++;
+            try{
+                var reply=request("mailbox_eligibility_snapshot",new Dictionary<string,object>{{"recipientAccountId",recipient.ToString(System.Globalization.CultureInfo.InvariantCulture)}});
+                string state=Text(reply,"state");
+                if(state=="session_invalidated")throw new DiscoveryRequestException(state);
+                if(state!="ready"){
+                    string reason=state!=null&&state.Length<=64&&state.All(c=>c>='a'&&c<='z'||c>='0'&&c<='9'||c=='_')?state:"snapshot_refused";
+                    eligibilityRefreshUtc[recipient]=DateTime.UtcNow.AddSeconds(15);unavailable++;
+                    trace("mailbox eligibility recipient="+recipient+" refresh refused reason="+reason+"; native selection remains unresolved without a fresh snapshot");
+                    continue;
+                }
+                var wire=EligibilitySnapshotWire(reply,localAccount,localDevice,friendGeneration,recipient,DateTime.UtcNow);
+                Require(Native(11,wire).SequenceEqual(new byte[]{1}));
+                eligibilityRefreshUtc[recipient]=DateTime.UtcNow.AddSeconds(60);
+                installed++;
+                trace("mailbox eligibility recipient="+recipient+" authenticated snapshot installed; next refresh in 60s");
+            }catch(Exception error){
+                if(AuthenticationFailure(error))throw;
+                eligibilityRefreshUtc[recipient]=DateTime.UtcNow.AddSeconds(15);
+                unavailable++;
+                trace("mailbox eligibility recipient="+recipient+" refresh unavailable reason="+FailureReason(error)+"; native selection remains unresolved without a fresh snapshot");
+            }
+        }
+        eligibilityOffset=(eligibilityOffset+Math.Max(1,attempts))%active.Length;
+        NextEligibilityUtc=active.Select(x=>eligibilityRefreshUtc.ContainsKey(x)?eligibilityRefreshUtc[x]:DateTime.UtcNow).Min();
+        lock(diagnosticsGate)eligibilitySummary="Eligibility refresh: active="+active.Length+" installed_this_pass="+installed+" unavailable_this_pass="+unavailable+"; next due UTC="+NextEligibilityUtc.ToString("O");
+    }
     public void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged,Action<string> diagnostic=null){Service(accounts,device,allowed,acknowledged,diagnostic,null);}
     internal void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged,Action<string> diagnostic,Func<string,Dictionary<string,object>,Dictionary<string,object>> requestOverride){
+        Service(accounts,device,allowed,acknowledged,diagnostic,requestOverride,null,0,0);
+    }
+    internal void Service(DiscoveryClient accounts,string device,bool allowed,Action<string,bool> acknowledged,Action<string> diagnostic,Func<string,Dictionary<string,object>,Dictionary<string,object>> requestOverride,long[] eligibleRecipients,long friendGeneration,long localAccount){
         NeedsContinuation=false;
-        NextRetryUtc=DateTime.MinValue;
+        NextRetryUtc=NextEligibilityUtc=DateTime.MinValue;
         Action<string> trace=message=>{
             string safe=message;
             int marker=safe.IndexOf("message=",StringComparison.Ordinal);
@@ -126,11 +209,12 @@ internal sealed class MailboxExecution {
                 Require(Text(request("mailbox_register",body),"state")=="accepted");Require(Native(1,binding).SequenceEqual(new byte[]{1}));
                 var current=Native(0,null,"",allowed);registered=current.SequenceEqual(binding);binding=current;}
             Require(registered);}
+        RefreshEligibility(eligibleRecipients,friendGeneration,localAccount,device,request,trace);
         string requestedFetchCursor=fetchCursor;
         var fetched=request("mailbox_fetch",new Dictionary<string,object>{{"cursor",fetchCursor}});Require(Text(fetched,"state")=="ready");
         var envelopes=Rows(fetched,"envelopes").ToArray();Require(envelopes.Length<=64);
         bool fetchPaging=fetched.ContainsKey("nextCursor");
-        NeedsContinuation=envelopes.Length>4;
+        NeedsContinuation|=envelopes.Length>4;
         foreach(var item in envelopes.Take(4)){
             string rowCursor=Text(item,"cursor");
             if(fetchPaging&&String.IsNullOrEmpty(rowCursor))throw new InvalidDataException("Mailbox fetch cursor missing.");

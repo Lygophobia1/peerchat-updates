@@ -13,6 +13,14 @@ internal static class MailboxExecutionReliabilityTest {
     static void Text(BinaryWriter writer,string value){Bytes(writer,Encoding.UTF8.GetBytes(value));}
     static Dictionary<string,object> Reply(string state){return new Dictionary<string,object>{{"state",state}};}
     static Dictionary<string,object> Page(string name,object[] rows){return new Dictionary<string,object>{{"state","ready"},{name,rows},{"nextCursor",rows.Length==0?"":((Dictionary<string,object>)rows.Last())["cursor"]}};}
+    static Dictionary<string,object> Eligibility(long recipient,string sender){long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();return new Dictionary<string,object>{
+        {"state","ready"},{"snapshotVersion",1},{"senderAccountId",1},{"senderDevice",sender},{"recipientAccountId",recipient},
+        {"snapshotId",new string('b',32)},{"snapshotSequence",recipient},{"issuedUtcMs",now},{"freshUntilUtcMs",now+120000},
+        {"candidates",new object[]{new Dictionary<string,object>{{"device",new string('c',64)},{"online",true},{"binding",Convert.ToBase64String(new byte[]{9,8})}}}}
+    };}
+    static void Rejected(Action action){try{action();}catch(InvalidOperationException){return;}throw new Exception("Expected snapshot rejection.");}
+    static long BigEndian(byte[] bytes,ref int position,int width){long value=0;for(int i=0;i<width;i++)value=(value<<8)|bytes[position++];return value;}
+    static string WireText(byte[] bytes,ref int position){int length=checked((int)BigEndian(bytes,ref position,4));string value=Encoding.UTF8.GetString(bytes,position,length);position+=length;return value;}
     public static void Main(){
         var stored=new List<string>();var diagnostics=new List<string>();
         var execution=new MailboxExecution((op,input,id,allowed)=>{
@@ -85,6 +93,43 @@ internal static class MailboxExecutionReliabilityTest {
         };
         for(int i=0;i<3;i++)reconciler.Service(null,"device",false,(peer,inserted)=>{},diagnostics.Add,receiptRpc);
         Check(verified==65&&receiptCursors.SequenceEqual(new[]{"","receipt-cursor-64","receipt-cursor-65"}));
-        Console.WriteLine("PASS: four refused outgoing items do not starve fifth; poisoned incoming rows allow later fetch; all 65 per-device receipts are verified across a boundary sharing one message ID.");
+        string own=new string('a',64);var installed=new List<byte[]>();var requested=new List<long>();
+        var eligibility=new MailboxExecution((op,input,id,allowed)=>{
+            if(op==7)return new byte[]{1};if(op==0)return new byte[]{2};if(op==1)return new byte[]{1};
+            if(op==2)return Record(4,w=>Number(w,0));
+            if(op==11){installed.Add(input);return new byte[]{1};}
+            throw new Exception("Unexpected native operation "+op);
+        });
+        Func<string,Dictionary<string,object>,Dictionary<string,object>> eligibilityRpc=(operation,body)=>{
+            if(operation=="mailbox_register")return Reply("accepted");
+            if(operation=="mailbox_fetch")return Page("envelopes",new object[0]);
+            if(operation=="mailbox_receipts")return Page("receipts",new object[0]);
+            if(operation=="mailbox_eligibility_snapshot"){
+                long recipient=long.Parse((string)body["recipientAccountId"]);requested.Add(recipient);return Eligibility(recipient,own);
+            }
+            throw new Exception("Unexpected RPC "+operation);
+        };
+        long[] active={2,3,4,5,6};
+        eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,eligibilityRpc,active,7,1);
+        Check(installed.Count==4&&eligibility.NeedsContinuation&&eligibility.NextEligibilityUtc<=DateTime.UtcNow.AddSeconds(2));
+        eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,eligibilityRpc,active,7,1);
+        Check(installed.Count==5&&requested.Distinct().Count()==5&&eligibility.NextEligibilityUtc>DateTime.UtcNow.AddSeconds(50));
+        eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,eligibilityRpc,new long[]{2},8,1);
+        Check(installed.Count==6&&requested.Last()==2); // Published friend generation invalidates the managed refresh cache.
+        var prefix=Encoding.ASCII.GetBytes("PeerChat/mailbox-eligibility-snapshot/v1\0");
+        Check(installed[0].Take(prefix.Length).SequenceEqual(prefix));int cursor=prefix.Length;
+        Check(BigEndian(installed[0],ref cursor,8)==1&&BigEndian(installed[0],ref cursor,8)==7&&WireText(installed[0],ref cursor)==own);
+        Check(BigEndian(installed[0],ref cursor,8)==2&&BigEndian(installed[0],ref cursor,4)==1&&WireText(installed[0],ref cursor)==new string('b',32));
+        Check(BigEndian(installed[0],ref cursor,8)==2);BigEndian(installed[0],ref cursor,8);BigEndian(installed[0],ref cursor,8);
+        Check(installed[0][cursor++]==1&&WireText(installed[0],ref cursor)==new string('c',64)&&installed[0][cursor++]==1);
+        Check(BigEndian(installed[0],ref cursor,4)==2&&installed[0][cursor++]==9&&installed[0][cursor++]==8&&cursor==installed[0].Length);
+        var spoof=Eligibility(2,own);spoof["senderAccountId"]=9;Rejected(()=>MailboxExecution.EligibilitySnapshotWire(spoof,1,own,7,2,DateTime.UtcNow));
+        var expired=Eligibility(2,own);expired["freshUntilUtcMs"]=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()-1;Rejected(()=>MailboxExecution.EligibilitySnapshotWire(expired,1,own,7,2,DateTime.UtcNow));
+        var wrongRecipient=Eligibility(9,own);Rejected(()=>MailboxExecution.EligibilitySnapshotWire(wrongRecipient,1,own,7,2,DateTime.UtcNow));
+        bool invalidated=false;
+        try{eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,(operation,body)=>operation=="mailbox_eligibility_snapshot"?Reply("session_invalidated"):operation=="mailbox_fetch"?Page("envelopes",new object[0]):Page("receipts",new object[0]),new long[]{2},9,1);}
+        catch(DiscoveryRequestException error){invalidated=error.ErrorCode=="session_invalidated";}
+        Check(invalidated&&installed.Count==6);
+        Console.WriteLine("PASS: fair outgoing/incoming/receipt scans; bounded authenticated eligibility refresh; source/recipient/expiry mismatches rejected.");
     }
 }

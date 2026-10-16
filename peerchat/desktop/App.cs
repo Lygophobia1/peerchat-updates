@@ -140,6 +140,7 @@ public partial class DesktopApplication {
     }
     void RequestMailbox(string reason){mailboxRequested=true;TraceUi("mailbox work hint: "+reason);}
     MailboxExecution mailboxExecution;DiscoveryClient mailboxService;
+    ulong mailboxExecutionSessionGeneration,mailboxExecutionProfileGeneration;
     long mailboxContextAccount;
     bool mailboxStorageAllowed;
     string MailboxPolicyPath {get{return Path.Combine(directory,"mailbox-policy.dat");}}
@@ -148,17 +149,24 @@ public partial class DesktopApplication {
     void PumpMailbox(){
         if(closing||busy||discovery==null||!MailboxExecution.CanStart(discovery.AccountId,mailboxContextAccount,closing)||String.IsNullOrEmpty(model.OwnId)||!core.MailboxSupported||!mailboxTask.IsCompleted||(!mailboxRequested&&DateTime.UtcNow<mailboxNextUtc))return;
         var service=discovery;var peer=model.OwnId;bool allowed=mailboxStorageAllowed;
-        if(mailboxService!=service){mailboxService=service;mailboxExecution=new MailboxExecution(core);}
+        ulong sessionGeneration=discoverySessionGeneration,profileGeneration=profileSessionGeneration;
+        long friendGeneration=checked((long)authenticatedFriendSnapshotGeneration),localAccount=mailboxContextAccount;
+        var eligibleRecipients=model.Conversations.Values.Where(item=>item.AccountId>0&&item.IsFriend&&item.Contact!=null&&(item.Contact.verified||item==model.Selected))
+            .Select(item=>item.AccountId).Distinct().ToArray();
+        if(mailboxService!=service||mailboxExecutionSessionGeneration!=sessionGeneration||mailboxExecutionProfileGeneration!=profileGeneration){
+            mailboxService=service;mailboxExecutionSessionGeneration=sessionGeneration;mailboxExecutionProfileGeneration=profileGeneration;mailboxExecution=new MailboxExecution(core);
+        }
         var execution=mailboxExecution;
         mailboxRequested=false;mailboxNextUtc=DateTime.UtcNow.AddMinutes(service.EventChannelConnected?15:2);
         mailboxTask=Task.Run(()=>execution.Service(service,peer,allowed,(sender,inserted)=>window.Dispatcher.BeginInvoke((Action)(()=>{
-            if(closing||discovery!=service)return;
+            if(closing||discovery!=service||discoverySessionGeneration!=sessionGeneration||profileSessionGeneration!=profileGeneration)return;
             var conversation=model.FindByPeer(sender);if(conversation!=null){core.History(sender,Int64.MaxValue);}
-        })),stage=>window.Dispatcher.BeginInvoke((Action)(()=>{if(!closing&&discovery==service)TraceUi(stage);}))))
+        })),stage=>window.Dispatcher.BeginInvoke((Action)(()=>{if(!closing&&discovery==service&&discoverySessionGeneration==sessionGeneration&&profileSessionGeneration==profileGeneration)TraceUi(stage);})),null,eligibleRecipients,friendGeneration,localAccount))
         .ContinueWith(task=>window.Dispatcher.BeginInvoke((Action)(()=>{
-            if(closing||discovery!=service)return;
+            if(closing||discovery!=service||discoverySessionGeneration!=sessionGeneration||profileSessionGeneration!=profileGeneration)return;
             mailboxNextUtc=task.IsFaulted?DateTime.UtcNow.AddSeconds(30):execution.NeedsContinuation?DateTime.UtcNow.AddSeconds(1):mailboxNextUtc;
             if(execution.NextRetryUtc!=DateTime.MinValue&&execution.NextRetryUtc<mailboxNextUtc)mailboxNextUtc=execution.NextRetryUtc;
+            if(execution.NextEligibilityUtc!=DateTime.MinValue&&execution.NextEligibilityUtc<mailboxNextUtc)mailboxNextUtc=execution.NextEligibilityUtc;
             if(task.IsFaulted)TraceUi("mailbox servicing failed: "+task.Exception.GetBaseException().GetType().Name);
             else if(model.Selected!=null&&!model.Groups)RequestConversationHistory(model.Selected);
         })));
@@ -469,7 +477,7 @@ public partial class DesktopApplication {
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if((Keyboard.Modifiers&(ModifierKeys.Control|ModifierKeys.Alt))==0&&(e.Key==Key.Back||e.Key==Key.Delete))e.Handled=EmojiComposer.Delete(Find<TextBox>("Composer"),e.Key==Key.Back);};
         Find<TextBox>("Composer").PreviewKeyDown+=(s,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;Send();}};
         Find<TextBox>("Search").TextChanged+=(s,e)=>RefreshList();
-        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ServerGroupRoster selectedRoster;if(discovery!=null&&serverGroupRosters.TryGetValue(selectedGroup.Id,out selectedRoster))discovery.QueueGroupRoom(selectedRoster.GroupId,"snapshot");ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);ShowConversation();Refresh();}}};
+        Find<ListBox>("ContactList").SelectionChanged+=(s,e)=>{if(changingSelection)return;if(model.Groups){var selectedGroup=Find<ListBox>("ContactList").SelectedItem as GroupModel;if(selectedGroup!=null){model.SelectedGroup=selectedGroup;selectedGroup.Unread=0;selectedGroup.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selectedGroup.Draft;RequestGroupHistory(selectedGroup);ServerGroupRoster selectedRoster;if(discovery!=null&&serverGroupRosters.TryGetValue(selectedGroup.Id,out selectedRoster))discovery.QueueGroupRoom(selectedRoster.GroupId,"snapshot");ShowConversation();Refresh();}}else{var selected=Find<ListBox>("ContactList").SelectedItem as ConversationModel;if(selected!=null){model.Selected=selected;selected.Unread=0;selected.Refresh();UpdateUnreadIndicator();Find<TextBox>("Composer").Text=selected.Draft;RequestConversationHistory(selected);RequestMailbox("active direct conversation selection");ShowConversation();Refresh();}}};
         Find<Expander>("VoiceAdvancedExpander").Expanded+=(s,e)=>RefreshVoiceDiagnosticsText();
         var removeMenu=new ContextMenu();var clearHistoryItem=new MenuItem{Header="Delete Conversation History"};var removeItem=new MenuItem{Header="Remove Contact"};removeMenu.Items.Add(clearHistoryItem);removeMenu.Items.Add(new Separator());removeMenu.Items.Add(removeItem);clearHistoryItem.Click+=(s,e)=>DeleteSelectedConversationHistory();removeItem.Click+=(s,e)=>RemoveSelectedContact();
         var list=Find<ListBox>("ContactList");list.ContextMenu=removeMenu;list.PreviewMouseRightButtonDown+=(s,e)=>{var element=e.OriginalSource as DependencyObject;var item=ItemsControl.ContainerFromElement(list,element) as ListBoxItem;if(item!=null){item.IsSelected=true;item.Focus();}};
@@ -4507,6 +4515,9 @@ public partial class DesktopApplication {
         if(model.Groups){if(discovery==null||!discovery.EventChannelConnected){Notify("The authenticated server channel is unavailable. No group message was sent.");return;}if(model.SelectedGroup!=null&&core.SendGroup(model.SelectedGroup.Id,text)){Find<TextBox>("Composer").Clear();Find<TextBox>("Composer").Focus();}else Notify("Encrypted group message could not be queued.");return;}
         var conversation=model.Selected;if(conversation==null||conversation.Contact==null)return;
         string peer=conversation.Contact.peer;directSendInFlight=true;
+        // A send never waits for an eligibility RPC: native can still use the
+        // healthy live route, while unresolved sibling selection remains visible.
+        RequestMailbox("direct send eligibility refresh hint");
         bool queued=false;
         try{queued=await Task.Run(()=>core.Send(peer,text));}
         catch(Exception){/* Preserve draft; the native write did not confirm acceptance. */}
