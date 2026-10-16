@@ -327,6 +327,20 @@ public:
     DurableJournal(const DurableJournal&)=delete;
     DurableJournal& operator=(const DurableJournal&)=delete;
     std::uint64_t wallTime()const override{return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
+    std::optional<std::uint64_t> loadDownloadLimit()override{
+        auto sealed=readFile(root_/L"download-limit.protected");if(sealed.empty())return {};
+        platform::WindowsRecordProtector protector;auto plain=protector.unprotect(sealed,context_+"/DownloadLimit/v1");protocol::Reader r(plain);
+        require(r.type()==protocol::FileTransfer&&r.number()==1);auto bits=r.number();r.end();require(bits<=10000000000ull);return bits;
+    }
+    void saveDownloadLimit(std::uint64_t bits)override{
+        require(bits<=10000000000ull);auto prior=loadDownloadLimit();if(prior&&*prior==bits)return;
+        protocol::Writer w(protocol::FileTransfer);w.number(1);w.number(bits);platform::WindowsRecordProtector protector;auto sealed=protector.protect(w.data,context_+"/DownloadLimit/v1");
+        auto path=root_/L"download-limit.protected",temp=root_/(L"download-limit-"+std::to_wstring(++serial_)+L".next");
+        HANDLE file=CreateFileW(temp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);require(file!=INVALID_HANDLE_VALUE);DWORD wrote=0;
+        bool ok=WriteFile(file,sealed.data(),static_cast<DWORD>(sealed.size()),&wrote,nullptr)&&wrote==sealed.size()&&FlushFileBuffers(file);CloseHandle(file);
+        if(ok)ok=MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+        if(!ok){DeleteFileW(temp.c_str());throw std::runtime_error("Cannot commit protected download settings");}
+    }
     std::map<std::string,Options> loadOptions()override{
         auto encrypted=readFile(root_/L"tuning.protected");if(encrypted.empty())return {};
         platform::WindowsRecordProtector protector;auto plain=protector.unprotect(encrypted,context_+"/Tuning/v1");protocol::Reader r(plain);

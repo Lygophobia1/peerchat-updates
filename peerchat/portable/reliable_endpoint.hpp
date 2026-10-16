@@ -209,6 +209,7 @@ public:
     bool closed()const noexcept{return closed_;}
     bool permitsDeferredHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0;}
     bool permitsGroupHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups)!=0;}
+    bool permitsTransferPipeline()const noexcept{return ready()&&!archive_&&!group_&&(runtime_.remoteCapabilities&protocol::CapabilityTransferPipeline)!=0;}
     const char* diagnosticStage()const noexcept{return stage_;}
     void sendArchiveControl(const Blob& bytes){
         protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
@@ -246,7 +247,7 @@ public:
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
                 ((!archive_&&!group_&&voice_&&voice_->available&&voice_->available())?(protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery):0)|
                 (group_?(protocol::CapabilitySignedGroups|protocol::CapabilityGroupKeyHandoff|(group_->historyOutgoing?protocol::CapabilityArchiveGroups:0)):0)|
-                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|(archive_->groups?protocol::CapabilityArchiveGroups:0)):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0);
+                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|(archive_->groups?protocol::CapabilityArchiveGroups:0)):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0)|((!archive_&&!group_&&transfer_)?protocol::CapabilityTransferPipeline:0);
             stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});
@@ -305,7 +306,7 @@ public:
     bool sendTransfer(const Blob& bytes){
         if(archive_||group_||!transfer_||!ready()||!friends_.contains(runtime_.expected)||
            !(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)||output_.size()>MaxOutput/2)return false;
-        protocol::check(bytes.size()<=65536);protocol::Reader reader(bytes);protocol::check(reader.type()==protocol::FileTransfer);
+        protocol::check(bytes.size()<=protocol::MaxPacket);protocol::Reader reader(bytes);protocol::check(reader.type()==protocol::FileTransfer);
         protocol::Writer frame(protocol::FileTransfer);frame.data=bytes;packet(frame);return true;
     }
     Blob takeOutput(){

@@ -236,8 +236,8 @@ struct Node::Impl {
         if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds())){auto id=row.substr(9,32);result+=widenUtf8(row+transferTiming.diagnostics(id)+(transferJournal?transferJournal->diagnostics(id):std::string{}))+L"\n";}return result;}
         if(command.sourceKind==12||command.sourceKind==13){
             protocol::check(command.id.empty()||protocol::id(command.id,32));
-            if(command.sourceKind==13){protocol::check(command.text.size()<=100);std::wistringstream input(command.text);transfer::Options value;wchar_t a=0,b=0;input>>value.chunkBytes>>a>>value.window>>b>>value.bitsPerSecond;protocol::check(input&&input.eof()&&a==L','&&b==L','&&value.valid());transfers->configure(command.id,value);}
-            auto value=transfers->options(command.id);return L"{\"chunkBytes\":"+std::to_wstring(value.chunkBytes)+L",\"window\":"+std::to_wstring(value.window)+L",\"bitsPerSecond\":"+std::to_wstring(value.bitsPerSecond)+L"}";
+            if(command.sourceKind==13){protocol::check(command.text.size()<=100);std::wistringstream input(command.text);transfer::Options value;wchar_t a=0,b=0;input>>value.chunkBytes>>a>>value.window>>b>>value.bitsPerSecond;protocol::check(input&&a==L','&&b==L','&&value.valid());std::optional<std::uint64_t> download;if(!input.eof()){wchar_t comma=0;std::uint64_t bits=0;input>>comma>>bits;protocol::check(input&&comma==L','&&bits<=10000000000ull);download=bits;}protocol::check(input.eof());transfers->configure(command.id,value);if(download&&command.id.empty())transfers->configureDownload(*download);}
+            auto value=transfers->options(command.id);return L"{\"chunkBytes\":"+std::to_wstring(value.chunkBytes)+L",\"window\":"+std::to_wstring(value.window)+L",\"bitsPerSecond\":"+std::to_wstring(value.bitsPerSecond)+L",\"downloadBitsPerSecond\":"+std::to_wstring(transfers->downloadLimit())+L"}";
         }
         if(command.sourceKind==14){protocol::check(command.text==L"0"||command.text==L"1");groupBulkMediaActive=command.text==L"1";return L"ok";}
         if(command.sourceKind==16)return widenUtf8(group_attachments::rpc::base64(group_attachments::windows::captureOverwriteTarget(command.text),false));
@@ -1728,6 +1728,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     transfers->restore(nowMilliseconds());
                     notice(NodeEvent::Kind::Error,L"Group attachments unavailable: protected recovery metadata requires attention","group-attachment:storage");
                 }
+                transfers->defaults({transfer::ExtendedChunkBytes,16,0});
                 for(auto& d:transferJournal->load())if(!d.location.empty()){
                     protocol::Reader location(d.location);auto source=location.text();transferPaths[d.metadata.id]=d.sending?source:location.text();
                 }

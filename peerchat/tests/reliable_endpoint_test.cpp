@@ -100,7 +100,10 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;downloads.receive(peer,frame,time);});
     protocol::Writer premature(protocol::FileTransfer);require(!left.sendTransfer(premature.data),"File sent before authenticated winner");
     left.receive({},++now);right.receive({},++now);exchange(left,right);require(left.ready()&&right.ready(),"File route failed authentication");
-    Blob picture(100000),document(70000);for(size_t i=0;i<picture.size();++i)picture[i]=static_cast<unsigned char>(i);
+    require(left.permitsTransferPipeline()&&right.permitsTransferPipeline(),"Portable endpoint omitted negotiated pipeline capability");
+    uploads.capability(bob.peerId,301,left.permitsTransferPipeline());downloads.capability(alice.peerId,302,right.permitsTransferPipeline());
+    uploads.configure("",{65536,16,0});downloads.configure("",{65536,16,0});
+    Blob picture(1048576+100000),document(786432+70000);for(size_t i=0;i<picture.size();++i)picture[i]=static_cast<unsigned char>(i);
     for(size_t i=0;i<document.size();++i)document[i]=static_cast<unsigned char>(255-i);
     auto pictureId=Storage::newMessageId(),documentId=Storage::newMessageId();
     uploads.offer(bob.peerId,pictureId,std::make_unique<MemoryFile>(picture,"picture.png"),++now);
@@ -115,6 +118,7 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     }
     require(receivedPicture->committed&&receivedPicture->bytes==picture&&receivedDocument->committed&&receivedDocument->bytes==document&&fileFrames>8,"Bidirectional authenticated binary transfer corrupted or incomplete");
     require(uploads.completedRecords().size()==2&&downloads.completedRecords().size()==2,"File completion acknowledgement missing");
+    require(uploads.diagnostics(now)[0].find("effective_chunk_bytes=65536 effective_window=16")!=std::string::npos,"Portable 64 KiB frame/window did not activate");
     // Capacity rejection is an application refusal, not TLS/session failure.
     // Four unaccepted offers are retained; the fifth must leave the winner live.
     for(unsigned n=0;n<5;++n){protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(transfer::Kind::Offer));offer.string(Storage::newMessageId());offer.string("capacity.bin");offer.number(1);offer.bytes(Blob(32,0));require(left.sendTransfer(offer.data),"Capacity fixture send failed");exchange(left,right);}

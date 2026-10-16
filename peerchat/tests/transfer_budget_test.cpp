@@ -18,5 +18,13 @@ int main(){try{
  }
  check(payload<=2500000+65536&&limited<=625000+65536);for(const auto& row:send.snapshots())check(row.done>0);
  std::cout<<"PASS modeled 10-second aggregate 2 Mbps + individual 0.5 Mbps ceilings, four concurrent transfers, bounded burst and fair progress. submitted="<<payload<<" limited="<<limited<<"; not measured network throughput\n";
+ {
+  Harness h;h.receiver.configureDownload(1000000);h.duplicate=true;h.offer(data(512*1024));h.finish();
+  check(h.sender.snapshots()[0].state==State::Complete&&h.result.committed&&h.result.bytes==data(512*1024));
+  check(h.now>=4194); // confirmed payload cannot bypass the 1 Mbps receiver ceiling
+  h.receiver.configureDownload(0);check(h.receiver.downloadLimit()==0);
+  rejected([&]{h.receiver.configureDownload(10000000001ull);});
+  std::cout<<"PASS modeled receive ceiling, verified completion, unlimited switch and invalid cap rejection; no network-throughput claim\n";
+ }
  return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

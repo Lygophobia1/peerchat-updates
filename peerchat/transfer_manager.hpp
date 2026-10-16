@@ -80,6 +80,8 @@ public:
     // Optional profile-local tuning sidecar; never part of durable ACK authority.
     virtual std::map<std::string,Options> loadOptions(){return {};}
     virtual void saveOptions(const std::map<std::string,Options>&){}
+    virtual std::optional<std::uint64_t> loadDownloadLimit(){return {};}
+    virtual void saveDownloadLimit(std::uint64_t){throw std::runtime_error("Download settings persistence unavailable");}
 };
 struct PersistenceError:std::runtime_error{explicit PersistenceError(const std::string& reason):std::runtime_error("Protected transfer journal unavailable: "+reason){}};
 class StatisticsStateStore {
@@ -129,7 +131,7 @@ class TransferManager {
         std::unique_ptr<Source> source;
         std::unique_ptr<Sink> sink;
         std::unique_ptr<Hash> hash;
-        std::uint64_t prepared=0,lastActivity=0,route=0,sentUntil=0,highWaterSent=0;
+        std::uint64_t prepared=0,lastActivity=0,route=0,sentUntil=0,highWaterSent=0,receiveAckAt=0;
         bool ready=false,finishSent=false;
         Options requested,effective;unsigned version=1;std::uint64_t negotiation=0;
         std::deque<std::uint64_t> outstanding;
@@ -155,7 +157,9 @@ class TransferManager {
     std::uint64_t nextNegotiation_=1;
     std::map<std::string,Options> options_;
     std::uint64_t aggregateBits_=0,aggregateAt_=0;double aggregateTokens_=ExtendedChunkBytes;
-    size_t turn_=0;bool mediaActive_=false,optionsUnavailable_=false;
+    std::uint64_t downloadBits_=0,downloadAt_=0;
+    bool downloadConfigured_=false;
+    size_t turn_=0;bool mediaActive_=false,optionsUnavailable_=false,downloadUnavailable_=false;
     static void refill(double& tokens,std::uint64_t& at,std::uint64_t bits,std::uint64_t now){if(!at){at=now;return;}if(now>=at){tokens=std::min<double>(ExtendedChunkBytes,tokens+double(now-at)*bits/8000.0);at=now;}}
     bool budget(Entry& e,size_t count,std::uint64_t now){refill(aggregateTokens_,aggregateAt_,aggregateBits_,now);refill(e.tokens,e.tokenAt,e.requested.bitsPerSecond,now);return (!aggregateBits_||aggregateTokens_>=count)&&(!e.requested.bitsPerSecond||e.tokens>=count);}
     static bool terminal(State s){return s==State::Complete||s==State::Cancelled||s==State::Failed||s==State::Suspended;}
@@ -211,16 +215,20 @@ class TransferManager {
     }
 public:
     explicit TransferManager(std::function<std::unique_ptr<Hash>()> hash,StateStore* store=nullptr,StatisticsStateStore* statistics=nullptr):hash_(std::move(hash)),store_(store),statistics_(statistics){if(!hash_)throw std::runtime_error("Hash provider unavailable");}
+    void defaults(Options value,std::uint64_t download=0){if(!optionsUnavailable_&&!downloadUnavailable_&&!options_.count(""))configure("",value);if(!optionsUnavailable_&&!downloadUnavailable_&&!downloadConfigured_)configureDownload(download);}
+    std::uint64_t downloadLimit()const{if(downloadUnavailable_)throw std::runtime_error("Protected download settings unavailable");return downloadBits_;}
+    void configureDownload(std::uint64_t bits){protocol::check(bits<=10000000000ull);if(store_)store_->saveDownloadLimit(bits);downloadBits_=bits;downloadConfigured_=true;downloadUnavailable_=false;downloadAt_=0;for(auto& row:entries_)row.second.receiveAckAt=0;}
     // Adapter supplies only current authenticated winner capabilities. Never
     // infer support from a transfer packet or a persistent peer preference.
     void capability(const std::string& peer,std::uint64_t route,bool pipeline){if(!protocol::id(peer))throw std::runtime_error("Invalid transfer peer");if(!capabilities_.count(peer)&&capabilities_.size()>=128){auto old=std::find_if(capabilities_.begin(),capabilities_.end(),[&](const auto& cap){return std::none_of(entries_.begin(),entries_.end(),[&](const auto& row){return row.second.peer==cap.first&&(!terminal(row.second.state)||row.second.reply);});});if(old!=capabilities_.end())capabilities_.erase(old);else throw std::runtime_error("Transfer capability bound");}capabilities_[peer]={route,pipeline};}
     void configure(const std::string& id,Options value){auto i=entries_.find(id);if(!value.valid()||(!id.empty()&&(i==entries_.end()||!i->second.sending)))throw std::runtime_error("Invalid transfer settings");auto next=options_;for(auto p=next.begin();p!=next.end();)if(!p->first.empty()&&!entries_.count(p->first))p=next.erase(p);else ++p;next[id]=value;if(next.size()>MaxRecords+1)throw std::runtime_error("Transfer settings bound");if(store_)store_->saveOptions(next);options_=std::move(next);optionsUnavailable_=false;if(!id.empty())i->second.requested=value;else{aggregateBits_=value.bitsPerSecond;aggregateTokens_=0;aggregateAt_=0;}}
     Options options(const std::string& id={})const{if(optionsUnavailable_)throw std::runtime_error("Protected transfer settings unavailable; payload submission paused");auto i=options_.find(id);if(i!=options_.end())return i->second;auto e=entries_.find(id);return e==entries_.end()?Options{}:e->second.requested;}
     void mediaActive(bool value){mediaActive_=value;}
-    bool hasTransmissionWork()const{if(optionsUnavailable_)return false;for(const auto& p:entries_){const auto& e=p.second;if(e.sending&&e.state==State::Transferring&&e.ready&&e.route&&!e.blocked&&e.sentUntil<e.metadata.size&&e.outstanding.size()<(mediaActive_?1:e.effective.window))return true;}return false;}
+    bool hasTransmissionWork()const{if(optionsUnavailable_||downloadUnavailable_)return false;for(const auto& p:entries_){const auto& e=p.second;if(e.sending&&e.state==State::Transferring&&e.ready&&e.route&&!e.blocked&&e.sentUntil<e.metadata.size&&e.outstanding.size()<(mediaActive_?1:e.effective.window))return true;}return false;}
     void restore(std::uint64_t now){
         if(!store_||!entries_.empty())throw std::runtime_error("Invalid transfer restore");
         try{options_=store_->loadOptions();if(options_.size()>MaxRecords+1)throw std::runtime_error("Transfer settings bound");for(const auto& p:options_)if((!p.first.empty()&&!protocol::id(p.first,32))||!p.second.valid())throw std::runtime_error("Invalid transfer settings");aggregateBits_=options().bitsPerSecond;}catch(...){options_.clear();aggregateBits_=0;optionsUnavailable_=true;}
+        try{auto download=store_->loadDownloadLimit();if(download){protocol::check(*download<=10000000000ull);downloadBits_=*download;downloadConfigured_=true;}}catch(...){downloadUnavailable_=true;}
         auto records=store_->load();if(records.size()>MaxRecords)throw std::runtime_error("Transfer journal limit");
         if(statistics_)try{statistics_->load(records);}catch(...){for(auto& d:records)d.statisticsKnown=false;}
         size_t active=0;
@@ -231,7 +239,11 @@ public:
                 d.expires<d.created||d.expires-d.created>RetentionMilliseconds||entries_.count(d.metadata.id))throw std::runtime_error("Invalid protected transfer state");
             Entry e;static_cast<Snapshot&>(e)=d;e.location=d.location;e.highWaterSent=d.highWaterSent;
             e.offerSeen=false;
-            e.requested=options_.count(d.metadata.id)?options(d.metadata.id):options();if(!options_.count(d.metadata.id))e.requested.bitsPerSecond=0;
+            // Supplemental tuning must not prevent reopening authoritative
+            // journals or ordinary messaging endpoints. Payload stays paused
+            // below if either protected preference record is unavailable.
+            auto selected=options_.find(d.metadata.id);if(selected==options_.end())selected=options_.find("");
+            e.requested=selected==options_.end()?Options{}:selected->second;if(!options_.count(d.metadata.id))e.requested.bitsPerSecond=0;
             e.created=d.created;e.updated=d.updated;e.expires=d.expires;e.digestReady=d.digestReady;e.lastActivity=now;
             e.statisticsBytes=std::max(e.statisticsBytes,e.done);e.rateMeter.baseline(e.statisticsBytes,now);e.statisticsInitialized=true;e.statisticsFinished=d.state==State::Complete||d.state==State::Cancelled||d.state==State::Failed;
             bool resumable=!terminal(d.state)||d.state==State::Suspended;
@@ -263,7 +275,7 @@ public:
                 " write_us="+std::to_string(e.writeUs)+" flush_us="+std::to_string(e.flushUs)+" commit_us="+std::to_string(e.commitUs)+
                 " route_changes="+std::to_string(e.routeChanges)+" backpressure="+std::to_string(e.backpressure)+
                 " ack_wait_ticks="+std::to_string(e.ackWaitTicks)+" journal_all_transfers_us="+std::to_string(journalUs_));
-            rows.back()+=" protocol_version="+std::to_string(e.version)+" effective_chunk_bytes="+std::to_string(e.effective.chunkBytes)+" effective_window="+std::to_string(e.effective.window)+" outstanding_chunks="+std::to_string(e.outstanding.size())+" aggregate_cap_bps="+std::to_string(aggregateBits_)+" individual_cap_bps="+std::to_string(e.requested.bitsPerSecond)+" settings_unavailable="+std::to_string(optionsUnavailable_);
+            rows.back()+=" protocol_version="+std::to_string(e.version)+" effective_chunk_bytes="+std::to_string(e.effective.chunkBytes)+" effective_window="+std::to_string(e.effective.window)+" outstanding_chunks="+std::to_string(e.outstanding.size())+" aggregate_cap_bps="+std::to_string(aggregateBits_)+" individual_cap_bps="+std::to_string(e.requested.bitsPerSecond)+" download_cap_bps="+std::to_string(downloadBits_)+" settings_unavailable="+std::to_string(optionsUnavailable_||downloadUnavailable_);
         }return rows;
     }
     bool hasPendingControl(const std::string& id)const{auto found=entries_.find(id);return found!=entries_.end()&&found->second.reply.has_value();}
@@ -315,7 +327,7 @@ public:
         auto& e=i->second;e.state=State::Cancelled;if(e.sink)e.sink->discard();e.sink.reset();e.source.reset();e.hash.reset();e.reply=packet(Kind::Cancel,e).data;touch(e);save();
     }
     bool hasPreparationWork(std::uint64_t now)const{
-        if(optionsUnavailable_||now<persistenceRetryAt_)return false;
+        if(optionsUnavailable_||downloadUnavailable_||now<persistenceRetryAt_)return false;
         return std::any_of(entries_.begin(),entries_.end(),[](const auto& row){return row.second.state==State::Preparing||row.second.state==State::Recovering;});
     }
     void unsupportedPeer(const std::string& peer){
@@ -329,7 +341,7 @@ public:
     // Execution adapters choose the authorized route for this exact transfer.
     // Shared preparation, journal, deadlines and completion ownership are unchanged.
     void tickScoped(std::uint64_t now,const std::function<std::uint64_t(const Snapshot&)>& route,const std::function<bool(const Snapshot&,const Blob&)>& send){
-        if(optionsUnavailable_||now<persistenceRetryAt_)return;
+        if(optionsUnavailable_||downloadUnavailable_||now<persistenceRetryAt_)return;
         try{tickImplScoped(now,route,send);persistenceRetryAt_=0;}
         catch(const PersistenceError&){persistenceRetryAt_=now+250;throw;}
     }
@@ -383,7 +395,7 @@ public:
                 // Never send a pending ACK from an old negotiation onto a new
                 // route before its authenticated Offer establishes the scope.
                 if(!e.sending&&e.version==2){auto cap=capabilities_.find(e.peer);if(cap==capabilities_.end()||cap->second.route!=e.route)continue;}
-                if(e.reply){if(durableSend(e,*e.reply))e.reply.reset();continue;}
+                if(e.reply){if(!e.sending&&e.state==State::Transferring&&now<e.receiveAckAt)continue;if(durableSend(e,*e.reply))e.reply.reset();continue;}
                 if(terminal(e.state)||!e.sending)continue;
                 if(e.route!=current){
                     auto cap=capabilities_.find(e.peer);bool extended=cap!=capabilities_.end()&&cap->second.route==current&&cap->second.pipeline;
@@ -470,6 +482,11 @@ private:
                 {Timer timer(e.hashUs);for(size_t n=0;n<b.size();n+=ChunkBytes)e.hash->update(b.data()+n,std::min(ChunkBytes,b.size()-n));}
                 e.payloadBytes+=b.size();if(!e.observedAt)e.observedAt=now;if(!e.firstPayloadAt)e.firstPayloadAt=now;
                 e.done+=b.size();e.lastActivity=now;touch(e);e.reply=offsetPacket(Kind::Resume,e);
+                // Delay only the existing durable ACK credit, never block the
+                // runtime or buffer a second copy. Retransmitted bytes above
+                // never consume rate budget again. At most the negotiated
+                // bounded window can arrive ahead of this aggregate ceiling.
+                if(downloadBits_){downloadAt_=std::max(now,downloadAt_)+(b.size()*8000ull+downloadBits_-1)/downloadBits_;e.receiveAckAt=downloadAt_;}
             }catch(...){if(store_)suspend(e,"receive disk or hash failure");else fail(e,"Receive disk or hash failure");}
             return;
         }

@@ -61,6 +61,8 @@ public:
  std::uint64_t wallTime()const override{return ordinary_.wallTime();}
  std::map<std::string,transfer::Options> loadOptions()override{return ordinary_.loadOptions();}
  void saveOptions(const std::map<std::string,transfer::Options>& rows)override{ordinary_.saveOptions(rows);}
+ std::optional<std::uint64_t> loadDownloadLimit()override{return ordinary_.loadDownloadLimit();}
+ void saveDownloadLimit(std::uint64_t bits)override{ordinary_.saveDownloadLimit(bits);}
  std::vector<transfer::DurableState> load()override{
   loaded_=false;
   auto legacy=ordinary_.load();std::set<std::string> ids;for(const auto& d:legacy)protocol::check(d.purpose==transfer::Purpose::PeerFile&&ids.insert(d.metadata.id).second);
