@@ -23,7 +23,7 @@ constexpr std::uint64_t MaxFileBytes=256ull*1024*1024, IdleMilliseconds=15*60*10
 // An explicitly admitted cache object has AEAD overhead, not a larger user-file
 // allowance. No ordinary peer packet can select this local purpose.
 constexpr std::uint64_t MaxCacheCipherBytes=20+MaxFileBytes+((MaxFileBytes+32767)/32768)*16;
-enum class Purpose { PeerFile, GroupCacheCiphertext };
+enum class Purpose { PeerFile=0, GroupCacheCiphertext=1, DirectCacheCiphertext=2 };
 using Digest=std::array<unsigned char,32>;
 class Hash {
 public:
@@ -122,7 +122,7 @@ inline bool safeName(const std::string& name){
     return true;
 }
 class TransferManager {
-    static std::uint64_t maximum(Purpose purpose){protocol::check(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext);return purpose==Purpose::PeerFile?MaxFileBytes:MaxCacheCipherBytes;}
+    static std::uint64_t maximum(Purpose purpose){protocol::check(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext||purpose==Purpose::DirectCacheCiphertext);return purpose==Purpose::PeerFile?MaxFileBytes:MaxCacheCipherBytes;}
     void supported(Purpose purpose)const{protocol::check(!store_||store_->supports(purpose));}
     static void cacheContext(const Metadata& metadata,std::uint64_t plainBytes){
         protocol::check(protocol::id(metadata.id,32)&&metadata.name=="ciphertext.peerchat"&&plainBytes<=MaxFileBytes&&metadata.size==20+plainBytes+std::max<std::uint64_t>(1,(plainBytes+32767)/32768)*16);
@@ -311,6 +311,10 @@ public:
         cacheContext(expected,plainBytes);protocol::check(source&&source->size()==expected.size&&source->name()==expected.name);
         offerImpl(peer,expected.id,std::move(source),now,&expected.digest,Purpose::GroupCacheCiphertext);
     }
+    void offerDirectCacheCiphertext(const std::string& peer,const Metadata& expected,std::uint64_t plainBytes,std::unique_ptr<Source> source,std::uint64_t now){
+        cacheContext(expected,plainBytes);protocol::check(source&&source->size()==expected.size&&source->name()==expected.name);
+        offerImpl(peer,expected.id,std::move(source),now,&expected.digest,Purpose::DirectCacheCiphertext);
+    }
 private:
     void offerImpl(const std::string& peer,const std::string& id,std::unique_ptr<Source> source,std::uint64_t now,const Digest* expectedDigest,Purpose purpose){
         supported(purpose);
@@ -438,6 +442,9 @@ public:
     void receive(const std::string& peer,const Blob& frame,std::uint64_t now){receiveScoped(peer,frame,now,Purpose::PeerFile,nullptr);}
     void receiveCacheCiphertext(const std::string& peer,const Metadata& expected,std::uint64_t plainBytes,const Blob& frame,std::uint64_t now){
         cacheContext(expected,plainBytes);receiveScoped(peer,frame,now,Purpose::GroupCacheCiphertext,&expected);
+    }
+    void receiveDirectCacheCiphertext(const std::string& peer,const Metadata& expected,std::uint64_t plainBytes,const Blob& frame,std::uint64_t now){
+        cacheContext(expected,plainBytes);receiveScoped(peer,frame,now,Purpose::DirectCacheCiphertext,&expected);
     }
 private:
     void receiveScoped(const std::string& peer,const Blob& frame,std::uint64_t now,Purpose purpose,const Metadata* expected){

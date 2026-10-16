@@ -589,6 +589,41 @@ Blob Storage::attachmentMetadata(const std::string& id){
 Blob Storage::groupAttachmentStaging(const std::string& device){
     require(identifier(device),"Invalid staging device");return impl_->get("group-attachment-staging/v1/"+device);
 }
+Blob Storage::directAttachmentState(const std::string& device){require(identifier(device),"Invalid DM cache device");return impl_->get("dm-attachment-state/v1/"+device);}
+Blob Storage::directAttachmentReadContext(const std::string& device){require(identifier(device),"Invalid DM cache device");return impl_->get("dm-attachment-read-context/v1/"+device);}
+void Storage::saveDirectAttachmentReadContext(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=4096,"Invalid DM attachment read context");Transaction transaction(impl_->sql);Secret previous{directAttachmentReadContext(device)};
+    require(previous.data==expected,"DM attachment read context changed concurrently");if(previous.data!=next)impl_->put("dm-attachment-read-context/v1/"+device,next);transaction.commit();
+}
+void Storage::saveDirectAttachmentState(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=1024*1024,"Invalid DM attachment state");Transaction transaction(impl_->sql);Secret previous{directAttachmentState(device)};
+    require(previous.data==expected,"DM attachment state changed concurrently");if(previous.data!=next)impl_->put("dm-attachment-state/v1/"+device,next);transaction.commit();
+}
+Blob Storage::directAttachmentTransfers(const std::string& device){require(identifier(device),"Invalid DM transfer device");return impl_->get("dm-attachment-transfers/v1/"+device);}
+Blob Storage::directAttachmentJob(const std::string& device,const std::string& id){require(identifier(device)&&identifier(id,32),"Invalid DM attachment job identity");return impl_->get("dm-attachment-job/v1/"+device+"/"+id);}
+Blob Storage::directAttachmentIndexPage(const std::string& device,const std::string& page){
+    require(identifier(device)&&identifier(page),"Invalid DM attachment index page");auto bytes=impl_->get("dm-attachment-index-page/v1/"+device+"/"+page);
+    require(bytes.empty()||(bytes.size()<=65536&&publicKeyId(bytes)==page),"DM attachment index page integrity failed");return bytes;
+}
+void Storage::saveDirectAttachmentIndexPage(const std::string& device,const std::string& page,const Blob& bytes){
+    require(identifier(device)&&identifier(page)&&!bytes.empty()&&bytes.size()<=65536&&publicKeyId(bytes)==page,"Invalid DM attachment index page bounds or digest");
+    Transaction transaction(impl_->sql);Secret previous{directAttachmentIndexPage(device,page)};
+    require(previous.data.empty()||previous.data==bytes,"DM attachment index page is immutable");
+    if(previous.data.empty())impl_->put("dm-attachment-index-page/v1/"+device+"/"+page,bytes);
+    transaction.commit();
+}
+void Storage::saveDirectAttachmentJob(const std::string& device,const std::string& id,const Blob& expectedJob,const Blob& nextJob,const Blob& expectedIndex,const Blob& nextIndex){
+    require(identifier(device)&&identifier(id,32)&&!nextJob.empty()&&nextJob.size()<=900*1024&&!nextIndex.empty()&&nextIndex.size()<=65536,"Invalid DM attachment job bounds");
+    Transaction transaction(impl_->sql);Secret previousJob{directAttachmentJob(device,id)},previousIndex{directAttachmentState(device)};
+    require(previousJob.data==expectedJob&&previousIndex.data==expectedIndex,"DM attachment job or index changed concurrently");
+    if(previousJob.data!=nextJob)impl_->put("dm-attachment-job/v1/"+device+"/"+id,nextJob);
+    if(previousIndex.data!=nextIndex)impl_->put("dm-attachment-state/v1/"+device,nextIndex);
+    transaction.commit();
+}
+void Storage::saveDirectAttachmentTransfers(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid DM attachment transfers");Transaction transaction(impl_->sql);Secret previous{directAttachmentTransfers(device)};
+    require(previous.data==expected,"DM attachment transfers changed concurrently");if(previous.data!=next)impl_->put("dm-attachment-transfers/v1/"+device,next);transaction.commit();
+}
 void Storage::saveGroupAttachmentStaging(const std::string& device,const Blob& expected,const Blob& next){
     require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid group attachment staging");
     Transaction transaction(impl_->sql);Secret previous{groupAttachmentStaging(device)};

@@ -12,7 +12,7 @@ struct SecretRecord {
  ~SecretRecord(){platform::group_crypto::wipe(bytes.data(),bytes.size());}
 };
 inline void writePrivateManifest(protocol::Writer& w,const Manifest& m){
- m.validate();w.string(m.binding.attachment);w.string(m.binding.group);w.string(m.binding.sender);w.number(m.binding.account);w.number(m.binding.epoch);
+ m.validate();protocol::check(!m.binding.direct);w.string(m.binding.attachment);w.string(m.binding.group);w.string(m.binding.sender);w.number(m.binding.account);w.number(m.binding.epoch);
  w.string(m.name);w.number(m.size);w.bytes(m.key);w.bytes(m.prefix);w.bytes(Blob(m.plainDigest.begin(),m.plainDigest.end()));w.bytes(Blob(m.cipherDigest.begin(),m.cipherDigest.end()));
 }
 inline Manifest readPrivateManifest(protocol::Reader& r){

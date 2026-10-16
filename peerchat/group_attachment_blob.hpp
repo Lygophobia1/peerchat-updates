@@ -6,7 +6,12 @@ namespace peerchat::group_attachments {
 // The manifest is for an authenticated encrypted group body, NEVER a Pi request.
 constexpr std::uint64_t HeaderBytes=20,TagBytes=16,BlockBytes=32768;
 constexpr std::uint64_t MaxCipherBytes=transfer::MaxFileBytes+((transfer::MaxFileBytes+BlockBytes-1)/BlockBytes)*TagBytes+HeaderBytes;
-struct Binding {std::string attachment,group,sender;std::uint64_t account=0,epoch=0;};
+struct Binding {
+ std::string attachment,group,sender;std::uint64_t account=0,epoch=0;
+ // Explicit local codec context. Legacy group bytes and default construction
+ // remain unchanged; a DM never supplies a synthetic group or epoch.
+ bool direct=false;std::uint64_t recipientAccount=0;std::string relationship{},audienceDigest{};
+};
 struct Manifest {
  Binding binding;std::string name;std::uint64_t size=0;
  Blob key,prefix;transfer::Digest plainDigest{},cipherDigest{};
@@ -15,11 +20,16 @@ struct Manifest {
  ~Manifest(){platform::group_crypto::wipe(key.data(),key.size());}
  std::uint64_t blocks()const{return std::max<std::uint64_t>(1,(size+BlockBytes-1)/BlockBytes);}
  std::uint64_t cipherSize()const{return HeaderBytes+size+blocks()*TagBytes;}
- void validate()const{protocol::check(protocol::id(binding.attachment,32)&&protocol::id(binding.group,32)&&protocol::id(binding.sender)&&binding.account&&binding.account<=INT64_MAX&&binding.epoch&&binding.epoch<=INT64_MAX&&transfer::safeName(name)&&size<=transfer::MaxFileBytes&&key.size()==32&&prefix.size()==4);}
+ void validate()const{protocol::check(protocol::id(binding.attachment,32)&&protocol::id(binding.sender)&&binding.account&&binding.account<=INT64_MAX&&transfer::safeName(name)&&size<=transfer::MaxFileBytes&&key.size()==32&&prefix.size()==4);
+  if(binding.direct)protocol::check(binding.group.empty()&&!binding.epoch&&binding.recipientAccount&&binding.recipientAccount<=INT64_MAX&&binding.recipientAccount!=binding.account&&protocol::id(binding.relationship,32)&&protocol::id(binding.audienceDigest));
+  else protocol::check(protocol::id(binding.group,32)&&binding.epoch&&binding.epoch<=INT64_MAX&&!binding.recipientAccount&&binding.relationship.empty()&&binding.audienceDigest.empty());
+ }
 };
-inline Blob header(const Manifest& m){Blob bytes{'P','C','G','A',1,0,0,0};for(unsigned n=0;n<8;++n)bytes.push_back(static_cast<unsigned char>(m.size>>(n*8)));bytes.insert(bytes.end(),m.prefix.begin(),m.prefix.end());return bytes;}
+inline Blob header(const Manifest& m){Blob bytes{'P','C',static_cast<unsigned char>(m.binding.direct?'D':'G'),'A',1,0,0,0};for(unsigned n=0;n<8;++n)bytes.push_back(static_cast<unsigned char>(m.size>>(n*8)));bytes.insert(bytes.end(),m.prefix.begin(),m.prefix.end());return bytes;}
 inline Blob nonce(const Manifest& m,std::uint64_t index){auto n=m.prefix;for(int bit=56;bit>=0;bit-=8)n.push_back(static_cast<unsigned char>(index>>bit));return n;}
-inline Blob aad(const Manifest& m,std::uint64_t index,size_t count){protocol::Writer w(protocol::GroupEvent);w.string("PeerChat/GroupAttachmentBlob/v1");w.string(m.binding.attachment);w.string(m.binding.group);w.string(m.binding.sender);w.number(m.binding.account);w.number(m.binding.epoch);w.string(m.name);w.number(m.size);w.number(index);w.number(count);return w.data;}
+inline Blob aad(const Manifest& m,std::uint64_t index,size_t count){protocol::Writer w(m.binding.direct?protocol::FileTransfer:protocol::GroupEvent);w.string(m.binding.direct?"PeerChat/DirectAttachmentBlob/v1":"PeerChat/GroupAttachmentBlob/v1");w.string(m.binding.attachment);
+ if(m.binding.direct){w.number(m.binding.recipientAccount);w.string(m.binding.relationship);w.string(m.binding.audienceDigest);}else w.string(m.binding.group);
+ w.string(m.binding.sender);w.number(m.binding.account);if(!m.binding.direct)w.number(m.binding.epoch);w.string(m.name);w.number(m.size);w.number(index);w.number(count);return w.data;}
 inline void hash(transfer::Hash& h,const Blob& bytes){for(size_t off=0;off<bytes.size();off+=transfer::ChunkBytes)h.update(bytes.data()+off,std::min(transfer::ChunkBytes,bytes.size()-off));}
 inline Blob read(transfer::Source& source,std::uint64_t offset,size_t count){Blob result;while(result.size()<count){auto part=source.read(offset+result.size(),std::min<size_t>(transfer::ChunkBytes,count-result.size()));protocol::check(!part.empty()&&part.size()<=count-result.size());result.insert(result.end(),part.begin(),part.end());}return result;}
 inline void append(transfer::Sink& sink,const Blob& bytes){for(size_t off=0;off<bytes.size();off+=transfer::ChunkBytes)sink.append(Blob(bytes.begin()+off,bytes.begin()+std::min(bytes.size(),off+transfer::ChunkBytes)));}
