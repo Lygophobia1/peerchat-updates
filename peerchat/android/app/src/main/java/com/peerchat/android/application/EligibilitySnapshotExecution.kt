@@ -73,7 +73,7 @@ internal class EligibilitySnapshotExecution(
                 stage="snapshot_scope_and_format";reason="response_scope_or_format_rejected"
                 val wire=encode(reply,account,generation,device,recipient)
                 val utc=wallNow();val issued=reply.getLong("issuedUtcMs");val fresh=reply.getLong("freshUntilUtcMs")
-                if(issued>utc&&issued-utc<=5000&&deferred.size<32){
+                if(issued>utc&&issued-utc<=60_000&&deferred.size<32){
                     deferred[recipient]=Deferred(wire,issued,fresh,now+minOf(120_000L,fresh-utc))
                     refreshAfter[recipient]=now+1000
                     diagnostic="eligibility=waiting_for_snapshot_issuance stage=deferred_snapshot clock_ahead_ms=${issued-utc}"

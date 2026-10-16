@@ -98,8 +98,19 @@ class EligibilitySnapshotExecutionTest {
         var calls=0
         val execution=EligibilitySnapshotExecution({1000}){_,_->calls++;1}
         assertFalse(execution.refreshWith(1,10,3,device,listOf(20),100){
-            reply().put("issuedUtcMs",6001).put("freshUntilUtcMs",126001)
+            reply().put("issuedUtcMs",61001).put("freshUntilUtcMs",181001)
         })
         assertEquals(1,calls);assertTrue(execution.diagnostic.contains("binding_rejected"))
+    }
+    @Test fun physicalClockSkewDefersWithoutChangingAuthenticatedBytes() {
+        var utc=1000L;var calls=0;var installed:ByteArray?=null
+        val execution=EligibilitySnapshotExecution({utc}){_,wire->calls++;installed=wire;0}
+        val response=reply().put("issuedUtcMs",38500).put("freshUntilUtcMs",158500)
+        val expected=EligibilitySnapshotExecution.encode(response,10,3,device,20)
+        assertFalse(execution.refreshWith(1,10,3,device,listOf(20),100){response})
+        assertEquals(0,calls)
+        utc=38499;assertFalse(execution.refreshWith(1,10,3,device,listOf(20),37599){error("Refetched pending evidence")})
+        utc=38500;assertTrue(execution.refreshWith(1,10,3,device,listOf(20),37600){error("Refetched pending evidence")})
+        assertEquals(1,calls);assertArrayEquals(expected,installed)
     }
 }

@@ -156,6 +156,54 @@ internal static class MailboxExecutionReliabilityTest {
         try{eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,(operation,body)=>operation=="mailbox_eligibility_snapshot"?Reply("session_invalidated"):operation=="mailbox_fetch"?Page("envelopes",new object[0]):Page("receipts",new object[0]),new long[]{2},9,1);}
         catch(DiscoveryRequestException error){invalidated=error.ErrorCode=="session_invalidated";}
         Check(invalidated&&installed.Count==6);
+        // Physical Pi/Windows skew: no install before local issuance, exact
+        // response bytes after issuance, and no refetch/sleep on the owner.
+        var clock=DateTime.UtcNow;var origin=clock;int skewInstalls=0,skewFetches=0;
+        byte[] skewWire=null;var skewReply=Eligibility(2,own);
+        skewReply["issuedUtcMs"]=new DateTimeOffset(origin.AddMilliseconds(37500)).ToUnixTimeMilliseconds();
+        skewReply["freshUntilUtcMs"]=new DateTimeOffset(origin.AddMilliseconds(157500)).ToUnixTimeMilliseconds();
+        var skew=new MailboxExecution((op,input,id,allowed)=>{
+            if(op==7)return new byte[]{1};if(op==0)return new byte[]{2};if(op==1)return new byte[]{1};
+            if(op==2)return Record(4,w=>Number(w,0));
+            if(op==11){Check(clock>=origin.AddMilliseconds(37500));skewInstalls++;skewWire=input;return new byte[]{1};}
+            throw new Exception("Unexpected native skew operation");
+        },()=>clock);
+        Func<string,Dictionary<string,object>,Dictionary<string,object>> skewRpc=(operation,body)=>{
+            if(operation=="mailbox_register")return Reply("accepted");
+            if(operation=="mailbox_fetch")return Page("envelopes",new object[0]);
+            if(operation=="mailbox_receipts")return Page("receipts",new object[0]);
+            if(operation=="mailbox_eligibility_snapshot"){skewFetches++;return skewReply;}
+            throw new Exception("Unexpected skew RPC");
+        };
+        Action<long[]> stepSkew=targets=>skew.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,skewRpc,targets,7,1);
+        stepSkew(new long[]{2});Check(skewInstalls==0&&skewFetches==1&&skew.DiagnosticsSnapshot().Contains("waiting_for_issuance"));
+        clock=origin.AddMilliseconds(37499);stepSkew(new long[]{2});Check(skewInstalls==0&&skewFetches==1);
+        clock=origin.AddMilliseconds(38500);stepSkew(new long[]{2});Check(skewInstalls==1&&skewFetches==1);
+        Check(skewWire.SequenceEqual(MailboxExecution.EligibilitySnapshotWire(skewReply,1,own,7,2,clock)));
+        skew.Reset();clock=origin;stepSkew(new long[]{2});
+        clock=origin.AddSeconds(40);stepSkew(new long[0]);Check(skewInstalls==1);
+        // A new authenticated generation must discard the deferred scope.
+        skew.Reset();clock=origin;stepSkew(new long[]{2});clock=origin.AddSeconds(40);
+        skew.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,skewRpc,new long[0],8,1);Check(skewInstalls==1);
+        skew.Reset();clock=origin;stepSkew(new long[]{2});clock=origin.AddSeconds(158);
+        stepSkew(new long[]{2});Check(skewInstalls==1); // Expired evidence is never installed.
+        // Native rejection after waiting still fails closed; it is not a
+        // successful install merely because an authenticated response arrived.
+        int rejectedInstalls=0;clock=origin;
+        var nativeReject=new MailboxExecution((op,input,id,allowed)=>{
+            if(op==7)return new byte[]{1};if(op==0)return new byte[]{2};if(op==1)return new byte[]{1};
+            if(op==11){rejectedInstalls++;throw new InvalidOperationException();}
+            throw new Exception("Unexpected rejected-snapshot operation");
+        },()=>clock);
+        nativeReject.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,skewRpc,new long[]{2},7,1);
+        Check(rejectedInstalls==0);clock=origin.AddSeconds(40);
+        nativeReject.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,skewRpc,new long[]{2},7,1);
+        Check(rejectedInstalls==1&&nativeReject.DiagnosticsSnapshot().Contains("unavailable reason=native_or_protocol_rejected"));
+        // A changed scope discards old bytes, fetching a fresh scoped response.
+        skew.Reset();clock=origin;stepSkew(new long[]{2});clock=origin.AddSeconds(40);
+        skew.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,skewRpc,new long[]{2},8,1);
+        int scopePosition=prefix.Length;BigEndian(skewWire,ref scopePosition,8);
+        Check(BigEndian(skewWire,ref scopePosition,8)==8);
         Console.WriteLine("PASS: fair outgoing/incoming/receipt scans; bounded authenticated eligibility refresh; source/recipient/expiry mismatches rejected.");
     }
 }

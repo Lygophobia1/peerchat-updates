@@ -839,6 +839,11 @@ std::string Storage::mailboxDiagnostics(){
             " total="+std::to_string(manifest->targets.size())+" acknowledged="+std::to_string(acknowledged)+
             " pending="+std::to_string(pending)+" unavailable="+std::to_string(unavailable)+
             " result="+(all?"all_verified_acks":"partial")+"\n";
+        result+="delivery_target_scope message_id="+id+" canonical_device="+manifest->canonicalRecipient+
+            " sender_account="+std::to_string(manifest->senderAccount)+" recipient_account="+std::to_string(manifest->recipientAccount)+"\n";
+        for(const auto& target:manifest->targets)
+            result+="delivery_target_device message_id="+id+" device="+target.device+
+                " status="+(target.status==DeliveryTargetStatus::Acknowledged?"acknowledged":target.status==DeliveryTargetStatus::Pending?"pending":"unavailable")+"\n";
     }
     Statement retries(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'delivery-target-retry/v1/%' ORDER BY k LIMIT 32");
     while(retries.row()){
