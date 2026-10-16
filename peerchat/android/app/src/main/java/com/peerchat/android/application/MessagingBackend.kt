@@ -711,9 +711,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     }else groupCompletionObserved.remove(attempt)
                 }catch(_:Exception){groupCompletionObserved.remove(attempt)}
             }
-            repeat(16) {
-                val event=ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0)) ?: return@repeat
-                if(event.isEmpty())return@repeat
+            drainNativeEvents({ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0))}) { event ->
                 val record=NativeRecord(event,3);val kind=record.number();record.text();record.text();record.number()
                 if(kind==1L)android.util.Log.i("PeerChatWake","stage=peer_session_ready")
                 if(kind==2L){
