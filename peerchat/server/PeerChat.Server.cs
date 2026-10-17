@@ -683,6 +683,7 @@ namespace PeerChat.Server {
         }
         internal void RequestStop(){
             lock(workerGate){if(stopping)return;stopping=true;}
+            mailboxHints.Stop();
             Log("INFO","Graceful shutdown requested.");try{if(listener!=null)listener.Stop();}catch{}
         }
         void DrainWorkers(){

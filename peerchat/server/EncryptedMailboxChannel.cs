@@ -1,13 +1,65 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Web.Script.Serialization;
 
 namespace PeerChat.Server {
+// Optional wake hints only, never durable work/ACKs. One bounded, coalesced
+// account batch per server worker; overflow is recovered by periodic fetch.
+internal sealed class MailboxHintQueue {
+    readonly object gate=new object();readonly Dictionary<long,int> pending=new Dictionary<long,int>();readonly Queue<long> order=new Queue<long>();bool running,stopped;
+    internal int Count {get{lock(gate)return pending.Count;}}
+    internal bool Running {get{lock(gate)return running;}}
+    internal bool Enqueue(long account,int kind){lock(gate){
+        if(stopped||account<=0||(kind!=1&&kind!=2))return false;
+        int previous;if(pending.TryGetValue(account,out previous)){pending[account]=previous|kind;return false;}
+        if(pending.Count>=256)return false;
+        pending.Add(account,kind);order.Enqueue(account);if(running)return false;running=true;return true;
+    }}
+    internal bool Take(out long account,out int kind){lock(gate){
+        account=0;kind=0;if(stopped||pending.Count==0){running=false;return false;}
+        account=order.Dequeue();kind=pending[account];pending.Remove(account);return true;
+    }}
+    internal void Stop(){lock(gate){stopped=true;pending.Clear();order.Clear();}}
+}
 sealed partial class DiscoveryServer {
+    readonly MailboxHintQueue mailboxHints=new MailboxHintQueue();
+    void QueueMailboxHint(long account,bool receipt){
+        if(mailboxHints.Enqueue(account,receipt?2:1))QueueWorker(DrainMailboxHints);
+    }
+    void DrainMailboxHints(){
+        long account;int kind;
+        while(mailboxHints.Take(out account,out kind)){
+            if(stopping)return;
+            if((kind&1)!=0)SendMailboxHint(account,"mailbox_ready");
+            if((kind&2)!=0)SendMailboxHint(account,"mailbox_receipt_ready");
+        }
+    }
+    void SendMailboxHint(long account,string name){
+        EventClient[] subscribers;lock(eventGate)subscribers=eventClients.Where(value=>value.AccountId==account).ToArray();
+        var payload=System.Text.Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(new Dictionary<string,object>{{"ok",true},{"version",ProtocolVersion},{"type","friend_event"},{"event",name}}));
+        foreach(var subscriber in subscribers){
+            // Only this owned dispatcher may wait for an event writer. Bounded
+            // waits requeue/coalesce fairly, never delaying the durable RPC or
+            // losing the sole hint merely because another writer is active.
+            if(stopping)return;
+            if(!System.Threading.Monitor.TryEnter(subscriber.Gate,100)){QueueMailboxHint(account,name=="mailbox_receipt_ready");continue;}
+            bool dead=false;
+            try{
+                if(!subscriber.Active||leaseClock.ElapsedMilliseconds-subscriber.LastHeartbeatUtc>=EventLeaseSeconds*1000L||
+                    accounts.Authenticate(subscriber.SessionTokenHash)!=subscriber.AccountId||
+                    !accounts.SessionAllowsDevice(subscriber.SessionTokenHash,subscriber.PublicIdentity)||!accounts.OwnsDevice(subscriber.AccountId,subscriber.PublicIdentity))continue;
+                WriteFrame(subscriber.Tls,payload);
+            }catch{dead=true;}
+            finally{System.Threading.Monitor.Exit(subscriber.Gate);}
+            if(dead){lock(eventGate){subscriber.Active=false;eventClients.Remove(subscriber);}subscriber.Dispose();}
+        }
+    }
     // Only a hint after durable storage, never a delivery acknowledgement.
     // Cache notices use the same existing wake path as ordinary mailbox data.
     void NotifyStoredMailbox(byte[] wire){
         var envelope=MailboxProtocol.Envelope.Parse(wire);
-        Notify(envelope.Recipient,new Dictionary<string,object>{{"event","mailbox_ready"}});
+        QueueMailboxHint(envelope.Recipient,false);
         pushWakes.Hint(envelope.Recipient,envelope.RecipientDevice);
     }
     // Uses the existing authenticated event channel and its write/session gate.
@@ -53,7 +105,7 @@ sealed partial class DiscoveryServer {
                 if(state=="acknowledged") {
                     var receipt=MailboxProtocol.Receipt.Parse(wire);
                     long senderAccount=accounts.MailboxReceiptSender(receipt);
-                    if(senderAccount>0)Notify(senderAccount,new Dictionary<string,object>{{"event","mailbox_receipt_ready"}});
+                    if(senderAccount>0)QueueMailboxHint(senderAccount,true);
                 }
             } else if(type=="mailbox_receipts") {
                 var rows=accounts.MailboxReceipts(account,device,Text(request,"afterMessageId")??"",Text(request,"cursor"));
