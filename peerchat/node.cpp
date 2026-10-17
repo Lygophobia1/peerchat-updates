@@ -20,6 +20,7 @@
 #include "windows_mailbox.hpp"
 #include "windows_group_attachment_application.hpp"
 #include "windows_download_save.hpp"
+#include "windows_dm_attachment_adapter.hpp"
 #include "direct_transport_adapter.hpp"
 #include "session_transport_manager.hpp"
 #include "tls.hpp"
@@ -131,6 +132,16 @@ struct Node::Impl {
     std::unique_ptr<transfer::windows::DurableJournal> transferJournal;
     std::unique_ptr<group_attachments::windows::CacheStateStore> cacheJournal;
     std::unique_ptr<group_attachments::windows::Application> groupAttachments;
+    std::unique_ptr<dm_attachments::windows::Adapter> dmAttachmentIo;
+    std::unique_ptr<dm_attachments::Application> dmAttachments;
+    std::unique_ptr<transfer::DirectCacheJournal> dmTransferJournal;
+    std::vector<DeviceKeyMetadata> dmLocalKeys;
+    void refreshDmKeys(){if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);mailboxApplication->attachmentKeys([&](auto& manager,auto&,auto&){dmLocalKeys=manager.snapshot();});}
+    dm_attachments::Evidence dmEvidence(){dm_attachments::Evidence evidence;
+        evidence.identity=[this](std::uint64_t account,const std::string& device)->Blob{if(account==authenticatedFriends.localAccount()&&device==profile.peerId)return profile.publicKey;auto historical=store->historicalDeviceAccount(device);protocol::check(authenticatedFriends.accountFor(device)==account||(historical&&*historical==account));auto contact=contacts.find(device);protocol::check(contact!=contacts.end()&&contact->second.verified&&Storage::publicKeyId(contact->second.publicKey)==device);return contact->second.publicKey;};
+        evidence.current=[this,identity=evidence.identity](const mailbox::RecipientBinding& binding,const std::string& relationship,std::uint64_t other){if(!protocol::id(relationship,32)||!binding.storageAllowed||!other)return false;try{if(!mailbox::verifyBinding(binding,binding.accountId,binding.device,identity(binding.accountId,binding.device),verifyDevicePayload,Storage::publicKeyId))return false;if(binding.accountId==authenticatedFriends.localAccount()){if(binding.device!=profile.peerId)return false;return std::any_of(dmLocalKeys.begin(),dmLocalKeys.end(),[&](const auto& key){return key.registration==DeviceKeyRegistration::Accepted&&(key.state==DeviceKeyState::Active||key.state==DeviceKeyState::Retired)&&key.signedBinding==mailbox::serializeBinding(binding);});}return other==authenticatedFriends.localAccount()&&authenticatedFriends.accountFor(binding.device)==binding.accountId;}catch(...){return false;}};return evidence;
+    }
+    dm_attachments::Application::KeyAccess dmKeyAccess(){return [this](const std::string& id,const auto& operation){refreshDmKeys();mailboxApplication->attachmentKeys([&](auto& manager,auto& hpke,auto& signer){auto key=dmLocalKeys.end();for(auto it=dmLocalKeys.begin();it!=dmLocalKeys.end();++it)if(it->registration==DeviceKeyRegistration::Accepted&&!it->signedBinding.empty()&&(id.empty()?it->state==DeviceKeyState::Active:it->id==id&&(it->state==DeviceKeyState::Active||it->state==DeviceKeyState::Retired))&&(key==dmLocalKeys.end()||it->generation>key->generation))key=it;protocol::check(key!=dmLocalKeys.end());auto binding=mailbox::parseBinding(key->signedBinding);protocol::check(binding.accountId==authenticatedFriends.localAccount()&&binding.device==profile.peerId&&binding.storageAllowed);manager.withRecipient(key->id,!id.empty(),[&](const auto&,const auto& handle){operation(hpke,signer,binding,handle);});});};}
     bool groupAttachmentPersistenceReported=false;
     std::unique_ptr<transfer::ProtectedStatisticsStore> transferStatistics;
     bool transferPersistenceReported=false;
@@ -173,7 +184,8 @@ struct Node::Impl {
     transfer::windows::TransferTiming transferTiming;
     void serviceTransfers(){
         if(!transfers)return;
-        if(downloadSaves)try{downloadSaves->tick(transfers->completedRecords());}catch(const std::exception&){transferPersistenceFailure();}
+        if(dmAttachments)try{refreshDmKeys();dmAttachments->tick();dmAttachmentIo->tick();}catch(const std::exception&){/* Protected DM cache failure never advances an ACK. */}
+        if(downloadSaves)try{auto completed=transfers->completedRecords();if(dmAttachmentIo){auto plain=dmAttachmentIo->plaintextRecords();completed.insert(completed.end(),plain.begin(),plain.end());}downloadSaves->tick(completed);}catch(const std::exception&){transferPersistenceFailure();}
         if(groupAttachments)try{groupAttachments->tick();}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}}
         if(groupAttachments&&archiveGroups&&nowMilliseconds()>=groupReferenceScanAt){groupReferenceScanAt=nowMilliseconds()+1000;try{groupAttachments->visitPublicReferences([this](const Blob& wire){archiveGroups->rememberReference(wire);});}catch(...){/* Reference indexing cannot interrupt accepted transfers. */}}
         transfers->mediaActive(groupBulkMediaActive||calls.active()||screenShares.active()!=nullptr);
@@ -183,8 +195,9 @@ struct Node::Impl {
             auto state=sessionTransports->snapshot(peer);if(!state||!state->connected)continue;
             for(auto& c:connections)if(c->attemptId==state->activeTransport.value&&c->online&&!c->dead&&!(c->remoteCapabilities&protocol::CapabilityFileTransfer))transfers->unsupportedPeer(peer);
         }
-        try{transfers->tickScoped(nowMilliseconds(),[&](const transfer::Snapshot& row){if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->route(row):0;auto c=transferConnection(row.peer);return c?c->attemptId:0;},
+        try{transfers->tickScoped(nowMilliseconds(),[&](const transfer::Snapshot& row){if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments?dmAttachments->route(row):0;if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->route(row):0;auto c=transferConnection(row.peer);return c?c->attemptId:0;},
             [&](const transfer::Snapshot& row,const Blob& bytes){
+                if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments&&dmAttachments->send(row,bytes);
                 if(row.purpose==transfer::Purpose::GroupCacheCiphertext){try{return groupAttachments&&groupAttachments->send(row,bytes);}catch(const std::exception&){if(!groupAttachmentPersistenceReported){notice(NodeEvent::Kind::Error,L"Group attachments are waiting for verified protected storage; messaging is unaffected","group-attachment:storage");groupAttachmentPersistenceReported=true;}return false;}}
                 if(row.purpose!=transfer::Purpose::PeerFile)return false;
                 const auto& peer=row.peer;
@@ -231,6 +244,24 @@ struct Node::Impl {
     }
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
+        if(command.sourceKind==21&&command.id.rfind("legacy:",0)==0){if(!dmAttachments||dmAttachments->capabilityState()!=2)return L"error:Wait for the encrypted attachment capability check. Direct fallback is allowed only when the server explicitly reports unsupported encrypted attachments.";auto account=std::stoull(command.id.substr(7));if(authenticatedFriends.accountFor(command.peer)!=account||!transferConnection(command.peer))return L"error:Live verified direct transfer is unavailable. Reconnect the verified recipient, or update all devices for encrypted offline attachments.";Command legacy=command;legacy.sourceKind=1;legacy.id=Storage::newMessageId();return transferOperation(legacy);}
+        if(command.sourceKind==28){
+            protocol::check(dmAttachments&&store);auto bytes=store->directAttachmentReadContext(profile.peerId);if(bytes.empty())return L"{\"items\":[],\"cursor\":\"\",\"more\":false,\"scope\":\"\"}";
+            protocol::Reader context(bytes);protocol::check(context.type()==protocol::FileTransfer&&context.string()=="PeerChat/DMLocalReadContext/v1");auto account=context.number();auto server=context.string();context.end();auto page=dmAttachments->historyFor(account,server,command.id,32);using V=group_attachments::rpc::Value;auto result=V::map();result["cursor"]=V(page.cursor);result["more"]=V(page.more);result["scope"]=V(std::to_string(account)+":"+server);auto items=V::list();
+            for(const auto& row:page.items){auto v=V::map();v["id"]=V(row.id);v["logicalId"]=V(row.message);v["peer"]=V(row.peer);v["conversationPeer"]=V(row.peer);v["senderPeer"]=V(row.sending?profile.peerId:row.peer);v["name"]=V(row.name);v["dmState"]=V(row.state);v["dmCache"]=V(true);v["error"]=V(row.error);v["size"]=V(row.size);v["done"]=V(row.done);v["time"]=V(row.time);v["sending"]=V(row.sending);v["uploadComplete"]=V(row.uploadComplete);v["noticesStored"]=V(row.noticesStored);v["plaintextVerified"]=V(row.verified);v["account"]=V(store->historicalDeviceAccount(row.peer).value_or(0));unsigned state=row.state=="complete"?4:row.state=="canceled"?5:row.state=="failed"?6:row.state=="paused"?8:row.state=="available"&&!row.sending?2:row.state=="preflight"||row.state=="preparing"?0:3;v["state"]=V(std::uint64_t(state));auto save=downloadSaves?downloadSaves->status(row.id,row.verified):download_save::Coordinator::Status{};v["saveState"]=V(save.state);v["savePath"]=V(utf8(save.path));v["saveError"]=V(save.error);items.array.push_back(std::move(v));}result["items"]=std::move(items);return widenUtf8(group_attachments::rpc::json(result));
+        }
+        if(command.sourceKind>=20&&command.sourceKind<=27){
+            if(!dmAttachments){if(command.sourceKind==20)return L"{\"supported\":false,\"reason\":\"Protected direct attachment storage is unavailable\",\"items\":[]}";throw std::runtime_error("Protected direct attachment storage is unavailable");}
+            if(command.sourceKind==20){auto root=group_attachments::rpc::Value::map();using V=group_attachments::rpc::Value;root["supported"]=V(dmAttachments->supported());root["reason"]=V(dmAttachments->supported()?"":"Waiting for an authenticated device session and compatible encrypted attachment cache");auto items=V::list();for(const auto& row:dmAttachments->snapshots()){auto v=V::map();v["id"]=V(row.id);v["logicalId"]=V(row.message);v["peer"]=V(row.peer);v["conversationPeer"]=V(row.peer);v["senderPeer"]=V(row.sending?profile.peerId:row.peer);v["name"]=V(row.name);v["dmState"]=V(row.state);v["dmCache"]=V(true);v["error"]=V(row.error);v["size"]=V(row.size);v["done"]=V(row.done);v["time"]=V(row.time);v["sending"]=V(row.sending);v["uploadComplete"]=V(row.uploadComplete);v["noticesStored"]=V(row.noticesStored);v["plaintextVerified"]=V(row.verified);v["account"]=V(authenticatedFriends.accountFor(row.peer));unsigned state=row.state=="complete"?4:row.state=="canceled"?5:row.state=="failed"?6:row.state=="paused"?8:row.state=="available"&&!row.sending?2:row.state=="preflight"||row.state=="preparing"?0:3;v["state"]=V(std::uint64_t(state));auto save=downloadSaves?downloadSaves->status(row.id,row.verified):download_save::Coordinator::Status{};v["saveState"]=V(save.state);v["savePath"]=V(utf8(save.path));v["saveError"]=V(save.error);v["path"]=V(utf8(dmAttachmentIo->path(row.id)));items.array.push_back(std::move(v));}root["items"]=std::move(items);return widenUtf8(group_attachments::rpc::json(root));}
+            if(command.sourceKind==21){if(!dmAttachments->supported())return L"error:Encrypted attachments are not ready. Verify this device session and update the recipient's PeerChat devices.";std::uint64_t account=std::stoull(command.id);std::string peer;for(const auto& contact:contacts)if(contact.second.verified&&authenticatedFriends.accountFor(contact.first)==account&&(peer.empty()||contact.first==command.peer))peer=contact.first;if(peer.empty())return L"error:Verify a device belonging to this friend before sending an encrypted attachment. No identity was automatically trusted.";return widenUtf8(dmAttachments->start(peer,account,std::make_unique<transfer::windows::FileSource>(command.text)));}
+            if(command.sourceKind==22){protocol::check(downloadSaves!=nullptr);auto wire=group_attachments::rpc::unbase64(utf8(command.text),65536,false);protocol::Reader r(wire);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DownloadSelection/v1");auto target=r.text();auto approval=r.bytes();r.end();auto records=dmAttachmentIo->plaintextRecords();auto complete=std::find_if(records.begin(),records.end(),[&](const auto& row){return row.metadata.id==command.id;});if(complete!=records.end()){protocol::check(dmAttachments->completedLocation(command.id)==complete->location);downloadSaves->retry(command.id,target,approval,&*complete);}else{downloadSaves->select(command.id,target,approval);try{dmAttachments->accept(command.id);}catch(...){downloadSaves->abandon(command.id);throw;}}return L"ok";}
+            if(command.sourceKind==23){auto rows=dmAttachments->snapshots();protocol::check(std::any_of(rows.begin(),rows.end(),[&](const auto& row){return row.id==command.id;}));dmAttachments->cancel(command.id);return L"ok";}
+            if(command.sourceKind==25)return widenUtf8(group_attachments::rpc::base64(dmAttachments->nextCommand(),false));
+            auto wire=group_attachments::rpc::unbase64(utf8(command.text),100000,false);
+            if(command.sourceKind==24){protocol::Reader r(wire);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DMCacheSession/v1");auto account=r.number(),generation=r.number();auto server=r.string();r.end();protocol::check(!account||(account==authenticatedFriends.localAccount()&&account==groupAccount.accountId));dmAttachments->session(account,generation,server);if(account){protocol::Writer context(protocol::FileTransfer);context.string("PeerChat/DMLocalReadContext/v1");context.number(account);context.string(server);auto previous=store->directAttachmentReadContext(profile.peerId);if(previous!=context.data)store->saveDirectAttachmentReadContext(profile.peerId,previous,context.data);}}
+            else if(command.sourceKind==26)dmAttachments->reply(wire);else dmAttachments->failure(wire);
+            return L"ok";
+        }
         // Legacy DM/archive actions cannot target the separate cache purpose.
         if(!command.id.empty())for(const auto& row:transfers->snapshots())if(row.metadata.id==command.id&&row.purpose!=transfer::Purpose::PeerFile)throw std::runtime_error("Use the group attachment operation for this object");
         if(command.sourceKind==11){std::wstring result;for(const auto& row:transfers->diagnostics(nowMilliseconds())){auto id=row.substr(9,32);result+=widenUtf8(row+transferTiming.diagnostics(id)+(transferJournal?transferJournal->diagnostics(id):std::string{}))+L"\n";}return result;}
@@ -373,6 +404,8 @@ struct Node::Impl {
         }
     }
     void clearGroupAttachmentSession(){
+        if(dmAttachments)dmAttachments->session(0,0,"");
+        dmLocalKeys.clear();
         if(!groupAttachments)return;
         protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/AttachmentSession/v1");w.number(0);w.number(0);w.string("");groupAttachments->network(0,w.data);
     }
@@ -1348,6 +1381,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
             if(command.mailbox){
                 if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);
+                if(command.sourceKind==5&&dmAttachments){auto attachment=dmAttachments->dispatchNotice(command.bytes);if(attachment){if(attachment->empty())throw std::runtime_error("Encrypted attachment is waiting for current authenticated cache context");auto h=mailbox::parse(command.bytes).header;protocol::Writer result(protocol::Ack);result.number(0);result.bytes(*attachment);result.string(h.senderDevice);result.string(h.messageId);if(command.bytesResponse)command.bytesResponse->set_value(std::move(result.data));continue;}}
                 auto output=mailboxApplication->execute(command.sourceKind,command.bytes,command.id,command.accepted,*store,*deliveries,authenticatedFriends,*sessionTransports);
                 if(command.sourceKind==11){for(const auto& device:store->pendingTargetDevices())liveOutboxPeers.insert(device);demandCheckAt=0;}
                 if(command.sourceKind==5){protocol::Reader record(output);auto inserted=record.number();record.bytes();auto sender=record.string(),id=record.string();record.end();
@@ -1707,7 +1741,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             store=std::make_unique<Storage>(directory);profile=store->profile();
             mailboxApplication.reset();mailboxProfileDirectory=directory;
             deliveries=std::make_unique<delivery::DeliveryManager>(*store,profile.peerId);
-            downloadSaves.reset();groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;groupAttachmentPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
+            downloadSaves.reset();dmAttachments.reset();groupAttachments.reset();transfers.reset();dmTransferJournal.reset();dmAttachmentIo.reset();dmLocalKeys.clear();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();transferPersistenceReported=false;groupAttachmentPersistenceReported=false;cataloguedTransfers.clear();attachmentCatalogAt=0;
             try{
                 transferCleanup=std::make_unique<transfer::windows::CleanupJournal>(directory);transferCleanup->recover();
                 transferJournal=std::make_unique<transfer::windows::DurableJournal>(directory,profile.peerId);
@@ -1715,15 +1749,23 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 try{
                     cacheJournal=std::make_unique<group_attachments::windows::CacheStateStore>(directory,profile.peerId,*transferJournal,[this](const transfer::DurableState& d){protocol::check(groupAttachments!=nullptr);return groupAttachments->reopen(d);});
                     cacheJournal->load(); // Application metadata must be verified before reopening cache sources.
-                    transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},cacheJournal.get(),transferStatistics.get());
-                    groupAttachments=std::make_unique<group_attachments::windows::Application>(*store,profile,*transfers,*cacheJournal,directory,
+                    auto createGroupApplication=[&](){groupAttachments=std::make_unique<group_attachments::windows::Application>(*store,profile,*transfers,*cacheJournal,directory,
                         [this](const std::string& group,const group_keys::RosterSnapshot* historical){return attachmentContext(group,historical);},
-                        [this](const auto& operation){if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);mailboxApplication->attachmentKeys(operation);});
-                    transfers->restore(nowMilliseconds());
+                        [this](const auto& operation){if(!mailboxApplication)mailboxApplication=std::make_unique<mailbox::WindowsMailbox>(mailboxProfileDirectory,profile);mailboxApplication->attachmentKeys(operation);});};
+                    try{
+                        dmAttachmentIo=std::make_unique<dm_attachments::windows::Adapter>(directory);
+                        dmTransferJournal=std::make_unique<transfer::DirectCacheJournal>(*store,profile.peerId,*cacheJournal,[this](const transfer::DurableState& d){protocol::check(dmAttachments!=nullptr);return dmAttachments->reopen(d);},[this](const transfer::DurableState& d){return dmAttachmentIo->receive(d);});
+                        transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},dmTransferJournal.get(),transferStatistics.get());createGroupApplication();
+                        dmAttachments=std::make_unique<dm_attachments::Application>(*store,profile,*transfers,dmAttachmentIo->platform(),[this](){return dmEvidence();},dmKeyAccess());transfers->restore(nowMilliseconds());
+                    }catch(const std::exception&){
+                        dmAttachments.reset();groupAttachments.reset();transfers.reset();dmTransferJournal.reset();dmAttachmentIo.reset();
+                        transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},cacheJournal.get(),transferStatistics.get());createGroupApplication();transfers->restore(nowMilliseconds());
+                        notice(NodeEvent::Kind::Error,L"Encrypted direct attachments unavailable: protected recovery metadata requires attention","dm-attachment:storage");
+                    }
                 }catch(const std::exception&){
                     // A cache-only recovery failure never resets protected cache
                     // data or disables otherwise valid direct-file transfers.
-                    groupAttachments.reset();transfers.reset();cacheJournal.reset();
+                    dmAttachments.reset();groupAttachments.reset();transfers.reset();dmTransferJournal.reset();dmAttachmentIo.reset();cacheJournal.reset();
                     transfers=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::windows::Sha256>();},transferJournal.get(),transferStatistics.get());
                     transfers->restore(nowMilliseconds());
                     notice(NodeEvent::Kind::Error,L"Group attachments unavailable: protected recovery metadata requires attention","group-attachment:storage");
@@ -1734,7 +1776,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }
                 try{downloadSaves=std::make_unique<download_save::Coordinator>(directory,profile.peerId);}catch(const std::exception&){notice(NodeEvent::Kind::Error,L"Automatic saving unavailable: protected save choices require attention; verified downloads are retained");}
             }
-            catch(...){groupAttachments.reset();transfers.reset();cacheJournal.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
+            catch(...){dmAttachments.reset();groupAttachments.reset();transfers.reset();dmTransferJournal.reset();dmAttachmentIo.reset();cacheJournal.reset();notice(NodeEvent::Kind::Error,L"File transfers unavailable: protected restart metadata requires attention");}
             sessionEpoch={nextSessionEpoch++};
             auto profileScope=utf8(std::filesystem::path(directory).filename().wstring());
             sessionTransports=std::make_unique<session::SessionTransportManager>(std::move(profileScope),profile.peerId,sessionEpoch,static_cast<std::uint32_t>(ReconnectBaseMilliseconds),static_cast<std::uint32_t>(ReconnectCapMilliseconds));
@@ -1841,6 +1883,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             }
         }catch(const std::exception& error){std::string reason=error.what();notice(NodeEvent::Kind::Error,std::wstring(reason.begin(),reason.end()));}
         archiveTransfers.reset();archiveExecution.reset();archiveGroups.reset();archiveApplication.reset();archiveGeneration=0;archiveAuthenticated=false;
+        dmAttachments.reset();groupAttachments.reset();transfers.reset();dmTransferJournal.reset();dmAttachmentIo.reset();dmLocalKeys.clear();
         clearVoice(L"Profile closed");calls.reset();clearScreen(L"Profile closed");running=false;resolvers.clear();connections.clear();{std::lock_guard<std::mutex> relayLock(relayMutex);for(auto& item:relayPipes){std::lock_guard<std::mutex> pipeLock(item.second->mutex);item.second->closed=true;item.second->changed.notify_all();}relayPipes.clear();}downloadSaves.reset();groupAttachments.reset();transfers.reset();cacheJournal.reset();transferJournal.reset();transferCleanup.reset();transferPaths.clear();mailboxApplication.reset();sessionTransports.reset();deliveries.reset();groupKeys.reset();groupRosterDiscoveryGeneration=0;directListenerLeases.clear();closeDirectListener();credentials.reset();store.reset();groups.clear();groupAccount={};SecureZeroMemory(profile.privateKey.data(),profile.privateKey.size());profile={};if(winsock)WSACleanup();
     }
 };

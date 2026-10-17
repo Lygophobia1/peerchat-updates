@@ -22,6 +22,21 @@ template<class F> jbyteArray call(JNIEnv* env,F body){
     try{std::lock_guard<std::mutex> lock(gate);return peerchat::platform::android::Context::input(env,body());}
     catch(...){if(env->ExceptionCheck())env->ExceptionClear();auto type=env->FindClass("java/lang/IllegalStateException");if(type)env->ThrowNew(type,"Host test SQL/protection provider failed");return nullptr;}
 }
+// Isolated fixture setup only: provision explicit, already verified test pins.
+// This export is compiled into test DLLs, never a product library/build target.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_platform_tls_NativeDmAttachmentSide_profileFixtureDiagnostic(JNIEnv* env,jclass,jobject facade){
+    std::string result="ok";
+    try{auto providers=peerchat::platform::android::platform(env,facade);peerchat::Storage storage(providers);auto profile=storage.profile();peerchat::delivery::DeliveryManager delivery(storage,profile.peerId);}
+    catch(const std::exception& error){result=error.what();}catch(...){result="Unknown host profile failure";}
+    if(env->ExceptionCheck())env->ExceptionClear();
+    return peerchat::platform::android::Context::input(env,result);
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_platform_tls_NativeDmAttachmentSide_trustFixturePeer(JNIEnv* env,jclass,jlong handle,jbyteArray input,jboolean verified){
+    try{auto instance=lookup(static_cast<pc_core_handle>(handle));peerchat::protocol::check(bool(instance));std::lock_guard<std::mutex> lock(instance->gate);
+        auto key=peerchat::platform::android::Context::output(env,input);auto device=peerchat::Storage::publicKeyId(key);peerchat::protocol::check(key.size()==72&&instance->friends.accountFor(device)>0);
+        instance->storage->saveContact({device,L"Explicit isolated JNI fixture pin",key,{},verified==JNI_TRUE});return 0;
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 1;}
+}
 // Test-only protected archive classification: deny ordinary traffic for an ID.
 // Does not create any archive authorization/grant or bypass production dispatch.
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_platform_tls_NativeTransferProof_markArchive(JNIEnv* env,jclass,jlong handle,jbyteArray input){

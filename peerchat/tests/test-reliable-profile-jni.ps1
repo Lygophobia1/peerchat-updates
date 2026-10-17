@@ -1,7 +1,7 @@
-param([string]$JavaHome='C:\Program Files\Java\jdk-22',[string]$ServerDirectory,[switch]$TransferFiles)
+param([string]$JavaHome='C:\Program Files\Java\jdk-22',[string]$ServerDirectory,[switch]$TransferFiles,[string]$FixtureDirectory,[switch]$PrepareOnly)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
-$out=Join-Path $root ('build\tests\reliable-profile-jni-'+[Guid]::NewGuid().ToString('N'))
+$out=if($FixtureDirectory){[IO.Path]::GetFullPath($FixtureDirectory)}else{Join-Path $root ('build\tests\reliable-profile-jni-'+[Guid]::NewGuid().ToString('N'))}
 $deps=Join-Path $root 'build\deps\bouncycastle-1.86.1-jdk18on'
 $pins=@{
     'bcprov-jdk18on-1.86.jar'='2af190b300cbb0b35e248ccf5f4a06b6072030aeb3da7a98ec73abe5b4cb371f'
@@ -46,6 +46,7 @@ try {
     if($TransferFiles){
         & "$JavaHome\bin\javac.exe" -encoding UTF-8 -cp "$out;$classpath" -d $out tests/jni-host/com/peerchat/android/ArchiveBridge.java tests/tls-host/NativeTransferProof.java
         if($LASTEXITCODE -ne 0){throw 'Native transfer Java proof compilation failed'}
+        if($PrepareOnly){Write-Output "Prepared JNI fixture: $out";return}
         Write-Host 'Native transfer proof: production JNI/core/Java TLS with real Windows files and protected SQLite journals; NOT Android POSIX/Keystore.'
         & "$JavaHome\bin\java.exe" -Xcheck:jni "-Djava.library.path=$out" -cp "$out;$classpath" com.peerchat.android.platform.tls.NativeTransferProof "$out\transfer-profiles"
         if($LASTEXITCODE -ne 0){throw "Native transfer proof failed; retained fixture $out"}

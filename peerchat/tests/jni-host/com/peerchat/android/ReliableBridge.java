@@ -11,6 +11,7 @@ public final class ReliableBridge {
     public static native byte[] exchange(long profile,long peer,int operation,byte[] input);
     public static native int close(long profile,long peer,boolean recoverable);
     public static native byte[] send(long profile,byte[] expectedPeer,byte[] text);
+    public static native byte[] queueLocal(long profile,byte[] expectedPeer,byte[] text);
     public static native byte[] history(long profile,byte[] expectedPeer,long before);
     public static native byte[] state(long profile,byte[] expectedPeer);
     static void require(boolean value,String reason){if(!value)throw new AssertionError(reason);}

@@ -96,7 +96,7 @@ class FileSource final:public Source {
     Blob token_;
 public:
     explicit FileSource(const std::wstring& path,const std::string& logicalName={},Purpose purpose=Purpose::PeerFile){
-        require(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext);
+        require(purpose==Purpose::PeerFile||purpose==Purpose::GroupCacheCiphertext||purpose==Purpose::DirectCacheCiphertext);
         name_=logicalName.empty()?unicode::encode(std::filesystem::path(path).filename().wstring()):logicalName;require(safeName(name_));
         handle_=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle_==INVALID_HANDLE_VALUE)throw std::runtime_error("Cannot open file");

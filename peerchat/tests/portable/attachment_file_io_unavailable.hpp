@@ -22,7 +22,7 @@ public:
 };
 class FileSource final:public Source {
 public:
-    FileSource(std::shared_ptr<Cache>,std::string,std::string){attachmentUnavailable();}
+    FileSource(std::shared_ptr<Cache>,std::string,std::string,Purpose=Purpose::PeerFile){attachmentUnavailable();}
     std::uint64_t size()const override{attachmentUnavailable();}
     std::string name()const override{attachmentUnavailable();}
     Blob read(std::uint64_t,size_t)override{attachmentUnavailable();}
@@ -33,7 +33,7 @@ public:
 };
 class FileSink final:public Sink {
 public:
-    FileSink(std::shared_ptr<Cache>,const Metadata&){attachmentUnavailable();}
+    FileSink(std::shared_ptr<Cache>,const Metadata&,Purpose=Purpose::PeerFile){attachmentUnavailable();}
     void append(const Blob&)override{attachmentUnavailable();}
     void flush()override{attachmentUnavailable();}
     Blob read(std::uint64_t,size_t)override{attachmentUnavailable();}
@@ -43,4 +43,6 @@ public:
     Blob sourceToken()const{attachmentUnavailable();}
     static std::unique_ptr<FileSink> reopen(std::shared_ptr<Cache>,const DurableState&){attachmentUnavailable();}
 };
+inline std::unique_ptr<Sink> replaySink(std::shared_ptr<Cache>,const DurableState&){attachmentUnavailable();}
+inline std::unique_ptr<Sink> resumeStage(std::shared_ptr<Cache>,const Metadata&,const Blob&){attachmentUnavailable();}
 }
