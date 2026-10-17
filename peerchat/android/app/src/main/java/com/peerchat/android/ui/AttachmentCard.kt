@@ -57,6 +57,7 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
                 Text("${row.size} bytes · "+when(row.state){0->"Preparing";1->"Waiting for recipient";2->"File offered";3->"Transferring";4->"Transfer complete";5->"Cancelled";6->"Failed";7->"Recovering";else->"Suspended"},
                     style=MaterialTheme.typography.labelSmall)
                 if(row.cachePhase.isNotEmpty())Text(row.cachePhase,style=MaterialTheme.typography.labelSmall)
+                else Text(if(row.outgoing)"Direct transfer · selected device only" else "Direct transfer · this device only",style=MaterialTheme.typography.labelSmall)
                 if(row.state==3&&row.size>0)LinearProgressIndicator(progress={row.done.toFloat()/row.size.toFloat()},modifier=Modifier.fillMaxWidth())
                 Text(row.statisticsText,style=MaterialTheme.typography.labelSmall)
                 if(row.error.isNotEmpty())Text(row.error,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)

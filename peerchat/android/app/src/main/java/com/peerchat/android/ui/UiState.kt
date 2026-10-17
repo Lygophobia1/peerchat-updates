@@ -83,6 +83,7 @@ data class PeerChatUiState(
     val mailboxStorageAllowed:Boolean=false,
     val archiveEnrollment:ArchiveEnrollmentSnapshot?=null,val archiveBusy:Boolean=false,val archiveProgress:com.peerchat.android.application.ArchiveSyncProgress=com.peerchat.android.application.ArchiveSyncProgress(),
     val attachmentPreviews:Map<String,String> = emptyMap(),
+    val attachmentCompatibility:com.peerchat.android.application.AttachmentCompatibilityChoice?=null,val attachmentCompatibilityBusy:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
     val diagnosticsReturn: Route = Route.Details,
     val theme: ThemeChoice = ThemeChoice.System, val incomingCallPreview: Boolean = false,
@@ -146,6 +147,7 @@ sealed interface UiAction {
     data class ArchiveConsent(val context:ArchiveEnrollmentSnapshot,val action:ArchiveDeviceAction,val device:String,val read:Boolean=false,val serve:Boolean=false):UiAction
     data class PreviewMessage(val text: String) : UiAction
     data class SendAttachment(val uri:android.net.Uri):UiAction
+    data class ResolveAttachmentCompatibility(val token:String,val direct:Boolean):UiAction
     data class AttachmentAction(val id:String,val accept:Boolean):UiAction
     data class AttachmentPreview(val id:String):UiAction
     data object Older : UiAction
@@ -214,7 +216,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
         UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize,
-        is UiAction.SendAttachment,is UiAction.AttachmentAction,is UiAction.AttachmentPreview -> state // Real application commands only, never demo trust.
+        is UiAction.SendAttachment,is UiAction.ResolveAttachmentCompatibility,is UiAction.AttachmentAction,is UiAction.AttachmentPreview -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

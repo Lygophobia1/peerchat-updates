@@ -39,6 +39,11 @@ object AndroidMessagingRuntime {
             owner.attachmentAction(id,accept)
             if(accept&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
         }
+        override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? {
+            val id=owner.resolveAttachmentCompatibility(token,direct)
+            if(id!=null&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
+            return id
+        }
         override fun setForeground(active:Boolean)=synchronized(AndroidMessagingRuntime){
             if(!closed){
                 val leavingForeground=this.active&&!active&&wakeDeadline==null

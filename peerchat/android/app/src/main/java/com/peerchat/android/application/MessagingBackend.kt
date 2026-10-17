@@ -475,11 +475,26 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val request=NativeRecordWriter(30).also(write).bytes()
         return checkNotNull(com.peerchat.android.TransferBridge.request(checkNotNull(profile).handle,operation,request)){"Native transfer operation rejected"}
     }
-    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){synchronized(gate){
+    private data class PendingAttachmentCompatibility(val token:String,val owner:ServerAccounts,val session:com.peerchat.android.platform.AccountSession,
+        val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String)
+    private var pendingAttachmentCompatibility:PendingAttachmentCompatibility?=null
+    private fun compatibilityScope(p:PendingAttachmentCompatibility)=!stopped&&authorizationSnapshotInstalled&&accounts===p.owner&&
+        p.owner.session===p.session&&generation==p.generation&&friends.any{it.peerId==p.peer&&it.accountId==p.recipient}
+    private fun directCompatibility(p:PendingAttachmentCompatibility,commit:Boolean):ByteArray=transfer(16){w->
+        w.number(p.session.accountId);w.number(p.generation);w.number(p.recipient);w.text(p.peer);w.number(if(commit)1 else 0)
+        w.text(if(commit)p.path else "");w.text(if(commit)p.name else "")
+    }
+    private fun directCompatibilityStatus(p:PendingAttachmentCompatibility):Boolean?=try{
+        check(compatibilityScope(p));val r=NativeRecord(directCompatibility(p,false),30);val ready=r.number();r.end();require(ready in 0..1);ready==1L
+    }catch(_:Exception){null}
+    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){val prepared:Any=synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled&&friends.any{it.peerId==peerId})
+        check(pendingAttachmentCompatibility==null){"A selected file is awaiting a compatibility decision"}
         val owner=checkNotNull(accounts);configureMailboxEnrollment(owner,checkNotNull(profile).handle)
         val directoryRecord=NativeRecord(transfer(0),30);val directory=java.io.File(directoryRecord.text());directoryRecord.end()
         val (path,name)=importAttachment(context,uri,directory)
+        val pending=PendingAttachmentCompatibility(java.util.UUID.randomUUID().toString().replace("-",""),owner,checkNotNull(owner.session),generation,
+            peerId,friends.single{it.peerId==peerId}.accountId,path,name)
         // A failed native journal may already retain the source. Never delete it
         // on a ambiguous offer failure; cleanup cannot destroy a resumable copy.
         // A bounded preflight runs on the existing owner, using its authenticated
@@ -487,9 +502,35 @@ class MessagingBackend(context: Context,private val profileName: String="default
         fun capability():Long {val r=NativeRecord(transfer(11){it.number(checkNotNull(owner.session).accountId);it.number(generation)},30);return r.number().also{r.end()}}
         var ready=capability()
         repeat(4){if(ready==0L&&dmAttachmentExecution.service(owner,checkNotNull(profile).handle))ready=capability()}
-        check(ready==1L||ready==2L){"Attachment cache preflight is pending; the private source is retained"}
-        val response=NativeRecord(transfer(if(ready==1L)10 else 1){it.text(peerId);it.text(path);it.text(name)},30)
+        check(ready==1L){"Attachment cache preflight unavailable; the private source is retained"}
+        if(attachmentRecipientPreflight(pending.recipient,{compatibilityScope(pending)},owner::directAttachmentCache)==AttachmentRecipientPreflight.UpgradeRequired){
+            pendingAttachmentCompatibility=pending
+            return@synchronized pending
+        }
+        check(compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
+        val response=NativeRecord(transfer(10){it.text(peerId);it.text(path);it.text(name)},30)
         val id=response.text();response.end();publish();id
+    }
+        if(prepared is PendingAttachmentCompatibility){
+            val ready=try{awaitAttachmentDirectRoute(
+                {synchronized(gate){if(pendingAttachmentCompatibility!==prepared)null else directCompatibilityStatus(prepared)}},
+                {synchronized(gate){compatibilityScope(prepared)&&pendingAttachmentCompatibility===prepared&&
+                    ReliableBridge.demand(checkNotNull(profile).handle,prepared.peer.toByteArray(Charsets.US_ASCII))==0}})
+            }catch(cancelled:kotlinx.coroutines.CancellationException){synchronized(gate){if(pendingAttachmentCompatibility===prepared)pendingAttachmentCompatibility=null};throw cancelled}
+            synchronized(gate){if(!compatibilityScope(prepared)||pendingAttachmentCompatibility!==prepared){
+                if(pendingAttachmentCompatibility===prepared)pendingAttachmentCompatibility=null
+                error("Attachment authorization changed; private source retained")
+            }}
+            throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer))
+        }
+        prepared as String
+    }
+    override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String?=withContext(Dispatchers.IO){synchronized(gate){
+        val pending=pendingAttachmentCompatibility
+        if(!direct){if(pending?.token==token)pendingAttachmentCompatibility=null;return@synchronized null}
+        check(pending!=null&&pending.token==token&&compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
+        val response=NativeRecord(directCompatibility(pending,true),30);val id=response.text();response.end()
+        pendingAttachmentCompatibility=null;publish();id
     }}
     override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled);transfer(if(accept)2 else 3){it.text(id)};publish();Unit
@@ -539,6 +580,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        pendingAttachmentCompatibility=null // Private source bytes are retained.
         profile?.let{try{com.peerchat.android.TransferBridge.request(it.handle,11,NativeRecordWriter(30).also{w->w.number(0);w.number(0)}.bytes())}catch(_:Exception){}}
         pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
         mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)

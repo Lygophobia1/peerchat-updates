@@ -310,7 +310,14 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     // View-only older pages, always fetched from native Storage. Never an outbox.
     private val older=mutableMapOf<Long,List<MessageSnapshot>>()
     private val exhausted=mutableSetOf<Long>()
+    private var attachmentCompatibilityScope:Pair<Long,Long>?=null
+    private var attachmentCompatibilityConversation:String?=null
     private fun project() {
+        if(attachmentCompatibilityScope?.let{it.first!=current.accountId||it.second!=uiGeneration||!current.authenticated||mutable.value.route!=Route.Conversation||attachmentCompatibilityConversation!=mutable.value.selectedId}==true){
+            val choice=mutable.value.attachmentCompatibility
+            attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)
+            if(choice!=null)viewModelScope.launch{try{backend.resolveAttachmentCompatibility(choice.token,false)}catch(_:Exception){}}
+        }
         val combined=current.copy(conversations=current.conversations.map {c ->
             c.copy(messages=chronologicalMessages((older[c.friend.accountId] ?: emptyList())+c.messages))
         })
@@ -743,9 +750,29 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 finally{previewLoading.remove(action.id)}}
             }
             is UiAction.SendAttachment -> {
+                if(mutable.value.attachmentCompatibility!=null)return
                 val c=current.conversations.find{"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
-                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri)}
-                    catch(_:Exception){mutable.value=mutable.value.copy(notice="File could not be offered. Check connection, file access and available storage.")}}
+                val account=current.accountId;val requestGeneration=uiGeneration
+                mutable.value=mutable.value.copy(notice="Checking encrypted file delivery…")
+                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri)
+                        if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice=="Checking encrypted file delivery…")mutable.value=mutable.value.copy(notice=null)}
+                    catch(required:AttachmentCompatibilityRequired){
+                        if(account==current.accountId&&requestGeneration==uiGeneration&&current.authenticated&&mutable.value.route==Route.Conversation&&mutable.value.selectedId=="account:${c.friend.accountId}"){attachmentCompatibilityScope=account to requestGeneration;attachmentCompatibilityConversation=mutable.value.selectedId
+                            mutable.value=mutable.value.copy(attachmentCompatibility=required.choice,attachmentCompatibilityBusy=false,notice=null)}
+                        else {try{backend.resolveAttachmentCompatibility(required.choice.token,false)}catch(_:Exception){}
+                            if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice=="Checking encrypted file delivery…")mutable.value=mutable.value.copy(notice=null)}
+                    }
+                    catch(_:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="File could not be offered. Check connection, file access and available storage. The private source is retained.")}}
+            }
+            is UiAction.ResolveAttachmentCompatibility -> {
+                val choice=mutable.value.attachmentCompatibility ?: return
+                if(choice.token!=action.token||attachmentCompatibilityConversation!=mutable.value.selectedId||mutable.value.attachmentCompatibilityBusy||action.direct&&!choice.directReady)return
+                val scope=attachmentCompatibilityScope
+                mutable.value=mutable.value.copy(attachmentCompatibilityBusy=true)
+                viewModelScope.launch{try{backend.resolveAttachmentCompatibility(action.token,action.direct)
+                    if(scope==attachmentCompatibilityScope){attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)}}
+                    catch(_:Exception){if(scope==attachmentCompatibilityScope)mutable.value=mutable.value.copy(attachmentCompatibility=choice.copy(directReady=false),attachmentCompatibilityBusy=false,
+                        notice="Direct sending requires the same currently connected, verified device. The selected private file is retained.")}}
             }
             is UiAction.AttachmentAction -> viewModelScope.launch{try{backend.attachmentAction(action.id,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}

@@ -72,6 +72,18 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     login: (String, String) -> Unit = { _, _ -> }) {
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
+        state.attachmentCompatibility?.let { choice ->
+            AlertDialog(onDismissRequest={if(!state.attachmentCompatibilityBusy)dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,false))},
+                title={Text("Offline attachment compatibility")},
+                text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
+                    Text("Some recipient devices need an update for cached delivery. The server did not provide the affected device IDs.")
+                    Text((if(choice.directReady)"Selected verified device: " else "Selected device (verified online connection required): ")+choice.device,style=MaterialTheme.typography.labelSmall)
+                    Text("${choice.name}\nDirect sending reaches only the currently connected, verified device; other devices will not receive this file. No automatic fallback has occurred.")
+                    if(!choice.directReady)Text("A verified online file connection is required. Connect to the recipient and select the file again. The private source is retained.")
+                }},
+                confirmButton={TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,true))},enabled=choice.directReady&&!state.attachmentCompatibilityBusy){Text("Send Directly to Online Device")}},
+                dismissButton={TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,false))},enabled=!state.attachmentCompatibilityBusy){Text("Cancel")}})
+        }
         if(state.serverTrust==null)state.deviceVerification?.let { value ->
             fun fingerprint(id:String)=id.chunked(4).joinToString(" ").uppercase()
             AlertDialog(onDismissRequest={dispatch(UiAction.VerifyDevice(value,false))},
