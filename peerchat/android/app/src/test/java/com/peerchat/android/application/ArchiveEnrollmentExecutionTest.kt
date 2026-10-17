@@ -11,6 +11,37 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[28])
 class ArchiveEnrollmentExecutionTest {
+    @Test fun delayedArchiveMetadataDoesNotHoldLocalAdmissionGate(){
+        val gate=Any();val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+        val admitted=java.util.concurrent.CountDownLatch(1);val pool=java.util.concurrent.Executors.newFixedThreadPool(2)
+        val fixture=Fixture();val waited=java.util.concurrent.atomic.AtomicLong(-1);val scope=ScopedBackendWork(gate){true}
+        val execution=ArchiveEnrollmentExecution({op,bytes->scope.local{assertTrue(Thread.holdsLock(gate));fixture.native(op,bytes)}},{op,body->scope.network{
+            assertFalse(Thread.holdsLock(gate))
+            if(op=="archive_authorization_state"){entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))}
+            fixture.rpc(op,body)
+        }})
+        try{
+            val work=pool.submit{execution.refreshCurrent(8,3,fixture.device)}
+            assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));val began=System.nanoTime()
+            pool.submit{synchronized(gate){waited.set((System.nanoTime()-began)/1_000_000);admitted.countDown()}}
+            assertTrue("Modeled local admission blocked behind archive metadata",admitted.await(250,java.util.concurrent.TimeUnit.MILLISECONDS))
+            assertEquals(1L,release.count);release.countDown();work.get(5,java.util.concurrent.TimeUnit.SECONDS)
+        }finally{release.countDown();pool.shutdown();pool.awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS)
+            println("modeled_archive_local_admission wait_ms=${waited.get()} native_commit_not_measured=true")}
+    }
+    @Test fun staleArchiveResponseCannotInstallOrInvalidateReplacementEnrollment(){
+        for(expired in listOf(false,true)){
+            val gate=Any();var current=true;val fixture=Fixture();val scope=ScopedBackendWork(gate){current}
+            val execution=ArchiveEnrollmentExecution({op,bytes->scope.local{fixture.native(op,bytes)}},{op,body->scope.network{
+                assertFalse(Thread.holdsLock(gate));synchronized(gate){current=false}
+                if(expired)throw com.peerchat.android.platform.ServerRejected("session_invalid")
+                fixture.rpc(op,body)
+            }})
+            assertThrows(ScopedBackendWork.Superseded::class.java){execution.refreshCurrent(8,3,fixture.device)}
+            assertTrue("Neither install2 nor invalidate9 can reach replacement scope",fixture.operations.isEmpty())
+            assertFalse(scope.finish{fail("Cannot mutate replacement projection")})
+        }
+    }
     // Transport/serialization fixture only. Signature/trust validation stays in
     // the native enrollment tests and packaged Windows C ABI regression.
     private class Fixture {

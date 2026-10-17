@@ -66,7 +66,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastNativeReceiveAttempt=0L
     private val mailboxPublication=MailboxPublicationGate({publish()})
     private var mailboxAt=0L
-    private val mailboxExecution=MailboxExecution()
+    private var mailboxExecution=MailboxExecution()
+    private var mailboxInFlight:MailboxExecution?=null
     private val dmAttachmentExecution=DmAttachmentExecution()
     private val eligibilitySnapshots=EligibilitySnapshotExecution()
     private val groupExecution=GroupExecution()
@@ -92,7 +93,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
         OpaquePushWake.refreshPeriodic(context)
-        mailboxExecution.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
+        mailboxExecution=MailboxExecution();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
     private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
         val session=checkNotNull(owner.session)
@@ -125,7 +126,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             error(mailboxRecoveryFailure(reason))
         }
         mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null)
-        if(accept){mailboxExecution.reset();mailboxAt=0L}
+        if(accept){mailboxExecution=MailboxExecution();mailboxAt=0L}
     }}
     private fun projectMailboxRecovery(native:Long){
         if(!mailboxAllowed()||!mutable.value.authenticated||!mutable.value.serverPresenceLive){mutable.value=mutable.value.copy(mailboxReenrollment=null);return}
@@ -231,11 +232,34 @@ class MessagingBackend(context: Context,private val profileName: String="default
     init {
         executor.scheduleWithFixedDelay({
             val waiting=System.nanoTime()
-            if(!stopped&&!resetting)try {dmAttachmentExecution.serviceOutsideGate(gate){
-                ownerTimings.record(OwnerStage.GateWait,System.nanoTime()-waiting)
-                if(!stopped&&!resetting){ownerTimings.measure(OwnerStage.Tick){tick()};borrowDmAttachmentRequest()}else null
-            }}catch(failure: Exception){synchronized(gate){handleTickFailure(failure)}}
+            if(!stopped&&!resetting)try {
+                val frame=synchronized(gate){
+                    ownerTimings.record(OwnerStage.GateWait,System.nanoTime()-waiting)
+                    if(stopped||resetting)null else try{
+                        ownerTimings.measure(OwnerStage.Tick){tick()}
+                        val scope=backendWorkScope()
+                        if(scope==null)null else scope to borrowMailboxRequest()
+                    }catch(failure:Exception){handleTickFailure(failure);null}
+                }
+                frame?.second?.invoke() // Receiving and durable ACK precede cache/history work.
+                var archive:(()->Unit)?=null
+                frame?.first?.finish{try{archive=ownerTimings.measure(OwnerStage.Tick){tickAfterMailbox()}}
+                    catch(failure:Exception){handleTickFailure(failure)}}
+                dmAttachmentExecution.serviceOutsideGate(gate){borrowDmAttachmentRequest()}
+                archive?.invoke()
+            }catch(failure:Exception){
+                // Native/auth failures are handled atomically in their scoped
+                // locked phase above, not after reacquiring a replacement login.
+                android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+failure.javaClass.simpleName)
+            }
         },125,125,TimeUnit.MILLISECONDS)
+    }
+    private fun backendWorkScope(extra:()->Boolean={true}):ScopedBackendWork? {
+        if(stopped||resetting||!inUse||!authorizationSnapshotInstalled||!mutable.value.authenticated)return null
+        val owner=accounts?:return null;val active=owner.session?:return null;val opened=profile?:return null;val revision=generation
+        val identity=ScopedBackendWork.Identity(opened,owner,active,active.accountId,revision)
+        return ScopedBackendWork(gate){!stopped&&!resetting&&inUse&&authorizationSnapshotInstalled&&mutable.value.authenticated&&
+            identity.matches(profile,accounts,owner.session,mutable.value.accountId,generation)&&extra()}
     }
     // Called only while holding gate, including cache failures after the exact
     // borrowed scope guard. A stale response cannot log out a replacement login.
@@ -603,7 +627,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
-        mailboxExecution.reset();mailboxPublication.reset();eligibilitySnapshots.reset();mailboxAt=0L
+        mailboxExecution=MailboxExecution();mailboxPublication.reset();eligibilitySnapshots.reset();mailboxAt=0L
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
@@ -740,11 +764,21 @@ class MessagingBackend(context: Context,private val profileName: String="default
             try{groupPendingMore=groupExecution.submitPending(native,mutable.value.accountId,generation){events?.queueGroup(it)==true}}
             catch(_:Exception){groupPendingAt=now+30000}
         }
-        if(mutable.value.authenticated&&now>=mailboxAt) {
+    }
+    // Called under gate; the existing owner invokes the returned bounded script
+    // outside it. Reset replaces the script instance instead of racing its state.
+    private fun borrowMailboxRequest():(()->Unit)? {
+        if(!mutable.value.authenticated||System.nanoTime()/1_000_000<mailboxAt)return null
+        val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle;val execution=mailboxExecution;val allowed=mailboxAllowed()
+        val scope=backendWorkScope{mailboxExecution===execution}?:return null
+        configureMailboxEnrollment(owner,native)
+        // Consume this hint, preserving any new Send/event hint arriving during
+        // transport wait: completion must not overwrite a concurrent zero.
+        mailboxAt=Long.MAX_VALUE;mailboxInFlight=execution
+        return {
             try {
                 ownerTimings.measure(OwnerStage.Mailbox){measured("mailbox_service") {
-                    configureMailboxEnrollment(checkNotNull(accounts),native)
-                    mailboxExecution.service(checkNotNull(accounts),native,mailboxAllowed(),committed={ messageId ->
+                    execution.serviceScoped(scope,owner::mailbox,native,allowed,committed={ messageId ->
                         historyProjection.invalidate()
                         // Publish at the durable-import boundary. A later ACK,
                         // receipt lookup or outgoing failure cannot hide this row.
@@ -757,23 +791,36 @@ class MessagingBackend(context: Context,private val profileName: String="default
                         mailboxPublication.acknowledged()
                     }
                 }}
-                mutable.value=mutable.value.copy(mailboxRecoveryError=null)
-                historyProjection.invalidate()
-                publish()
-                mailboxPublication.servicePublished()
+                scope.local{
+                    mutable.value=mutable.value.copy(mailboxRecoveryError=null)
+                    historyProjection.invalidate()
+                    publish()
+                    mailboxPublication.servicePublished()
+                }
             } catch(failure:Exception) {
-                if(expiredServerSession(failure))throw failure
-                if(mailboxExecution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
-                    mailboxRecoveryError="The server did not accept this mailbox enrollment. Existing keys, the original binding and queued messages are preserved. Return the diagnostics; do not reset or retry with a different key.")
-                // No plaintext/error message. An unavailable/rejected mailbox
-                // does not manufacture a peer route or invalidate local history.
-                android.util.Log.i("PeerChatWake","stage=mailbox_service_pending ${mailboxExecution.diagnostic}")
+                scope.finish{
+                    if(expiredServerSession(failure))handleTickFailure(failure)
+                    else {
+                        if(execution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
+                            mailboxRecoveryError="The server did not accept this mailbox enrollment. Existing keys, the original binding and queued messages are preserved. Return the diagnostics; do not reset or retry with a different key.")
+                        // No plaintext/error message. An unavailable/rejected mailbox
+                        // does not manufacture a peer route or invalidate local history.
+                        android.util.Log.i("PeerChatWake","stage=mailbox_service_pending ${execution.diagnostic}")
+                    }
+                }
             } finally {
-                try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
-                mailboxAt=System.nanoTime()/1_000_000+if(mailboxExecution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
-                if(mailboxExecution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,mailboxExecution.nextRetryAt)
+                scope.finish{
+                    try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
+                    val next=System.nanoTime()/1_000_000+if(execution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
+                    mailboxAt=minOf(mailboxAt,next)
+                    if(execution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,execution.nextRetryAt)
+                }
+                synchronized(gate){if(mailboxInFlight===execution)mailboxInFlight=null}
             }
         }
+    }
+    private fun tickAfterMailbox():(()->Unit)? {
+        val now=System.nanoTime()/1_000_000;val native=checkNotNull(profile).handle
         if(mutable.value.authenticated&&authorizationSnapshotInstalled) {
             // Receiving/publication above takes priority. A finite background
             // wake refreshes only actual pending send destinations, not contacts.
@@ -786,27 +833,45 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
-        if(!livePeerWorkAllowed&&!archiveWorkAllowed&&mailboxAllowed()){publish();return}
-        val initialArchive=archiveLoadedGeneration!=generation
-        if(archiveWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
-            val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId
-            val execution=archiveExecution(owner,checkNotNull(profile))
-            try{ownerTimings.measure(OwnerStage.Archive){if(initialArchive||now>=archiveMetadataAt){
-                    if(initialArchive)execution.publishPending(active.accountId,generation,local) else execution.refreshCurrent(active.accountId,generation,local)
-                    // Stay below the native 30-second authorization expiry.
-                    archiveMetadataAt=System.nanoTime()/1_000_000+if(mutable.value.archiveProgress.running)10000 else 20000
-                }
-                mutable.value=mutable.value.copy(archiveProgress=execution.progress(active.accountId,generation))
-                if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,System.nanoTime()/1_000_000+10000)
-                archiveLoadedGeneration=generation
-                archiveRetryAt=0L
-            }}catch(_:Exception){mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(projectionFresh=false));archiveRetryAt=System.nanoTime()/1_000_000+60000}
-            finally{val admission=try{execution.authorizationDiagnostics(active.accountId,generation)}catch(error:Exception){"Admission snapshot unavailable: ${error.javaClass.simpleName}"};mutable.value=mutable.value.copy(archiveAuthorizationDiagnostics=admission)}
-        }
-        // Drain bounded events; payload history/delivery is always reread from
-        // Storage. An event is never a second message/persistence authority.
+        if(!livePeerWorkAllowed&&!archiveWorkAllowed&&mailboxAllowed()){publish();return null}
+        val archive=borrowPeriodicArchive(now)
+        // Existing peer controls and local projection precede borrowed history RPC.
         ownerTimings.measure(OwnerStage.NativeRelay){servicePeerExecutions(native,System.nanoTime()/1_000_000)}
         publish()
+        return archive
+    }
+    private fun borrowPeriodicArchive(now:Long):(()->Unit)? {
+        val initialArchive=archiveLoadedGeneration!=generation
+        if(archiveWorkAllowed&&now>=archiveRetryAt&&(initialArchive||mutable.value.archiveProgress.running||now<archiveServingUntil||now>=archiveMetadataAt)){
+            val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val local=mutable.value.localPeerId;val revision=generation
+            val opened=checkNotNull(profile);val scope=backendWorkScope{archiveWorkAllowed}?:return null
+            val refresh=initialArchive||now>=archiveMetadataAt
+            val execution=ArchiveEnrollmentExecution(
+                {op,bytes->scope.local{checkNotNull(com.peerchat.android.ArchiveBridge.request(opened.handle,op,bytes)){"Native archive operation rejected"}}},
+                {op,body->scope.network{owner.archive(op,body)}})
+            return {
+            try{ownerTimings.measure(OwnerStage.Archive){if(refresh){
+                    if(initialArchive)execution.publishPending(active.accountId,revision,local) else execution.refreshCurrent(active.accountId,revision,local)
+                    // Stay below the native 30-second authorization expiry.
+                    scope.local{archiveMetadataAt=System.nanoTime()/1_000_000+if(mutable.value.archiveProgress.running)10000 else 20000}
+                }
+                val progress=execution.progress(active.accountId,revision)
+                scope.local{
+                mutable.value=mutable.value.copy(archiveProgress=progress)
+                if(mutable.value.archiveProgress.running)archiveMetadataAt=minOf(archiveMetadataAt,System.nanoTime()/1_000_000+10000)
+                archiveLoadedGeneration=revision
+                archiveRetryAt=0L
+                }
+            }}catch(failure:Exception){scope.finish{
+                if(expiredServerSession(failure))handleTickFailure(failure)
+                else {mutable.value=mutable.value.copy(archiveProgress=mutable.value.archiveProgress.copy(projectionFresh=false));archiveRetryAt=System.nanoTime()/1_000_000+60000}
+            }}finally{
+                val admission=try{execution.authorizationDiagnostics(active.accountId,revision)}catch(error:Exception){"Admission snapshot unavailable: ${error.javaClass.simpleName}"}
+                scope.finish{mutable.value=mutable.value.copy(archiveAuthorizationDiagnostics=admission)}
+            }
+            }
+        }
+        return null
     }
     private fun servicePeerExecutions(native:Long,now:Long){
         val iterator=executions.iterator()
@@ -1010,6 +1075,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         },mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
+        if(mailboxInFlight===mailboxExecution)return@synchronized false
         // Mailbox publication may finish before the first archive pass. Keep the
         // same bounded job alive until a fresh native projection settles, or its
         // deadline releases the lease and the scheduler defers recovery.

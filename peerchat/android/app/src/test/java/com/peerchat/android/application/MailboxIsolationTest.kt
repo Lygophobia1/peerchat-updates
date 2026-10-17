@@ -13,6 +13,61 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[34])
 class MailboxIsolationTest {
+    @Test fun delayedMailboxFetchDoesNotHoldLocalAdmissionGate(){
+        val gate=Any();val entered=java.util.concurrent.CountDownLatch(1);val release=java.util.concurrent.CountDownLatch(1)
+        val admitted=java.util.concurrent.CountDownLatch(1);val pool=java.util.concurrent.Executors.newFixedThreadPool(2)
+        val native=Native().also{it.binding=byteArrayOf(1);it.uploads=false};val server=Server().also{it.withReceipt=false}
+        val execution=MailboxExecution(native);val waited=java.util.concurrent.atomic.AtomicLong(-1);val scope=ScopedBackendWork(gate){true}
+        try{
+            val work=pool.submit{execution.serviceScoped(scope,{op,body->
+                assertFalse(Thread.holdsLock(gate))
+                if(op=="mailbox_fetch"){entered.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))}
+                server.request(op,body)
+            },1,true){}}
+            assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));val began=System.nanoTime()
+            pool.submit{synchronized(gate){waited.set((System.nanoTime()-began)/1_000_000);admitted.countDown()}}
+            assertTrue("Modeled local admission blocked behind mailbox fetch",admitted.await(250,java.util.concurrent.TimeUnit.MILLISECONDS))
+            assertEquals(1L,release.count);release.countDown();work.get(5,java.util.concurrent.TimeUnit.SECONDS)
+        }finally{release.countDown();pool.shutdown();pool.awaitTermination(5,java.util.concurrent.TimeUnit.SECONDS)
+            println("modeled_mailbox_local_admission wait_ms=${waited.get()} native_commit_not_measured=true")}
+    }
+    @Test fun scopedMailboxCannotImportAckOrInvalidateReplacementAfterFetchChangesScope(){
+        for(expired in listOf(false,true)){
+            val gate=Any();var current=true;val n=Native().apply{binding=byteArrayOf(7);uploads=false}
+            val server=Server().apply{withReceipt=false};var callbacks=0
+            val execution=MailboxExecution(n);val scope=ScopedBackendWork(gate){current}
+            assertThrows(ScopedBackendWork.Superseded::class.java){execution.serviceScoped(scope,{op,body->
+                assertFalse(Thread.holdsLock(gate))
+                if(op=="mailbox_fetch"){
+                    synchronized(gate){current=false}
+                    if(expired)throw ServerRejected("session_invalid")
+                }
+                server.request(op,body)
+            },1,true,committed={callbacks++}){callbacks++}}
+            assertEquals(0,n.receives);assertEquals(0,n.receipts);assertEquals(0,n.stored);assertEquals(0,callbacks)
+            assertFalse(server.operations.contains("mailbox_ack"));assertFalse(scope.finish{fail("Cannot invalidate replacement")})
+        }
+    }
+    @Test fun scopedMailboxKeepsDurablePublicationBeforeAckAndAllNativeCallbacksLocked(){
+        val gate=Any();val n=Native().apply{
+            binding=byteArrayOf(7);uploads=false
+            receiveResult=NativeRecordWriter(3).also{it.number(1);it.blob(byteArrayOf(8));it.text("peer");it.text("message")}.bytes()
+        }
+        val locked=object:MailboxNative by n {
+            override fun identity(handle:Long)=n.identity(handle).also{assertTrue(Thread.holdsLock(gate))}
+            override fun registered(handle:Long,binding:ByteArray)=n.registered(handle,binding).also{assertTrue(Thread.holdsLock(gate))}
+            override fun receive(handle:Long,wire:ByteArray)=n.receive(handle,wire).also{assertTrue(Thread.holdsLock(gate))}
+            override fun pending(handle:Long)=n.pending(handle).also{assertTrue(Thread.holdsLock(gate))}
+        }
+        val server=Server().apply{withReceipt=false};val scope=ScopedBackendWork(gate){true};var published=false;var acknowledged=false
+        MailboxExecution(locked).serviceScoped(scope,{op,body->
+            assertFalse(Thread.holdsLock(gate));if(op=="mailbox_ack")assertTrue(published)
+            server.request(op,body)
+        },1,true,committed={assertTrue(Thread.holdsLock(gate));published=true}){
+            assertTrue(Thread.holdsLock(gate));assertTrue(published);acknowledged=true
+        }
+        assertTrue(published);assertTrue(acknowledged);assertEquals(1,n.receives)
+    }
     private class Native:MailboxNative {
         var binding:ByteArray?=null
         var changingBindings=false

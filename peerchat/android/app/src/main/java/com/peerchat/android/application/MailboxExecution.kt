@@ -36,6 +36,21 @@ private object JniMailboxNative:MailboxNative {
     override fun stored(handle:Long,wire:ByteArray)=MailboxBridge.stored(handle,wire)
     override fun storeFailure(handle:Long,retry:ByteArray)=MailboxBridge.storeFailure(handle,retry)
 }
+private fun MailboxNative.scoped(scope:ScopedBackendWork):MailboxNative {
+    val target=this
+    return object:MailboxNative {
+        override fun identity(handle:Long)=scope.local{target.identity(handle)}
+        override fun registration(handle:Long,allowed:Boolean)=scope.local{target.registration(handle,allowed)}
+        override fun registered(handle:Long,binding:ByteArray)=scope.local{target.registered(handle,binding)}
+        override fun receive(handle:Long,wire:ByteArray)=scope.local{target.receive(handle,wire)}
+        override fun receipt(handle:Long,wire:ByteArray)=scope.local{target.receipt(handle,wire)}
+        override fun pending(handle:Long)=scope.local{target.pending(handle)}
+        override fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean)=scope.local{target.prepareDevices(handle,id,bindings,allowed)}
+        override fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean)=scope.local{target.prepare(handle,id,binding,allowed)}
+        override fun stored(handle:Long,wire:ByteArray)=scope.local{target.stored(handle,wire)}
+        override fun storeFailure(handle:Long,retry:ByteArray)=scope.local{target.storeFailure(handle,retry)}
+    }
+}
 internal class MailboxExecution(private val native:MailboxNative=JniMailboxNative) {
     private var registeredBinding: ByteArray? = null
     private var receiptCursor = ""
@@ -76,13 +91,22 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         service(accounts::mailbox,handle,storageAllowed,committed,acknowledged)
     internal fun service(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
                 committed: (String) -> Unit = {}, acknowledged: (Boolean) -> Unit) {
-        try { serviceAttempt(accounts,handle,storageAllowed,committed,acknowledged) }
+        serviceUsing(native,accounts,handle,storageAllowed,committed,acknowledged)
+    }
+    internal fun serviceScoped(scope:ScopedBackendWork,accounts:(String,JSONObject)->JSONObject,handle:Long,storageAllowed:Boolean,
+                               committed:(String)->Unit={},acknowledged:(Boolean)->Unit){
+        serviceUsing(native.scoped(scope),{op,body->scope.network{accounts(op,body)}},handle,storageAllowed,
+            {id->scope.local{committed(id)}},{inserted->scope.local{acknowledged(inserted)}})
+    }
+    private fun serviceUsing(native:MailboxNative,accounts:(String,JSONObject)->JSONObject,handle:Long,storageAllowed:Boolean,
+                             committed:(String)->Unit,acknowledged:(Boolean)->Unit){
+        try { serviceAttempt(native,accounts,handle,storageAllowed,committed,acknowledged) }
         catch(failure:Exception){
             diagnostic="stage=$phase result=${failure.javaClass.simpleName} $diagnostic".take(320)
             throw failure // Preserve legitimate session invalidation handling.
         }
     }
-    private fun serviceAttempt(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
+    private fun serviceAttempt(native:MailboxNative,accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
                                committed: (String) -> Unit, acknowledged: (Boolean) -> Unit) {
         phase="native_identity";diagnostic="stage=$phase"
         nextRetryAt=0
@@ -131,7 +155,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                 val result=try {
                     native.receive(handle,decoded(item.getString("envelope"),70000))
                 }catch(failure:Exception){
-                    if(expiredServerSession(failure))throw failure
+                    if(failure is ScopedBackendWork.Superseded||expiredServerSession(failure))throw failure
                     pendingValidation++
                     processedCount++
                     if(rowCursor.isNotEmpty())fetchCursor=rowCursor
@@ -191,7 +215,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                 val id=item.getString("messageId");require(id.matches(Regex("[0-9a-f]{32}")))
                 check(native.receipt(handle, decoded(item.getString("receipt"), 2048)) == 0)
             }catch(failure:Exception){
-                if(expiredServerSession(failure))throw failure
+                if(failure is ScopedBackendWork.Superseded||expiredServerSession(failure))throw failure
                 receiptValidationFailures++ // Unverified row remains on server and is retried next sweep.
             }
             if(rowCursor.isNotEmpty())receiptCursor=rowCursor
@@ -260,7 +284,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                     throw MailboxItemRefused(reason)
                 }
                 } catch(failure:Exception) {
-                    if(expiredServerSession(failure))throw failure
+                    if(failure is ScopedBackendWork.Superseded||expiredServerSession(failure))throw failure
                     failed++
                     failureReason=if(failure is MailboxItemRefused)failure.state else "device_attempt_unavailable"
                     val attempts=((deviceRetry[deviceKey]?.second?:0)+1).coerceAtMost(8)
@@ -273,7 +297,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             if(deferred.isNotEmpty()&&deferred.all{(deviceRetry[it]?.first?:0L)>now})outgoingRetry[id]=deferred.minOf{checkNotNull(deviceRetry[it]).first} to 0
             else outgoingRetry.remove(id)
         }catch(failure:Exception){
-            if(failure is ServerRejected&&com.peerchat.android.application.expiredServerSession(failure))throw failure
+            if(failure is ScopedBackendWork.Superseded||failure is ServerRejected&&com.peerchat.android.application.expiredServerSession(failure))throw failure
             failed++
             failureReason=when(failure){
                 is MailboxItemRefused->failure.state
