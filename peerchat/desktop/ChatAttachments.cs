@@ -21,7 +21,14 @@ public static class DmAttachmentDelivery {
     public static bool OnlineSelectable(ConversationModel target){return target!=null&&target.AccountId>0&&target.IsFriend&&target.Contact!=null&&target.Contact.verified&&!String.IsNullOrEmpty(target.Contact.peer);}
     public static bool OnlineReady(ConversationModel target){return OnlineSelectable(target)&&target.Online&&target.WinningConnectionId>0;}
     public static bool CompatibilityBlocked(string state){return state=="cache_dm_recipient_upgrade_required"||state=="cache_dm_source_upgrade_required"||state=="cache_dm_feature_gated"||state=="cache_unsupported_operation"||state=="unsupported_request";}
-    public static string CompatibilityMessage(string state){return state=="cache_dm_recipient_upgrade_required"?"Some devices associated with this account do not support offline attachments.\nThe authenticated server did not identify the affected devices individually. No device was silently omitted.":state=="cache_dm_source_upgrade_required"?"This sending device has not registered offline attachment capability. No recipient was omitted.":"This server does not currently support the offline attachment cache. No recipient was omitted.";}
+    // Only a transport failure of the read-only preflight may offer a separate
+    // user-selected direct scope. A server refusal or unclassified I/O error
+    // might be an authorization decision and is never treated as compatibility.
+    public static bool PreflightTransportUnavailable(Exception error){
+        return error is System.Net.Sockets.SocketException||error is TimeoutException||
+            error is IOException&&error.InnerException is System.Net.Sockets.SocketException;
+    }
+    public static string CompatibilityMessage(string state){return state=="preflight_transport_unavailable"?"The offline attachment preflight could not reach the server. No cache attachment was started. A direct transfer reaches only the selected verified device; other linked devices will not receive it.":state=="cache_dm_recipient_upgrade_required"?"Some devices associated with this account do not support offline attachments.\nThe authenticated server did not identify the affected devices individually. No device was silently omitted.":state=="cache_dm_source_upgrade_required"?"This sending device has not registered offline attachment capability. No recipient was omitted.":"This server does not currently support the offline attachment cache. No recipient was omitted.";}
     public static string Target(DmAttachmentDeliveryMode mode,long account){if(account<=0||(mode!=DmAttachmentDeliveryMode.OnlineDevice&&mode!=DmAttachmentDeliveryMode.EncryptedCache))throw new InvalidOperationException("Attachment delivery was not selected.");return (mode==DmAttachmentDeliveryMode.OnlineDevice?"online:":"")+account.ToString(System.Globalization.CultureInfo.InvariantCulture);}
 }
 // Presentation only: no persisted UI transfer state, sockets, ACK or retry owner.
@@ -286,25 +293,26 @@ public partial class DesktopApplication {
     async Task<DmAttachmentDeliveryMode> SelectDmAttachmentDelivery(ConversationModel target){
         if(target==null||target.Contact==null||!target.IsFriend||target.AccountId<=0)return DmAttachmentDeliveryMode.Cancel;
         var owner=discovery;ulong profile=profileSessionGeneration;string peer=target.Contact.peer;long account=target.AccountId;
-        string state="";
+        string state="";bool preflightRequestStarted=false;
         try{
             if(await EnsureDmAttachmentReady(false)){
                 var client=dmAttachmentNetworkClient;string token=dmAttachmentToken,pin=dmAttachmentPin,device=dmAttachmentPeer;long localAccount=dmAttachmentAccount;string request=Guid.NewGuid().ToString("N");
+                preflightRequestStarted=true;
                 var reply=await Task.Run(()=>client.AttachmentCache(device,new Dictionary<string,object>{{"type","cache_dm_prepare"},{"requestId",request},{"recipientAccountId",account}},localAccount,token,pin));
                 object value;state=reply.TryGetValue("state",out value)?value as string:"";
                 if(state=="accepted"&&(!reply.TryGetValue("requestId",out value)||!String.Equals(value as string,request,StringComparison.Ordinal)||!reply.TryGetValue("operation",out value)||!String.Equals(value as string,"cache_dm_prepare",StringComparison.Ordinal)))throw new InvalidDataException("Attachment preflight correlation failed.");
             }else state=dmAttachmentExecution==null?"":dmAttachmentExecution.LastState;
-        }catch{if(!closing)Notify("Offline attachment readiness could not be verified. Nothing was queued; retry after the authenticated connection recovers.");return DmAttachmentDeliveryMode.Cancel;}
+        }catch(Exception error){if(!preflightRequestStarted||!DmAttachmentDelivery.PreflightTransportUnavailable(error)){if(!closing)Notify("Offline attachment readiness could not be verified. Nothing was queued; retry after the authenticated connection recovers.");return DmAttachmentDeliveryMode.Cancel;}state="preflight_transport_unavailable";}
         if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
         if(state=="accepted")return DmAttachmentDeliveryMode.EncryptedCache;
-        if(!DmAttachmentDelivery.CompatibilityBlocked(state)){Notify("Attachment preflight did not authorize delivery ("+(state??"unavailable")+"). No cache checks were bypassed and no direct transfer was started.");return DmAttachmentDeliveryMode.Cancel;}
+        if(state!="preflight_transport_unavailable"&&!DmAttachmentDelivery.CompatibilityBlocked(state)){Notify("Attachment preflight did not authorize delivery ("+(state??"unavailable")+"). No cache checks were bypassed and no direct transfer was started.");return DmAttachmentDeliveryMode.Cancel;}
         // A direct transfer is a distinct user-selected scope, never conversion
         // of a failed upload. Try only the existing route owner before offering it.
         if(DmAttachmentDelivery.OnlineSelectable(target)&&!DmAttachmentDelivery.OnlineReady(target))await DemandReadyRoute(target,"attachment compatibility choice");
         if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||target.Contact==null||target.Contact.peer!=peer||target.AccountId!=account||!target.IsFriend)return DmAttachmentDeliveryMode.Cancel;
         var dialog=new Window{Title="Attachment delivery",Owner=window,Width=530,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),FontSize=15,Resources=window.Resources};
         var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;
-        panel.Children.Add(new TextBlock{Text="Offline attachment compatibility",FontSize=23,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,16)});
+        panel.Children.Add(new TextBlock{Text=state=="preflight_transport_unavailable"?"Offline attachment unavailable":"Offline attachment compatibility",FontSize=23,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,16)});
         panel.Children.Add(new TextBlock{Text=target.Name+" · account "+account,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,12)});
         panel.Children.Add(new TextBlock{Text=DmAttachmentDelivery.CompatibilityMessage(state),TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,16)});
         var mode=DmAttachmentDeliveryMode.Cancel;

@@ -17,6 +17,15 @@ class ChatAttachmentTest {
         Check(DmAttachmentDelivery.OnlineSelectable(delivery),"verified device cannot request an online route");
         Check(!DmAttachmentDelivery.OnlineReady(delivery),"offline device offered direct delivery");delivery.Online=true;delivery.WinningConnectionId=1;Check(DmAttachmentDelivery.OnlineReady(delivery),"verified winning device not offered direct delivery");
         Check(DmAttachmentDelivery.CompatibilityBlocked("cache_dm_recipient_upgrade_required")&&!DmAttachmentDelivery.CompatibilityBlocked("cache_dm_not_authorized")&&!DmAttachmentDelivery.CompatibilityBlocked("cache_dm_authority_stale")&&!DmAttachmentDelivery.CompatibilityBlocked("network_unavailable"),"security/network failure offered compatibility bypass");
+        Check(DmAttachmentDelivery.PreflightTransportUnavailable(new System.Net.Sockets.SocketException())&&
+            DmAttachmentDelivery.PreflightTransportUnavailable(new TimeoutException())&&
+            DmAttachmentDelivery.PreflightTransportUnavailable(new IOException("socket failed",new System.Net.Sockets.SocketException()))&&
+            !DmAttachmentDelivery.PreflightTransportUnavailable(new IOException("RPC authorization rejected"))&&
+            !DmAttachmentDelivery.PreflightTransportUnavailable(new DiscoveryRequestException("cache_dm_not_authorized"))&&
+            !DmAttachmentDelivery.PreflightTransportUnavailable(new InvalidDataException("RPC correlation failed"))&&
+            !DmAttachmentDelivery.PreflightTransportUnavailable(new System.Security.Authentication.AuthenticationException())&&
+            !DmAttachmentDelivery.PreflightTransportUnavailable(new OperationCanceledException()),"preflight transport choice crossed a security or ambiguous-failure boundary");
+        Check(DmAttachmentDelivery.CompatibilityMessage("preflight_transport_unavailable").Contains("only the selected verified device"),"direct scope narrowing was not disclosed");
         Check(DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.OnlineDevice,4)=="online:4"&&DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.EncryptedCache,4)=="4","online choice replaced cache scope");
         delivery.Contact.verified=false;Check(!DmAttachmentDelivery.OnlineSelectable(delivery),"unverified online option accepted");delivery.Contact.verified=true;delivery.IsFriend=false;Check(!DmAttachmentDelivery.OnlineSelectable(delivery),"nonfriend online option accepted");
         bool canceled=false;try{DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.Cancel,4);}catch(InvalidOperationException){canceled=true;}Check(canceled,"cancel generated a send target");

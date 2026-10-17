@@ -1100,15 +1100,17 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         stage="jni_input";length=input?static_cast<std::uint64_t>(env->GetArrayLength(input)):0;
         protocol::check(input&&env->GetArrayLength(input)<=((operation==13||operation==14)?100000:4096));
         if(operation>=11&&operation<=14){
+            stage="cache_command_copy";
             auto data=platform::android::Context::output(env,input);protocol::Writer result(protocol::FileTransfer);
-            if(operation==11){protocol::Reader r(data);protocol::check(r.type()==protocol::FileTransfer);auto account=r.number(),generation=r.number();r.end();
+            if(operation==11){stage="cache_session_scope";protocol::Reader r(data);protocol::check(r.type()==protocol::FileTransfer);auto account=r.number(),generation=r.number();r.end();
                 if(!account){if(instance->dmAttachments)instance->dmAttachments->session(0,0,"");result.number(0);}
                 else {protocol::check(mailboxScopeCurrent(*instance)&&account==instance->friends.localAccount()&&generation==instance->friends.generation());prepareDmAttachments(*instance,runtimeNow());
                     instance->dmAttachments->session(account,generation,Storage::publicKeyId(Blob(instance->mailboxScope.begin(),instance->mailboxScope.end())));result.number(instance->dmAttachments->capabilityState());}
                 return platform::android::Context::input(env,result.data);
             }
-            protocol::check(bool(instance->dmAttachments));
-            if(operation==12){protocol::check(data.empty());instance->dmAttachments->tick();return platform::android::Context::input(env,instance->dmAttachments->nextCommand());}
+            stage="cache_controller_lookup";protocol::check(bool(instance->dmAttachments));
+            if(operation==12){stage="cache_command_tick";protocol::check(data.empty());instance->dmAttachments->tick();return platform::android::Context::input(env,instance->dmAttachments->nextCommand());}
+            stage=operation==13?"cache_reply_validation_apply":"cache_failure_apply";
             if(operation==13)instance->dmAttachments->reply(data);else instance->dmAttachments->failure(data);
             return platform::android::Context::input(env,Blob{});
         }
