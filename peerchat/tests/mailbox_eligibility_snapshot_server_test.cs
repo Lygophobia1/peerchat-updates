@@ -39,6 +39,25 @@ internal static class MailboxEligibilitySnapshotServerTest {
             Check(Convert.ToInt64(issued["freshUntilUtcMs"])-Convert.ToInt64(issued["issuedUtcMs"])==120000,"Queue freshness interval incorrect.");
             Check(Convert.ToInt64(issued["validateUntilUtcMs"])-Convert.ToInt64(issued["issuedUtcMs"])==600000,"Validation retention interval incorrect.");
             snapshotId=(string)issued["snapshotId"];
+            // Reconnects and simultaneous client refreshes must not spend the
+            // bounded proof-retention quota on identical still-fresh audiences.
+            for(int refresh=0;refresh<70;refresh++){
+                var reused=db.MailboxEligibilitySnapshot(7,sender,8);
+                Check((string)reused["state"]=="ready","Identical refresh exhausted snapshot quota.");
+                Check((string)reused["snapshotId"]==snapshotId&&
+                    Convert.ToInt64(reused["snapshotSequence"])==Convert.ToInt64(issued["snapshotSequence"])&&
+                    Convert.ToInt64(reused["freshUntilUtcMs"])==Convert.ToInt64(issued["freshUntilUtcMs"]),
+                    "Identical refresh replaced immutable snapshot or extended freshness.");
+            }
+            // Preserve the real quota for changed audiences, while allowing an
+            // already retained unchanged proof to be read even at saturation.
+            for(int n=0;n<63;n++)db.Execute("INSERT INTO mailbox_eligibility_snapshots(id,sender_account,sender_device,recipient_account,issued,fresh_until,validate_until,digest) SELECT 'quota"+n+"',sender_account,sender_device,recipient_account,issued,1,validate_until,digest FROM mailbox_eligibility_snapshots WHERE id='"+snapshotId+"';");
+            Check((string)db.MailboxEligibilitySnapshot(7,sender,8)["snapshotId"]==snapshotId,"Quota blocked reuse of unchanged current proof.");
+            db.Execute("UPDATE mailbox_eligibility_snapshots SET fresh_until="+(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()+20000)+" WHERE id='"+snapshotId+"';");
+            Check((string)db.MailboxEligibilitySnapshot(7,sender,8)["state"]=="snapshot_quota_exceeded","Near-expiry snapshot reused or quota bypassed.");
+            db.Execute("DELETE FROM mailbox_eligibility_snapshots WHERE id LIKE 'quota%';");
+            var refreshed=db.MailboxEligibilitySnapshot(7,sender,8);
+            Check((string)refreshed["snapshotId"]!=snapshotId&&Convert.ToInt64(refreshed["snapshotSequence"])>Convert.ToInt64(issued["snapshotSequence"]),"Near-expiry proof was extended in place.");
             Reject(()=>db.ValidateMailboxEligibility(9,foreign,8,snapshotId),"Foreign sender read snapshot.");
             Reject(()=>db.ValidateMailboxEligibility(7,foreign,8,snapshotId),"Foreign device read snapshot.");
             Check((string)db.ValidateMailboxEligibility(7,sender,9,snapshotId)["state"]=="snapshot_unavailable","Wrong recipient read snapshot.");
@@ -46,6 +65,9 @@ internal static class MailboxEligibilitySnapshotServerTest {
                 "INSERT INTO mailbox_recipient_keys(device,key_id,account_id,generation,state,allowed,proof) VALUES('"+late+"','"+Id(71).Substring(0,32)+"',8,1,'active',1,X'0405');"+
                 "UPDATE mailbox_recipient_keys SET state='revoked' WHERE device='"+bound+"';");
             var validated=db.ValidateMailboxEligibility(7,sender,8,snapshotId);
+            var changed=db.MailboxEligibilitySnapshot(7,sender,8);
+            Check((string)changed["snapshotId"]!=(string)refreshed["snapshotId"]&&
+                (string)changed["eligibilityDigest"]!=(string)refreshed["eligibilityDigest"],"Changed/revoked audience reused an obsolete proof.");
             Check(Rows(validated).Count==2&&!(bool)Find(validated,bound)["eligible"]&&(string)Find(validated,bound)["binding"]=="","Revoked original binding remained eligible.");
             Check((bool)Find(validated,online)["eligible"],"Existing authenticated online device vanished.");
             Check(Convert.ToInt64(validated["snapshotSequence"])==Convert.ToInt64(issued["snapshotSequence"])&&(string)validated["eligibilityDigest"]==(string)issued["eligibilityDigest"],"Frozen snapshot evidence changed.");

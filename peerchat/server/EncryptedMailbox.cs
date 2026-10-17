@@ -123,11 +123,30 @@ sealed partial class AccountDatabase {
             if(e.Message=="Eligibility exceeds bound.")return new Dictionary<string,object>{{"state","too_many_eligible_devices"}};
             throw;
         }
+        long now=MailboxNow();
+        string digest=EligibilityDigest(members);
+        // Repeated authenticated refreshes of an unchanged audience reuse the
+        // immutable proof, not its lifetime. Re-evaluate authorization and the
+        // complete audience above first; keep enough freshness for client refresh.
+        string reuse="sender_account="+account+" AND sender_device="+Quote(device)+
+            " AND recipient_account="+recipient+" AND digest="+Quote(digest)+
+            " AND fresh_until>="+(now+30000)+" AND validate_until>"+now;
+        string existing=ScalarText(database,"SELECT id FROM mailbox_eligibility_snapshots WHERE "+reuse+" ORDER BY sequence DESC LIMIT 1");
+        if(!String.IsNullOrEmpty(existing)){
+            string where="id="+Quote(existing);
+            return new Dictionary<string,object>{{"state","ready"},{"snapshotVersion",1},{"snapshotId",existing},
+                {"snapshotSequence",ScalarLong(database,"SELECT sequence FROM mailbox_eligibility_snapshots WHERE "+where)},
+                {"senderAccountId",account},{"senderDevice",device},{"recipientAccountId",recipient},
+                {"issuedUtcMs",ScalarLong(database,"SELECT issued FROM mailbox_eligibility_snapshots WHERE "+where)},
+                {"freshUntilUtcMs",ScalarLong(database,"SELECT fresh_until FROM mailbox_eligibility_snapshots WHERE "+where)},
+                {"validateUntilUtcMs",ScalarLong(database,"SELECT validate_until FROM mailbox_eligibility_snapshots WHERE "+where)},
+                {"eligibilityDigest",digest},{"candidates",EligibilityResponse(members,false)}};
+        }
         if(ScalarLong(database,"SELECT count(*) FROM mailbox_eligibility_snapshots")>=4096||
            ScalarLong(database,"SELECT count(*) FROM mailbox_eligibility_snapshots WHERE sender_account="+account+" AND sender_device="+Quote(device))>=64)
             return new Dictionary<string,object>{{"state","snapshot_quota_exceeded"}};
-        long now=MailboxNow(),freshUntil=now+EligibilityFreshMilliseconds,validateUntil=now+EligibilityValidationMilliseconds;
-        string id=Guid.NewGuid().ToString("N"),digest=EligibilityDigest(members);
+        long freshUntil=now+EligibilityFreshMilliseconds,validateUntil=now+EligibilityValidationMilliseconds;
+        string id=Guid.NewGuid().ToString("N");
         Execute("BEGIN IMMEDIATE;");try{
             Execute("INSERT INTO mailbox_eligibility_snapshots(id,sender_account,sender_device,recipient_account,issued,fresh_until,validate_until,digest) VALUES("+
                 Quote(id)+","+account+","+Quote(device)+","+recipient+","+now+","+freshUntil+","+validateUntil+","+Quote(digest)+");");

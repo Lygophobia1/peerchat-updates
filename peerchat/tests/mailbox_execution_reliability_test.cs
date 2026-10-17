@@ -140,6 +140,25 @@ internal static class MailboxExecutionReliabilityTest {
         Check(installed.Count==4&&eligibility.NeedsContinuation&&eligibility.NextEligibilityUtc<=DateTime.UtcNow.AddSeconds(2));
         eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,eligibilityRpc,active,7,1);
         Check(installed.Count==5&&requested.Distinct().Count()==5&&eligibility.NextEligibilityUtc>DateTime.UtcNow.AddSeconds(50));
+        var refreshClock=DateTime.UtcNow;
+        Check(MailboxExecution.EligibilityNextRefreshUtc(refreshClock,refreshClock.AddSeconds(120))==refreshClock.AddSeconds(60));
+        Check(MailboxExecution.EligibilityNextRefreshUtc(refreshClock,refreshClock.AddSeconds(35))==refreshClock.AddSeconds(20));
+        Check(MailboxExecution.EligibilityNextRefreshUtc(refreshClock,refreshClock.AddSeconds(5))==refreshClock.AddSeconds(1));
+        var reusedSnapshot=Eligibility(2,own);
+        reusedSnapshot["issuedUtcMs"]=new DateTimeOffset(refreshClock.AddSeconds(-85)).ToUnixTimeMilliseconds();
+        reusedSnapshot["freshUntilUtcMs"]=new DateTimeOffset(refreshClock.AddSeconds(35)).ToUnixTimeMilliseconds();
+        var reused=new MailboxExecution((op,input,id,allowed)=>{
+            if(op==7)return new byte[]{1};if(op==0)return new byte[]{2};
+            if(op==1||op==11)return new byte[]{1};
+            throw new Exception("Unexpected reused-snapshot native operation "+op);
+        },()=>refreshClock);
+        reused.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,(operation,body)=>
+            operation=="mailbox_register"?Reply("accepted"):
+            operation=="mailbox_eligibility_snapshot"?reusedSnapshot:
+            operation=="mailbox_fetch"?Page("envelopes",new object[0]):
+            operation=="mailbox_receipts"?Page("receipts",new object[0]):
+            throw new Exception("Unexpected reused-snapshot RPC "+operation),new long[]{2},7,1);
+        Check(reused.NextEligibilityUtc<=refreshClock.AddSeconds(21)&&reused.NextEligibilityUtc>=refreshClock.AddSeconds(19));
         eligibility.Service(null,own,false,(peer,inserted)=>{},diagnostics.Add,eligibilityRpc,new long[]{2},8,1);
         Check(installed.Count==6&&requested.Last()==2); // Published friend generation invalidates the managed refresh cache.
         var prefix=Encoding.ASCII.GetBytes("PeerChat/mailbox-eligibility-snapshot/v1\0");

@@ -104,6 +104,17 @@ internal sealed class MailboxExecution {
             Require(output.Length<=70000);return output.ToArray();
         }
     }
+    // The server may return an unchanged authenticated snapshot while it is
+    // still fresh. Renew before its original deadline, without a tight retry
+    // loop if a response arrives unusually close to expiry.
+    internal static DateTime EligibilityNextRefreshUtc(DateTime observed,DateTime fresh){
+        if(fresh<=observed)return observed.AddSeconds(1);
+        var remaining=fresh-observed;
+        if(remaining<=TimeSpan.FromSeconds(16))return observed.AddSeconds(1);
+        var delay=remaining-TimeSpan.FromSeconds(15);
+        if(delay>TimeSpan.FromSeconds(60))delay=TimeSpan.FromSeconds(60);
+        return observed.Add(delay);
+    }
     static bool AuthenticationFailure(Exception error){
         var rejected=error as DiscoveryRequestException;
         if(rejected!=null)return true;
@@ -178,7 +189,7 @@ internal sealed class MailboxExecution {
                     // bypass native account/generation/signature/freshness checks.
                     deferredEligibility.Remove(recipient);
                     Require(Native(11,deferred.Wire).SequenceEqual(new byte[]{1}));
-                    eligibilityRefreshUtc[recipient]=current.AddSeconds(Math.Min(60,(deferred.Fresh-current).TotalSeconds));
+                    eligibilityRefreshUtc[recipient]=EligibilityNextRefreshUtc(current,deferred.Fresh);
                     installed++;
                     lock(diagnosticsGate)eligibilityLastOutcome="Eligibility last outcome: recipient="+recipient+" installed_after_issuance";
                     continue;
@@ -207,10 +218,10 @@ internal sealed class MailboxExecution {
                 }
                 var wire=EligibilitySnapshotWire(reply,localAccount,localDevice,friendGeneration,recipient,observed);
                 Require(Native(11,wire).SequenceEqual(new byte[]{1}));
-                eligibilityRefreshUtc[recipient]=DateTime.UtcNow.AddSeconds(60);
+                eligibilityRefreshUtc[recipient]=EligibilityNextRefreshUtc(observed,fresh);
                 installed++;
                 lock(diagnosticsGate)eligibilityLastOutcome="Eligibility last outcome: recipient="+recipient+" installed";
-                trace("mailbox eligibility recipient="+recipient+" authenticated snapshot installed; next refresh in 60s");
+                trace("mailbox eligibility recipient="+recipient+" authenticated snapshot installed; next refresh before expiry");
             }catch(Exception error){
                 if(AuthenticationFailure(error))throw;
                 eligibilityRefreshUtc[recipient]=DateTime.UtcNow.AddSeconds(15);
