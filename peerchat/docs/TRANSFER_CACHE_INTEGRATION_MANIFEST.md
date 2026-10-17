@@ -1,5 +1,120 @@
 # Transfer cache integration manifest
 
+## Offline DM cache integration — dev.173 test handoff
+
+As of 2026-10-16, the active branch remains `codex/native-unicode-emoji` in
+`C:/Users/Livel/.codex/worktrees/native-unicode-emoji/Create 2D Game`.
+The packaged baseline is dev.172 (`e242b50`). Checkpoint `8607fbe` adds independently
+saving Android messages and immediate composer clearing; 50 focused UI/presenter
+tests passed. Production source is checkpointed at `bdd28e5`, including reviewed
+post-admission engine retirement at `82abe0a`. Unified Windows/Android dev.173
+packages passed their audits. Pi dev.166 was safely updated to dev.173 after the
+automated gates passed; physical phone/cache acceptance remains pending. See
+`OFFLINE_DM_CACHE_DEV173.md` for exact artifacts, evidence and rollback location.
+
+The user approved the separately typed offline DM cache proposal and, subsequently,
+the new private recovery records for selected source, cache lease and individual
+jobs with an atomic index. This does not authorize changing existing message or
+transfer-journal schemas. Existing group attachments, clipboard sending and the
+256 MiB plaintext limit remain preserved requirements.
+
+### Shared files and compatibility
+
+| Surface | Current change and boundary |
+| --- | --- |
+| `group_attachment_blob.hpp`, `group_attachment_metadata.hpp` | Add explicit direct context and DM-specific blob AAD; default group bytes remain unchanged. Legacy group metadata rejects direct context. |
+| `dm_attachment_descriptor.hpp`, `dm_attachment_body.hpp`, `dm_attachment_receipt.hpp` | New signed public DM descriptor, frozen signed recipient audience, separately typed private HPKE body and independent verified-file receipt. No private filename, key or plaintext digest in public server metadata. |
+| `dm_attachment_application.hpp`, `dm_attachment_finalizer.hpp` | Shared cache orchestration and bounded final integrity/decryption steps. Existing TransferManager remains the transfer, retry and durable-offset owner. Recovery integration remains under test. |
+| `transfer_manager.hpp`, `portable/dm_attachment_transfer_storage.hpp` | Explicit local `DirectCacheCiphertext=2` purpose; old peer/group values unchanged. Isolated protected journal wrapper delegates ordinary transfers to their existing journal. Add exact-purpose local terminal retirement preserving protected files; no C/JNI, journal or peer wire-format change. |
+| `storage.hpp`, `storage.cpp` | Protected supplemental state, per-job CAS, immutable bounded history pages and read-only local context. Existing message/history/journal schemas unchanged. |
+| `windows_dm_attachment_adapter.hpp`, `node.cpp`, `windows_transfer_io.hpp` | Windows adapter, scoped staging and additive local file-transfer operations 20–28 (28 is local retained history). No key export or general-purpose signing API. |
+| `portable/peerchat_core.cpp`, `portable/attachment_file_io.hpp`, `portable/attachment_file_scope.hpp` | Android production adapter and purpose-aware staging. Add local operations -10 through -15 (15 is local retained history) through the existing transfer bridge; C/JNI method signatures unchanged. JNI/Kotlin must be packaged together. |
+| `desktop/DmAttachmentExecution.cs`, `DiscoveryClient.cs`, `ChatAttachments.cs`, `CoreAdapter.cs`, `App.cs` | Bounded command execution on existing authenticated pinned-TLS RPCs; account-context cache selection must not require a live peer route or bypass native verification. |
+| Android `DmAttachmentExecution.kt`, `MessagingBackend.kt`, `ServerAccounts.kt`, `AttachmentSnapshots.kt`, `AttachmentCard.kt` | Equivalent Android RPC/session adapter and truthful logical transfer projection. No Android voice or group attachment UI expansion. |
+| `server/AttachmentCacheDirect.cs`, `AttachmentCacheDescriptor.cs`, `AttachmentCacheReceipts.cs`, `AttachmentCacheAdmission.cs`, `AttachmentCacheRequests.cs`, `AttachmentCacheServer.cs` | Add typed DM scope using the existing cache, mailbox, verified keys and device-bound sessions. Group admission remains separate. |
+| `windows_group_attachment_application.hpp`, `desktop/GroupAttachmentExecution.cs` | Existing cache receiver uses a freshly negotiated local 64 KiB v2 Offer with window 1; cache RPC schema and serialized durable progress remain unchanged. |
+
+The public descriptor domain is `PeerChat/dm-cache-upload/v1`; the audience domain
+is `PeerChat/dm-cache-audience/v1`. Device capability registration signs only
+`PeerChat/dm-cache-device/v1` with the existing identity provider. Private notices
+use existing per-device HPKE envelopes with a distinct attachment body. Receipt
+domain `PeerChat/dm-attachment-verified-file/v1` cannot acknowledge ordinary text
+delivery or authorize another device. Normal text, PCGE group records, discovery
+authentication, opaque relay and peer TransferManager v1/v2 formats are unchanged.
+
+New `cache_dm_*` operations require a compatible candidate server and explicit
+signed capability registration for every frozen recipient key. Text-only clients
+are rejected during preflight rather than receiving notices they cannot process.
+No automatic trust, enrollment or recipient substitution is introduced. Normal
+server builds keep the DM transport gate closed; candidate build switches are
+`DirectCacheCandidate` and `DirectAttachmentCacheCandidate` respectively.
+
+The parallel Android worktree was rechecked read-only at `ac7ab34`, clean, including
+its `ANDROID_GROUPS_VOICE_INTEGRATION.md`. Its earlier mailbox/group interfaces are
+already present in this unified development baseline. This pass does not modify
+that worktree, create competing group/voice APIs or copy its private configuration.
+
+### Current validation and remaining gates
+
+The authenticated Windows Application/TLS fixture reproduced `cache_upload_already_owned`
+after a lost append reply and client-only restart. The client omitted its lease
+from protected recovery state; server duplicate ownership rejection is correct.
+The approved correction now durably preserves and reuses that exact lease. Real
+application/TLS tests pass lost-append and lost-completion responses followed by
+client restart, without evicting another owner or suppressing duplicate rejection.
+
+The source token, selected basename/size, staging token and lease are protected
+per job before dependent work proceeds. Existing verified finals are replayed by
+comparison, never overwritten or deleted to recover a partial. History is paged
+through immutable authenticated storage records rather than silently dropping
+older jobs at an in-memory limit. Local history reads do not authorize network
+downloads. New cache corruption disables only this supplemental feature, retaining
+the corrupt evidence and ordinary messaging/journals.
+
+The security audit also corrected DM leases reading beyond the 48-hour deadline:
+reads/progress are rejected after expiry, while lease release still succeeds.
+Successful durable DM notice publication now reuses the existing mailbox-ready
+event/push wake path outside the cache storage gate; this remains a hint, not ACK.
+
+Completed isolated checks include signed DM admission, immutable offline audience,
+retired-key access versus new capability registration, revocation of source and
+recipient, cross-account rejection, expiry, independent offsets and verified
+receipts. Evidence: `build/dm-cache-admission-final.log`. The existing cache quota,
+reserved space, group authorization and actual-process crash suite passed in
+`build/dm-cache-runtime-regressions.log`. Actual protected storage CAS/journal
+restart and native HPKE/controller tests passed at
+`build/tests/dm-attachment-body-84061050f5954c4db4342c416fc47f9d`.
+
+Windows actual-candidate application evidence, including two independent recipient
+devices, offline sender, server restart, interrupted finalization, exact verified
+file replay and both-direction signed receipt aggregation:
+`F:/PeerChat-isolated-cache-tests/dm-application-7d69dbfff8824c1fb270ed241a962be9/results.log`.
+The complete Android JVM suite passed 309 tests and lint reported no errors;
+the final rebuilt production JNI/TLS interoperability gate passed. Retained
+logical cache rows explicitly show unavailable throughput rather than inventing
+plaintext-speed measurements from ciphertext engine counters.
+
+Those gates have now passed: client source/staging/lease recovery, real Windows/JNI
+bidirectional transfers, two recipients, offline sender, ordinary mailbox dispatch
+during upload, legacy direct/group regressions, full Windows build/dependency audit,
+309 Android tests/lint/APK signature audit, ARM32 build and actual Pi version/loader,
+backup and health checks. Final JNI evidence is
+`build/tests/android-jni-dm-final-173/results-b67335c215d9451290e02c1e9dfb9040.log`.
+The new purpose-only retirement test also covers eight admitted expirations across
+restart, failed-save rollback, no Cancel, protected partial retention and a new
+usable transfer. Host fixtures do not establish physical phone acceptance or
+Pi/LAN throughput. See `TRANSFER_PROTOCOL_AUDIT_DM_CACHE.md` for the boundaries.
+
+The read-only live inspection found Pi dev.166, ARMv7l, existing encrypted cache
+enabled at its configured directory with 10 GiB quota and 48-hour retention. New
+The approved update preserved that configuration, certificate, database and cache.
+Rollback is retained at
+`/opt/peerchat-test/rollback/pre-4.0.2-dev.173-20261017T002445Z`.
+No older database was restored. No APK was installed and no physical acceptance
+is claimed. Future larger media/diagnostics/roadmap work is not started here.
+
+## Archived group cache milestones
+
 This branch owns the Windows transfer and encrypted attachment-cache milestone.
 Attachment-only per-device HPKE envelopes are user-approved. Shipping cache
 transport remains disabled in ordinary builds. The explicit dev.158 cache
