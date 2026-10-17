@@ -35,6 +35,12 @@ sealed partial class DiscoveryServer {
    reply=attachmentCacheRequests.Execute(account,device,current,request);
    MaintainAttachmentCache();
   }
+  // Dispatch outside the storage gate and only after authenticated publication
+  // committed. Rejected requests cannot wake or acknowledge a recipient.
+  object stored;
+  if(Text(request,"type")=="cache_dm_publish"&&Text(reply,"state")=="accepted"&&
+     reply.TryGetValue("newNoticeStored",out stored)&&stored is bool&&(bool)stored)
+   NotifyStoredMailbox(AttachmentCacheRequests.Decode(Text(request,"envelope")));
  }
  partial void MaintainAttachmentCache(){
   lock(attachmentCacheGate){

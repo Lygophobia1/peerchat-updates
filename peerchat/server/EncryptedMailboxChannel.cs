@@ -3,6 +3,13 @@ using System.Collections.Generic;
 
 namespace PeerChat.Server {
 sealed partial class DiscoveryServer {
+    // Only a hint after durable storage, never a delivery acknowledgement.
+    // Cache notices use the same existing wake path as ordinary mailbox data.
+    void NotifyStoredMailbox(byte[] wire){
+        var envelope=MailboxProtocol.Envelope.Parse(wire);
+        Notify(envelope.Recipient,new Dictionary<string,object>{{"event","mailbox_ready"}});
+        pushWakes.Hint(envelope.Recipient,envelope.RecipientDevice);
+    }
     // Uses the existing authenticated event channel and its write/session gate.
     // This is application dispatch, not a mailbox socket or reconnect owner.
     void HandleMailboxChannel(EventClient client,Dictionary<string,object> request){
@@ -32,11 +39,9 @@ sealed partial class DiscoveryServer {
                 byte[] wire=MailboxProtocol.Decode(Text(request,"envelope"),MailboxProtocol.MaxWire);
                 string state=accounts.StoreMailbox(account,device,identity,wire);reply["state"]=state;
                 if(state=="stored") {
-                    var envelope=MailboxProtocol.Envelope.Parse(wire);
                     // Hint only. Recipient native authenticated/decrypted durable
                     // acceptance and its signed ACK must precede notification.
-                    Notify(envelope.Recipient,new Dictionary<string,object>{{"event","mailbox_ready"}});
-                    pushWakes.Hint(envelope.Recipient,envelope.RecipientDevice);
+                    NotifyStoredMailbox(wire);
                 }
             } else if(type=="mailbox_fetch") {
                 var rows=accounts.FetchMailbox(account,device,Text(request,"cursor")??"");
