@@ -74,9 +74,11 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     Surface(Modifier.fillMaxSize()) {
         state.attachmentCompatibility?.let { choice ->
             AlertDialog(onDismissRequest={if(!state.attachmentCompatibilityBusy)dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,false))},
-                title={Text("Offline attachment compatibility")},
+                title={Text(if(choice.preflightTransportUnavailable)"Offline attachment unavailable" else "Offline attachment compatibility")},
                 text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
-                    Text("Some recipient devices need an update for cached delivery. The server did not provide the affected device IDs.")
+                    Text(if(choice.preflightTransportUnavailable)
+                        "The offline attachment check timed out or disconnected. No cached file was started."
+                        else "Some recipient devices need an update for cached delivery. The server did not provide the affected device IDs.")
                     Text((if(choice.directReady)"Selected verified device: " else "Selected device (verified online connection required): ")+choice.device,style=MaterialTheme.typography.labelSmall)
                     Text("${choice.name}\nDirect sending reaches only the currently connected, verified device; other devices will not receive this file. No automatic fallback has occurred.")
                     if(!choice.directReady)Text("A verified online file connection is required. Connect to the recipient and select the file again. The private source is retained.")

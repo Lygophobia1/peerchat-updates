@@ -43,7 +43,7 @@ class MailboxIsolationTest {
                     if(expired)throw ServerRejected("session_invalid")
                 }
                 server.request(op,body)
-            },1,true,committed={callbacks++}){callbacks++}}
+            },1,true,committed={_,_->callbacks++}){callbacks++}}
             assertEquals(0,n.receives);assertEquals(0,n.receipts);assertEquals(0,n.stored);assertEquals(0,callbacks)
             assertFalse(server.operations.contains("mailbox_ack"));assertFalse(scope.finish{fail("Cannot invalidate replacement")})
         }
@@ -63,7 +63,7 @@ class MailboxIsolationTest {
         MailboxExecution(locked).serviceScoped(scope,{op,body->
             assertFalse(Thread.holdsLock(gate));if(op=="mailbox_ack")assertTrue(published)
             server.request(op,body)
-        },1,true,committed={assertTrue(Thread.holdsLock(gate));published=true}){
+        },1,true,committed={_,_->assertTrue(Thread.holdsLock(gate));published=true}){
             assertTrue(Thread.holdsLock(gate));assertTrue(published);acknowledged=true
         }
         assertTrue(published);assertTrue(acknowledged);assertEquals(1,n.receives)

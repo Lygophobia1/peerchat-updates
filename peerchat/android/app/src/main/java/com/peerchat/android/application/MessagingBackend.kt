@@ -38,6 +38,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     @Volatile private var localReadContext:LocalReadContext?=null
     @Volatile private var preferredLocalAccount=0L
     private var projectedHistoryRevision=-1L
+    private val projectionCadence=OwnerProjectionCadence()
     private fun publishLocalReadContext(handle:Long,account:Long,endpoint:ServerEndpoint){
         val next=LocalReadContext(handle,account,endpoint,friends.map{it.copy(online=false)})
         localReadContext?.let{old->if(old.handle!=handle||old.account!=account||old.endpoint!=endpoint)historyProjection.clear()}
@@ -515,7 +516,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         return checkNotNull(com.peerchat.android.TransferBridge.request(checkNotNull(profile).handle,operation,request)){"Native transfer operation rejected"}
     }
     private data class PendingAttachmentCompatibility(val token:String,val owner:ServerAccounts,val session:com.peerchat.android.platform.AccountSession,
-        val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String)
+        val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String,
+        val preflightTransportUnavailable:Boolean=false)
     private var pendingAttachmentCompatibility:PendingAttachmentCompatibility?=null
     private fun compatibilityScope(p:PendingAttachmentCompatibility)=!stopped&&authorizationSnapshotInstalled&&accounts===p.owner&&
         p.owner.session===p.session&&generation==p.generation&&friends.any{it.peerId==p.peer&&it.accountId==p.recipient}
@@ -542,9 +544,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         var ready=capability()
         repeat(4){if(ready==0L&&dmAttachmentExecution.service(owner,checkNotNull(profile).handle))ready=capability()}
         check(ready==1L){"Attachment cache preflight unavailable; the private source is retained"}
-        if(attachmentRecipientPreflight(pending.recipient,{compatibilityScope(pending)},owner::directAttachmentCache)==AttachmentRecipientPreflight.UpgradeRequired){
-            pendingAttachmentCompatibility=pending
-            return@synchronized pending
+        val preflight=attachmentSendPreflight(pending.recipient,{compatibilityScope(pending)},owner::directAttachmentCache)
+        if(preflight!=AttachmentSendPreflight.Cached){
+            val choice=pending.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice)
+            pendingAttachmentCompatibility=choice
+            return@synchronized choice
         }
         check(compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
         val response=NativeRecord(transfer(10){it.text(peerId);it.text(path);it.text(name)},30)
@@ -560,7 +564,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(pendingAttachmentCompatibility===prepared)pendingAttachmentCompatibility=null
                 error("Attachment authorization changed; private source retained")
             }}
-            throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer))
+            throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer,prepared.preflightTransportUnavailable))
         }
         prepared as String
     }
@@ -778,8 +782,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
         return {
             try {
                 ownerTimings.measure(OwnerStage.Mailbox){measured("mailbox_service") {
-                    execution.serviceScoped(scope,owner::mailbox,native,allowed,committed={ messageId ->
-                        historyProjection.invalidate()
+                    execution.serviceScoped(scope,owner::mailbox,native,allowed,committed={ messageId,sender ->
+                        val friend=friends.firstOrNull{sender in it.knownPeerIds}
+                        if(friend!=null)historyProjection.invalidateUrgent(friend)
+                        else {historyProjection.invalidate();contactsDirty=true}
                         // Publish at the durable-import boundary. A later ACK,
                         // receipt lookup or outgoing failure cannot hide this row.
                         mailboxPublication.committed(messageId)
@@ -793,12 +799,15 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }}
                 scope.local{
                     mutable.value=mutable.value.copy(mailboxRecoveryError=null)
-                    historyProjection.invalidate()
-                    publish()
+                    publishMailboxChanges(execution)
                     mailboxPublication.servicePublished()
                 }
             } catch(failure:Exception) {
                 scope.finish{
+                    if(execution.projectionChanged)try{publishMailboxChanges(execution)}catch(projectionFailure:Exception){
+                        projectionCadence.dirty()
+                        android.util.Log.i("PeerChatWake","stage=mailbox_receipt_projection_pending result="+projectionFailure.javaClass.simpleName)
+                    }
                     if(expiredServerSession(failure))handleTickFailure(failure)
                     else {
                         if(execution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
@@ -833,11 +842,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         try {val token=pushRegistration.token();if(token!=null&&token!=pushRegisteredToken){accounts?.registerPush(token);pushRegisteredToken=token}}
         catch(_:Exception){/* Optional provider registration never invalidates messaging. */}
-        if(!livePeerWorkAllowed&&!archiveWorkAllowed&&mailboxAllowed()){publish();return null}
+        if(!livePeerWorkAllowed&&!archiveWorkAllowed&&mailboxAllowed()){publishIfDue();return null}
         val archive=borrowPeriodicArchive(now)
         // Existing peer controls and local projection precede borrowed history RPC.
         ownerTimings.measure(OwnerStage.NativeRelay){servicePeerExecutions(native,System.nanoTime()/1_000_000)}
-        publish()
+        publishIfDue()
         return archive
     }
     private fun borrowPeriodicArchive(now:Long):(()->Unit)? {
@@ -884,10 +893,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 // sessions, only the last sixteen observed attempt snapshots.
                 relayFailureDiagnostics[attempt]=execution.diagnostics()
                 while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())
-                groupCompletionObserved.remove(attempt);iterator.remove();continue}
+                groupCompletionObserved.remove(attempt);iterator.remove();projectionCadence.dirty();continue}
             if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
-            if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();continue}
+            if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();projectionCadence.dirty();continue}
             if(checkGroupCompletion&&execution.groupScope!=null){
                 try{
                     if(groupExecution.controlSettled(native,mutable.value.accountId,generation,attempt)){
@@ -903,6 +912,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
             drainNativeEvents({ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0))}) { event ->
                 val record=NativeRecord(event,3);val kind=record.number();record.text();record.text();record.number()
+                if(kind in 0L..3L)projectionCadence.dirty()
                 if(kind==1L){execution.observedAuthenticatedPeer();android.util.Log.i("PeerChatWake","stage=peer_session_ready")}
                 if(kind==2L){
                     lastNativeReceiveNanos=System.nanoTime();lastNativeReceiveAttempt=attempt
@@ -944,7 +954,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 ((archive.reader==mutable.value.localPeerId&&archive.source==request.peerId)||(archive.source==mutable.value.localPeerId&&archive.reader==request.peerId))
             if(!admitted||executions.size>=32){ReliableBridge.close(native,request.attempt,admitted);continue}
             val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId)
-            executions[request.attempt]=execution;execution.start()
+            executions[request.attempt]=execution;execution.start();projectionCadence.dirty()
         }
     }
     private fun handleServerEvent(event:org.json.JSONObject){
@@ -1016,7 +1026,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(status="Device explicitly verified; delivery awaits native acknowledgment")
         mailboxAt=0L;check(ReliableBridge.demand(native,value.presented.toByteArray(Charsets.US_ASCII))==0)
     }}
-    private fun publish()=ownerTimings.measure(OwnerStage.Projection){publishLocked()}
+    private fun publishIfDue(){if(projectionCadence.due(System.nanoTime()/1_000_000))publish()}
+    private fun publishMailboxChanges(execution:MailboxExecution){
+        if(!execution.projectionChanged)return
+        if(!historyProjection.invalidateMessages(execution.changedMessageIds))historyProjection.invalidate()
+        publish()
+    }
+    private fun publish(){
+        ownerTimings.measure(OwnerStage.Projection){publishLocked()}
+        val now=System.nanoTime()/1_000_000
+        projectionCadence.published(now,executions.isNotEmpty())
+        if(historyProjection.hasPending(friends))projectionCadence.remainingDirty(now)
+    }
     private fun publishLocked() {
         pendingDeviceVerifications.entries.removeAll{it.value.generation!=generation}
         pendingDeviceVerifications.replaceAll{_,value->value.copy(live=value.attempt in executions&&executions[value.attempt]?.finished==false)}

@@ -17,6 +17,8 @@ import org.robolectric.annotation.Config
 class MailboxAuditFaultTest {
     private class Native : MailboxNative {
         var outgoingIds: List<String> = emptyList()
+        var receiptCalls = 0
+        var pendingFailure: Exception? = null
         override fun identity(handle: Long) = byteArrayOf(1)
         override fun registration(handle: Long, allowed: Boolean) = byteArrayOf(2)
         override fun registered(handle: Long, binding: ByteArray) = 0
@@ -26,8 +28,9 @@ class MailboxAuditFaultTest {
             it.text("sender")
             it.text("message")
         }.bytes()
-        override fun receipt(handle: Long, wire: ByteArray) = 0
+        override fun receipt(handle: Long, wire: ByteArray): Int { receiptCalls++;return 0 }
         override fun pending(handle: Long) = NativeRecordWriter(4).also { writer ->
+            pendingFailure?.let { throw it }
             writer.number(outgoingIds.size.toLong())
             outgoingIds.forEach { id -> writer.text(id); writer.text("b".repeat(64)); writer.number(2) }
         }.bytes()
@@ -87,5 +90,78 @@ class MailboxAuditFaultTest {
         repeat(2) { execution.service(request, 1, true) { error("No inbound ACK expected") } }
         assertEquals(ids, storedAttempts)
         assertTrue(execution.diagnostic.contains("outgoing_retry=1"))
+    }
+
+    @Test fun emptyServiceDoesNotRequestConversationReprojection() {
+        val execution = MailboxExecution(Native())
+        execution.service({ operation, _ ->
+            when (operation) {
+                "mailbox_register" -> JSONObject().put("state", "accepted")
+                "mailbox_fetch" -> JSONObject().put("state", "ready").put("envelopes", JSONArray())
+                "mailbox_receipts" -> JSONObject().put("state", "ready").put("receipts", JSONArray())
+                else -> error("Unexpected operation: $operation")
+            }
+        }, 1, true) { error("No inbound ACK expected") }
+        assertEquals(false, execution.projectionChanged)
+    }
+
+    @Test fun acceptedReceiptRequestsConversationReprojection() {
+        val execution = MailboxExecution(Native())
+        execution.service({ operation, _ ->
+            when (operation) {
+                "mailbox_register" -> JSONObject().put("state", "accepted")
+                "mailbox_fetch" -> JSONObject().put("state", "ready").put("envelopes", JSONArray())
+                "mailbox_receipts" -> JSONObject().put("state", "ready").put("receipts", JSONArray()
+                    .put(JSONObject().put("messageId", "a".repeat(32))
+                        .put("receipt", Base64.encodeToString(byteArrayOf(4), Base64.NO_WRAP))))
+                else -> error("Unexpected operation: $operation")
+            }
+        }, 1, true) { error("No inbound ACK expected") }
+        assertTrue(execution.projectionChanged)
+    }
+
+    @Test fun verifiedReceiptRowIsRevalidatedWithoutRepeatedConversationReprojection() {
+        val native = Native()
+        val execution = MailboxExecution(native)
+        val rpc = { operation: String, _: JSONObject ->
+            when (operation) {
+                "mailbox_register" -> JSONObject().put("state", "accepted")
+                "mailbox_fetch" -> JSONObject().put("state", "ready").put("envelopes", JSONArray())
+                "mailbox_receipts" -> JSONObject().put("state", "ready").put("receipts", JSONArray()
+                    .put(JSONObject().put("messageId", "a".repeat(32))
+                        .put("cursor", "row-position")
+                        .put("receipt", Base64.encodeToString(byteArrayOf(4), Base64.NO_WRAP))))
+                    .put("nextCursor", "row-position")
+                else -> error("Unexpected operation: $operation")
+            }
+        }
+        execution.service(rpc, 1, true) { error("No inbound ACK expected") }
+        assertTrue(execution.projectionChanged)
+        execution.service(rpc, 1, true) { error("No inbound ACK expected") }
+        assertEquals(false, execution.projectionChanged)
+        assertEquals(2, native.receiptCalls)
+    }
+
+    @Test fun receiptProjectionHintSurvivesLaterUnrelatedPendingFailure() {
+        val failure = java.io.IOException("controlled pending failure")
+        val native = Native().apply { pendingFailure = failure }
+        val execution = MailboxExecution(native)
+        val rpc = { operation: String, _: JSONObject ->
+            when (operation) {
+                "mailbox_register" -> JSONObject().put("state", "accepted")
+                "mailbox_fetch" -> JSONObject().put("state", "ready").put("envelopes", JSONArray())
+                "mailbox_receipts" -> JSONObject().put("state", "ready").put("receipts", JSONArray()
+                    .put(JSONObject().put("messageId", "a".repeat(32)).put("cursor", "row-position")
+                        .put("receipt", Base64.encodeToString(byteArrayOf(4), Base64.NO_WRAP))))
+                    .put("nextCursor", "row-position")
+                else -> error("Unexpected operation: $operation")
+            }
+        }
+        assertEquals(failure, assertThrows(java.io.IOException::class.java) {
+            execution.service(rpc, 1, true) { error("No inbound ACK expected") }
+        })
+        assertTrue(execution.projectionChanged)
+        assertEquals(setOf("a".repeat(32)), execution.changedMessageIds)
+        assertEquals(1, native.receiptCalls)
     }
 }

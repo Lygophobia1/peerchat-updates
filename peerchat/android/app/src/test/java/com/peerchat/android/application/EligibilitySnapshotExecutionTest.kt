@@ -113,4 +113,36 @@ class EligibilitySnapshotExecutionTest {
         utc=38500;assertTrue(execution.refreshWith(1,10,3,device,listOf(20),37600){error("Refetched pending evidence")})
         assertEquals(1,calls);assertArrayEquals(expected,installed)
     }
+
+    @Test fun reusedSnapshotRefreshesBeforeItsOriginalFreshnessEnds() {
+        var utc=1000L;var fetched=0
+        val execution=EligibilitySnapshotExecution({utc}){_,_->0}
+        val response=reply()
+        fun step(now:Long)=execution.refreshWith(1,10,3,device,listOf(20),now){fetched++;response}
+        assertTrue(step(100));assertEquals(1,fetched)
+        utc=61000;assertTrue(step(60100));assertEquals(2,fetched)
+        utc=106899;assertFalse(step(105099));assertEquals(2,fetched)
+        utc=107000;assertTrue(step(106100));assertEquals(3,fetched)
+    }
+
+    @Test fun nearExpiryReuseNeverSchedulesPastFreshness() {
+        assertEquals(1000L,EligibilitySnapshotExecution.refreshDelay(11000,1000))
+        assertEquals(1000L,EligibilitySnapshotExecution.refreshDelay(17000,1000))
+        assertEquals(2000L,EligibilitySnapshotExecution.refreshDelay(18000,1000))
+        assertEquals(60000L,EligibilitySnapshotExecution.refreshDelay(121000,1000))
+    }
+
+    @Test fun quotaBackoffStillVisitsLaterRecipients() {
+        val fetched=mutableListOf<Long>()
+        val execution=EligibilitySnapshotExecution({1000L}){_,_->fail("No quota response may reach native");1}
+        val recipients=(20L..24L).toList()
+        fun step(now:Long)=execution.refreshWith(1,10,3,device,recipients,now){recipient->
+            fetched+=recipient;JSONObject().put("state","snapshot_quota_exceeded")
+        }
+        assertFalse(step(100));assertEquals(listOf(20L,21L,22L,23L),fetched)
+        assertTrue(execution.diagnostic.contains("snapshot_quota_exceeded"))
+        assertFalse(step(1100));assertEquals(recipients,fetched)
+        assertFalse(step(15100));assertEquals(recipients,fetched)
+        assertFalse(step(60100));assertEquals(recipients+recipients.take(4),fetched)
+    }
 }

@@ -56,6 +56,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
     private var receiptCursor = ""
     private var fetchCursor = ""
     private var legacyReceiptCursor = false
+    private val projectedReceiptRows=linkedSetOf<String>()
     private val outgoingRetry = linkedMapOf<String,Pair<Long,Int>>()
     private val deviceRetry = linkedMapOf<String,Pair<Long,Int>>()
     var nextRetryAt=0L
@@ -69,6 +70,10 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         private set
     var needsContinuation=false
         private set
+    var projectionChanged=false
+        private set
+    val changedMessageIds=linkedSetOf<String>()
+    private data class Received(val inserted:Boolean,val receipt:ByteArray,val sender:String,val messageId:String)
     private fun encoded(value: ByteArray) = Base64.encodeToString(value, Base64.NO_WRAP)
     private fun decoded(value: String, maximum: Int): ByteArray {
         require(value.length <= ((maximum + 2) / 3) * 4)
@@ -82,7 +87,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         diagnostic="stage=$phase state="+safeMailboxState(reply.optString("state"))
         return reply
     }
-    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;outgoingRetry.clear();deviceRetry.clear();nextRetryAt=0;outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
+    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;projectedReceiptRows.clear();outgoingRetry.clear();deviceRetry.clear();nextRetryAt=0;outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;projectionChanged=false;changedMessageIds.clear();diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
     // Completion callback is emitted only after native durable receipt creation
     // AND a real authenticated server acknowledgement. Duplicate native receives
     // still drain their ACK but do not invent another message/notification.
@@ -91,15 +96,15 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         service(accounts::mailbox,handle,storageAllowed,committed,acknowledged)
     internal fun service(accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
                 committed: (String) -> Unit = {}, acknowledged: (Boolean) -> Unit) {
-        serviceUsing(native,accounts,handle,storageAllowed,committed,acknowledged)
+        serviceUsing(native,accounts,handle,storageAllowed,{id,_->committed(id)},acknowledged)
     }
     internal fun serviceScoped(scope:ScopedBackendWork,accounts:(String,JSONObject)->JSONObject,handle:Long,storageAllowed:Boolean,
-                               committed:(String)->Unit={},acknowledged:(Boolean)->Unit){
+                               committed:(String,String)->Unit={_,_->},acknowledged:(Boolean)->Unit){
         serviceUsing(native.scoped(scope),{op,body->scope.network{accounts(op,body)}},handle,storageAllowed,
-            {id->scope.local{committed(id)}},{inserted->scope.local{acknowledged(inserted)}})
+            {id,sender->scope.local{committed(id,sender)}},{inserted->scope.local{acknowledged(inserted)}})
     }
     private fun serviceUsing(native:MailboxNative,accounts:(String,JSONObject)->JSONObject,handle:Long,storageAllowed:Boolean,
-                             committed:(String)->Unit,acknowledged:(Boolean)->Unit){
+                             committed:(String,String)->Unit,acknowledged:(Boolean)->Unit){
         try { serviceAttempt(native,accounts,handle,storageAllowed,committed,acknowledged) }
         catch(failure:Exception){
             diagnostic="stage=$phase result=${failure.javaClass.simpleName} $diagnostic".take(320)
@@ -107,10 +112,12 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         }
     }
     private fun serviceAttempt(native:MailboxNative,accounts: (String,JSONObject)->JSONObject, handle: Long, storageAllowed: Boolean,
-                               committed: (String) -> Unit, acknowledged: (Boolean) -> Unit) {
+                               committed: (String,String) -> Unit, acknowledged: (Boolean) -> Unit) {
         phase="native_identity";diagnostic="stage=$phase"
         nextRetryAt=0
         needsContinuation=true
+        projectionChanged=false
+        changedMessageIds.clear()
         val identity = checkNotNull(native.identity(handle))
         val signing = JSONObject().put("signingPublicKey", encoded(identity))
         if (registeredBinding == null) {
@@ -172,8 +179,8 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                 val parsed=try {
                     val record=NativeRecord(result,3)
                     val inserted=record.number().also{require(it in 0..1)}==1L
-                    val receipt=record.bytes();record.text();val messageId=record.text();record.end()
-                    Triple(inserted,receipt,messageId)
+                    val receipt=record.bytes();val sender=record.text();val messageId=record.text();record.end()
+                    Received(inserted,receipt,sender,messageId)
                 }catch(failure:Exception){
                     pendingValidation++
                     processedCount++
@@ -181,10 +188,10 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                     inboundDiagnostic="receive=pending_native_validation fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
                     continue // No valid receipt available; never ACK this row.
                 }
-                val (inserted,receipt,messageId)=parsed
+                val (inserted,receipt,sender,messageId)=parsed
                 if(inserted){
                     imported++
-                    committed(messageId) // Native history is durable even if ACK or later work fails.
+                    committed(messageId,sender) // Native history is durable even if ACK or later work fails.
                 }
                 inboundDiagnostic="receive=durable_import_receipt_ready fetched=$fetchedCount imported=$imported acknowledged=$accepted pending_native_validation=$pendingValidation"
                 val reply = request(accounts, "mailbox_ack", JSONObject(signing.toString()).put("receipt", encoded(receipt)))
@@ -214,6 +221,10 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
             try {
                 val id=item.getString("messageId");require(id.matches(Regex("[0-9a-f]{32}")))
                 check(native.receipt(handle, decoded(item.getString("receipt"), 2048)) == 0)
+                // Native validates every sweep. This bounded display hint avoids
+                // rereading unchanged history for an already verified server row.
+                if(rowCursor.isEmpty()||projectedReceiptRows.add(rowCursor)){projectionChanged=true;changedMessageIds.add(id)}
+                while(projectedReceiptRows.size>4096)projectedReceiptRows.remove(projectedReceiptRows.first())
             }catch(failure:Exception){
                 if(failure is ScopedBackendWork.Superseded||expiredServerSession(failure))throw failure
                 receiptValidationFailures++ // Unverified row remains on server and is retried next sweep.
@@ -268,7 +279,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
                     binding, true) ?: continue
                 if (wire.isEmpty()) continue // Live route or already Delivered.
                 val reply = request(accounts, "mailbox_store", JSONObject(signing.toString()).put("envelope", encoded(wire)))
-                if (reply.getString("state") == "stored") {check(native.stored(handle, wire) == 0);deviceRetry.remove(deviceKey)}
+                if (reply.getString("state") == "stored") {check(native.stored(handle, wire) == 0);projectionChanged=true;changedMessageIds.add(id);deviceRetry.remove(deviceKey)}
                 else {
                     val reason=safeMailboxState(reply.optString("state"))
                     val permanent=reason in setOf("not_authorized","invalid_key_or_signature","recipient_key_retired","recipient_key_unavailable","expired_or_invalid_timestamp","conflicting_message")

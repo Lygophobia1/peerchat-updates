@@ -50,7 +50,7 @@ internal class EligibilitySnapshotExecution(
             }else if(utc>=value.issued){
                 retry.remove()
                 if(install(handle,value.wire)==0){
-                    refreshAfter[recipient]=now+60_000;installed=true
+                    refreshAfter[recipient]=now+refreshDelay(value.fresh,utc);installed=true
                     diagnostic="eligibility=authenticated_snapshot_cached"
                 }else {
                     refreshAfter[recipient]=now+15_000
@@ -82,11 +82,11 @@ internal class EligibilitySnapshotExecution(
                 stage="native_verified_eligibility";reason="native_scope_freshness_or_binding_rejected"
                 check(install(handle,wire)==0)
                 diagnostic="eligibility=authenticated_snapshot_cached"
-                refreshAfter[recipient]=now+60_000;installed=true
+                refreshAfter[recipient]=now+refreshDelay(fresh,utc);installed=true
             } catch(failure:Exception) {
                 if(expiredServerSession(failure))throw failure
                 diagnostic="eligibility=unavailable_primary_delivery_independent stage=$stage reason=$reason exception=${failure.javaClass.simpleName}"
-                refreshAfter[recipient]=now+15_000
+                refreshAfter[recipient]=now+if(reason=="snapshot_quota_exceeded")60_000 else 15_000
             }
         }
         nextAt=targets.minOf{refreshAfter[it]?:now+1000}.coerceAtLeast(now+1000)
@@ -94,8 +94,10 @@ internal class EligibilitySnapshotExecution(
     }
 
     companion object {
+        internal fun refreshDelay(freshUntilUtcMs:Long,nowUtcMs:Long):Long=
+            (freshUntilUtcMs-nowUtcMs-15_000).coerceIn(1_000,60_000)
         internal fun safeState(value:String):String=when(value){
-            "ready","rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature","eligibility_too_large","unsupported_request"->value
+            "ready","rejected_or_storage_unavailable","malformed_request","invalid_key_or_signature","eligibility_too_large","snapshot_quota_exceeded","unsupported_request"->value
             else->"snapshot_not_ready"
         }
         internal fun encode(reply:JSONObject,account:Long,generation:Long,device:String,recipient:Long):ByteArray {

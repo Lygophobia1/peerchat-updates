@@ -23,6 +23,27 @@ class AttachmentCompatibilityTest {
             var calls=0;assertEquals(expected,attachmentRecipientPreflight(8,{true}){op,body->calls++;assertEquals("cache_dm_prepare",op);assertEquals(8,body.getLong("recipientAccountId"));reply(state)});assertEquals(1,calls)
         }
     }
+    @Test fun preflightTransportLossOffersOnlyExplicitDirectChoiceBeforeCacheJob(){
+        assertEquals(AttachmentSendPreflight.TransportChoice,attachmentSendPreflight(8,{true})
+            {_,_->throw java.net.SocketTimeoutException("test-only timeout")})
+        assertEquals(AttachmentSendPreflight.TransportChoice,attachmentSendPreflight(8,{true})
+            {_,_->throw java.net.SocketException("test-only disconnect")})
+        assertEquals(AttachmentSendPreflight.Cached,attachmentSendPreflight(8,{true}){_,_->reply("accepted")})
+        assertEquals(AttachmentSendPreflight.UpgradeChoice,attachmentSendPreflight(8,{true}){_,_->reply("cache_dm_recipient_upgrade_required")})
+    }
+    @Test fun preflightRejectionsAndChangedScopeCannotOfferDirectChoice(){
+        assertThrows(IllegalStateException::class.java){
+            attachmentSendPreflight(8,{true}){_,_->reply("cache_access_denied")}}
+        assertThrows(com.peerchat.android.platform.ServerRejected::class.java){
+            attachmentSendPreflight(8,{true}){_,_->throw com.peerchat.android.platform.ServerRejected("cache_access_denied")}}
+        assertThrows(javax.net.ssl.SSLException::class.java){
+            attachmentSendPreflight(8,{true}){_,_->throw javax.net.ssl.SSLException("test-only TLS failure")}}
+        assertThrows(java.io.IOException::class.java){
+            attachmentSendPreflight(8,{true}){_,_->throw java.io.IOException("test-only generic I/O")}}
+        var current=true
+        assertThrows(IllegalStateException::class.java){
+            attachmentSendPreflight(8,{current}){_,_->current=false;throw java.net.SocketTimeoutException("test-only timeout")}}
+    }
     @Test fun securityNetworkAndOtherCacheFailuresNeverBecomeDirectChoice(){
         for(state in listOf("cache_access_denied","cache_dm_source_upgrade_required","cache_storage_unavailable","cache_expired","cache_malformed_request")){
             try{attachmentRecipientPreflight(8,{true}){_,_->reply(state)};fail(state)}catch(_:IllegalStateException){}
