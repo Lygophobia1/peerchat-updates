@@ -244,6 +244,13 @@ struct Node::Impl {
     }
     std::wstring transferOperation(const Command& command){
         if(!transfers)throw std::runtime_error("File transfers unavailable");
+        if(command.sourceKind==21&&command.id.rfind("online:",0)==0){
+            const auto selected=command.id.substr(7);std::uint64_t account=0;
+            try{size_t consumed=0;account=std::stoull(selected,&consumed);if(consumed!=selected.size()||std::to_string(account)!=selected||!mailbox::account(account))return L"error:Select a valid authenticated recipient account for online file transfer.";}catch(...){return L"error:Select a valid authenticated recipient account for online file transfer.";}
+            auto contact=contacts.find(command.peer);auto connection=transferConnection(command.peer);
+            if(!authenticatedFriends.localAccount()||authenticatedFriends.accountFor(command.peer)!=account||contact==contacts.end()||!contact->second.verified||!connection||connection->archiveBound||connection->authorization.permitsArchiveControl()||!connection->authorization.permitsDirectMessage()||!connection->tls||connection->tls->remotePublicKey()!=contact->second.publicKey)return L"error:Online transfer requires this friend's exact verified device and a live authenticated file-capable connection. Reconnect and verify that device, or use encrypted offline attachment delivery after all linked devices are upgraded.";
+            Command online=command;online.sourceKind=1;online.id=Storage::newMessageId();return transferOperation(online);
+        }
         if(command.sourceKind==21&&command.id.rfind("legacy:",0)==0){if(!dmAttachments||dmAttachments->capabilityState()!=2)return L"error:Wait for the encrypted attachment capability check. Direct fallback is allowed only when the server explicitly reports unsupported encrypted attachments.";auto account=std::stoull(command.id.substr(7));if(authenticatedFriends.accountFor(command.peer)!=account||!transferConnection(command.peer))return L"error:Live verified direct transfer is unavailable. Reconnect the verified recipient, or update all devices for encrypted offline attachments.";Command legacy=command;legacy.sourceKind=1;legacy.id=Storage::newMessageId();return transferOperation(legacy);}
         if(command.sourceKind==28){
             protocol::check(dmAttachments&&store);auto bytes=store->directAttachmentReadContext(profile.peerId);if(bytes.empty())return L"{\"items\":[],\"cursor\":\"\",\"more\":false,\"scope\":\"\"}";

@@ -41,6 +41,7 @@ int main(){
         screen::Backend::WebRtcCompatibility:screen::Backend::NativeWindows;
     std::array<Node,2> nodes;
     std::array<std::string,2> peers;
+    std::array<Blob,2> publicKeys;
     std::array<bool,2> ready{},connected{};
     std::array<std::uint64_t,2> relayAttempts{};bool relayPaired=false;
     std::array<std::uint32_t,2> shareState{};
@@ -125,17 +126,28 @@ int main(){
         require(content!=nullptr,"Could not create animated screen content");
         SetWindowPos(source,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         for(size_t i=0;i<2;++i){auto path=(root/std::to_wstring(i)).wstring();
-            {Storage storage(path);auto profile=storage.profile();profile.listenPort=static_cast<unsigned short>(base+i);storage.saveProfile(profile);}
+            {Storage storage(path);auto profile=storage.profile();publicKeys[i]=profile.publicKey;profile.listenPort=static_cast<unsigned short>(base+i);storage.saveProfile(profile);}
             // This direct-only fixture uses explicit loopback ports. Production
             // relay-only startup still has no reliable direct listener.
             if(relayFixture)nodes[i].start(path,0,L"Relay media fixture",false);else nodes[i].start(path,static_cast<unsigned short>(base+i));
         }
         wait([&]{return ready[0]&&ready[1];},"Screen peers did not start");
-        nodes[0].replaceAuthenticatedFriends(71,1,{{72,peers[1],{peers[1]}}});
+        const auto olderLinkedDevice=std::string(64,'e');
+        nodes[0].replaceAuthenticatedFriends(71,1,{{72,peers[1],{peers[1],olderLinkedDevice}}});
         nodes[1].replaceAuthenticatedFriends(72,1,{{71,peers[0],{peers[0]}}});
+        auto selectorSource=root/L"online-selector.bin";{std::ofstream file(selectorSource,std::ios::binary);file<<"online";require(bool(file),"selector fixture source write failed");}
+        auto rejectsSelection=[&](const std::string& peer,const std::string& selector,const char* reason){bool rejected=false;try{auto response=nodes[0].fileTransfer(21,peer,selector,selectorSource.wstring());rejected=response.empty()||response.rfind(L"error:",0)==0;}catch(...){rejected=true;}require(rejected,reason);};
+        Contact pinned;pinned.peerId=peers[1];pinned.name=L"Exact fixture recipient";pinned.publicKey=publicKeys[1];pinned.endpoints={{L"127.0.0.1",1}};pinned.verified=true;nodes[0].saveContact(pinned);
+        rejectsSelection(peers[1],"online:72","online selector accepted an offline verified device");
+        pinned.verified=false;nodes[0].saveContact(pinned);rejectsSelection(peers[1],"online:72","online selector accepted an unverified contact");pinned.verified=true;nodes[0].saveContact(pinned);
         nodes[0].setNetworkContext(1,L"lan-a");nodes[1].setNetworkContext(1,L"lan-b");
         if(relayFixture){nodes[0].updateCandidates(peers[1],L"",0,L"",0,true,1,true);nodes[1].updateCandidates(peers[0],L"",0,L"",0,true,1,true);}else nodes[0].connect(L"127.0.0.1",static_cast<unsigned short>(base+1),peers[1]);
         wait([&]{return connected[0]&&connected[1];},"Screen peers did not establish verified peer TLS");
+        rejectsSelection(peers[1],"online:73","online selector accepted wrong authenticated account");
+        rejectsSelection(peers[1],"online:072","online selector accepted noncanonical account");
+        rejectsSelection(olderLinkedDevice,"online:72","online selector accepted unavailable older linked device");
+        rejectsSelection(peers[1],"legacy:72","legacy selector bypassed explicit unsupported cache capability gate");
+        rejectsSelection(peers[1],"72","offline cache accepted a missing authenticated cache session");
         require(nodes[1].setScreenShareBackend(receiverRequirement),
             "Receiver backend requirement could not be configured");
         const auto captureKind=realMonitor?PC_SCREEN_MONITOR:PC_SCREEN_WINDOW;
@@ -253,7 +265,7 @@ int main(){
         std::filesystem::create_directory(fileDestination);
         {std::ofstream file(fileSource,std::ios::binary);file.write(reinterpret_cast<const char*>(fileBytes.data()),fileBytes.size());require(bool(file),"fixture source write failed");}
         if(auto tuning=std::getenv("PEERCHAT_TEST_TRANSFER_TUNING"))nodes[0].fileTransfer(13,"","",unicode::decode(tuning));
-        auto fileId=nodes[0].fileTransfer(1,peers[1],"",fileSource.wstring());
+        auto fileId=nodes[0].fileTransfer(21,peers[1],"online:72",fileSource.wstring());require(fileId.size()==32&&fileId.rfind(L"error:",0)!=0,"explicit online transfer required a compatible cache or selected an invalid ID");
         std::string fileKey(fileId.begin(),fileId.end());
         wait([&]{return nodes[1].fileTransfer(0).find(fileId)!=std::wstring::npos;},"file offer during media missing");
         nodes[1].fileTransfer(2,"",fileKey,fileDestination.wstring());
