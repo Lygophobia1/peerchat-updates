@@ -13,6 +13,15 @@
 
 namespace {
 void require(bool okay,const char* message){if(!okay)throw std::runtime_error(message);}
+// These fixture IDs are hexadecimal and fixture filenames contain no braces.
+// Select the exact row so a completed setup transfer cannot satisfy another
+// transfer's progress or completion assertion.
+std::wstring transferRow(const std::wstring& rows,const std::wstring& id){
+    const auto start=rows.find(L"{\"id\":\""+id+L"\"");
+    if(start==std::wstring::npos)return {};
+    const auto end=rows.find(L'}',start);
+    return end==std::wstring::npos?std::wstring{}:rows.substr(start,end-start+1);
+}
 std::uint64_t counter(const std::wstring& text,const std::wstring& name){
     const auto start=text.find(name+L"=");
     if(start==std::wstring::npos)return 0;
@@ -248,7 +257,7 @@ int main(){
         std::string fileKey(fileId.begin(),fileId.end());
         wait([&]{return nodes[1].fileTransfer(0).find(fileId)!=std::wstring::npos;},"file offer during media missing");
         nodes[1].fileTransfer(2,"",fileKey,fileDestination.wstring());
-        wait([&]{auto rows=nodes[1].fileTransfer(0);return rows.find(L"\"state\":3")!=std::wstring::npos&&rows.find(L"\"done\":0,")==std::wstring::npos;},"concurrent transfer did not establish durable payload",30);
+        wait([&]{auto row=transferRow(nodes[1].fileTransfer(0),fileId);return row.find(L"\"state\":3")!=std::wstring::npos&&row.find(L"\"done\":0,")==std::wstring::npos;},"concurrent transfer did not establish durable payload",30);
         auto disconnectsBeforeStop=reliableDisconnects;
         bool mailboxRejected=false;try{nodes[0].mailbox(1,{1});}catch(...){mailboxRejected=true;}
         require(mailboxRejected,"invalid local mailbox operation did not fail closed");
@@ -261,7 +270,7 @@ int main(){
             nodes[0].relayClosed(relayAttempts[0],L"isolated fixture interruption");nodes[1].relayClosed(relayAttempts[1],L"isolated fixture interruption");relayPaired=false;relayAttempts={};connected={};
             wait([&]{return relayPaired&&connected[0]&&connected[1]&&relayAttempts[0]!=previous[0]&&relayAttempts[1]!=previous[1];},"active file did not reestablish a fresh authenticated relay",30);
         }
-        wait([&]{return nodes[0].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos&&nodes[1].fileTransfer(0).find(L"\"state\":4")!=std::wstring::npos;},"media-stop concurrent file did not complete",60);
+        wait([&]{return transferRow(nodes[0].fileTransfer(0),fileId).find(L"\"state\":4")!=std::wstring::npos&&transferRow(nodes[1].fileTransfer(0),fileId).find(L"\"state\":4")!=std::wstring::npos;},"media-stop concurrent file did not complete",60);
         auto receivedPath=fileDestination/(fileId+L".peerchat-received")/L"concurrent-media.bin";
         require(receivedPath.filename()==fileSource.filename(),"received original filename changed");
         std::ifstream received(receivedPath,std::ios::binary);
