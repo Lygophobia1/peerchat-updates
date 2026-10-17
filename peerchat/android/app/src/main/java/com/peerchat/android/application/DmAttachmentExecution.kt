@@ -13,27 +13,58 @@ internal class DmAttachmentExecution(
     fun service(accounts:ServerAccounts,handle:Long):Boolean=service(accounts::directAttachmentCache,handle)
 
     internal fun service(accounts:(String,JSONObject)->JSONObject,handle:Long):Boolean {
-        val bytes=native(handle,12,ByteArray(0))?:return false
-        if(bytes.isEmpty())return false
+        val work=borrow(handle,accounts,{true},{},{throw it})?:return false
+        apply(work,exchange(work));return true
+    }
+
+    /** One command borrowed by the existing scheduled owner, not another queue
+     * or retry owner. All native access and scope callbacks run under its gate. */
+    internal class Borrowed internal constructor(
+        internal val handle:Long,internal val operation:String,internal val requestId:String,
+        internal val request:()->ByteArray,internal val rejected:(Exception)->ByteArray,
+        internal val current:()->Boolean,internal val applied:()->Unit,internal val failed:(Exception)->Unit
+    )
+    private class Result(val bytes:ByteArray,val failure:Exception?=null)
+
+    internal fun borrow(handle:Long,accounts:(String,JSONObject)->JSONObject,current:()->Boolean,
+                        applied:()->Unit,failed:(Exception)->Unit):Borrowed? {
+        val bytes=native(handle,12,ByteArray(0))?:return null
+        if(bytes.isEmpty())return null
         val command=Command.parse(bytes)
-        val response=try {
-            encodeReply(command,accounts(command.operation,command.fields()))
-        }catch(failure:Exception){
-            val rejected=NativeRecordWriter(30).also{w->
+        return Borrowed(handle,command.operation,command.requestId,
+            {encodeReply(command,accounts(command.operation,command.fields()))},
+            {NativeRecordWriter(30).also{w->
                 w.text("PeerChat/DMCacheFailure/v1");w.number(command.generation);w.text(command.requestId);w.text("network_unavailable")
-            }.bytes()
-            checkNotNull(native(handle,14,rejected)){"Native attachment failure commit unavailable"}
-            if(expiredServerSession(failure))throw failure
-            return true
+            }.bytes()},current,applied,failed)
+    }
+    private fun exchange(work:Borrowed):Result {
+        val began=System.nanoTime()
+        try{return try{Result(work.request())}catch(failure:Exception){Result(work.rejected(failure),failure)}}
+        finally{val elapsed=(System.nanoTime()-began)/1_000_000
+            if(elapsed>=250)android.util.Log.i("PeerChatNetwork","stage=dm_cache_rpc operation=${work.operation} native_request_id=${work.requestId} elapsed_ms=$elapsed")}
+    }
+    private fun apply(work:Borrowed,result:Result){
+        checkNotNull(native(work.handle,if(result.failure==null)13 else 14,result.bytes)){"Native attachment reply commit unavailable"}
+        result.failure?.let{if(expiredServerSession(it))throw it}
+        work.applied()
+    }
+    internal fun serviceOutsideGate(gate:Any,prepare:()->Borrowed?){
+        val work=synchronized(gate){prepare()}?:return
+        // Only transport/encoding is outside the gate. No native operation,
+        // authorization mutation or callback can race local profile commands.
+        val result=exchange(work)
+        synchronized(gate){
+            if(work.current())try{apply(work,result)}catch(failure:Exception){work.failed(failure)}
         }
-        checkNotNull(native(handle,13,response)){"Native attachment reply commit unavailable"}
-        return true
     }
 
     private data class Command(val generation:Long,val requestId:String,val operation:String,
         val recipient:Long,val id:String,val lease:String,val offset:Long,val maximum:Long,val upload:Long,
         val descriptor:ByteArray,val audience:ByteArray,val data:ByteArray) {
         fun fields():JSONObject=JSONObject().also{body->
+            // Local correlation only: ServerAccounts replaces this with its
+            // independently generated actual RPC ID before writing the wire.
+            body.put("requestId",requestId)
             when(operation){
                 "cache_dm_capability"->Unit
                 "cache_dm_register"->{require(data.isNotEmpty());body.put("proof",encoded(data))}

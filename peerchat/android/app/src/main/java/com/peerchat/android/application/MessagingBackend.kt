@@ -231,30 +231,45 @@ class MessagingBackend(context: Context,private val profileName: String="default
     init {
         executor.scheduleWithFixedDelay({
             val waiting=System.nanoTime()
-            if(!stopped&&!resetting)try {synchronized(gate){
+            if(!stopped&&!resetting)try {dmAttachmentExecution.serviceOutsideGate(gate){
                 ownerTimings.record(OwnerStage.GateWait,System.nanoTime()-waiting)
-                if(!resetting)ownerTimings.measure(OwnerStage.Tick){tick()}
-            }}catch(failure: Exception){
-                if(loggedTickFailure!=failure.javaClass.simpleName){
-                    loggedTickFailure=failure.javaClass.simpleName
-                    android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+loggedTickFailure)
-                }
-                if(expiredServerSession(failure))synchronized(gate){
-                    android.util.Log.w("PeerChatNetwork","event=authentication_invalidated generation=$generation reason="+(failure as ServerRejected).code)
-                    generation++;clearAuthorization();accounts=null;index=null
-                    friends=friends.map{it.copy(online=false)}
-                    mutable.value=localOfflineSnapshot(mutable.value,"Session expired; local history retained; sign in again")
-                    // Expiring access sessions are not remembered credentials.
-                    // One bounded refresh through the same coordinator; never
-                    // fight a superseded session or bypass server revocation.
-                    if(inUse&&failure is ServerRejected&&failure.code=="session_invalid")try{
-                        val saved=remembered.load();if(saved!=null&&!saved.revocationPending)restoreRememberedLocked(saved.endpoint)
-                    }catch(_:Exception){/* Retain fail-closed offline state; lifecycle/wake may retry. */}
-                    return@scheduleWithFixedDelay
-                }
-                synchronized(gate){mutable.value=mutable.value.copy(serverPresenceLive=false,status=if(failure is ServerRejected)serverRefreshFailure(failure) else "Application/native update validation failed; native delivery state retained")}
-            }
+                if(!stopped&&!resetting){ownerTimings.measure(OwnerStage.Tick){tick()};borrowDmAttachmentRequest()}else null
+            }}catch(failure: Exception){synchronized(gate){handleTickFailure(failure)}}
         },125,125,TimeUnit.MILLISECONDS)
+    }
+    // Called only while holding gate, including cache failures after the exact
+    // borrowed scope guard. A stale response cannot log out a replacement login.
+    private fun handleTickFailure(failure:Exception){
+        if(loggedTickFailure!=failure.javaClass.simpleName){
+            loggedTickFailure=failure.javaClass.simpleName
+            android.util.Log.i("PeerChatWake","stage=backend_tick_failure result="+loggedTickFailure)
+        }
+        if(expiredServerSession(failure)){
+            android.util.Log.w("PeerChatNetwork","event=authentication_invalidated generation=$generation reason="+(failure as ServerRejected).code)
+            generation++;clearAuthorization();accounts=null;index=null
+            friends=friends.map{it.copy(online=false)}
+            mutable.value=localOfflineSnapshot(mutable.value,"Session expired; local history retained; sign in again")
+            // Expiring access sessions are not remembered credentials.
+            // One bounded refresh through the same coordinator; never
+            // fight a superseded session or bypass server revocation.
+            if(inUse&&failure.code=="session_invalid")try{
+                val saved=remembered.load();if(saved!=null&&!saved.revocationPending)restoreRememberedLocked(saved.endpoint)
+            }catch(_:Exception){/* Retain fail-closed offline state; lifecycle/wake may retry. */}
+            return
+        }
+        mutable.value=mutable.value.copy(serverPresenceLive=false,status=if(failure is ServerRejected)serverRefreshFailure(failure) else "Application/native update validation failed; native delivery state retained")
+    }
+    private fun borrowDmAttachmentRequest():DmAttachmentExecution.Borrowed? {
+        if(stopped||resetting||!inUse||!mutable.value.authenticated||!authorizationSnapshotInstalled||!livePeerWorkAllowed)return null
+        val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val opened=checkNotNull(profile);val revision=generation
+        return try{
+            configureMailboxEnrollment(owner,opened.handle)
+            dmAttachmentExecution.borrow(opened.handle,owner::directAttachmentCache,
+                {!stopped&&!resetting&&inUse&&profile===opened&&accounts===owner&&owner.session===active&&generation==revision&&
+                    authorizationSnapshotInstalled&&mutable.value.authenticated&&mutable.value.accountId==active.accountId&&livePeerWorkAllowed},
+                {mailboxAt=minOf(mailboxAt,System.nanoTime()/1_000_000+1000)},
+                {failure->if(expiredServerSession(failure))handleTickFailure(failure) /* Other failures retain native protected retries. */})
+        }catch(failure:Exception){if(expiredServerSession(failure))throw failure;null}
     }
     override suspend fun signIn(endpoint: ServerEndpoint,username: String,password: String): AccountSession = signInRemembered(endpoint,username,password,false)
     override suspend fun signInRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession =
@@ -759,10 +774,6 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(mailboxExecution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,mailboxExecution.nextRetryAt)
             }
         }
-        if(mutable.value.authenticated&&authorizationSnapshotInstalled&&livePeerWorkAllowed)try{
-            configureMailboxEnrollment(checkNotNull(accounts),native)
-            if(dmAttachmentExecution.service(checkNotNull(accounts),native))mailboxAt=minOf(mailboxAt,System.nanoTime()/1_000_000+1000)
-        }catch(failure:Exception){if(expiredServerSession(failure))throw failure /* Native protected jobs retain retries. */}
         if(mutable.value.authenticated&&authorizationSnapshotInstalled) {
             // Receiving/publication above takes priority. A finite background
             // wake refreshes only actual pending send destinations, not contacts.

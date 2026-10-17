@@ -36,9 +36,11 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     private fun rpc(type:String,fields:JSONObject):JSONObject {
         operations.check()
         val token=checkNotNull(session).token
+        val began=System.nanoTime()
         return rpcOwner.run(token){connection->
             connection.readTimeout(10000)
             val id=java.util.UUID.randomUUID().toString().replace("-","")
+            try{
             val request=JSONObject(fields.toString()).put("version",1).put("type",type)
                 .put("rpcRequestId",id).put("sessionToken",token).put("publicIdentity",device)
             if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))request.put("requestId",id)
@@ -49,6 +51,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             if(type.startsWith("cache_dm_"))require(body.getString("requestId")==id)
             if(!reply.optBoolean("more"))rpcOwner.close() else connection.readTimeout(10000)
             body
+            }finally{stages.rpcCorrelation(type,fields.optString("requestId"),id,(System.nanoTime()-began)/1_000_000)}
         }
     }
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
