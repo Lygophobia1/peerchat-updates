@@ -1128,6 +1128,19 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         }
         stage="attachment_prepare";instance->prepareAttachments(now);
         auto directory=[&]{auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance->profile.identity);protocol::check(bool(identity));auto bytes=identity->context->bytes("attachmentDirectory","()[B");return std::string(bytes.begin(),bytes.end());};
+        if(operation==16){
+            auto account=r.number(),generation=r.number(),recipient=r.number();auto peer=r.string();auto commit=r.number();auto path=r.string(),name=r.string();r.end();
+            protocol::check(account&&account==instance->friends.localAccount()&&generation&&generation==instance->friends.generation()&&
+                mailboxScopeCurrent(*instance)&&recipient&&recipient!=account&&instance->friends.accountFor(peer)==recipient&&instance->friends.contains(peer)&&commit<=1);
+            mailboxContact(*instance,peer,recipient); // Exact current, explicitly verified identity; never TOFU.
+            auto route=instance->sessions.snapshot(peer);bool ready=false;
+            if(route&&route->connected){auto endpoint=instance->peers.find(route->activeTransport.value);
+                ready=endpoint!=instance->peers.end()&&endpoint->second->expected()==peer&&endpoint->second->permitsDirectFileTransfer(generation);}
+            if(!commit){protocol::check(path.empty()&&name.empty());w.number(ready);}
+            else {protocol::check(ready);auto source=std::make_unique<transfer::posix::FileSource>(instance->attachmentCache,path,name);
+                auto id=Storage::newMessageId();instance->transfers->offer(peer,id,std::move(source),now);instance->sessions.demandLiveRoute(peer,now+2000,now);w.string(id);}
+            return platform::android::Context::input(env,w.data);
+        }
         if(operation==15){
             auto account=r.number();auto server=r.string(),pin=r.string(),peer=r.string(),cursor=r.string();r.end();
             protocol::check(mailbox::account(account)&&!server.empty()&&server.size()<=320&&protocol::id(pin)&&

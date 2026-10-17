@@ -38,6 +38,9 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_platform_tls_NativeD
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 1;}
 }
 // Test-only protected archive classification: deny ordinary traffic for an ID.
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_platform_tls_DirectFileCompatibilityProof_verifiedFixturePeer(JNIEnv* env,jclass,jlong handle,jbyteArray input,jboolean verified){
+    return Java_com_peerchat_android_platform_tls_NativeDmAttachmentSide_trustFixturePeer(env,nullptr,handle,input,verified);
+}
 // Does not create any archive authorization/grant or bypass production dispatch.
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_platform_tls_NativeTransferProof_markArchive(JNIEnv* env,jclass,jlong handle,jbyteArray input){
     try{

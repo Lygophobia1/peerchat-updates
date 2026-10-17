@@ -214,6 +214,10 @@ public:
     bool permitsDeferredHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0;}
     bool permitsGroupHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups)!=0;}
     bool permitsTransferPipeline()const noexcept{return ready()&&!archive_&&!group_&&(runtime_.remoteCapabilities&protocol::CapabilityTransferPipeline)!=0;}
+    // Read-only admission for an explicitly selected online compatibility send.
+    // It never creates a route or changes trust/capability negotiation.
+    bool permitsDirectFileTransfer(std::uint64_t generation)const noexcept{return generation&&generation==authenticationGeneration_&&generation==friends_.generation()&&
+        !archive_&&!group_&&transfer_&&ready()&&(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)!=0;}
     const char* diagnosticStage()const noexcept{return stage_;}
     void sendArchiveControl(const Blob& bytes){
         protocol::check(archive_&&ready());archive::validateHistoryControl(bytes);
