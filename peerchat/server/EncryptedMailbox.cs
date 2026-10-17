@@ -127,10 +127,11 @@ sealed partial class AccountDatabase {
         string digest=EligibilityDigest(members);
         // Repeated authenticated refreshes of an unchanged audience reuse the
         // immutable proof, not its lifetime. Re-evaluate authorization and the
-        // complete audience above first; keep enough freshness for client refresh.
+        // complete audience above first; keep enough freshness for older clients
+        // that refresh on a fixed 60-second cadence plus bounded scheduling delay.
         string reuse="sender_account="+account+" AND sender_device="+Quote(device)+
             " AND recipient_account="+recipient+" AND digest="+Quote(digest)+
-            " AND fresh_until>="+(now+30000)+" AND validate_until>"+now;
+            " AND fresh_until>="+(now+90000)+" AND validate_until>"+now;
         string existing=ScalarText(database,"SELECT id FROM mailbox_eligibility_snapshots WHERE "+reuse+" ORDER BY sequence DESC LIMIT 1");
         if(!String.IsNullOrEmpty(existing)){
             string where="id="+Quote(existing);

@@ -53,11 +53,14 @@ internal static class MailboxEligibilitySnapshotServerTest {
             // already retained unchanged proof to be read even at saturation.
             for(int n=0;n<63;n++)db.Execute("INSERT INTO mailbox_eligibility_snapshots(id,sender_account,sender_device,recipient_account,issued,fresh_until,validate_until,digest) SELECT 'quota"+n+"',sender_account,sender_device,recipient_account,issued,1,validate_until,digest FROM mailbox_eligibility_snapshots WHERE id='"+snapshotId+"';");
             Check((string)db.MailboxEligibilitySnapshot(7,sender,8)["snapshotId"]==snapshotId,"Quota blocked reuse of unchanged current proof.");
-            db.Execute("UPDATE mailbox_eligibility_snapshots SET fresh_until="+(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()+20000)+" WHERE id='"+snapshotId+"';");
-            Check((string)db.MailboxEligibilitySnapshot(7,sender,8)["state"]=="snapshot_quota_exceeded","Near-expiry snapshot reused or quota bypassed.");
+            // A fixed-60s older client needs scheduling headroom beyond its next
+            // refresh. A proof with 75s left fails the 90s reuse floor; quota
+            // remains authoritative even here.
+            db.Execute("UPDATE mailbox_eligibility_snapshots SET fresh_until="+(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()+75000)+" WHERE id='"+snapshotId+"';");
+            Check((string)db.MailboxEligibilitySnapshot(7,sender,8)["state"]=="snapshot_quota_exceeded","Short-for-legacy-cadence snapshot reused or quota bypassed.");
             db.Execute("DELETE FROM mailbox_eligibility_snapshots WHERE id LIKE 'quota%';");
             var refreshed=db.MailboxEligibilitySnapshot(7,sender,8);
-            Check((string)refreshed["snapshotId"]!=snapshotId&&Convert.ToInt64(refreshed["snapshotSequence"])>Convert.ToInt64(issued["snapshotSequence"]),"Near-expiry proof was extended in place.");
+            Check((string)refreshed["snapshotId"]!=snapshotId&&Convert.ToInt64(refreshed["snapshotSequence"])>Convert.ToInt64(issued["snapshotSequence"]),"Short-for-legacy-cadence proof was extended in place.");
             Reject(()=>db.ValidateMailboxEligibility(9,foreign,8,snapshotId),"Foreign sender read snapshot.");
             Reject(()=>db.ValidateMailboxEligibility(7,foreign,8,snapshotId),"Foreign device read snapshot.");
             Check((string)db.ValidateMailboxEligibility(7,sender,9,snapshotId)["state"]=="snapshot_unavailable","Wrong recipient read snapshot.");
