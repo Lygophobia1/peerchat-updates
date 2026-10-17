@@ -337,6 +337,21 @@ public:
         auto i=entries_.find(id);if(i==entries_.end()||(terminal(i->second.state)&&i->second.state!=State::Suspended))return;
         auto& e=i->second;e.state=State::Cancelled;if(e.sink)e.sink->discard();e.sink.reset();e.source.reset();e.hash.reset();e.reply=packet(Kind::Cancel,e).data;touch(e);save();
     }
+    // Local DM-cache retirement only: retain owned bytes/tokens, never send a
+    // peer Cancel or promote an unverified object to Complete. Durable sinks
+    // close without discard; their protected token remains restart evidence.
+    bool retireDirectCacheCiphertext(const std::string& peer,const std::string& id,const std::string& reason){
+        protocol::check(protocol::id(peer)&&protocol::id(id,32)&&(reason=="cache_attachment_expired"||reason=="cache_attachment_unavailable"));
+        auto found=entries_.find(id);if(found==entries_.end())return false;auto& e=found->second;
+        protocol::check(e.purpose==Purpose::DirectCacheCiphertext&&e.peer==peer);
+        if(e.state==State::Complete)return false;
+        if(e.state==State::Failed&&e.error==reason)return true;
+        auto oldState=e.state;auto oldError=e.error;auto oldLocation=e.location;
+        auto location=e.source?e.source->resumeToken():e.sink?e.sink->resumeToken():e.location;
+        e.state=State::Failed;e.error=reason;e.location=std::move(location);
+        try{save();}catch(...){e.state=oldState;e.error=std::move(oldError);e.location=std::move(oldLocation);throw;}
+        e.reply.reset();e.route=0;e.ready=false;e.finishSent=false;e.outstanding.clear();e.source.reset();e.sink.reset();e.hash.reset();return true;
+    }
     bool hasPreparationWork(std::uint64_t now)const{
         if(optionsUnavailable_||downloadUnavailable_||now<persistenceRetryAt_)return false;
         return std::any_of(entries_.begin(),entries_.end(),[](const auto& row){return row.second.state==State::Preparing||row.second.state==State::Recovering;});

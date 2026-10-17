@@ -70,7 +70,7 @@ private:
  static bool terminalCacheError(const Job& j){return j.error=="cache_attachment_expired"||j.error=="cache_attachment_unavailable";}
  static bool active(const Job& j){if(j.state=="failed"||j.state=="canceled"||terminalCacheError(j))return false;return j.sending?(!j.uploaded||!allStored(j)):(j.noticeAck.empty()||(j.accepted&&!j.verified)||(j.verified&&!j.published));}
  void memoryRoom(){while(jobs_.size()>=64){auto oldest=jobs_.end();for(auto it=jobs_.begin();it!=jobs_.end();++it)if(!active(*it->second)&&!busy(it->first)&&(oldest==jobs_.end()||it->second->time<oldest->second->time))oldest=it;protocol::check(oldest!=jobs_.end());jobs_.erase(oldest);}}
- void room(){auto count=std::count_if(jobs_.begin(),jobs_.end(),[](const auto& item){return active(*item.second);});protocol::check(count<32);memoryRoom();}
+ void room(){reconcileTerminalTransfers();auto count=std::count_if(jobs_.begin(),jobs_.end(),[](const auto& item){return active(*item.second);});protocol::check(count<32);memoryRoom();}
  std::string storePage(const std::vector<Indexed>& entries,const std::string& previous){
   protocol::check(!entries.empty()&&entries.size()<=128&&(previous.empty()||protocol::id(previous)));protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/DMCacheIndexPage/v1");w.string(identity_.peerId);w.string(previous);w.number(entries.size());for(const auto& e:entries){w.string(e.second);w.number(e.first);}auto id=Storage::publicKeyId(w.data);storage_.saveDirectAttachmentIndexPage(identity_.peerId,id,w.data);return id;
  }
@@ -118,7 +118,9 @@ private:
   protocol::check(working_.size()<=32);auto recent=openIndex_;if(recent.size()<32&&!previousPage_.empty()){auto page=readPage(previousPage_);recent.insert(recent.begin(),page.entries.begin(),page.entries.end());}size_t loaded=0;for(auto it=recent.rbegin();it!=recent.rend()&&jobs_.size()<64&&loaded++<32;++it)if(!jobs_.count(it->second))loadJob(it->second);
  }
  void pause(Job& j,const std::string& reason){if(!terminalCacheError(j)){j.error=reason;j.retry=io_.wall()+10000;if(!j.verified)j.state="paused";}j.route=0;j.contextUntil=0;save();}
- void cacheUnavailable(Job& j,const std::string& reason){j.error=reason;j.state=j.verified?"complete":"failed";j.retry=0;j.route=0;j.contextUntil=0;requests_.erase(std::remove_if(requests_.begin(),requests_.end(),[&](const auto& q){return q.job==j.id;}),requests_.end());save();}
+ bool terminalTransfersReconciled_=false;
+ void reconcileTerminalTransfers(){if(terminalTransfersReconciled_)return;for(const auto& d:transfers_.retainedRecords())if(d.purpose==transfer::Purpose::DirectCacheCiphertext&&d.state!=transfer::State::Complete&&d.state!=transfer::State::Failed&&d.state!=transfer::State::Cancelled){auto& j=job(d.metadata.id);if(terminalCacheError(j)){protocol::check(j.body&&j.peer==d.peer&&metadata(j)==d.metadata);transfers_.retireDirectCacheCiphertext(j.peer,j.id,j.error);}}terminalTransfersReconciled_=true;}
+ void cacheUnavailable(Job& j,const std::string& reason){transfers_.retireDirectCacheCiphertext(j.peer,j.id,reason);j.error=reason;j.state=j.verified?"complete":"failed";j.retry=0;j.route=0;j.contextUntil=0;requests_.erase(std::remove_if(requests_.begin(),requests_.end(),[&](const auto& q){return q.job==j.id;}),requests_.end());save();}
  Evidence authorizedEvidence(const Job& j){
   auto evidence=evidence_();protocol::check(evidence.identity&&evidence.current&&j.contextUntil>io_.wall());auto mapping=evidence.current;auto relationship=j.body?j.body->manifest.binding.relationship:parseAudience(j.audience,j.account,identity_.peerId,j.recipient).relationship;
   evidence.current=[mapping,relationship](const auto& b,const std::string& rel,std::uint64_t other){return rel==relationship&&mapping(b,rel,other);};return evidence;
@@ -198,6 +200,7 @@ public:
 };
 
 inline void Application::tick(){
+ reconcileTerminalTransfers();
  if(!account_)return;
  auto now=io_.wall();
  for(auto it=requests_.begin();it!=requests_.end();){if(it->dispatched&&now>=it->sentAt&&now-it->sentAt>=30000){auto id=it->job;it=requests_.erase(it);if(id.empty()){supported_=false;capability_=0;probeAt_=now;}else pause(job(id),"Cache request timed out; durable attachment data retained");}else ++it;}
