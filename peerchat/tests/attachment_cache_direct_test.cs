@@ -40,6 +40,21 @@ partial class AttachmentCacheRuntimeTest {
   }
  }
  static void DFriend(AccountDatabase db){Check(db.SendFriendRequest(1,2)=="pending"&&db.RespondToRequest(2,1,true)=="friends","DM friendship");}
+ static long ObserveAppendAdmissionBlocking(AccountDatabase db,AttachmentCacheAdmission admission,string source,string lease,byte[] block,string unrelatedDevice){
+  // Test-only storage barrier, not measured physical SD latency.
+  using(var entered=new System.Threading.ManualResetEvent(false))using(var release=new System.Threading.ManualResetEvent(false))
+  using(var lookupStarted=new System.Threading.ManualResetEvent(false))using(var lookupDone=new System.Threading.ManualResetEvent(false)){
+   Exception appendFailure=null,lookupFailure=null;long durable=0,lookupMilliseconds=0;
+   AttachmentCacheRuntime.TestFault=phase=>{if(phase=="before_commit"){entered.Set();if(!release.WaitOne(5000))throw new TimeoutException("isolated append barrier");}};
+   var append=new System.Threading.Thread(()=>{try{durable=admission.AppendDirect(1,source,()=>true,lease,0,block);}catch(Exception error){appendFailure=error;}});
+   var lookup=new System.Threading.Thread(()=>{try{var watch=System.Diagnostics.Stopwatch.StartNew();lookupStarted.Set();Check(db.OwnsDevice(3,unrelatedDevice),"unrelated account mapping");lookupMilliseconds=watch.ElapsedMilliseconds;}catch(Exception error){lookupFailure=error;}finally{lookupDone.Set();}});
+   bool blocked=false;
+   try{append.Start();Check(entered.WaitOne(5000),"append did not reach durable commit");lookup.Start();Check(lookupStarted.WaitOne(5000),"unrelated lookup not scheduled");blocked=!lookupDone.WaitOne(250);}
+   finally{release.Set();Check(append.Join(6000),"append barrier did not drain");if(lookup.ThreadState!=System.Threading.ThreadState.Unstarted)Check(lookup.Join(6000),"unrelated lookup did not drain");AttachmentCacheRuntime.TestFault=null;}
+   Check(blocked&&appendFailure==null&&lookupFailure==null&&durable==block.Length,"cache authority lock latency characterization changed");
+   Console.WriteLine("CACHE_AUTHORITY_CONTENTION injected_commit_barrier_ms=250 unrelated_account_lookup_ms="+lookupMilliseconds+" blocked=true scope=isolated_production_admission_not_physical_disk");return durable;
+  }
+ }
  static void DRegister(AccountDatabase db,ECDsaCng key,long account,byte[] binding){Check(db.RegisterMailboxKey(account,DId(key),key.Key.Export(CngKeyBlobFormat.EccPublicBlob),binding)=="accepted","DM verified key registration");}
  static byte[] DCapability(ECDsaCng key,long account,byte[] wire){var binding=MailboxProtocol.Binding.Parse(wire);using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){
   writer.Write(new byte[]{80,84,1,30});Text(writer,"PeerChat/dm-cache-device/v1");writer.Write((ulong)account);Text(writer,DId(key));Text(writer,binding.Key);writer.Write((ulong)binding.Generation);writer.Write(1UL);writer.Write(1UL);Field(writer,key.Key.Export(CngKeyBlobFormat.EccPublicBlob));Field(writer,SignKeyBytes(key,stream.ToArray()));return stream.ToArray();
@@ -81,7 +96,7 @@ partial class AttachmentCacheRuntimeTest {
     var changed=(byte[])audience.Wire.Clone();changed[changed.Length-1]^=1;Reject(()=>admission.AdmitDirect(1,source,()=>true,descriptor.Wire,changed),"*");
     Check(!admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire).Complete,"Admission claimed plaintext/file completion");admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire);
     Reject(()=>admission.Inspect(2,reader,()=>true,descriptor.Id),"cache_scope_mismatch");Reject(()=>admission.InspectDirect(3,other,()=>true,descriptor.Id),"cache_dm_original_recipient_required");Reject(()=>admission.AcquireDirect(2,reader,()=>true,descriptor.Id,true),"cache_sender_binding_mismatch");
-    oldLease=admission.AcquireDirect(1,source,()=>true,descriptor.Id,true);var block=payload.Take(65536).ToArray();Check(admission.AppendDirect(1,source,()=>true,oldLease,0,block)==65536,"DM prefix");Check(admission.AppendDirect(1,source,()=>true,oldLease,0,block)==65536,"DM duplicate inflated progress");
+    oldLease=admission.AcquireDirect(1,source,()=>true,descriptor.Id,true);var block=payload.Take(65536).ToArray();Check(ObserveAppendAdmissionBlocking(db,admission,source,oldLease,block,other)==65536,"DM prefix");Check(admission.AppendDirect(1,source,()=>true,oldLease,0,block)==65536,"DM duplicate inflated progress");
     var corrupt=(byte[])block.Clone();corrupt[0]^=1;Reject(()=>admission.AppendDirect(1,source,()=>true,oldLease,0,corrupt),"cache_conflicting_chunk");Reject(()=>admission.CompleteDirect(1,source,()=>true,oldLease),"cache_upload_incomplete");
    }
    using(var db=new AccountDatabase(database))using(var cache=new AttachmentCacheRuntime(options,()=>now)){

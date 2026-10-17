@@ -65,6 +65,18 @@ partial class AttachmentCacheRuntimeTest {
     if(operation=="mailbox_ack"){
      int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM ACK actor");var result=clients[actor].Mailbox("mailbox_ack",devices[actor],new Dictionary<string,object>{{"receipt",(string)command["receipt"]},{"signingPublicKey",Convert.ToBase64String(publics[actor])}});send(result);continue;
     }
+    if(operation=="mailbox_store"){
+     int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM store actor");send(clients[actor].Mailbox("mailbox_store",devices[actor],new Dictionary<string,object>{{"envelope",(string)command["receipt"]},{"signingPublicKey",Convert.ToBase64String(publics[actor])}}));continue;
+    }
+    if(operation=="mailbox_receipts"){
+     int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM receipt actor");send(clients[actor].Mailbox("mailbox_receipts",devices[actor],new Dictionary<string,object>()));
+     for(int observed=0;observed<clients.Length;observed++)Console.Error.WriteLine("RPC_TRACE actor="+(observed+1)+" "+clients[observed].RpcTimingDiagnostics);
+     if(server is ContextServer){var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+      var active=(DiscoveryServer)typeof(ContextServer).GetField("server",flags).GetValue(server);
+      var timing=(ServerTimingDiagnostics)typeof(DiscoveryServer).GetField("timing",flags).GetValue(active);
+      foreach(var row in timing.Snapshot())Console.Error.WriteLine("SERVER_TRACE "+row);
+     }continue;
+    }
     if(operation=="restart"){restart();send(new Dictionary<string,object>{{"restarted",true}});continue;}
     if(operation=="logout"){int actor=command.ContainsKey("actor")?Convert.ToInt32(command["actor"])-1:0;clients[actor].Logout();send(new Dictionary<string,object>{{"loggedOut",String.IsNullOrEmpty(clients[actor].SessionToken)}});continue;}
     if(operation=="source_login"){
