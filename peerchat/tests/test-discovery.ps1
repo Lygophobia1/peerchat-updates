@@ -12,7 +12,7 @@ if($PhysicalTurn) {
         $outputDirectory='build\tests\server'
         New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
         $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-        & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\server\DiscoveryIntegrationTest.cs
+        & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\desktop\ArchiveEnrollmentExecution.cs .\server\DiscoveryIntegrationTest.cs
         if($LASTEXITCODE -ne 0){throw 'Discovery TURN physical-proof harness build failed'}
         & (Join-Path $projectRoot "$outputDirectory\DiscoveryIntegrationTest.exe") --physical-turn
         if($LASTEXITCODE -ne 0){throw 'Discovery-issued TURN physical proof failed'}
@@ -31,7 +31,7 @@ try {
     }else{& (Join-Path $projectRoot 'scripts\build-server.ps1') -OutputDirectory $outputDirectory}
     $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
     $references=@('System.dll','System.Core.dll','System.Xaml.dll','WPF\WindowsBase.dll','WPF\PresentationCore.dll','WPF\PresentationFramework.dll') | ForEach-Object { '/reference:'+(Join-Path $framework $_) }
-    & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\server\DiscoveryIntegrationTest.cs
+    & "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$outputDirectory\DiscoveryIntegrationTest.exe" /reference:"$framework\System.Web.Extensions.dll" .\desktop\DiscoveryClient.cs .\desktop\ArchiveEnrollmentExecution.cs .\server\DiscoveryIntegrationTest.cs
     if($LASTEXITCODE -ne 0){throw 'Discovery test build failed'}
     # Some Windows installations fail CertEnroll certificate creation (0x80070002). Reuse the
     # configured development certificate in that case; the test database remains isolated.
