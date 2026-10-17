@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 
 /** Application coordinator/platform execution only. Native owns profile,
  * messages/outbox/order/ACK/dedupe, trust and session/retry state. Immutable UI
@@ -46,19 +47,20 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     private val localContexts=LocalConversationContextStore(this.context,profileName)
     private var localEndpoint:ServerEndpoint?=null
-    private var generation=0L
+    @Volatile private var generation=0L
     private var network=0L
     private var archiveMetadataAt=0L
     private var archiveRetryAt=0L
     private var archiveServingUntil=0L
     private var archiveLoadedGeneration=-1L
     private var refreshAt=0L
-    private var events:ForegroundEvents?=null
+    @Volatile private var events:ForegroundEvents?=null
+    private val passiveEventQueued=java.util.concurrent.atomic.AtomicBoolean(false)
     private var eventRetryAt=0L
     private var eventRetryDelay=1000L
     private var eventWasConnected=false
     private var contactsDirty=false
-    private var authorizationSnapshotInstalled=false
+    @Volatile private var authorizationSnapshotInstalled=false
     private var rememberedRetryEndpoint:ServerEndpoint?=null
     private var rememberedRetryAt=0L
     private var rememberedRetryDelay=1000L
@@ -68,6 +70,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val mailboxPublication=MailboxPublicationGate({publish()})
     private var mailboxAt=0L
     private var mailboxExecution=MailboxExecution()
+    private var mailboxEnrollmentScope:ScopedBackendWork.Identity?=null
+    private var mailboxEnrollmentEndpoint:ServerEndpoint?=null
     private var mailboxInFlight:MailboxExecution?=null
     private val dmAttachmentExecution=DmAttachmentExecution()
     private val eligibilitySnapshots=EligibilitySnapshotExecution()
@@ -100,6 +104,14 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val session=checkNotNull(owner.session)
         val server=owner.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+owner.endpoint.port
         check(MailboxBridge.configureEnrollment(native,session.accountId,generation,server.toByteArray(Charsets.US_ASCII),owner.endpoint.certificatePin.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.US_ASCII))==0){"Authenticated mailbox scope is unavailable"}
+        if(mailboxEnrollmentScope?.matches(profile,owner,session,session.accountId,generation)!=true||mailboxEnrollmentEndpoint!=owner.endpoint){
+            // Replace rather than mutate an executor borrowed by an old session.
+            // Native invalidation remains authoritative; the existing key must
+            // be accepted again through the authenticated registration path.
+            mailboxExecution=MailboxExecution();mailboxAt=0L
+            mailboxEnrollmentScope=ScopedBackendWork.Identity(checkNotNull(profile),owner,session,session.accountId,generation)
+            mailboxEnrollmentEndpoint=owner.endpoint
+        }
         val scope=NativeRecordWriter(30).also{it.number(session.accountId);it.number(generation)}.bytes()
         // Optional capability setup cannot block ordinary text mailbox work.
         try{com.peerchat.android.TransferBridge.request(native,11,scope)}catch(_:Exception){}
@@ -206,16 +218,34 @@ class MessagingBackend(context: Context,private val profileName: String="default
     @Volatile private var livePeerWorkAllowed=true
     @Volatile private var archiveWorkAllowed=true
     @Volatile private var quiescent=java.util.concurrent.CountDownLatch(0)
-    internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE,allowArchiveWork:Boolean=allowPeerWork) {
+    @Volatile private var retentionUntil=0L
+    @Volatile private var requestedRetentionUntil=0L
+    @Volatile private var invalidRetentionUntil=0L
+    @Volatile private var lifetimeRevision=0L
+    private var ownerLoop:java.util.concurrent.ScheduledFuture<*>?=null
+    @Synchronized internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE,allowArchiveWork:Boolean=allowPeerWork,retainConnectionsUntilNanos:Long=0L) {
+        if(stopped)return
+        val revision=++lifetimeRevision
+        requestedRetentionUntil=retainConnectionsUntilNanos
         inUse=value
         operationDeadline=deadlineNanos
         // Background archive capability is separate from friend/transfer work;
         // signed native grants still admit every archive attempt.
         livePeerWorkAllowed=allowPeerWork
         archiveWorkAllowed=allowArchiveWork
-        operations.configure(value&&!resetting,deadlineNanos)
-        if(!value){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
+        retentionUntil=if(!value&&!resetting&&authorizationSnapshotInstalled&&mutable.value.authenticated&&retainConnectionsUntilNanos>invalidRetentionUntil)retainConnectionsUntilNanos else 0L
+        val retained=retentionUntil>System.nanoTime()
+        operations.configure((value||retained)&&!resetting&&!stopped,if(retained)retentionUntil else deadlineNanos)
+        if(value&&!stopped){if(ownerLoop==null||ownerLoop!!.isCancelled)startOwnerLoop()}
+        else {ownerLoop?.cancel(false);ownerLoop=null}
+        executor.execute {synchronized(gate){if(revision==lifetimeRevision){
+            executions.values.forEach{it.setActiveWork(value)}
+            if(value)mailboxAt=0L
+            else events?.let(::eventActivity) // Include events queued just before the foreground lease ended.
+        }}}
+        if(!value&&!retained){val completed=java.util.concurrent.CountDownLatch(1);quiescent=completed
             executor.execute {try{synchronized(gate){if(!inUse&&!stopped){
+            if(revision!=lifetimeRevision||retentionUntil>System.nanoTime())return@synchronized
             generation++;clearAuthorization();try{if(remembered.load()==null)accounts?.logout()}catch(_:Exception){}
             accounts?.closeRpc();accounts=null;index=null;pushRegisteredToken=null
             // Quiesce NETWORK ownership, not local Profile/Storage. The one
@@ -230,10 +260,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val start=System.nanoTime();android.util.Log.i("PeerChatWake","stage=${stage}_started")
         try{return operation()}finally{android.util.Log.i("PeerChatWake","stage=${stage}_returned elapsed_ms="+(System.nanoTime()-start)/1_000_000)}
     }
-    init {
-        executor.scheduleWithFixedDelay({
+    init {startOwnerLoop()}
+    private fun startOwnerLoop() {
+        ownerLoop=executor.scheduleWithFixedDelay({
             val waiting=System.nanoTime()
-            if(!stopped&&!resetting)try {
+            if(inUse&&!stopped&&!resetting)try {
                 val frame=synchronized(gate){
                     ownerTimings.record(OwnerStage.GateWait,System.nanoTime()-waiting)
                     if(stopped||resetting)null else try{
@@ -289,6 +320,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val opened=checkNotNull(profile);val revision=generation
         return try{
             configureMailboxEnrollment(owner,opened.handle)
+            if(!mailboxExecution.registrationAccepted)return null
             dmAttachmentExecution.borrow(opened.handle,owner::directAttachmentCache,
                 {!stopped&&!resetting&&inUse&&profile===opened&&accounts===owner&&owner.session===active&&generation==revision&&
                     authorizationSnapshotInstalled&&mutable.value.authenticated&&mutable.value.accountId==active.accountId&&livePeerWorkAllowed},
@@ -519,6 +551,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String,
         val preflightTransportUnavailable:Boolean=false)
     private var pendingAttachmentCompatibility:PendingAttachmentCompatibility?=null
+    private var attachmentPreparation:Any?=null
     private fun compatibilityScope(p:PendingAttachmentCompatibility)=!stopped&&authorizationSnapshotInstalled&&accounts===p.owner&&
         p.owner.session===p.session&&generation==p.generation&&friends.any{it.peerId==p.peer&&it.accountId==p.recipient}
     private fun directCompatibility(p:PendingAttachmentCompatibility,commit:Boolean):ByteArray=transfer(16){w->
@@ -528,32 +561,54 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private fun directCompatibilityStatus(p:PendingAttachmentCompatibility):Boolean?=try{
         check(compatibilityScope(p));val r=NativeRecord(directCompatibility(p,false),30);val ready=r.number();r.end();require(ready in 0..1);ready==1L
     }catch(_:Exception){null}
-    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){val prepared:Any=synchronized(gate){
-        check(!stopped&&authorizationSnapshotInstalled&&friends.any{it.peerId==peerId})
-        check(pendingAttachmentCompatibility==null){"A selected file is awaiting a compatibility decision"}
-        val owner=checkNotNull(accounts);configureMailboxEnrollment(owner,checkNotNull(profile).handle)
-        val directoryRecord=NativeRecord(transfer(0),30);val directory=java.io.File(directoryRecord.text());directoryRecord.end()
-        val (path,name)=importAttachment(context,uri,directory)
-        val pending=PendingAttachmentCompatibility(java.util.UUID.randomUUID().toString().replace("-",""),owner,checkNotNull(owner.session),generation,
-            peerId,friends.single{it.peerId==peerId}.accountId,path,name)
-        // A failed native journal may already retain the source. Never delete it
-        // on a ambiguous offer failure; cleanup cannot destroy a resumable copy.
-        // A bounded preflight runs on the existing owner, using its authenticated
-        // RPC connection and native capability/key checks before choosing scope.
-        fun capability():Long {val r=NativeRecord(transfer(11){it.number(checkNotNull(owner.session).accountId);it.number(generation)},30);return r.number().also{r.end()}}
-        var ready=capability()
-        repeat(4){if(ready==0L&&dmAttachmentExecution.service(owner,checkNotNull(profile).handle))ready=capability()}
-        check(ready==1L){"Attachment cache preflight unavailable; the private source is retained"}
-        val preflight=attachmentSendPreflight(pending.recipient,{compatibilityScope(pending)},owner::directAttachmentCache)
-        if(preflight!=AttachmentSendPreflight.Cached){
-            val choice=pending.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice)
-            pendingAttachmentCompatibility=choice
-            return@synchronized choice
+    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){
+        val intent=Any()
+        val selected=synchronized(gate){
+            check(!stopped&&!resetting&&pendingAttachmentCompatibility==null&&attachmentPreparation==null){"Another attachment selection is pending"}
+            val local=checkNotNull(localReadContext){"Open the intended conversation before selecting an attachment"}
+            check(local.friends.any{it.peerId==peerId}){"The selected recipient is unavailable"}
+            val opened=checkNotNull(profile)
+            attachmentPreparation=intent
+            opened to local
         }
-        check(compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
-        val response=NativeRecord(transfer(10){it.text(peerId);it.text(path);it.text(name)},30)
-        val id=response.text();response.end();publish();id
-    }
+        try{
+        // A picker may return before remembered authentication. Wait outside
+        // the owner gate, bound to the original local profile/account/server.
+        val pending=awaitAttachmentReadiness(probe={synchronized(gate){
+            check(!stopped&&!resetting&&attachmentPreparation===intent&&profile===selected.first&&
+                localReadContext?.account==selected.second.account&&localReadContext?.endpoint==selected.second.endpoint){"Attachment profile changed; nothing was sent"}
+            if(!inUse||!authorizationSnapshotInstalled||!mutable.value.authenticated)return@synchronized null
+            val owner=accounts?:return@synchronized null
+            val session=owner.session?:return@synchronized null
+            check(session.accountId==selected.second.account&&owner.endpoint==selected.second.endpoint)
+            check(friends.any{it.peerId==peerId}){"Recipient authorization changed"}
+            configureMailboxEnrollment(owner,selected.first.handle)
+            if(!mailboxExecution.registrationAccepted){if(mailboxInFlight==null)mailboxAt=0L;return@synchronized null}
+            val r=NativeRecord(transfer(11){it.number(session.accountId);it.number(generation)},30)
+            val ready=r.number();r.end()
+            check(ready!=2L){"Offline attachments are unsupported by this server"}
+            if(ready!=1L)return@synchronized null
+            PendingAttachmentCompatibility(java.util.UUID.randomUUID().toString().replace("-",""),owner,session,generation,
+                peerId,friends.single{it.peerId==peerId}.accountId,"","")
+        }})
+        val work=ScopedBackendWork(gate){attachmentPreparation===intent&&profile===selected.first&&inUse&&compatibilityScope(pending)}
+        val directory=work.local{val r=NativeRecord(transfer(0),30);java.io.File(r.text()).also{r.end()}}
+        // Slow SAF providers, copying and fsync must not hold the messaging gate.
+        // The private source is retained on ambiguous offer/auth failure.
+        val imported=work.network{importAttachment(context,uri,directory)}
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        val bound=pending.copy(path=imported.first,name=imported.second)
+        val preflight=work.network{attachmentSendPreflight(bound.recipient,
+            {synchronized(gate){attachmentPreparation===intent&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        val prepared:Any=work.local{
+            if(preflight!=AttachmentSendPreflight.Cached){
+                bound.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice).also{pendingAttachmentCompatibility=it}
+            }else{
+                val response=NativeRecord(transfer(10){it.text(peerId);it.text(bound.path);it.text(bound.name)},30)
+                val id=response.text();response.end();publish();id
+            }
+        }
         if(prepared is PendingAttachmentCompatibility){
             val ready=try{awaitAttachmentDirectRoute(
                 {synchronized(gate){if(pendingAttachmentCompatibility!==prepared)null else directCompatibilityStatus(prepared)}},
@@ -567,6 +622,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer,prepared.preflightTransportUnavailable))
         }
         prepared as String
+        }finally{synchronized(gate){if(attachmentPreparation===intent)attachmentPreparation=null}}
     }
     override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String?=withContext(Dispatchers.IO){synchronized(gate){
         val pending=pendingAttachmentCompatibility
@@ -624,6 +680,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }}
     private fun clearAuthorization() {
         pendingAttachmentCompatibility=null // Private source bytes are retained.
+        invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
+        retentionUntil=0L
+        if(!inUse)operations.configure(false,Long.MAX_VALUE)
+        mailboxEnrollmentScope=null;mailboxEnrollmentEndpoint=null
         profile?.let{try{com.peerchat.android.TransferBridge.request(it.handle,11,NativeRecordWriter(30).also{w->w.number(0);w.number(0)}.bytes())}catch(_:Exception){}}
         pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
         mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)
@@ -687,10 +747,14 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
         authoritative.forEach {friend->writer.number(friend.accountId);writer.text(friend.peerId);writer.number(friend.knownPeerIds.size.toLong());friend.knownPeerIds.forEach {writer.text(it)}}
         val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
-        if(identityChanged){generation++;groupRefreshAt=0L;groupProjectionAt=0L}
+        if(identityChanged){
+            invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
+            generation++;groupRefreshAt=0L;groupProjectionAt=0L
+        }
         val native=checkNotNull(profile).handle
         if(identityChanged)check(ReliableBridge.friends(native,active.accountId,generation,writer.bytes())==0)
         authorizationSnapshotInstalled=true
+        if(identityChanged)configureMailboxEnrollment(accounts,native)
         check(ReliableBridge.network(native,generation,network)==0)
         val changed=authoritative!=friends
         friends=authoritative
@@ -720,7 +784,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         val native=checkNotNull(profile).handle
         if(livePeerWorkAllowed||archiveWorkAllowed||!mailboxAllowed()){
-            if(events==null&&now>=eventRetryAt){events=ForegroundEvents(checkNotNull(accounts));android.util.Log.i("PeerChatNetwork","event=connecting")}
+            if(events==null&&now>=eventRetryAt){events=ForegroundEvents(checkNotNull(accounts),::eventActivity);android.util.Log.i("PeerChatNetwork","event=connecting")}
             events?.let {stream->
                 if(stream.connected&&!eventWasConnected){
                     eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L
@@ -773,9 +837,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
     // outside it. Reset replaces the script instance instead of racing its state.
     private fun borrowMailboxRequest():(()->Unit)? {
         if(!mutable.value.authenticated||System.nanoTime()/1_000_000<mailboxAt)return null
-        val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle;val execution=mailboxExecution;val allowed=mailboxAllowed()
-        val scope=backendWorkScope{mailboxExecution===execution}?:return null
+        val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle;val allowed=mailboxAllowed()
         configureMailboxEnrollment(owner,native)
+        val execution=mailboxExecution
+        val scope=backendWorkScope{mailboxExecution===execution}?:return null
         // Consume this hint, preserving any new Send/event hint arriving during
         // transport wait: completion must not overwrite a concurrent zero.
         mailboxAt=Long.MAX_VALUE;mailboxInFlight=execution
@@ -953,9 +1018,44 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 else if(archive==null)friend!=null else session!=null&&archive.account==session.accountId&&
                 ((archive.reader==mutable.value.localPeerId&&archive.source==request.peerId)||(archive.source==mutable.value.localPeerId&&archive.reader==request.peerId))
             if(!admitted||executions.size>=32){ReliableBridge.close(native,request.attempt,admitted);continue}
-            val execution=AndroidRelayExecution(native,request,checkNotNull(accounts),group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId)
+            val owner=checkNotNull(accounts);val ownerSession=owner.session;val revision=generation
+            val execution=AndroidRelayExecution(native,request,owner,group?.targetAccount?:archive?.account?:checkNotNull(friend).accountId){source,failure->
+                if(failure!=null&&expiredServerSession(failure)&&!stopped)try{executor.execute{synchronized(gate){
+                    if(executions[request.attempt]===source&&accounts===owner&&owner.session===ownerSession&&generation==revision){
+                        if(!inUse)retirePassiveConnections() else handleTickFailure(failure)
+                    }
+                }}}catch(_:java.util.concurrent.RejectedExecutionException){}
+            }
             executions[request.attempt]=execution;execution.start();projectionCadence.dirty()
         }
+    }
+    /** Event-driven passive work only: no reconnect, projections timer or new
+     * relay attempts. Authority changes retire retention before more work. */
+    private fun eventActivity(source:ForegroundEvents){
+        if(!passiveEventDrainAllowed(stopped,inUse,events===source,retentionUntil,System.nanoTime())||!passiveEventQueued.compareAndSet(false,true))return
+        try{executor.execute{
+            try{synchronized(gate){
+                if(inUse||stopped||events!==source||retentionUntil<=System.nanoTime())return@synchronized
+                if(source.finished){retirePassiveConnections();return@synchronized}
+                repeat(128){
+                    val event=source.poll()?:return@repeat
+                    val kind=event.optString("event")
+                    if(event.optString("type")=="friend_event"&&kind !in setOf("mailbox_ready","mailbox_receipt_ready","presence_changed","relay_demand")){
+                        retirePassiveConnections();return@synchronized
+                    }
+                    // No new peer/archive work is admitted while passive. Group
+                    // ciphertext already delivered is still validated and saved
+                    // by the existing owner, rather than discarded as a hint.
+                    handleServerEvent(event)
+                }
+            }}catch(_:Exception){synchronized(gate){if(!inUse&&events===source)retirePassiveConnections()}}
+            finally{passiveEventQueued.set(false);if(events===source&&source.hasPending())eventActivity(source)}
+        }}catch(_:java.util.concurrent.RejectedExecutionException){passiveEventQueued.set(false)}
+    }
+    private fun retirePassiveConnections(){
+        generation++;clearAuthorization()
+        accounts?.closeRpc();accounts=null;index=null
+        mutable.value=localOfflineSnapshot(mutable.value,"Connection changed while backgrounded; local history retained")
     }
     private fun handleServerEvent(event:org.json.JSONObject){
         if(event.optString("type") in setOf("group_message","group_delivery")){

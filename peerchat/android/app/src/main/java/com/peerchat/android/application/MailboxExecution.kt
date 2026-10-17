@@ -52,7 +52,15 @@ private fun MailboxNative.scoped(scope:ScopedBackendWork):MailboxNative {
     }
 }
 internal class MailboxExecution(private val native:MailboxNative=JniMailboxNative) {
+    @Volatile
     private var registeredBinding: ByteArray? = null
+    /** True only after this executor's authenticated registration was accepted by
+     * the server, installed by native, and reconciled against the current binding. */
+    val registrationAccepted:Boolean get()=registeredBinding!=null
+
+    /** Native enrollment invalidation changes the authority of a cached binding.
+     * Keep durable receipt/fetch progress and upload retry bookkeeping intact. */
+    fun invalidateRegistration(){registeredBinding=null}
     private var receiptCursor = ""
     private var fetchCursor = ""
     private var legacyReceiptCursor = false
@@ -87,7 +95,7 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
         diagnostic="stage=$phase state="+safeMailboxState(reply.optString("state"))
         return reply
     }
-    fun reset() { registeredBinding = null; receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;projectedReceiptRows.clear();outgoingRetry.clear();deviceRetry.clear();nextRetryAt=0;outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;projectionChanged=false;changedMessageIds.clear();diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
+    fun reset() { invalidateRegistration(); receiptCursor = "";fetchCursor="";legacyReceiptCursor=false;projectedReceiptRows.clear();outgoingRetry.clear();deviceRetry.clear();nextRetryAt=0;outgoingDeviceOffset.clear();outgoingOffset=0;needsContinuation=false;projectionChanged=false;changedMessageIds.clear();diagnostic="Not serviced";inboundDiagnostic="receive=not_serviced" }
     // Completion callback is emitted only after native durable receipt creation
     // AND a real authenticated server acknowledgement. Duplicate native receives
     // still drain their ACK but do not invent another message/notification.

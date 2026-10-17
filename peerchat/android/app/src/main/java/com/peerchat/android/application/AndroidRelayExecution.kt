@@ -8,7 +8,8 @@ import com.peerchat.android.platform.tls.RelayFrames
 // Physical execution adapter analogous to Desktop RelayTransport. Native owns
 // TLS/Hello/trust, route selection, retry, ACK/dedupe/history. No reconnect loop.
 internal class AndroidRelayExecution(private val profile: Long,private val request: RelayExecution,
-    private val accounts: ServerAccounts,private val remoteAccount: Long) : AutoCloseable {
+    private val accounts: ServerAccounts,private val remoteAccount: Long,
+    private val onTerminal:(AndroidRelayExecution,Exception?)->Unit={_,_->}) : AutoCloseable {
     val requestPeerId:String get()=request.peerId
     @Volatile var failureDiagnostic:String?=null
         private set
@@ -24,6 +25,9 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
     private var worker: Thread?=null
     private val progress=RelayProgress()
     private val ioTimings=RelayIoTimings()
+    private val workSignal=RelayWorkSignal()
+    @Volatile private var terminalFailure:Exception?=null
+    fun setActiveWork(active:Boolean){workSignal.setActiveWork(active)}
     fun diagnostics():String="relay_attempt=${request.attempt} remote_account=$remoteAccount peer_device=${request.peerId} purpose="+
         (if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+
         " attached=$attached finished=$finished ${progress.snapshot()} ${ioTimings.snapshot()} failure=${failureDiagnostic?:"none"}"
@@ -58,25 +62,30 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 try {
                     var nextStatusAt=0L
                     while(!stopping) {
+                        val observed=workSignal.revision()
                         val bytes=ioTimings.measure(RelayIoStage.NativeOutput){checkNotNull(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.OUTPUT,ByteArray(0)))}
                         if(bytes.isNotEmpty())ioTimings.measure(RelayIoStage.SocketWrite){relay.channel.write(frames.wrap(bytes),43+65536)}
                         else {
                             val now=System.nanoTime()
-                            if(now>=nextStatusAt){
+                            if(workSignal.active&&now>=nextStatusAt){
                                 check(nativeRelayOpen(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.STATUS,ByteArray(0))))
                                 nextStatusAt=now+100_000_000L
                             }
                             lastOutputIdleNanos=now
-                            Thread.sleep(10)
+                            if(workSignal.active)Thread.sleep(10)
+                            else workSignal.awaitPassive(observed)
                         }
                     }
-                } catch(failure: Exception) {failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=relay_output reason="+relayFailureCode(failure);try {relay.channel.close()}catch(_: Exception){}}
+                } catch(failure: Exception) {if(!stopping){terminalFailure=failure;failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=relay_output reason="+relayFailureCode(failure)};try {relay.channel.close()}catch(_: Exception){}}
             },"PeerChat relay output").apply {isDaemon=true;start()}
             while(!stopping) {
                 val bytes=frames.unwrap(ioTimings.measure(RelayIoStage.SocketRead){relay.channel.read(43+65536)})
                 ioTimings.measure(RelayIoStage.NativeReceive){check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)}
+                // RECEIVE can create a TLS response or ACK while output polling is parked.
+                workSignal.signal()
             }
         } catch(failure: Exception) {
+            if(!stopping&&terminalFailure==null)terminalFailure=failure
             if(!stopping&&failureDiagnostic==null)failureDiagnostic="purpose="+(if(request.archive!=null)"archive_history" else if(request.group!=null)"group_control" else "friend")+" stage=$stage reason="+relayFailureCode(failure)
             android.util.Log.i("PeerChatWake","stage="+stage+" attempt=${request.attempt} result="+failure.javaClass.simpleName)
             if(request.archive!=null)android.util.Log.w("PeerChatArchive","event=attempt_failed attempt=${request.attempt} role="+
@@ -87,16 +96,22 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
         } finally {
             progress.enter(RelayStage.Cleanup)
             val retry=!stopping;stopping=true
+            workSignal.shutdown()
             try {channel?.close()}catch(_: Exception){}
-            if(writer!==Thread.currentThread())writer?.join(1500)
-            ReliableBridge.close(profile,request.attempt,retry)
-            if(request.archive!=null)android.util.Log.i("PeerChatArchive","event=attempt_cleanup attempt=${request.attempt} socket_closed=true retry=$retry")
-            finished=true
-            progress.enter(RelayStage.Closed)
+            try {
+                if(writer!==Thread.currentThread())writer?.join(1500)
+                ReliableBridge.close(profile,request.attempt,retry)
+                if(request.archive!=null)android.util.Log.i("PeerChatArchive","event=attempt_cleanup attempt=${request.attempt} socket_closed=true retry=$retry")
+            } finally {
+                finished=true
+                progress.enter(RelayStage.Closed)
+                try{onTerminal(this,terminalFailure)}catch(_:Exception){}
+            }
         }
     }
     override fun close() {
         stopping=true
+        workSignal.shutdown()
         try {channel?.close()}catch(_: Exception){}
         ReliableBridge.close(profile,request.attempt,false)
         // Do not join while holding any native/application gate.

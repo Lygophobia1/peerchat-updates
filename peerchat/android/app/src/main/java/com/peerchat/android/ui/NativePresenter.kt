@@ -762,6 +762,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                         else {try{backend.resolveAttachmentCompatibility(required.choice.token,false)}catch(_:Exception){}
                             if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice=="Checking encrypted file delivery…")mutable.value=mutable.value.copy(notice=null)}
                     }
+                    catch(_:com.peerchat.android.application.AttachmentReadinessUnavailable){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="Attachment connection is not ready. Return to PeerChat, wait for authenticated connection readiness, then retry. No attachment was sent.")}
+                    catch(cancelled:kotlinx.coroutines.CancellationException){throw cancelled}
                     catch(_:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="File could not be offered. Check connection, file access and available storage. The private source is retained.")}}
             }
             is UiAction.ResolveAttachmentCompatibility -> {
