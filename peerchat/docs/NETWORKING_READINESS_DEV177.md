@@ -86,6 +86,25 @@ Evidence: `build/dev177-pi-preflight-health.log`, `build/dev177-pi-deployment.lo
 
 ## Remaining work and physical acceptance
 
+### Physical follow-up, 2026-10-17 (not accepted)
+
+Physical testing did not accept dev.177 as a complete reliability fix. Android-to-Windows cache sending failed; one explicit direct transfer succeeded; a subsequent attachment selection was blocked. The user subsequently clarified that text arrives in **both** directions, while Windows continues displaying "Stored · awaiting recipient". Do not report this as a continuing total receive failure.
+
+Read-only Pi inspection found current active/allowed mailbox keys without matching DM-cache capability records for secondary devices `35049f3bf26f…` (account 4) and `0612f2586407…` (account 3). The current phone `61f70fb01a60…` and sender Windows `0cb421c4f102…` have matching capability records. `PrepareDirectCache` requires every eligible recipient binding to be capable. These secondary devices therefore block account-wide cache admission in the current state; they must not be silently removed or auto-trusted. Explicit, verified-device direct transfer remains a different, online-only delivery scope.
+
+Two recent Windows message IDs, `40c66d5f1179486087d3aa853c2cbe93` and `9e947d31e400454e810e8db1e86e7e77`, have phone-target receipt records (318 bytes, ciphertext envelope no longer pending) on the Pi. Their secondary Windows PHONE-device copies remain encrypted and unacknowledged. This supports incomplete **account-wide** delivery, not missing phone acknowledgment at the server. The supplied Windows export is truncated before delivery-target/mailbox execution details, so sender-side receipt validation/reconciliation is not yet verified. Do not promote aggregate status to Delivered without the remaining required receipts. Current bubble wording does not communicate partial-device delivery.
+
+The Android 23:36:36 export records a mailbox transport error and a disconnected event stream, with finite retries scheduled. Approximate correlation of its monotonic/UTC samples places those deadlines about 7.5 seconds before the exported snapshot. Long owner/gate/projection work is recorded, but the samples do not identify a single responsible stage or prove a permanently stuck socket. Existing failed-RPC handling retires the socket and schedules continuation. The phone was unavailable to ADB during this follow-up; the read-only log request was canceled without installing, launching or changing anything.
+
+Two isolated characterization tests passed with JDK 22 (2 tests, zero failures):
+
+- `AttachmentPresenterOrphanTest`: real presenter lifecycle with a retained fake backend reproduces loss of the choice token when the presenter is replaced; the replacement cannot resolve the retained choice and a fresh selection is blocked. This demonstrates a reachable ownership defect, **not** that the physical test took this path. Normal successful direct commit clears the pending choice. Also review non-cancellation exceptions after a choice is assigned. Recommended narrow correction: an explicit new selection may supersede only an uncommitted choice after validating its scope, while failed preparation clears only its own token. Keep staged bytes and durable jobs intact; reject stale resolutions and concurrent preparations.
+- `PersistentRpcIdleAlarmCharacterizationTest`: a simulated channel alarm with the real RPC owner demonstrates a possible reuse-boundary race and subsequent successful reopen. This is not the demonstrated physical failure: an archive RPC on the same owner completed only 3.78 seconds before the 8 ms failed fetch. Do not modify timeout/security behavior based solely on this model.
+
+The first combined test invocation used Android Studio's JDK 25 and failed before test execution due to Gradle/runtime compatibility; rerunning with the compatible installed JDK 22 passed. No production implementation, live Pi state, APK or Windows release package changed during this follow-up. These tests characterize unresolved behavior; they are not fix-validation or physical acceptance.
+
+Resume by obtaining the exact second-selection error/UI state and full Windows delivery-target report, then implement/test token ownership recovery and an accurate per-device status projection without weakening aggregate acknowledgment requirements. Correlate current message IDs before changing mailbox or session recovery. Preserve the dev.177 and earlier packages and backups.
+
 1. Install the APK with `adb install -r`, retaining the existing signing identity and data. Run the matching Windows package using the existing profile.
 2. Send text in both directions, checking recipient persistence and accurate confirmation. Repeat while preparing a file and transferring it.
 3. Select cached attachments immediately after startup and after returning from the system file picker. Confirm no binding rejection, one offer per selection, correct filename and integrity verification. Exercise explicit direct compatibility choice without narrowing the audience silently.
