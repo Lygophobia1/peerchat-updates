@@ -377,6 +377,10 @@ public:
         auto durableSend=[&](const Snapshot& entry,const Blob& frame){save();return send(entry,frame);};
         std::vector<Entry*> ordered;for(auto& p:entries_)ordered.push_back(&p.second);
         if(!ordered.empty()){std::rotate(ordered.begin(),ordered.begin()+(turn_++%ordered.size()),ordered.end());}
+        // Preserve rotated fairness within each class, but service already
+        // queued durable control before unrelated source reads/preparation.
+        // Per-entry expiry, pacing, negotiation and save gates remain below.
+        std::stable_partition(ordered.begin(),ordered.end(),[](const Entry* e){return e->reply.has_value();});
         for(auto entry:ordered){
             auto& e=*entry;e.blocked=false;
             if(!e.observedAt)e.observedAt=now;

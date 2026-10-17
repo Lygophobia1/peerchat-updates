@@ -4,6 +4,8 @@
 #include <iostream>
 #include <deque>
 #include <fstream>
+#include <chrono>
+#include <thread>
 
 using namespace peerchat;
 using namespace peerchat::transfer;
@@ -55,8 +57,73 @@ struct Harness {
     void finish(){for(int n=0;n<3000&&sender.snapshots()[0].state!=State::Complete&&sender.snapshots()[0].state!=State::Failed&&sender.snapshots()[0].state!=State::Cancelled;++n)pump();}
 };
 Blob data(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*17);return b;}
+struct PriorityStore:StateStore {
+    std::vector<std::string>& events;bool broken=false;
+    explicit PriorityStore(std::vector<std::string>& value):events(value){}
+    std::uint64_t wallTime()const override{return 100;}
+    std::vector<DurableState> load()override{return {};}
+    void save(const std::vector<DurableState>&)override{events.push_back("save");if(broken)throw std::runtime_error("controlled journal failure");}
+    std::unique_ptr<Source> source(const DurableState&)override{return {};}
+    std::unique_ptr<Sink> sink(const DurableState&)override{return {};}
+    void saveDownloadLimit(std::uint64_t)override{}
+};
+struct PrioritySource:MemorySource {
+    std::vector<std::string>& events;bool slow;
+    PrioritySource(std::vector<std::string>& value,bool delay):MemorySource(data(9*ChunkBytes)),events(value),slow(delay){}
+    Blob read(std::uint64_t offset,size_t count)override{events.push_back("read");if(slow)std::this_thread::sleep_for(std::chrono::milliseconds(20));return MemorySource::read(offset,count);}
+};
+struct PrioritySink:Sink {
+    std::vector<std::string>& events;bool& flushed;
+    PrioritySink(std::vector<std::string>& value,bool& durable):events(value),flushed(durable){}
+    void append(const Blob&)override{flushed=false;events.push_back("append");}
+    void flush()override{flushed=true;events.push_back("flush");}
+    void commit()override{throw std::runtime_error("Unexpected priority fixture completion");}
+};
+void ackPriorityRegression(){
+    for(unsigned mode=0;mode<3;++mode){
+        std::vector<std::string> events;PriorityStore store(events);bool flushed=false;
+        TransferManager manager{[]{return std::make_unique<windows::Sha256>();},&store};manager.restore(1);
+        auto peer=std::string(64,'a'),bulk=std::string(32,'1'),incoming=std::string(32,'2');
+        manager.offer(peer,bulk,std::make_unique<PrioritySource>(events,true),1);
+        if(mode==2)manager.configureDownload(8); // Existing receive ACK pacing remains authoritative.
+        auto payload=data(8);windows::Sha256 digest;digest.update(payload.data(),payload.size());auto hash=digest.finish();
+        protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(Kind::Offer));offer.string(incoming);offer.string("incoming.bin");offer.number(payload.size());offer.bytes(Blob(hash.begin(),hash.end()));
+        manager.receive(peer,offer.data,1);manager.accept(incoming,std::make_unique<PrioritySink>(events,flushed),1);
+        protocol::Writer chunk(protocol::FileTransfer);chunk.number(1);chunk.number(static_cast<unsigned>(Kind::Chunk));chunk.string(incoming);chunk.number(0);chunk.bytes(Blob(payload.begin(),payload.begin()+4));manager.receive(peer,chunk.data,2);
+        check(flushed&&manager.hasPendingControl(incoming));events.clear();bool acknowledged=false;
+        auto send=[&](const std::string&,const Blob& frame){protocol::Reader r(frame);check(r.number()==1&&r.number()==static_cast<unsigned>(Kind::Resume)&&r.string()==incoming&&r.number()==4);r.end();check(flushed&&!store.broken);check(!events.empty()&&events.back()=="save");events.push_back("ack");acknowledged=true;return true;};
+        if(mode==1){store.broken=true;rejected([&]{manager.tick(10,[](const std::string&){return 1u;},send);});check(!acknowledged&&std::find(events.begin(),events.end(),"read")==events.end());store.broken=false;events.clear();}
+        manager.tick(mode==1?300:10,[](const std::string&){return 1u;},send);
+        if(mode==2){check(!acknowledged&&std::count(events.begin(),events.end(),"read")==1);events.clear();manager.tick(5000,[](const std::string&){return 1u;},send);}
+        const auto ack=std::find(events.begin(),events.end(),"ack"),read=std::find(events.begin(),events.end(),"read");
+        std::cout<<"Controlled ACK priority mode="<<mode<<" read-before-ACK="<<(read<ack)<<" (20 ms source; not physical throughput)\n";
+        check(acknowledged&&ack!=events.end()&&read!=events.end()&&ack<read);
+        check(manager.hasPreparationWork(5000)); // ACK priority must not consume or complete bulk preparation.
+    }
+    // Stable partition must retain round-robin order within pending replies,
+    // while processing the independent bulk source on every tick as before.
+    std::vector<std::string> events;PriorityStore store(events);bool flushed=false;
+    TransferManager manager{[]{return std::make_unique<windows::Sha256>();},&store};manager.restore(1);
+    auto peer=std::string(64,'a'),first=std::string(32,'2'),second=std::string(32,'3');
+    manager.offer(peer,std::string(32,'1'),std::make_unique<PrioritySource>(events,false),1);
+    std::vector<Blob> duplicates;
+    for(const auto& id:{first,second}){
+        protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(Kind::Offer));offer.string(id);offer.string("incoming.bin");offer.number(8);offer.bytes(Blob(32,0));
+        manager.receive(peer,offer.data,1);manager.accept(id,std::make_unique<PrioritySink>(events,flushed),1);
+        protocol::Writer chunk(protocol::FileTransfer);chunk.number(1);chunk.number(static_cast<unsigned>(Kind::Chunk));chunk.string(id);chunk.number(0);chunk.bytes(data(4));duplicates.push_back(chunk.data);
+    }
+    for(unsigned turn=0;turn<3;++turn){
+        for(const auto& chunk:duplicates)manager.receive(peer,chunk,2+turn);
+        events.clear();std::vector<std::string> replies;
+        manager.tick(10+turn,[](const std::string&){return 1u;},[&](const std::string&,const Blob& frame){protocol::Reader r(frame);check(r.number()==1&&r.number()==static_cast<unsigned>(Kind::Resume));replies.push_back(r.string());check(r.number()==4);r.end();check(std::find(events.begin(),events.end(),"read")==events.end());return true;});
+        check(replies==(turn==2?std::vector<std::string>{second,first}:std::vector<std::string>{first,second}));
+        check(std::count(events.begin(),events.end(),"read")==1);
+    }
+    std::cout<<"PASS: queued ACKs precede slow preparation only after flush/save; failed save and pacing preserved; rotated ACK fairness and same-tick bulk progress\n";
+}
 int main(){
     try{
+        ackPriorityRegression();
         {Harness h;check(!h.sender.hasPreparationWork(h.now));h.offer(data(2*ChunkBytes+1));check(h.sender.hasPreparationWork(h.now));
             while(h.sender.hasPreparationWork(h.now))h.pump();
             check(!h.sender.hasPreparationWork(h.now)); // Offer/ACK waits must not spin.
