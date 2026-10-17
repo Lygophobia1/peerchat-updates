@@ -75,8 +75,8 @@ public partial class DesktopApplication {
         if(directImageDraftPreparing||directImageDraftSending)return true;
         var draft=directImageDraft;if(draft==null||!DirectDraftVisible())return false;
         if(localProfile==null||profileManager==null){Notify("Image source storage is unavailable. Your draft was kept.");return true;}
-        var conversation=model.Selected;bool accountConversation=conversation.AccountId>0,cached=false;
-        if(accountConversation){cached=await EnsureDmAttachmentReady(false);if(!cached&&(!DmLegacyFallbackAllowed||!conversation.Contact.verified||conversation.WinningConnectionId<=0)){Notify("Update PeerChat on all recipient devices and verify this device session before sending the encrypted image. Your draft was kept.");return true;}if(draft!=directImageDraft||!DirectDraftVisible())return true;}
+        var conversation=model.Selected;bool accountConversation=conversation.AccountId>0;var mode=DmAttachmentDeliveryMode.Cancel;
+        if(accountConversation){directImageDraftSending=true;RefreshGroupImageDraft();try{mode=await SelectDmAttachmentDelivery(conversation);}finally{directImageDraftSending=false;RefreshGroupImageDraft();}if(mode==DmAttachmentDeliveryMode.Cancel||draft!=directImageDraft||!DirectDraftVisible())return true;}
         ulong generation=profileSessionGeneration;var owner=discovery;string profileId=localProfile.Id;
         directImageDraftSending=true;RefreshGroupImageDraft();string path=null,sourceDirectory=null;bool accepted=false;
         try{
@@ -84,7 +84,7 @@ public partial class DesktopApplication {
             path=Path.Combine(sourceDirectory,draft.Name);
             using(var file=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)){await file.WriteAsync(draft.Png,0,draft.Png.Length);file.Flush(true);}
             if(closing||generation!=profileSessionGeneration||owner!=discovery||localProfile.Id!=profileId)return true;
-            await Task.Run(()=>core.FileTransfer(accountConversation?21u:1u,draft.Peer,accountConversation?(cached?"":"legacy:")+conversation.AccountId.ToString(System.Globalization.CultureInfo.InvariantCulture):"",path));accepted=true;
+            await Task.Run(()=>core.FileTransfer(accountConversation?21u:1u,draft.Peer,accountConversation?DmAttachmentDelivery.Target(mode,conversation.AccountId):"",path));accepted=true;
             if(directImageDraft==draft){directImageDraft=null;RefreshGroupImageDraft();}
             await RefreshChatAttachments();
         }catch(Exception error){if(!closing)Notify("Image could not be durably queued. Your draft was kept. "+error.Message);}

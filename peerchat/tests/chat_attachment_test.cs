@@ -13,6 +13,14 @@ class ChatAttachmentTest {
     [STAThread] static int Main(string[] args){try{
         var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};string root=args[0];Directory.CreateDirectory(root);
         var conversation=new ConversationModel{Contact=new ContactData{peer="peer",name="test"}};
+        var delivery=new ConversationModel{AccountId=4,IsFriend=true,Contact=new ContactData{peer=new string('a',64),verified=true}};
+        Check(DmAttachmentDelivery.OnlineSelectable(delivery),"verified device cannot request an online route");
+        Check(!DmAttachmentDelivery.OnlineReady(delivery),"offline device offered direct delivery");delivery.Online=true;delivery.WinningConnectionId=1;Check(DmAttachmentDelivery.OnlineReady(delivery),"verified winning device not offered direct delivery");
+        Check(DmAttachmentDelivery.CompatibilityBlocked("cache_dm_recipient_upgrade_required")&&!DmAttachmentDelivery.CompatibilityBlocked("cache_dm_not_authorized")&&!DmAttachmentDelivery.CompatibilityBlocked("cache_dm_authority_stale")&&!DmAttachmentDelivery.CompatibilityBlocked("network_unavailable"),"security/network failure offered compatibility bypass");
+        Check(DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.OnlineDevice,4)=="online:4"&&DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.EncryptedCache,4)=="4","online choice replaced cache scope");
+        delivery.Contact.verified=false;Check(!DmAttachmentDelivery.OnlineSelectable(delivery),"unverified online option accepted");delivery.Contact.verified=true;delivery.IsFriend=false;Check(!DmAttachmentDelivery.OnlineSelectable(delivery),"nonfriend online option accepted");
+        bool canceled=false;try{DmAttachmentDelivery.Target(DmAttachmentDeliveryMode.Cancel,4);}catch(InvalidOperationException){canceled=true;}Check(canceled,"cancel generated a send target");
+        Check(DmAttachmentDelivery.OnlineDescription.Contains("NOT receive")&&DmAttachmentDelivery.CacheDescription.Contains("never silently omitted"),"delivery scope disclosure missing");
         foreach(int state in new[]{0,1,2,3,4,5,6,7,8}){
             var row=new CoreAdapter.FileTransferData{id="logical-file",peer="peer",name="message.txt",size=100,done=state==3?50:100,state=state,sending=true,time=100};
             Check(ChatAttachmentProjection.Apply(conversation,row),"snapshot state not projected");Check(conversation.Messages.Count==1,"duplicate/retry bubble");
