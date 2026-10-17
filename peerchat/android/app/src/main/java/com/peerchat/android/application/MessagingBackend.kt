@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 
 /** Application coordinator/platform execution only. Native owns profile,
@@ -66,6 +67,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val mailboxPublication=MailboxPublicationGate({publish()})
     private var mailboxAt=0L
     private val mailboxExecution=MailboxExecution()
+    private val dmAttachmentExecution=DmAttachmentExecution()
     private val eligibilitySnapshots=EligibilitySnapshotExecution()
     private val groupExecution=GroupExecution()
     private val voiceExecution=VoiceExecution()
@@ -96,6 +98,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val session=checkNotNull(owner.session)
         val server=owner.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+owner.endpoint.port
         check(MailboxBridge.configureEnrollment(native,session.accountId,generation,server.toByteArray(Charsets.US_ASCII),owner.endpoint.certificatePin.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.US_ASCII))==0){"Authenticated mailbox scope is unavailable"}
+        val scope=NativeRecordWriter(30).also{it.number(session.accountId);it.number(generation)}.bytes()
+        // Optional capability setup cannot block ordinary text mailbox work.
+        try{com.peerchat.android.TransferBridge.request(native,11,scope)}catch(_:Exception){}
     }
     private fun mailboxRecoveryFailure(code:String):String=when(code){
         "approval_expired_or_session_changed"->"The mailbox confirmation expired or the account/server session changed. Reconnect and review the current confirmation. Existing keys and messages are preserved."
@@ -339,7 +344,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             localHistoryReady=true)
         // Publish the protected conversation index before authentication, native
         // history decryption for other chats, attachment scans or server work.
-        mutable.value=mutable.value.copy(conversations=friends.map{ConversationSnapshot(it.copy(online=false),ConnectionSnapshot(),emptyList())})
+        mutable.value=mutable.value.copy(conversations=friends.map{ConversationSnapshot(it.copy(online=false),ConnectionSnapshot(),emptyList(),attachmentsHaveOlder=true)})
         android.util.Log.i("PeerChatWake","stage=local_history_projected contacts=${friends.size}")
         return true
     }
@@ -408,6 +413,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val rows=ownerTimings.measure(OwnerStage.LocalPage){accountHistoryPage(friend,before){peer,cursor->
             checkNotNull(ReliableBridge.history(scope.handle,peer.toByteArray(Charsets.US_ASCII),cursor))}}
         check(localReadContext===scope&&!stopped&&!resetting){"Local history scope changed"}
+        try{olderAttachments(scope,friend)}catch(_:Exception){
+            // An isolated new cache record failure must not hide an already
+            // read legacy text page or erase any protected attachment bytes.
+            mutable.update{value->if(localReadContext!==scope)value else value.copy(transferDiagnostics="Protected attachment history unavailable; original records and copies retained")}
+        }
         rows
     }
     override suspend fun createGroup(name:String)=withContext(Dispatchers.IO){synchronized(gate){
@@ -440,6 +450,26 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var transferDiagnosticsAt=0L
     private var attachmentProjectionAt=0L;private var attachmentProjectionHandle=0L;private var attachmentProjectionGeneration=0L
     private var attachmentProjection=emptyList<AttachmentSnapshot>()
+    private data class AttachmentDisplayHistory(val rows:LinkedHashMap<String,AttachmentSnapshot> = linkedMapOf(),var cursor:String="",var more:Boolean=true)
+    private val attachmentHistoryGate=Any()
+    private var attachmentHistoryScope:LocalReadContext?=null
+    private val attachmentDisplayHistory=mutableMapOf<String,AttachmentDisplayHistory>()
+    private fun olderAttachments(scope:LocalReadContext,friend:FriendIdentity){
+        val display=synchronized(attachmentHistoryGate){
+            if(attachmentHistoryScope!==scope){attachmentDisplayHistory.clear();attachmentHistoryScope=scope}
+            val history=attachmentDisplayHistory.getOrPut(friend.peerId){AttachmentDisplayHistory()}
+            if(history.more){
+                val fields=NativeRecordWriter(30).also{w->w.number(scope.account);w.text(scope.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+scope.endpoint.port);w.text(scope.endpoint.certificatePin.lowercase(java.util.Locale.ROOT));w.text("");w.text(history.cursor)}.bytes()
+                val page=dmLocalAttachmentPage(checkNotNull(com.peerchat.android.TransferBridge.request(scope.handle,15,fields)){"Protected attachment history is unavailable"})
+                check(localReadContext===scope&&!stopped&&!resetting){"Local attachment history scope changed"}
+                page.rows.filter{it.peer in friend.knownPeerIds}.forEach{history.rows[it.id]=it};history.cursor=page.cursor;history.more=page.more
+            }
+            history.rows.values.toList() to history.more
+        }
+        mutable.update{value->if(localReadContext!==scope)value else value.copy(conversations=value.conversations.map{c->
+            if(c.friend.accountId!=friend.accountId)c else c.copy(attachments=(display.first+c.attachments).associateBy{it.id}.values.sortedBy{it.created},attachmentsHaveOlder=display.second)
+        })}
+    }
     private val transferDiagnosticStates=mutableMapOf<String,Pair<String,Long>>()
     private fun transfer(operation:Int,write:(NativeRecordWriter)->Unit={}):ByteArray {
         val request=NativeRecordWriter(30).also(write).bytes()
@@ -447,11 +477,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled&&friends.any{it.peerId==peerId})
+        val owner=checkNotNull(accounts);configureMailboxEnrollment(owner,checkNotNull(profile).handle)
         val directoryRecord=NativeRecord(transfer(0),30);val directory=java.io.File(directoryRecord.text());directoryRecord.end()
         val (path,name)=importAttachment(context,uri,directory)
         // A failed native journal may already retain the source. Never delete it
         // on a ambiguous offer failure; cleanup cannot destroy a resumable copy.
-        val response=NativeRecord(transfer(1){it.text(peerId);it.text(path);it.text(name)},30)
+        // A bounded preflight runs on the existing owner, using its authenticated
+        // RPC connection and native capability/key checks before choosing scope.
+        fun capability():Long {val r=NativeRecord(transfer(11){it.number(checkNotNull(owner.session).accountId);it.number(generation)},30);return r.number().also{r.end()}}
+        var ready=capability()
+        repeat(4){if(ready==0L&&dmAttachmentExecution.service(owner,checkNotNull(profile).handle))ready=capability()}
+        check(ready==1L||ready==2L){"Attachment cache preflight is pending; the private source is retained"}
+        val response=NativeRecord(transfer(if(ready==1L)10 else 1){it.text(peerId);it.text(path);it.text(name)},30)
         val id=response.text();response.end();publish();id
     }}
     override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
@@ -502,6 +539,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        profile?.let{try{com.peerchat.android.TransferBridge.request(it.handle,11,NativeRecordWriter(30).also{w->w.number(0);w.number(0)}.bytes())}catch(_:Exception){}}
         pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
         mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)
         groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
@@ -679,6 +717,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(mailboxExecution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,mailboxExecution.nextRetryAt)
             }
         }
+        if(mutable.value.authenticated&&authorizationSnapshotInstalled&&livePeerWorkAllowed)try{
+            configureMailboxEnrollment(checkNotNull(accounts),native)
+            if(dmAttachmentExecution.service(checkNotNull(accounts),native))mailboxAt=minOf(mailboxAt,System.nanoTime()/1_000_000+1000)
+        }catch(failure:Exception){if(expiredServerSession(failure))throw failure /* Native protected jobs retain retries. */}
         if(mutable.value.authenticated&&authorizationSnapshotInstalled) {
             // Receiving/publication above takes priority. A finite background
             // wake refreshes only actual pending send destinations, not contacts.
@@ -909,7 +951,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
             attachmentProjection=attachmentSnapshots(transfer(4));attachmentProjectionHandle=native;attachmentProjectionGeneration=generation;attachmentProjectionAt=projectionNow+1000
         }
         val attachments=attachmentProjection
-        mutable.value=mutable.value.copy(conversations=conversations.map{c->c.copy(attachments=attachments.filter{it.peer in c.friend.knownPeerIds}.sortedBy{it.created})},mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
+        mutable.value=mutable.value.copy(conversations=conversations.map{c->
+            val history=synchronized(attachmentHistoryGate){if(attachmentHistoryScope===localReadContext)attachmentDisplayHistory[c.friend.peerId]?.let{it.rows.values.toList() to it.more}else null}
+            c.copy(attachments=((history?.first?:emptyList())+attachments.filter{it.peer in c.friend.knownPeerIds}).associateBy{it.id}.values.sortedBy{it.created},attachmentsHaveOlder=history?.second?:true)
+        },mailboxStorageAllowed=mailboxAllowed(),freshMailboxMessageIds=mailboxPublication.freshIds())
     }
     override fun backgroundOutputDrained(afterNanos:Long):Boolean=synchronized(gate){
         // Mailbox publication may finish before the first archive pass. Keep the

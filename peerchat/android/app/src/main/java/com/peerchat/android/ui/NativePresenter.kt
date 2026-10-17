@@ -44,7 +44,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                 timestamp=m.timestamp,logicalOrder=m.logicalOrder)
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
-            messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8,attachments=c.attachments)
+            messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8||c.attachmentsHaveOlder,attachments=c.attachments)
     }+snapshot.groups.map {g->
         val messages=g.messages.sortedWith(groupMessageOrder).map{m->val outgoing=m.device==snapshot.localPeerId
             MessageUi(m.id,m.device,if(outgoing)snapshot.username else accountName(m.account),m.text,outgoing,
@@ -316,7 +316,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         })
         // projectMessaging's paging hint is overridden by the actual native page result.
         mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->
-            if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted)
+            if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted||current.conversations.any{original->"account:${original.friend.accountId}"==c.id&&original.attachmentsHaveOlder})
         })}
         val nativeIds=mutable.value.conversations.flatMap{c->c.messages.map{it.id}+c.attachments.map{it.id}}.toSet()
         localSends.entries.removeAll{it.value.nativeId in nativeIds}

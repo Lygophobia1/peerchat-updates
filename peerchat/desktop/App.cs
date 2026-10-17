@@ -584,7 +584,7 @@ public partial class DesktopApplication {
     void Poll(){
         if(busy||closing)return;
         try{
-            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();
+            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -1425,7 +1425,7 @@ public partial class DesktopApplication {
         Find<Button>("GroupInvite").IsEnabled=canInvite;
         Find<Button>("GroupOverflow").Visibility=Visibility.Collapsed;
         RefreshGroupDetails();
-		bool canLoadOlder = (!model.Groups && model.Selected != null && model.Selected.Messages.Count > 0 && !model.Selected.HistoryExhausted) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
+		bool canLoadOlder = (!model.Groups && model.Selected != null && ((!model.Selected.HistoryExhausted&&model.Selected.Messages.Count>0)||DmHistoryMayHaveOlder)) || (model.Groups && model.SelectedGroup != null && model.SelectedGroup.Messages.Count > 0 && !model.SelectedGroup.HistoryExhausted);
 		Find<Button>("Older").Visibility = canLoadOlder ? Visibility.Visible : Visibility.Collapsed;
         bool flag4=model.CanQueueDirectText(flag3||(accountLink!=null&&accountLink.HasSession),busy);
         ServerGroupRoster sendRoster;
@@ -3587,6 +3587,7 @@ public partial class DesktopApplication {
 
 	private void RequestConversationHistory(ConversationModel conversation)
 	{
+        if(conversation!=null&&!model.Groups){var pendingDmHistory=LoadOlderDmAttachments(true);}
 		if (conversation == null || conversation.RequestedHistory || conversation.Contact == null || String.IsNullOrEmpty(conversation.Contact.peer))
 		{
 			return;
@@ -4500,6 +4501,7 @@ public partial class DesktopApplication {
             long before=group.Messages.Where(message=>message.IsGroupMessage&&message.Data.sequence>0).OrderBy(message=>message.Data.time).ThenBy(message=>message.Data.sender,StringComparer.Ordinal).ThenBy(message=>message.Data.id,StringComparer.Ordinal).Select(message=>message.Data.sequence).DefaultIfEmpty(long.MaxValue).First();
             group.HistoryLoading=true;historyScrollKey="group:"+group.Id;historyScrollOffset=viewer.VerticalOffset;historyScrollExtent=viewer.ExtentHeight;core.GroupHistory(group.Id,before);return;
         }
+        var pendingDmHistory=LoadOlderDmAttachments();
         var conversation=model.Selected;if(conversation==null||conversation.HistoryLoading||conversation.HistoryExhausted)return;
         string peer=(new[]{conversation.Contact==null?"":conversation.Contact.peer}.Concat(conversation.KnownPeerIds)).Where(value=>!String.IsNullOrEmpty(value)).Distinct(StringComparer.Ordinal).FirstOrDefault(value=>!conversation.HistoryExhaustedPeers.Contains(value));
         if(String.IsNullOrEmpty(peer)){conversation.HistoryExhausted=true;Refresh();return;}

@@ -41,11 +41,12 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             val id=java.util.UUID.randomUUID().toString().replace("-","")
             val request=JSONObject(fields.toString()).put("version",1).put("type",type)
                 .put("rpcRequestId",id).put("sessionToken",token).put("publicIdentity",device)
-            if(type.startsWith("mailbox_"))request.put("requestId",id)
-            connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_"))100000 else 4096)
+            if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))request.put("requestId",id)
+            connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))100000 else 4096)
             val reply=JSONObject(connection.read(100000).toString(Charsets.UTF_8))
             check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
             val body=reply.getJSONObject("body")
+            if(type.startsWith("cache_dm_"))require(body.getString("requestId")==id)
             if(!reply.optBoolean("more"))rpcOwner.close() else connection.readTimeout(10000)
             body
         }
@@ -194,6 +195,19 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         require(operation in setOf("archive_descriptor_register","archive_grant_register","archive_authorization_state"))
         check(supportsRpc&&rpcAuthorized&&session!=null) { "Archive requires authenticated RPC support" }
         return rpc(operation,payload)
+    }
+    /** Existing authenticated, device-bound TLS RPC only. Native code owns the
+     * descriptor, encrypted file, frozen recipients, offsets and retry journal. */
+    fun directAttachmentCache(operation:String,payload:JSONObject):JSONObject=stages.measure(operation){
+        require(operation in setOf("cache_dm_capability","cache_dm_register","cache_dm_prepare","cache_dm_admit",
+            "cache_dm_status","cache_dm_context","cache_dm_acquire","cache_dm_append",
+            "cache_dm_complete","cache_dm_read","cache_dm_progress","cache_dm_release","cache_dm_publish",
+            "cache_dm_verified","cache_dm_receipts"))
+        check(supportsRpc&&rpcAuthorized&&session!=null){"Direct attachment cache requires authenticated device RPC"}
+        val result=rpc(operation,payload)
+        require(result.getString("type")=="cache_result"&&result.getString("operation")==operation&&
+            (result.getInt("cacheVersion")==2||operation=="cache_dm_capability"&&result.getInt("cacheVersion")==1))
+        result
     }
     fun mailbox(operation: String, payload: JSONObject): JSONObject =stages.measure(operation){mailboxMeasured(operation,payload)}
     private fun mailboxMeasured(operation:String,payload:JSONObject):JSONObject {

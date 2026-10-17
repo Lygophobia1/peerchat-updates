@@ -82,6 +82,41 @@ internal sealed class GroupAttachmentExecution {
     }
 }
 public partial class DesktopApplication {
+    DmAttachmentExecution dmAttachmentExecution;
+    Task dmAttachmentNetworkTask=Task.FromResult(0);
+    DiscoveryClient dmAttachmentNetworkOwner,dmAttachmentNetworkClient;
+    ulong dmAttachmentGeneration,dmAttachmentProfile,dmAttachmentSession;
+    long dmAttachmentAccount;
+    string dmAttachmentToken="",dmAttachmentPin="",dmAttachmentPeer="";
+    DateTime dmAttachmentNext=DateTime.MinValue;
+    void StopDmAttachmentNetwork(){
+        if(dmAttachmentExecution!=null)dmAttachmentExecution.Stop();dmAttachmentExecution=null;dmAttachmentNetworkOwner=null;dmAttachmentNetworkClient=null;
+        try{core.FileTransfer(24,path:Convert.ToBase64String(DmAttachmentExecution.Session(0,++dmAttachmentGeneration,"")));}catch{}
+    }
+    void PumpDmAttachmentNetwork(){
+        if(closing||busy)return;var owner=discovery;var client=groupAttachmentDeviceClient??owner;
+        bool ready=owner!=null&&owner.AccountId>0&&owner.AccountId==mailboxContextAccount&&!String.IsNullOrEmpty(model.OwnId)&&client!=null&&!String.IsNullOrEmpty(client.SessionToken)&&client.CertificateSha256!=null&&client.CertificateSha256.Length==64;
+        bool changed=!ready||owner!=dmAttachmentNetworkOwner||client!=dmAttachmentNetworkClient||profileSessionGeneration!=dmAttachmentProfile||discoverySessionGeneration!=dmAttachmentSession||client.AccountId!=dmAttachmentAccount||client.SessionToken!=dmAttachmentToken||client.CertificateSha256.ToLowerInvariant()!=dmAttachmentPin||model.OwnId!=dmAttachmentPeer;
+        if(changed&&dmAttachmentExecution!=null)StopDmAttachmentNetwork();
+        if(!ready||!dmAttachmentNetworkTask.IsCompleted||!groupAttachmentNetworkTask.IsCompleted||DateTime.UtcNow<dmAttachmentNext)return;
+        if(dmAttachmentExecution==null){
+            if(dmAttachmentProfile!=profileSessionGeneration||dmAttachmentAccount!=client.AccountId||dmAttachmentPin!=client.CertificateSha256.ToLowerInvariant()){dmHistoryProfile=profileSessionGeneration;dmHistoryCursor="";dmHistoryScope="";dmHistoryMore=true;++dmHistoryEpoch;foreach(var conversation in model.Conversations.Values)foreach(var row in conversation.Messages.Where(value=>value.Attachment!=null&&value.Attachment.dmCache).ToArray())conversation.Messages.Remove(row);}
+            dmAttachmentNetworkOwner=owner;dmAttachmentNetworkClient=client;dmAttachmentProfile=profileSessionGeneration;dmAttachmentSession=discoverySessionGeneration;dmAttachmentAccount=client.AccountId;dmAttachmentToken=client.SessionToken;dmAttachmentPin=client.CertificateSha256.ToLowerInvariant();dmAttachmentPeer=model.OwnId;
+            var generation=++dmAttachmentGeneration;try{core.FileTransfer(24,path:Convert.ToBase64String(DmAttachmentExecution.Session((ulong)client.AccountId,generation,dmAttachmentPin)));dmAttachmentExecution=new DmAttachmentExecution((op,input)=>core.FileTransfer(op,path:input),generation);}catch{dmAttachmentNext=DateTime.UtcNow.AddSeconds(1);return;}
+        }
+        var execution=dmAttachmentExecution;string device=dmAttachmentPeer,token=dmAttachmentToken,pin=dmAttachmentPin;long account=dmAttachmentAccount;ulong profile=dmAttachmentProfile,session=dmAttachmentSession;
+        dmAttachmentNext=DateTime.UtcNow.AddSeconds(1);
+        dmAttachmentNetworkTask=Task.Run(()=>execution.Service(payload=>client.AttachmentCache(device,payload,account,token,pin))).ContinueWith(task=>{
+            window.Dispatcher.BeginInvoke((Action)(()=>{if(closing||dmAttachmentExecution!=execution||discovery!=owner||profileSessionGeneration!=profile||discoverySessionGeneration!=session)return;dmAttachmentNext=DateTime.UtcNow.AddMilliseconds(!task.IsFaulted&&task.Result?0:1000);if(!task.IsFaulted&&task.Result)PumpDmAttachmentNetwork();}));if(task.IsFaulted){var ignored=task.Exception;}
+        });
+    }
+    bool DmLegacyFallbackAllowed {get{return dmAttachmentExecution!=null&&new[]{"cache_dm_feature_gated","cache_unsupported_operation","cache_unsupported"}.Contains(dmAttachmentExecution.LastState);}}
+    async Task<bool> EnsureDmAttachmentReady(bool notify=true){
+        if(!await EnsureGroupAttachmentReady())return false;
+        var owner=discovery;ulong profile=profileSessionGeneration;var wait=System.Diagnostics.Stopwatch.StartNew();
+        while(wait.ElapsedMilliseconds<5000&&!closing&&owner==discovery&&profile==profileSessionGeneration){PumpDmAttachmentNetwork();var status=await Task.Run(()=>core.DmAttachments());if(status.supported)return true;await Task.Delay(100);}
+        if(notify)Notify("Encrypted direct attachments require a verified device session and compatible PeerChat versions on the server and every recipient device. Update the devices and retry Attach.");return false;
+    }
     DiscoveryClient groupAttachmentDeviceClient;
     Task<DiscoveryClient> groupAttachmentDeviceTask;
     Task groupAttachmentDeviceDrain=Task.FromResult(0);
@@ -165,6 +200,8 @@ public partial class DesktopApplication {
     long groupAttachmentNetworkAccount;
     DateTime groupAttachmentNetworkNext=DateTime.MinValue;
     void StopGroupAttachmentNetwork(){
+        StopDmAttachmentNetwork();
+        groupAttachmentDeviceDrain=Task.WhenAll(groupAttachmentDeviceDrain,dmAttachmentNetworkTask);
         System.Threading.Interlocked.Increment(ref groupAttachmentDeviceLifetime);
         groupAttachmentCapabilityDiagnostic="\ngroup_attachment_capability=retired";
         if(groupAttachmentExecution!=null)groupAttachmentExecution.Stop();

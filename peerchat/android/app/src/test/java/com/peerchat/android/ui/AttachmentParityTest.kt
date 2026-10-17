@@ -43,6 +43,7 @@ class AttachmentParityTest {
         val complete=current.copy(state=4,done=100000,statisticsBytes=100000)
         assertTrue(complete.statisticsText.contains("Average 0.40 Mbps"));assertFalse(complete.statisticsText.contains("Current"))
         assertTrue(row(4).statisticsText.contains("unavailable"))
+        assertTrue(row(3).statisticsText.contains("Current unavailable"))
     }
     @Test fun receiveRequiresExplicitAcceptanceAndNativeCompletion(){
         val actions=mutableListOf<UiAction>()

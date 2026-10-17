@@ -27,6 +27,7 @@ public static class ChatAttachmentProjection {
         return !group&&!String.IsNullOrEmpty(captured)&&captured==current&&files!=null&&files.Length>0&&files.Length<=4&&files.All(path=>!String.IsNullOrWhiteSpace(path)&&File.Exists(path)&&!Directory.Exists(path));
     }
     public static string Status(CoreAdapter.FileTransferData row){
+        if(row.dmCache){if(row.dmState=="paused")return "Paused — encrypted attachment retained";if(row.dmState=="failed")return "Encrypted attachment failed";if(row.dmState=="canceled")return "Canceled";if(row.sending){if(row.dmState=="complete")return "Recipient files verified";if(row.noticesStored)return "Available to recipients — awaiting file verification";if(row.uploadComplete)return "Encrypted upload stored — sending recipient notices";}if(row.dmState=="verifying")return "Verifying and retaining decrypted file";if(row.dmState=="available"&&!row.sending)return "Encrypted attachment — Download to accept";}
         string[] states={"Preparing / hashing","Waiting for recipient / route","Incoming attachment — Download to accept",row.sending?"Sending":"Receiving","Complete — SHA-256 verified","Canceled","Failed","Revalidating retained file","Paused — retained for restart","Archive metadata — file not local"};
         string label=row.state>=0&&row.state<states.Length?states[row.state]:"Unavailable";
         if(row.state==4&&!row.sending){
@@ -42,6 +43,7 @@ public static class ChatAttachmentProjection {
         double percent=row.size>0?Math.Min(100,100.0*row.done/row.size):row.state==4?100:0;
         string average=row.statisticsKnown&&row.durationMs>0?(row.statisticsBytes*8000.0/row.durationMs/1000000).ToString("0.00",culture)+" Mbps":"unavailable";
         string result=row.done.ToString("N0")+" / "+row.size.ToString("N0")+" bytes · "+percent.ToString("0.0",culture)+"%";
+        if(row.dmCache)return result+"\nEncrypted payload throughput: unavailable · Duration: unavailable";
         if(row.state==4)return result+"\nAverage "+average+" · Duration "+(row.statisticsKnown?(row.durationMs/1000.0).ToString("0.0",culture)+" s":"unavailable");
         result+="\nCurrent "+(row.state==3?row.rateBits/1000000.0:0).ToString("0.00",culture)+" Mbps · Average "+average;
         if(row.state==3&&row.etaReliable&&row.rateBits>0&&row.done<row.size){double seconds=Math.Ceiling((row.size-row.done)*8.0/row.rateBits);if(seconds>0&&seconds<=604800)result+=" · ETA "+seconds.ToString("0",culture)+" s";}
@@ -49,7 +51,7 @@ public static class ChatAttachmentProjection {
     }
     public static bool Apply(ConversationModel conversation,CoreAdapter.FileTransferData row){
         var message=conversation.Messages.FirstOrDefault(item=>item.Attachment!=null&&LogicalId(item.Attachment)==LogicalId(row));
-        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error&&previous.rateBits==row.rateBits&&previous.durationMs==row.durationMs&&previous.statisticsBytes==row.statisticsBytes&&previous.statisticsKnown==row.statisticsKnown&&previous.etaReliable==row.etaReliable&&previous.saveState==row.saveState&&previous.savePath==row.savePath&&previous.saveError==row.saveError)return false;message.SetAttachment(row);return true;}
+        if(message!=null){var previous=message.Attachment;if(previous.id==row.id&&previous.state==row.state&&previous.done==row.done&&previous.path==row.path&&previous.error==row.error&&previous.rateBits==row.rateBits&&previous.durationMs==row.durationMs&&previous.statisticsBytes==row.statisticsBytes&&previous.statisticsKnown==row.statisticsKnown&&previous.etaReliable==row.etaReliable&&previous.saveState==row.saveState&&previous.savePath==row.savePath&&previous.saveError==row.saveError&&previous.dmState==row.dmState&&previous.uploadComplete==row.uploadComplete&&previous.noticesStored==row.noticesStored)return false;message.SetAttachment(row);return true;}
         bool outgoing=row.isArchive?row.originalSending:row.sending;
         message=new MessageModel{Data=new MessageData{id=LogicalId(row),sender=row.senderPeer??"",text="",time=row.time,logical=row.time},Outgoing=outgoing};
         message.SetAttachment(row);
@@ -159,12 +161,12 @@ public sealed class AttachmentCard:StackPanel {
         else if(preview==null)Children.Add(new TextBlock{Text="Long message",FontWeight=FontWeights.SemiBold});
         Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
-        if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.dmCache&&row.error=="cache_dm_recipient_upgrade_required"?"Update PeerChat on every recipient device before retrying this encrypted attachment. No recipient was silently omitted.":row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(!String.IsNullOrEmpty(row.saveError))Children.Add(new TextBlock{Text="Save failed: "+row.saveError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
         if(!row.sending&&(row.saveState=="pending"||row.saveState=="copying"))Children.Add(new TextBlock{Text=row.saveState=="pending"?"Verifying retained attachment…":"Saving verified attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
         var actions=new WrapPanel();Children.Add(actions);actions.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
-        if(row.sending&&row.state!=4)actions.Children.Add(ActionButton("Transfer settings…",()=>Signal(row,"settings")));
+        if(row.sending&&row.state!=4&&!row.dmCache)actions.Children.Add(ActionButton("Transfer settings…",()=>Signal(row,"settings")));
         if(row.state==2&&!row.sending)actions.Children.Add(ActionButton("Download…",()=>Signal(row,"accept")));
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
         if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
@@ -195,6 +197,21 @@ public sealed class AttachmentCard:StackPanel {
     }
 }
 public partial class DesktopApplication {
+    string dmHistoryCursor="",dmHistoryScope="";bool dmHistoryMore=true,dmHistoryLoading;ulong dmHistoryProfile,dmHistoryEpoch;
+    bool DmHistoryMayHaveOlder {get{return dmHistoryProfile!=profileSessionGeneration||dmHistoryMore;}}
+    async Task LoadOlderDmAttachments(bool initial=false){
+        if(closing||model.Groups||model.Selected==null||dmHistoryLoading)return;
+        if(dmHistoryProfile!=profileSessionGeneration){dmHistoryProfile=profileSessionGeneration;dmHistoryCursor="";dmHistoryScope="";dmHistoryMore=true;++dmHistoryEpoch;}
+        if(!dmHistoryMore||initial&&!String.IsNullOrEmpty(dmHistoryCursor))return;
+        dmHistoryLoading=true;ulong profile=profileSessionGeneration,epoch=dmHistoryEpoch;string before=dmHistoryCursor;
+        try{var page=await Task.Run(()=>core.DmAttachmentHistory(before));if(closing||profile!=profileSessionGeneration||epoch!=dmHistoryEpoch)return;
+            if(!String.IsNullOrEmpty(dmHistoryScope)&&dmHistoryScope!=page.scope){dmHistoryCursor="";dmHistoryMore=true;dmHistoryScope=page.scope;return;}
+            dmHistoryScope=page.scope??"";dmHistoryCursor=page.cursor??"";dmHistoryMore=page.more;
+            foreach(var row in page.items??new CoreAdapter.FileTransferData[0]){var conversation=model.FindByPeer(row.peer)??model.Conversations.Values.FirstOrDefault(value=>row.account>0&&value.AccountId==row.account);if(conversation!=null)ChatAttachmentProjection.Apply(conversation,row);}
+            Refresh();SizeBubbles();
+        }catch{/* Protected local history can be retried; no network or trust is established. */}
+        finally{dmHistoryLoading=false;}
+    }
     bool chatAttachmentRefreshing;long chatAttachmentCursor;DateTime chatCatalogAt=DateTime.MinValue;
     string attachmentTelemetry="";long attachmentTelemetryAccount;ulong attachmentTelemetryGeneration;
     string AttachmentDiagnostics(){return discovery!=null&&attachmentTelemetryAccount==discovery.AccountId&&attachmentTelemetryGeneration==authenticatedFriendSnapshotGeneration?attachmentTelemetry:"No current profile/account transfer snapshot.";}
@@ -216,13 +233,13 @@ public partial class DesktopApplication {
                 finally{SafeAttachmentPreview.EndNativeRead();}return;
             }
             if(action.Action=="settings"){ShowTransferSettings(row.id);return;}
-            if(action.Action=="cancel"){await FileOperation(3,"",row.id,"");return;}
+            if(action.Action=="cancel"){await FileOperation(row.dmCache?23u:3u,"",row.id,"");return;}
             if(action.Action=="accept"||action.Action=="retry-save"){
                 var selectionOwner=discovery;ulong selectionProfile=profileSessionGeneration;
                 var chosen=AttachmentDownloadTarget.Choose(window,row.name,path=>core.FileTransfer(16,"","",path));if(chosen==null)return;
                 if(closing||selectionOwner!=discovery||selectionProfile!=profileSessionGeneration||model.Groups)return;
                 try{
-                    uint operation=action.Action=="retry-save"?18u:chosen.OverwriteApproved?17u:AttachmentDownloadTarget.DirectOperation;
+                    uint operation=row.dmCache?22u:action.Action=="retry-save"?18u:chosen.OverwriteApproved?17u:AttachmentDownloadTarget.DirectOperation;
                     string target=operation==AttachmentDownloadTarget.DirectOperation?AttachmentDownloadTarget.Validate(chosen.Path):AttachmentDownloadTarget.Wire(chosen);
                     await FileOperation(operation,"",row.id,target);
                 }catch(IOException error){Notify(error.Message);}
@@ -245,12 +262,13 @@ public partial class DesktopApplication {
     async void ChooseChatFiles(){
         if(model.Groups){await ChooseGroupFiles();return;}
         var selected=model.Groups?null:model.Selected;
-        if(selected==null||selected.Contact==null||!selected.Contact.verified){Notify("Select a verified direct conversation.");return;}
+        if(selected==null||selected.Contact==null||(selected.AccountId>0?!selected.IsFriend:!selected.Contact.verified)){Notify("Select a current friend conversation, or verify the direct recipient first.");return;}
         var choose=new Microsoft.Win32.OpenFileDialog{Title="Attach files to "+selected.Name,CheckFileExists=true,Multiselect=true};
         if(choose.ShowDialog(window)==true)await SendChatFiles(selected,choose.FileNames);
     }
     async Task SendChatFiles(ConversationModel target,string[] files){
-        if(target==null||target.Contact==null||!target.Contact.verified||files.Length>4){Notify("Use a verified recipient and at most four files per selection.");return;}
+        if(target==null||target.Contact==null||files==null||files.Length==0||files.Length>4||(target.AccountId>0?!target.IsFriend:!target.Contact.verified)){Notify("Choose a current friend or verified direct recipient and at most four files.");return;}
+        if(target.AccountId>0){bool cached=await EnsureDmAttachmentReady(false);if(!cached&&(!DmLegacyFallbackAllowed||!target.Contact.verified||target.WinningConnectionId<=0)){Notify("Encrypted offline attachments require compatible PeerChat versions on every recipient device and a verified device session. Update the devices and retry; an unverified identity cannot receive a file.");return;}var owner=discovery;ulong profile=profileSessionGeneration;foreach(string path in files){if(closing||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend)return;await FileOperation(21,target.Contact.peer,(cached?"":"legacy:")+target.AccountId.ToString(System.Globalization.CultureInfo.InvariantCulture),path);}return;}
         string peer=target.Contact.peer;foreach(string path in files)await FileOperation(1,peer,"",path);
     }
     async Task SendChatSnippet(string text){
