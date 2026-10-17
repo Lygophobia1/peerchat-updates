@@ -1,6 +1,6 @@
 # Delivery confirmation and recipient selection in dev 176
 
-Dev.176 is a client reliability candidate, not physical acceptance. The investigation distinguishes missing delivery from delayed confirmation. Existing encrypted messages, frozen recipient manifests, keys, histories and transfer journals remain unchanged. The live Pi remains on dev.175; server changes in this branch are not deployed.
+Dev.176 is a client reliability candidate, not physical acceptance. The investigation distinguishes missing delivery from delayed confirmation. Existing encrypted messages, frozen recipient manifests, keys, histories and transfer journals remain unchanged. Following explicit user approval, the live Pi was updated from dev.175 to dev.176 on 2026-10-17. Deployment and recovery evidence appears below.
 
 ## Physical evidence
 
@@ -20,7 +20,7 @@ The latest Android snapshot was captured about three seconds after remembered au
 
 Windows republishes its authenticated friend generation on every successful friend refresh, even when the security-relevant mapping is identical. Native correctly invalidates old-generation eligibility. A send in the resulting gap commits a canonical-only unresolved manifest, which does not subsequently expand. The prospective correction preserves the generation only for an identical account/device mapping within the same profile and authenticated session. Changed mappings and session boundaries still invalidate it; native freshness and trust checks remain authoritative.
 
-The server previously allocated another immutable eligibility proof on every query. Retained proofs live for ten minutes and each sender device may retain 64, so repeated refreshes can exhaust that limit. The server correction recomputes authorization and the current audience, then reuses an identical existing proof only when at least 90 seconds of its original two-minute freshness remain. It never extends freshness, changes the proof or increases quota. The 90-second minimum preserves headroom for older clients with a fixed 60-second refresh cadence. Changed audiences still require a new proof. This server correction requires separate deployment approval.
+The server previously allocated another immutable eligibility proof on every query. Retained proofs live for ten minutes and each sender device may retain 64, so repeated refreshes can exhaust that limit. The server correction recomputes authorization and the current audience, then reuses an identical existing proof only when at least 90 seconds of its original two-minute freshness remain. It never extends freshness, changes the proof or increases quota. The 90-second minimum preserves headroom for older clients with a fixed 60-second refresh cadence. Changed audiences still require a new proof. This correction is active in the authorized dev.176 Pi deployment.
 
 Both clients schedule refresh against the proof's actual freshness deadline rather than assuming every response starts a new two-minute lifetime. Android also backs off quota refusals and retains fair recipient iteration.
 
@@ -62,10 +62,10 @@ Local evidence includes `build/dev176-android-final.log`, `build/dev176-windows-
 | Android `MessagingBackend.kt`, `MailboxExecution.kt`, `LocalHistoryProjection.kt`, `EligibilitySnapshotExecution.kt` | Bounded projection and verified-change hints; expiry-aware refresh. Kotlin-local callback changes only. |
 | `desktop/ChatAttachments.cs`, Android `AttachmentCompatibility.kt`, `PeerChatApp.kt` | Explicit verified-device choice for classified preflight transport failures. No automatic scope narrowing or changed transfer packets. |
 | `portable/peerchat_core.cpp` | Fixed diagnostic stage names for existing cache operations 11–14. No signature, JNI ABI, authentication or packet changes. |
-| `server/EncryptedMailbox.cs` | Same-audience immutable proof reuse with original expiry and quota enforcement. Backward-compatible reply fields; not deployed. |
+| `server/EncryptedMailbox.cs` | Same-audience immutable proof reuse with original expiry and quota enforcement. Backward-compatible reply fields; deployed with explicit approval. |
 | `shared/VersionInfo.cs` | Candidate version 4.0.2-dev.176. |
 
-The Android worktree's integration notes and checkpoint `ac7ab34` were inspected read-only. This milestone introduces no conflicting shared API, group encryption format, database schema or message protocol. The server reuse optimization is independent of the client corrections; clients still support the existing dev.175 server. Its quota remains unchanged until an authorized deployment.
+The Android worktree's integration notes and checkpoint `ac7ab34` were inspected read-only. This milestone introduces no conflicting shared API, group encryption format, database schema or message protocol. The server reuse optimization is independent of the client corrections; clients also support the dev.175 server. The deployed server preserves the existing quota limits.
 
 No physical post-fix ACK latency, transfer throughput or connection time is claimed. The exact observed 5–10-second delivery delay cannot be reconstructed by subtracting timestamps from different devices. Local monotonic timing identifies client contention, while message IDs correlate authorization and durable receipt state.
 
@@ -112,4 +112,30 @@ Android APK:
 
 SHA-256: `a365d76ae557e8c0a18da4e9f193a7bece2d14bd18bff91396668f10d0545c58`.
 
-The package audit verified version, source checkpoint, ZIP payload hashes, Windows dependencies, Android arm64 ABI and the existing APK signing identity. Update Android in place with `adb install -r`; never uninstall or clear data. Extract Windows to a new folder and use the existing profile. No APK installation or Pi deployment was performed. Physical acceptance remains pending, and automatic post-upload direct fallback remains incomplete. The documentation checkpoint contains this report; production source has no uncommitted changes.
+The package audit verified version, source checkpoint, ZIP payload hashes, Windows dependencies, Android arm64 ABI and the existing APK signing identity. Update Android in place with `adb install -r`; never uninstall or clear data. Extract Windows to a new folder and use the existing profile. APK installation was not performed. Physical acceptance remains pending, and automatic post-upload direct fallback remains incomplete.
+
+## Authorized Pi deployment on 17 October 2026
+
+The operator requested the newest Pi version after the package handoff. The existing ARM32 host `ENDER3PROPI` was updated from **4.0.2-dev.175 to 4.0.2-dev.176**. Source checkpoint remains `df2b931`; deployment tooling and this report have separate later checkpoints.
+
+The ARM32 self-contained package uses SDK 10.0.401 and runtime 10.0.12, preserving both existing cache feature build flags. Its SHA-256 is `af4c644741e41ffa43c778e3b99c1dfd6a1866b3ec29a3444945ef75505bc0e9` at `build/linux/4.0.2-dev.176/PeerChat.Server-4.0.2-dev.176-linux-arm.zip`. All staged runtime files matched the package manifest and the actual executable reported dev.176.
+
+Before the live update, the production server compatibility harness passed on the Pi with disposable fixtures in an isolated network namespace. Coverage included pinned TLS, authentication, JSON/signature compatibility, SQLite FULL/WAL durability, shutdown/restart, groups, encrypted mailbox store/fetch/signed receipts, duplicate delivery, expiry, quotas and revocation. The separate real relay test passed attachment/forwarding and six revocation cases. Its first attempt correctly rejected a disposable certificate created with permissive permissions; rerunning with private mode creation passed without changing security checks.
+
+The first live attempt automatically rolled back when a TLS health connection timed out during the client reconnect burst. Current database writes were preserved. Both dev.176 and restored dev.175 logged startup worker queue delays, reaching approximately 8.7 and 7.4 seconds respectively. Dev.175 recovery subsequently passed pinned TLS, authentication and discovery in 1.322 seconds. This is a measured startup contention finding, not proof that dev.176's eligibility change caused the delay.
+
+The deployment helper now retries only transient connection errors/timeouts within a 45-second startup window. Pin, authentication and protocol assertion failures remain immediate failures; persistent transport failure still triggers rollback. Five isolated backup/readiness tests passed, including timeout exhaustion and no retry after authentication/pin failure. The second deployment passed its full health sequence in 9.463 seconds without needing a retry.
+
+The final running process is PID **24915**, executable `/opt/peerchat-test/server/4.0.2-dev.176/PeerChat.Server`, using `/opt/peerchat-test/config/4.0.2-dev.176/server-config.json`. The configuration was copied byte for byte. The persistent database remains `/opt/peerchat-test/data/4.0.2-dev.33/physical-client.db`.
+
+Three subsequent pinned TLS/login/discovery sequences passed in 1275, 1310 and 1284 ms. Database quick check returned `ok`. Original protected identity and grant tables matched the stopped backup. No error/fatal entries were observed after the successful restart, and four live relay pair events were observed. Working set was approximately 83 MiB with 32 threads at that snapshot. These checks do not constitute physical messaging or transfer acceptance.
+
+The encrypted cache remains enabled with its existing directory, filesystem binding, **10 GiB quota, 48-hour retention, and the greater of 20 percent free space or 2 GiB reserve**. Before deployment, available filesystem space was approximately 111 GB. The stopped cache index integrity check passed; all three cache backup files (106,528 bytes total) matched their source hashes. Database snapshots, executable/configuration trees and referenced private configuration files were also backed up and verified. Certificates, keys, credentials and TURN configuration were preserved.
+
+Verified rollback location:
+
+`/opt/peerchat-test/rollback/pre-4.0.2-dev.176-20261017T215418Z`
+
+The earlier automatically rolled-back attempt remains at `/opt/peerchat-test/rollback/pre-4.0.2-dev.176-20261017T215238Z`. Neither backup is removed. A subsequent rollback must stop dev.176 through the existing checked runtime helper and restart dev.175 against the **current** database and cache; do not restore an older database or cache snapshot over newer writes automatically. The retained manifests record the exact backup contents and successful health checks.
+
+Local evidence: `build/dev176-linux-server-build.log`, `build/dev176-pi-portability-build.log`, `build/dev176-pi-deployment.log` (initial rollback), `build/dev176-pi-deployment-readiness.log` (successful update), and `build/dev176-pi-final-health.log`. Pi validation and deployment evidence is retained under `/opt/peerchat-test/incoming/dev176-deployment/`.

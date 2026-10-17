@@ -107,6 +107,22 @@ def health(config, pin):
         call(dict(type='logout',sessionToken=login['sessionToken']))
     return {'tls_pin':'unchanged','existing_test_auth':'passed','discovery':'passed'}
 
+def wait_for_health(config, pin, startup_seconds=45):
+    # Listener readiness precedes TLS worker readiness during a reconnect burst.
+    # Retry only transient connection/timeouts within a bounded startup window;
+    # pin, authentication and protocol assertions remain immediate failures.
+    began=time.monotonic();deadline=began+startup_seconds;retries=0
+    while True:
+        try:
+            result=health(config,pin)
+            result['startup_retries']=retries
+            result['startup_elapsed_ms']=round((time.monotonic()-began)*1000)
+            return result
+        except (TimeoutError,ConnectionError):
+            if time.monotonic()>=deadline: raise
+            retries+=1
+            time.sleep(.5)
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--old',required=True);parser.add_argument('--new',required=True)
@@ -173,7 +189,7 @@ def main():
             report['cache_backup']=backup_cache(confined(config['AttachmentCache']['Directory']),backup/'cache-files')
         before=identities(database);report['identity_grant_snapshot']=before
         run(['python3',helper,'start','--version',args.new,'--port','7443'])
-        report['health']=health(config,args.pin.upper())
+        report['health']=wait_for_health(config,args.pin.upper())
         report['health']['cache']=cache_health(config)
         assert digest(certificate)==cert_hash and digest(oldconfig/'server-config.json')==digest(newconfig/'server-config.json')
         assert identities(database,before)==before, 'Original identity/grant content changed; inspect without restoring DB'
@@ -184,7 +200,7 @@ def main():
         newpid=ROOT/'data'/args.new/'server.pid'
         if newpid.exists(): run(['python3',helper,'stop','--version',args.new,'--port','7443'])
         run(['python3',helper,'start','--version',args.old,'--port','7443'])
-        health(config,args.pin.upper());report['result']='rolled_back_current_database_preserved'
+        report['rollback_health']=wait_for_health(config,args.pin.upper());report['result']='rolled_back_current_database_preserved'
         (backup/'manifest.json').write_text(json.dumps(report,indent=2))
         raise
 if __name__=='__main__': main()

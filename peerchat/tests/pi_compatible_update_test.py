@@ -56,5 +56,27 @@ class CacheBackupTests(unittest.TestCase):
             self.assertEqual(before, update.tree_hashes(source))
 
 
+class StartupHealthTests(unittest.TestCase):
+    def test_transient_tls_timeout_retries_full_health(self):
+        with patch.object(update,'health',side_effect=[TimeoutError('startup'),{'tls_pin':'unchanged','existing_test_auth':'passed','discovery':'passed'}]) as check:
+            with patch.object(update.time,'sleep'):
+                result=update.wait_for_health({},'test-pin')
+        self.assertEqual(check.call_count,2)
+        self.assertEqual(result['startup_retries'],1)
+        self.assertEqual(result['existing_test_auth'],'passed')
+
+    def test_authentication_or_pin_failure_is_not_retried(self):
+        with patch.object(update,'health',side_effect=AssertionError('pin or authentication')) as check:
+            with self.assertRaises(AssertionError):update.wait_for_health({},'test-pin')
+        self.assertEqual(check.call_count,1)
+
+    def test_persistent_timeout_fails_at_deadline(self):
+        with patch.object(update,'health',side_effect=TimeoutError('unavailable')) as check:
+            with patch.object(update.time,'monotonic',side_effect=[0,0,46]):
+                with patch.object(update.time,'sleep'):
+                    with self.assertRaises(TimeoutError):update.wait_for_health({},'test-pin')
+        self.assertEqual(check.call_count,2)
+
+
 if __name__ == '__main__':
     unittest.main()
