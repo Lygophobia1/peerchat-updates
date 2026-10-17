@@ -14,6 +14,40 @@ public sealed class FriendConversationBinding {
     public bool ActiveFriend;
 }
 
+// A friend-state refresh can update names and presence without changing the
+// authenticated account/device mapping consumed by native message selection.
+// Remember only a successfully submitted native publication; a failed submit
+// must be retried even if the server returns the same mapping again.
+internal sealed class AuthenticatedFriendPublication {
+    long account;
+    ulong discoverySession,profileSession;
+    string mapping;
+    bool submitted;
+    internal static string Mapping(IEnumerable<FriendConversationBinding> friends){
+        var rows=(friends??Enumerable.Empty<FriendConversationBinding>())
+            .Where(item=>item!=null&&item.ActiveFriend&&item.AccountId>0&&!String.IsNullOrEmpty(item.CurrentPeerId))
+            .OrderBy(item=>item.AccountId);
+        var result=new StringBuilder();
+        foreach(var item in rows){
+            result.Append(item.AccountId).Append('|').Append(item.CurrentPeerId).Append('|');
+            foreach(var peer in (item.KnownPeerIds??new List<string>())
+                .Where(value=>!String.IsNullOrEmpty(value)&&value.IndexOfAny(new[]{'|',',','\r','\n'})<0)
+                .Distinct(StringComparer.Ordinal).OrderBy(value=>value,StringComparer.Ordinal))result.Append(peer).Append(',');
+            result.Append('\n');
+        }
+        return result.ToString();
+    }
+    internal bool Requires(long currentAccount,ulong currentDiscoverySession,ulong currentProfileSession,string currentMapping){
+        return !submitted||currentAccount<=0||account!=currentAccount||discoverySession!=currentDiscoverySession||
+            profileSession!=currentProfileSession||!String.Equals(mapping,currentMapping,StringComparison.Ordinal);
+    }
+    internal void Published(long currentAccount,ulong currentDiscoverySession,ulong currentProfileSession,string currentMapping){
+        if(currentAccount<=0)throw new ArgumentOutOfRangeException("currentAccount");
+        account=currentAccount;discoverySession=currentDiscoverySession;profileSession=currentProfileSession;mapping=currentMapping;submitted=true;
+    }
+    internal void Reset(){submitted=false;account=0;mapping=null;}
+}
+
 // Per-profile, protected social-to-device index. It contains only public account/device
 // identifiers and display metadata; native encrypted message history remains in SQLite.
 public sealed class FriendConversationIndex {

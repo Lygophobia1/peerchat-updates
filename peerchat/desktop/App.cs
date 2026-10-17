@@ -176,6 +176,7 @@ public partial class DesktopApplication {
     readonly HashSet<string> trustSuppressed=new HashSet<string>(StringComparer.Ordinal);
     readonly ConnectionAttemptTracker connectionAttempts=new ConnectionAttemptTracker();
     ulong authenticatedFriendSnapshotGeneration;
+    readonly AuthenticatedFriendPublication authenticatedFriendPublication=new AuthenticatedFriendPublication();
     readonly HashSet<long> automaticInitialPinAttempts=new HashSet<long>();
     readonly object relayGate=new object();readonly Dictionary<ulong,RelayTransport> relayTransports=new Dictionary<ulong,RelayTransport>();
     string lastPublicCandidate="Unavailable",lastPublicCandidateSource="Unavailable",lastObservedAddressClassification="Unavailable";
@@ -1818,6 +1819,7 @@ public partial class DesktopApplication {
             serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();groupInvites.Clear();groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;
 		authenticatedFriendSnapshotGeneration++;
 		core.SetAuthenticatedFriends(0, authenticatedFriendSnapshotGeneration, null);
+		authenticatedFriendPublication.Reset();
 		automaticInitialPinAttempts.Clear();
 		StopRelays();
 		foreach(var friend in knownFriends){var conversation=model.FindByPeer(friend.PublicIdentity);if(conversation!=null)ConnectFriendCandidate(friend,conversation,false,"account signed out");}
@@ -2248,12 +2250,19 @@ public partial class DesktopApplication {
 			friendRequestStates[item3.AccountId] = "Request Sent";
 		}
 		conversationIndex.Reconcile(state.Friends);
-		authenticatedFriendSnapshotGeneration++;
         var account=discovery == null ? 0 : discovery.AccountId;
-        // Native commands are serialized on the Node worker: publish the
-        // authenticated context before any mailbox command can be enqueued.
-		mailboxContextAccount=core.SetAuthenticatedFriends(account, authenticatedFriendSnapshotGeneration, conversationIndex.Records.Where(binding => binding.ActiveFriend))?account:0;
-        RequestMailbox("authenticated account context published");
+        var authenticatedBindings=conversationIndex.Records.Where(binding=>binding.ActiveFriend).ToArray();
+        var authenticatedMapping=AuthenticatedFriendPublication.Mapping(authenticatedBindings);
+        if(mailboxContextAccount!=account||authenticatedFriendPublication.Requires(account,discoverySessionGeneration,profileSessionGeneration,authenticatedMapping)){
+            authenticatedFriendSnapshotGeneration++;
+            // Native commands are serialized on the Node worker: publish the
+            // authenticated context before any mailbox command can be enqueued.
+            bool submitted=core.SetAuthenticatedFriends(account,authenticatedFriendSnapshotGeneration,authenticatedBindings);
+            mailboxContextAccount=submitted&&account>0?account:0;
+            if(submitted&&account>0)authenticatedFriendPublication.Published(account,discoverySessionGeneration,profileSessionGeneration,authenticatedMapping);
+            else authenticatedFriendPublication.Reset();
+        }
+        RequestMailbox("authenticated friend state refreshed");
 		HashSet<long> hashSet = new HashSet<long>();
 		foreach (DiscoverySearchResult item in state.Friends)
 		{
