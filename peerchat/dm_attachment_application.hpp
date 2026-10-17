@@ -49,6 +49,7 @@ private:
  mailbox::Header header(const Job& j)const{return mailbox::parse(j.envelope).header;}
  static bool allStored(const Job& j){return !j.recipients.empty()&&std::all_of(j.recipients.begin(),j.recipients.end(),[](const auto& r){return r.stored;});}
  void enqueue(Job* j,std::string operation,std::uint64_t offset=0,std::uint64_t maximum=0,Blob data={},Blob frame={}){
+  if(j&&terminalCacheError(*j)&&operation!="cache_dm_release")return;
   protocol::check(account_&&requests_.size()<24);requests_.push_back({Storage::newMessageId(),j?j->id:"",std::move(operation),generation_,offset,maximum,std::move(data),std::move(frame),false});
  }
  Blob control(const Job& j,transfer::Kind kind,std::optional<std::uint64_t> offset={})const{protocol::Writer w(protocol::FileTransfer);w.number(j.version);w.number(static_cast<unsigned>(kind));w.string(j.id);if(j.version==2)w.number(j.negotiation);if(offset)w.number(*offset);return w.data;}
@@ -66,7 +67,8 @@ private:
   SecretRecord next(std::move(w.data));protocol::check(next.bytes.size()<=960*1024);storage_.saveDirectAttachmentState(identity_.peerId,previous_.bytes,next.bytes);previous_.bytes.swap(next.bytes);
  }
 
- static bool active(const Job& j){if(j.state=="failed"||j.state=="canceled")return false;return j.sending?(!j.uploaded||!allStored(j)):(j.noticeAck.empty()||(j.accepted&&!j.verified)||(j.verified&&!j.published));}
+ static bool terminalCacheError(const Job& j){return j.error=="cache_attachment_expired"||j.error=="cache_attachment_unavailable";}
+ static bool active(const Job& j){if(j.state=="failed"||j.state=="canceled"||terminalCacheError(j))return false;return j.sending?(!j.uploaded||!allStored(j)):(j.noticeAck.empty()||(j.accepted&&!j.verified)||(j.verified&&!j.published));}
  void memoryRoom(){while(jobs_.size()>=64){auto oldest=jobs_.end();for(auto it=jobs_.begin();it!=jobs_.end();++it)if(!active(*it->second)&&!busy(it->first)&&(oldest==jobs_.end()||it->second->time<oldest->second->time))oldest=it;protocol::check(oldest!=jobs_.end());jobs_.erase(oldest);}}
  void room(){auto count=std::count_if(jobs_.begin(),jobs_.end(),[](const auto& item){return active(*item.second);});protocol::check(count<32);memoryRoom();}
  std::string storePage(const std::vector<Indexed>& entries,const std::string& previous){
@@ -115,7 +117,8 @@ private:
   }
   protocol::check(working_.size()<=32);auto recent=openIndex_;if(recent.size()<32&&!previousPage_.empty()){auto page=readPage(previousPage_);recent.insert(recent.begin(),page.entries.begin(),page.entries.end());}size_t loaded=0;for(auto it=recent.rbegin();it!=recent.rend()&&jobs_.size()<64&&loaded++<32;++it)if(!jobs_.count(it->second))loadJob(it->second);
  }
- void pause(Job& j,const std::string& reason){j.error=reason;j.retry=io_.wall()+10000;j.route=0;j.contextUntil=0;if(!j.verified)j.state="paused";save();}
+ void pause(Job& j,const std::string& reason){if(!terminalCacheError(j)){j.error=reason;j.retry=io_.wall()+10000;if(!j.verified)j.state="paused";}j.route=0;j.contextUntil=0;save();}
+ void cacheUnavailable(Job& j,const std::string& reason){j.error=reason;j.state=j.verified?"complete":"failed";j.retry=0;j.route=0;j.contextUntil=0;requests_.erase(std::remove_if(requests_.begin(),requests_.end(),[&](const auto& q){return q.job==j.id;}),requests_.end());save();}
  Evidence authorizedEvidence(const Job& j){
   auto evidence=evidence_();protocol::check(evidence.identity&&evidence.current&&j.contextUntil>io_.wall());auto mapping=evidence.current;auto relationship=j.body?j.body->manifest.binding.relationship:parseAudience(j.audience,j.account,identity_.peerId,j.recipient).relationship;
   evidence.current=[mapping,relationship](const auto& b,const std::string& rel,std::uint64_t other){return rel==relationship&&mapping(b,rel,other);};return evidence;
@@ -151,7 +154,7 @@ public:
  Application(Storage& storage,const Profile& profile,transfer::TransferManager& transfers,Platform io,EvidenceLookup evidence,KeyAccess keys):storage_(storage),identity_(profile),transfers_(transfers),io_(std::move(io)),evidence_(std::move(evidence)),keys_(std::move(keys)){protocol::check(io_.wall&&io_.monotonic&&io_.hash&&io_.stage&&io_.receiveSink&&io_.location&&io_.reopen&&io_.plainSink&&evidence_&&keys_);load();}
  void session(std::uint64_t account,std::uint64_t generation,const std::string& server){protocol::check(!account||(mailbox::account(account)&&generation&&protocol::id(server)));if(account==account_&&generation==generation_&&server==server_)return;requests_.clear();account_=account;generation_=generation;server_=server;supported_=false;capability_=0;probeAt_=0;for(auto& x:jobs_){x.second->route=0;x.second->contextUntil=0;}}
  std::string start(const std::string& peer,std::uint64_t recipient,std::unique_ptr<transfer::Source> source){protocol::check(account_&&supported_&&protocol::id(peer)&&mailbox::account(recipient)&&recipient!=account_&&source&&source->size()<=transfer::MaxFileBytes&&transfer::safeName(source->name()));room();auto j=std::make_unique<Job>();j->id=Storage::newMessageId();j->message=Storage::newMessageId();j->peer=peer;j->server=server_;j->account=account_;j->recipient=recipient;j->sending=true;j->time=io_.wall();j->order=storage_.nextLogicalOrder();j->sourceToken=source->resumeToken();j->sourceName=source->name();j->sourceSize=source->size();protocol::check(legacyPreview_||(!j->sourceToken.empty()&&j->sourceToken.size()<=4096&&bool(io_.reopenPlain)));j->input=std::move(source);auto id=j->id;jobs_.emplace(id,std::move(j));try{save();enqueue(&job(id),"cache_dm_prepare");}catch(...){jobs_.erase(id);throw;}return id;}
- void accept(const std::string& id){auto& j=job(id);protocol::check(!j.sending&&j.body&&!j.noticeAck.empty()&&!j.verified&&j.server==server_&&j.recipient==account_);j.accepted=true;j.state="downloading";j.retry=0;save();}
+ void accept(const std::string& id){auto& j=job(id);protocol::check(!terminalCacheError(j)&&!j.sending&&j.body&&!j.noticeAck.empty()&&!j.verified&&j.server==server_&&j.recipient==account_);j.accepted=true;j.state="downloading";j.retry=0;save();}
  void accept(const std::string& id,std::unique_ptr<transfer::Sink> sink){protocol::check(bool(sink));accept(id);job(id).plain=std::move(sink);}
  void cancel(const std::string& id){auto& j=job(id);protocol::check(account_&&j.server==server_&&(j.sending?j.account:j.recipient)==account_&&!j.verified);if(j.sealer)j.sealer->cancel();if(j.finalizer)j.finalizer->cancel();j.sealer.reset();j.finalizer.reset();j.input.reset();j.sink.reset();j.plain.reset();transfers_.cancel(id);requests_.erase(std::remove_if(requests_.begin(),requests_.end(),[&](const auto& r){return r.job==id;}),requests_.end());j.state="canceled";save();if(!j.lease.empty()&&account_)enqueue(&j,"cache_dm_release");}
  bool supported()const{return account_&&supported_;}
@@ -200,12 +203,12 @@ inline void Application::tick(){
  for(auto it=requests_.begin();it!=requests_.end();){if(it->dispatched&&now>=it->sentAt&&now-it->sentAt>=30000){auto id=it->job;it=requests_.erase(it);if(id.empty()){supported_=false;capability_=0;probeAt_=now;}else pause(job(id),"Cache request timed out; durable attachment data retained");}else ++it;}
  if(!supported_){if(now>=probeAt_&&!busy("")){enqueue(nullptr,"cache_dm_capability");probeAt_=now+30000;}return;}
  // One local encryption/decryption block globally per worker tick.
- std::vector<Job*> localWork;for(auto& item:jobs_){auto& j=*item.second;if(j.server==server_&&(j.sending?j.account:j.recipient)==account_&&(j.sealer||j.state=="verifying"||(j.verified&&!j.outputNotified&&io_.verified)))localWork.push_back(&j);}
+ std::vector<Job*> localWork;for(auto& item:jobs_){auto& j=*item.second;if(j.server==server_&&(j.sending?j.account:j.recipient)==account_&&((!terminalCacheError(j)&&(j.sealer||j.state=="verifying"))||(j.verified&&!j.outputNotified&&io_.verified)))localWork.push_back(&j);}
  if(!localWork.empty()){auto& j=*localWork[turn_++%localWork.size()];
   try{if(j.sealer)prepare(j);else if(j.state=="verifying")finalize(j);else if(j.verified&&!j.outputNotified&&io_.verified){io_.verified(j.body->manifest,j.outputToken);j.outputNotified=true;}}
-  catch(...){j.sealer.reset();j.finalizer.reset();j.sink.reset();j.input.reset();j.plain.reset();if(!j.verified){j.state="failed";j.error="Attachment encryption, integrity or protected storage failed";}else j.error="Verified internal copy retained; output action failed";save();}
+  catch(...){j.sealer.reset();j.finalizer.reset();j.sink.reset();j.input.reset();j.plain.reset();if(!j.verified){j.state="failed";j.error="Attachment encryption, integrity or protected storage failed";}else if(!terminalCacheError(j))j.error="Verified internal copy retained; output action failed";save();}
  }
- for(auto& item:jobs_){auto& j=*item.second;if(requests_.size()>=24)break;if(j.server!=server_||now<j.retry||busy(j.id)||j.state=="failed"||j.state=="canceled"||j.sealer)continue;if((j.sending?j.account:j.recipient)!=account_)continue;
+ for(auto& item:jobs_){auto& j=*item.second;if(requests_.size()>=24)break;if(j.server!=server_||now<j.retry||busy(j.id)||j.state=="failed"||j.state=="canceled"||terminalCacheError(j)||j.sealer)continue;if((j.sending?j.account:j.recipient)!=account_)continue;
   try{
    if(!j.body){if(j.sending&&j.input)enqueue(&j,"cache_dm_prepare");continue;}
    auto evidence=evidence_();if(j.sending){auto a=parseAudience(j.audience,j.account,identity_.peerId,j.recipient);protocol::check(evidence.identity&&evidence.current);verifyAudience(a,evidence.identity);protocol::check(evidence.current(a.source,a.relationship,j.recipient));}else {if(j.contextUntil<=now){enqueue(&j,"cache_dm_context");continue;}auto authorized=authorizedEvidence(j);validateBody(*j.body,header(j),&authorized);}
@@ -241,6 +244,7 @@ inline void Application::reply(const Blob& wire){
   if(state!="accepted"){
    if(state=="cache_lease_expired"||state=="cache_lease_invalid"){j.lease.clear();j.route=0;save();}
    if(q.operation=="cache_dm_status"&&!j.admitted&&state=="cache_attachment_unavailable"){enqueue(&j,"cache_dm_admit");return;}
+   if(state=="cache_attachment_expired"||state=="cache_attachment_unavailable"){cacheUnavailable(j,state);return;}
    pause(j,state.size()<=96?state:"Cache rejected attachment operation");return;
   }
   protocol::check(cacheVersion==2&&dmVersion==1);if(j.body&&size)protocol::check(size==metadata(j).size);if(!descriptorWire.empty()&&j.body)protocol::check(descriptorWire==j.descriptor);if(!audience.empty()&&j.body)protocol::check(audience==j.audience);
