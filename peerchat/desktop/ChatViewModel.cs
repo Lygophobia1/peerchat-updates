@@ -21,6 +21,23 @@ public class ConversationModel : ObservableModel {
     public readonly HashSet<string> KnownPeerIds=new HashSet<string>(StringComparer.Ordinal);
     public readonly HashSet<string> RequestedPeerHistory=new HashSet<string>(StringComparer.Ordinal);
     public readonly HashSet<string> HistoryExhaustedPeers=new HashSet<string>(StringComparer.Ordinal);
+    // History pages are requested per device peer. An outgoing bubble does not
+    // carry its storage peer, so retain each page's authenticated cursor here.
+    readonly Dictionary<string,MessageData> historyAnchors=new Dictionary<string,MessageData>(StringComparer.Ordinal);
+    public long HistoryCursor(string peer){MessageData anchor;return historyAnchors.TryGetValue(peer,out anchor)?anchor.sequence:long.MaxValue;}
+    public void ResetHistoryPaging(){historyAnchors.Clear();}
+    public void ObserveHistoryPage(string peer,IEnumerable<MessageData> page){
+        if(String.IsNullOrEmpty(peer)||page==null)return;
+        var earliest=page.Where(message=>message!=null&&message.sequence>0)
+            .OrderBy(message=>message.time).ThenBy(message=>message.sender,StringComparer.Ordinal)
+            .ThenBy(message=>message.id,StringComparer.Ordinal).FirstOrDefault();
+        if(earliest==null)return;
+        MessageData prior;
+        if(!historyAnchors.TryGetValue(peer,out prior)||earliest.time<prior.time||
+           (earliest.time==prior.time&&(StringComparer.Ordinal.Compare(earliest.sender,prior.sender)<0||
+           (earliest.sender==prior.sender&&StringComparer.Ordinal.Compare(earliest.id,prior.id)<0))))
+            historyAnchors[peer]=earliest;
+    }
     public readonly ObservableCollection<MessageModel> Messages=new ObservableCollection<MessageModel>();
     public string Draft="";
     public bool Online,RequestedHistory,HistoryLoading,HistoryExhausted;
@@ -176,7 +193,7 @@ public class ChatViewModel {
         if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(item.SessionRevision==0&&(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId)){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
         if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];if(!item.Online){item.ConnectionState="Awaiting peer verification";item.Refresh();}}}
         if(e.kind==9)Status=e.text;
-        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
+        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.ResetHistoryPaging();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}if(e.kind==6)item.ObserveHistoryPage(e.peer,e.messages);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
         if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==receipt.id);if(match!=null)match.ProjectNativeDelivery(receipt.delivery);}
         if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online&&item.SessionRevision==0){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
