@@ -1,5 +1,37 @@
 # Transfer cache integration manifest
 
+## Networking priority candidate dev 175
+
+Based on preserved dev.174 and audit checkpoint `8cd6287`, dev.175 changes local
+scheduling, not transfer or messaging formats. See `NETWORKING_LATENCY_DEV175.md`
+for measured boundaries, remaining contention and physical acceptance.
+
+- `eafd49f`: shared `transfer_manager.hpp` prioritizes pending durable controls
+  before unrelated source reads; journal/save, pacing and rotated fairness remain.
+- `77f137d`: new internal `reliable_bulk_budget.hpp`, Windows `node.cpp` and
+  Android/shared `portable/reliable_endpoint.hpp` bound bulk output admission at
+  128 KiB without changing TLS record order, v1/v2 negotiation or chunk windows.
+- `022cc29`: server `EncryptedMailboxChannel.cs` and shutdown integration in
+  `PeerChat.Server.cs` move optional mailbox hints after durable RPCs onto one
+  bounded existing worker. No authorization, mailbox wire or ACK change.
+- `ffd6931`: Android `MessagingBackend.kt`, `MailboxExecution.kt` and internal
+  `ScopedBackendWork.kt` release mailbox/periodic archive transport waits from
+  the profile gate; native operations and results retain exact scope checks.
+- `32830b8`: version 4.0.2-dev.175. Previous NoDelay/timing/cache-lock-scope
+  audit checkpoints remain in its ancestry.
+
+No exported native/JNI signature, group encryption record, authentication
+protocol, database schema or cache authorization changes. Rebuild both clients
+for the shared header changes. Group cache and direct compatibility semantics
+are preserved. No live Pi deployment is included; server benefits are pending
+separate approval and installation.
+
+The other project's clean `ac7ab34` and its
+`docs/ANDROID_GROUPS_VOICE_INTEGRATION.md` were inspected read-only. Planned
+optional endpoint group/voice admissions do not conflict; retain the new bulk
+admission predicate when reconciling future endpoint edits. No other worktree
+was changed.
+
 ## Online transfer compatibility repair
 
 The dev.174 candidate keeps encrypted cache preferred but restores an explicit
