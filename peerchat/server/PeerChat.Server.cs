@@ -633,15 +633,51 @@ namespace PeerChat.Server {
         public bool Drain(int milliseconds){var clock=System.Diagnostics.Stopwatch.StartNew();lock(gate){while(pending!=0){int left=milliseconds-(int)clock.ElapsedMilliseconds;if(left<=0)return false;Monitor.Wait(gate,left);}return true;}}
     }
 
+        // Monotonic local diagnostics only: bounded samples, no request bodies or identities.
+        internal sealed class ServerTimingDiagnostics {
+            readonly object gate=new object();readonly Queue<string> samples=new Queue<string>();
+            static readonly object logGate=new object();static long nextLog;
+            internal long Count,Slow,Suppressed,MaximumTicks;
+            internal string[] Snapshot(){lock(gate)return samples.ToArray();}
+            static string Operation(string type){switch(type){
+                case "cache_append":case "cache_read":case "cache_complete":case "cache_progress":
+                case "cache_dm_append":case "cache_dm_read":case "cache_dm_complete":case "cache_dm_progress":
+                case "cache_dm_prepare":case "cache_dm_publish":case "cache_dm_verified":
+                case "mailbox_store":case "mailbox_ack":case "mailbox_fetch":case "mailbox_receipts":return type;
+                default:return type!=null&&type.StartsWith("cache_",StringComparison.Ordinal)?"cache_other":"ordinary";
+            }}
+            internal string Record(string phase,string operation,string id,long started,long finished){
+                long ticks=Math.Max(0,finished-started),frequency=System.Diagnostics.Stopwatch.Frequency;
+                string safePhase=phase=="worker_queue"||phase=="rpc_processing"||phase=="rpc_response_write"?phase:"other";
+                string safeId=MailboxProtocol.Id(id,32)?id:"none";
+                lock(gate){
+                    Count++;MaximumTicks=Math.Max(MaximumTicks,ticks);
+                    string row="server_timing phase="+safePhase+" operation="+Operation(operation)+" request_id="+safeId+
+                        " start_tick="+started+" end_tick="+finished+" elapsed_ms="+(ticks*1000.0/frequency).ToString("F3",CultureInfo.InvariantCulture);
+                    samples.Enqueue(row);if(samples.Count>64)samples.Dequeue();
+                    if(ticks<frequency/4)return null;
+                    Slow++;
+                    lock(logGate){if(finished<nextLog){Suppressed++;return null;}nextLog=finished+frequency;}
+                    return row+" total="+Count+" slow="+Slow+" suppressed="+Suppressed;
+                }
+            }
+        }
         sealed partial class DiscoveryServer {
+        readonly ServerTimingDiagnostics timing=new ServerTimingDiagnostics();
+        void RecordTiming(string phase,string operation,string id,long started){
+            try{string line=timing.Record(phase,operation,id,started,System.Diagnostics.Stopwatch.GetTimestamp());
+                if(line!=null)Log("DEBUG",line);
+            }catch(Exception error){if(error is OutOfMemoryException)throw;} // Diagnostics never change request authority or results.
+        }
         readonly object workerGate=new object();
         readonly HashSet<TcpClient> workerClients=new HashSet<TcpClient>();
         int workerCount;
         NamedPipeServerStream managementStream;
         void QueueWorker(Action work,TcpClient client=null){
+            long queued=System.Diagnostics.Stopwatch.GetTimestamp();
             lock(workerGate){if(stopping){if(client!=null)client.Close();return;}workerCount++;if(client!=null)workerClients.Add(client);}
             ThreadPool.QueueUserWorkItem(_=>{
-                try{work();}catch(Exception error){if(!stopping)Log("WARNING","Server worker ended: "+error.GetType().Name);}
+                try{RecordTiming("worker_queue",null,null,queued);work();}catch(Exception error){if(!stopping)Log("WARNING","Server worker ended: "+error.GetType().Name);}
                 finally{lock(workerGate){if(client!=null){workerClients.Remove(client);client.Close();}workerCount--;Monitor.PulseAll(workerGate);}}
             });
         }
@@ -668,7 +704,7 @@ namespace PeerChat.Server {
                 using(var sha=SHA256.Create())Log("INFO","Server certificate SHA-256: "+BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-",""));
                 Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled.":"TURN media credential issuer disabled.");
                 QueueWorker(PresenceMonitor);if(!String.IsNullOrEmpty(managementPipe))QueueWorker(ManagementLoop);
-                while(!stopping){try{var client=listener.AcceptTcpClient();QueueWorker(()=>Serve(client),client);}
+                while(!stopping){try{var client=listener.AcceptTcpClient();client.NoDelay=true;QueueWorker(()=>Serve(client),client);}
                     catch(SocketException){if(!stopping)throw;}catch(ObjectDisposedException){if(!stopping)throw;}}
             }finally{RequestStop();DrainWorkers();}
         }
@@ -953,7 +989,7 @@ namespace PeerChat.Server {
 
         static string DecodeAdminText(string value){try{return String.IsNullOrEmpty(value)?null:Encoding.UTF8.GetString(Convert.FromBase64String(value));}catch{return null;}}
         void ManagementLoop(){while(!stopping){try{using(var pipe=new NamedPipeServerStream(managementPipe,PipeDirection.InOut,4,PipeTransmissionMode.Byte,PipeOptions.None)){lock(workerGate){if(stopping)return;managementStream=pipe;}pipe.WaitForConnection();var encoding=new UTF8Encoding(false);var reader=new StreamReader(pipe,encoding,false,256,true);var writer=new StreamWriter(pipe,encoding,256,true);var command=reader.ReadLine()??"";Dictionary<string,object> response;if(command=="STATUS")response=Status();else if(command=="STOP"){response=new Dictionary<string,object>{{"ok",true}};}else if(command.StartsWith("ACCOUNT_LIST ",StringComparison.Ordinal)){var parts=command.Substring("ACCOUNT_LIST ".Length).Split(' ');int offset,limit;response=parts.Length==3&&Int32.TryParse(parts[0],out offset)&&Int32.TryParse(parts[1],out limit)?Ok(accounts.AdminAccounts(DecodeAdminText(parts[2]),offset,limit)):Error("invalid_account_search");}else if(command.StartsWith("ACCOUNT_LOOKUP ",StringComparison.Ordinal)){var account=accounts.AdminLookup(DecodeAdminText(command.Substring("ACCOUNT_LOOKUP ".Length)));response=account==null?Error("account_not_found"):Ok(account);}else if(command.StartsWith("DELETE_ACCOUNT ",StringComparison.Ordinal)){long id;response=Int64.TryParse(command.Substring("DELETE_ACCOUNT ".Length),out id)&&id>0?AdminDeleteAccount(id):Error("invalid_account_id");}else response=Error("unsupported_admin_command");writer.WriteLine(json.Serialize(response));writer.Flush();if(command=="STOP")RequestStop();}}catch(Exception error){if(!stopping)Log("WARNING","Local admin pipe error: "+error.GetType().Name);}}}
-        Dictionary<string,object> Status(){var data=accounts.Statistics();data["ok"]=true;data["running"]=!stopping;data["uptimeSeconds"]=(long)(DateTime.UtcNow-startedUtc).TotalSeconds;data["port"]=config.Port;data["address"]="0.0.0.0";data["tls"]=true;data["connectedClients"]=Interlocked.CompareExchange(ref connectedClients,0,0);data["turnEnabled"]=config.TurnEnabled;data["turnHost"]=config.TurnEnabled?config.TurnPublicHost:"";data["turnUdpPort"]=config.TurnEnabled?config.TurnUdpPort:0;data["turnCredentialTtlSeconds"]=config.TurnEnabled?config.TurnCredentialTtlSeconds:0;return data;}
+        Dictionary<string,object> Status(){var data=accounts.Statistics();data["ok"]=true;data["running"]=!stopping;data["uptimeSeconds"]=(long)(DateTime.UtcNow-startedUtc).TotalSeconds;data["port"]=config.Port;data["address"]="0.0.0.0";data["tls"]=true;data["connectedClients"]=Interlocked.CompareExchange(ref connectedClients,0,0);data["turnEnabled"]=config.TurnEnabled;data["turnHost"]=config.TurnEnabled?config.TurnPublicHost:"";data["turnUdpPort"]=config.TurnEnabled?config.TurnUdpPort:0;data["turnCredentialTtlSeconds"]=config.TurnEnabled?config.TurnCredentialTtlSeconds:0;data["networkTimings"]=timing.Snapshot();return data;}
 
         // TLS is a byte stream, not a message transport. A four-byte big-endian length prefix
         // keeps partial reads from being mistaken for an entire JSON request.

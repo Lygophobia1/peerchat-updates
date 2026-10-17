@@ -23,6 +23,7 @@ sealed partial class DiscoveryServer {
         var age=Stopwatch.StartNew();
         for(int count=0;count<64&&!stopping&&age.ElapsedMilliseconds<120000;count++){
             var bytes=ReadFrame(tls,100000);if(bytes==null)return;
+            long processingStarted=Stopwatch.GetTimestamp(); // Complete frame read, not transport arrival.
             var request=groupJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(bytes));
             string id=Text(request,"rpcRequestId"),type=Text(request,"type");
             if(!MailboxProtocol.Id(id,32)||Text(request,"sessionToken")!=token||Text(request,"publicIdentity")!=device||!current())return;
@@ -43,7 +44,10 @@ sealed partial class DiscoveryServer {
             var reply=new Dictionary<string,object>{{"type","rpc_result"},{"rpcRequestId",id},{"operation",type},{"body",body},{"more",more}};
             var output=Encoding.UTF8.GetBytes(groupJson.Serialize(reply));
             if(output.Length>100000)throw new InvalidDataException("RPC response exceeds bound");
-            WriteFrame(tls,output);if(!more)return;
+            RecordTiming("rpc_processing",type,id,processingStarted);
+            long writeStarted=Stopwatch.GetTimestamp();
+            try{WriteFrame(tls,output);}finally{RecordTiming("rpc_response_write",type,id,writeStarted);}
+            if(!more)return;
         }
     }
 }
