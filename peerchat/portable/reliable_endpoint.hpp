@@ -4,6 +4,7 @@
 #include "../direct_transport_adapter.hpp"
 #include "../archive_session.hpp"
 #include "../archive_history.hpp"
+#include "../reliable_bulk_budget.hpp"
 #include <deque>
 
 namespace peerchat::portable {
@@ -315,6 +316,7 @@ public:
         if(archive_||group_||!transfer_||!ready()||!friends_.contains(runtime_.expected)||
            !(runtime_.remoteCapabilities&protocol::CapabilityFileTransfer)||output_.size()>MaxOutput/2)return false;
         protocol::check(bytes.size()<=protocol::MaxPacket);protocol::Reader reader(bytes);protocol::check(reader.type()==protocol::FileTransfer);
+        if(!scheduling::admitsTransfer(bytes,output_.size()))return false;
         protocol::Writer frame(protocol::FileTransfer);frame.data=bytes;packet(frame);return true;
     }
     Blob takeOutput(){

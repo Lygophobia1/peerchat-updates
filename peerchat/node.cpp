@@ -16,6 +16,7 @@
 #include "archive_attachment_transfer.hpp"
 #include "windows_transfer_io.hpp"
 #include "windows_transfer_timing.hpp"
+#include "reliable_bulk_budget.hpp"
 #include "portable/transfer_statistics_storage.hpp"
 #include "windows_mailbox.hpp"
 #include "windows_group_attachment_application.hpp"
@@ -205,7 +206,9 @@ struct Node::Impl {
                 // A revoked archive transfer may never escape its purpose by
                 // falling through to a coincident ordinary friend route.
                 if(archiveTransfers&&archiveTransfers->wasArchiveTransfer(transfer::packetId(bytes))&&!c->authorization.permitsArchiveControl())return false;
-                if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;}
+                size_t queued=c->output.size()-c->sent;
+                if(c->relayPipe){std::lock_guard<std::mutex> lock(c->relayPipe->mutex);if(c->relayPipe->closed||c->relayPipe->queued>MaxQueue/4)return false;queued+=c->relayPipe->queued;}
+                if(!scheduling::admitsTransfer(bytes,queued))return false;
                 try{auto began=transfer::windows::TransferTiming::now();packet(*c,c->authorization.permitsArchiveControl()?archiveTransfers->outgoing(c->authorization,bytes):bytes);transferTiming.sent(bytes,c->attemptId,began,transfer::windows::TransferTiming::now());return true;}
                 catch(...){c->closeReason=L"File transfer observed reliable transport failure";c->dead=true;return false;}
             });retainCompletedAttachments();}catch(const transfer::PersistenceError&){transferPersistenceFailure();}

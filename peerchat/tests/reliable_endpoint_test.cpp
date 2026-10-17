@@ -21,6 +21,10 @@ struct MemoryDestination final:peerchat::transfer::Sink {
 
 int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     auto require=[](bool value,const char* reason){if(!value)throw std::runtime_error(reason);};
+    for(auto version:{1u,2u})for(unsigned kind=1;kind<=6;++kind){
+        protocol::Writer frame(protocol::FileTransfer);frame.number(version);frame.number(kind);
+        require(scheduling::admitsTransfer(frame.data,scheduling::BulkOutputHighWater)==(kind!=static_cast<unsigned>(transfer::Kind::Chunk)),"Only bulk payload should consume the local output reserve");
+    }
     auto id=Storage::newMessageId();auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/std::wstring(id.begin(),id.end());
     Storage a((root/L"a").wstring()),b((root/L"b").wstring());auto alice=a.profile(),bob=b.profile();
     TlsCredentials ac(alice),bc(bob);
@@ -93,11 +97,11 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     af.replace(10,3,{{20,bob.peerId,{bob.peerId}}});
     transfer::TransferManager uploads([]{return std::make_unique<transfer::windows::Sha256>();});
     transfer::TransferManager downloads([]{return std::make_unique<transfer::windows::Sha256>();});
-    unsigned fileFrames=0;
+    unsigned fileFrames=0;Blob capturedBulk;
     ReliableEndpoint left(alice,a,as,ad,af,{1},{301},std::make_unique<TlsSession>(ac,false),bob.peerId,route(301,false),++now,{},
         [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;uploads.receive(peer,frame,time);});
     ReliableEndpoint right(bob,b,bs,bd,bf,{1},{302},std::make_unique<TlsSession>(bc,true),alice.peerId,route(302,true),++now,{},
-        [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;downloads.receive(peer,frame,time);});
+        [&](const std::string& peer,const Blob& frame,std::uint64_t time){++fileFrames;protocol::Reader r(frame);r.number();if(r.number()==static_cast<unsigned>(transfer::Kind::Chunk)&&frame.size()>65536)capturedBulk=frame;downloads.receive(peer,frame,time);});
     protocol::Writer premature(protocol::FileTransfer);require(!left.sendTransfer(premature.data),"File sent before authenticated winner");
     left.receive({},++now);right.receive({},++now);exchange(left,right);require(left.ready()&&right.ready(),"File route failed authentication");
     require(left.permitsTransferPipeline()&&right.permitsTransferPipeline(),"Portable endpoint omitted negotiated pipeline capability");
@@ -119,6 +123,19 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     require(receivedPicture->committed&&receivedPicture->bytes==picture&&receivedDocument->committed&&receivedDocument->bytes==document&&fileFrames>8,"Bidirectional authenticated binary transfer corrupted or incomplete");
     require(uploads.completedRecords().size()==2&&downloads.completedRecords().size()==2,"File completion acknowledgement missing");
     require(uploads.diagnostics(now)[0].find("effective_chunk_bytes=65536 effective_window=16")!=std::string::npos,"Portable 64 KiB frame/window did not activate");
+    // Hold the transport consumer: repeated valid payload must not fill a MiB
+    // ahead of newly queued text. Duplicate completed chunks preserve integrity.
+    require(!capturedBulk.empty(),"No authenticated payload captured for blocked-writer fixture");
+    unsigned queuedBulk=0;while(queuedBulk<40&&left.sendTransfer(capturedBulk))++queuedBulk;
+    require(queuedBulk<=3,"Bulk output prefilled ahead of text beyond bounded control reserve");
+    StoredMessage priorityText{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",44,Delivery::Queued,0,a.nextLogicalOrder()};
+    require(a.append(bob.peerId,priorityText),"Priority text durable send failed");left.pump();
+    unsigned forwardDrains=0;while(forwardDrains<32&&!b.message(priorityText.id)){
+        auto forward=left.takeOutput();if(!forward.empty()){++forwardDrains;right.receive(forward,++now);}
+        auto backward=right.takeOutput();if(!backward.empty())left.receive(backward,++now);drain(left);drain(right);
+    }
+    exchange(left,right);require(b.message(priorityText.id).has_value()&&a.pending(bob.peerId).empty()&&forwardDrains<=4,"Text/ACK delayed behind bulk backlog");
+    std::cout<<"HOST PRIORITY: held_consumer_bulk_frames="<<queuedBulk<<" text_forward_64KiB_drains="<<forwardDrains<<"; actual Schannel ciphertext order preserved; not physical network latency\n";
     // Capacity rejection is an application refusal, not TLS/session failure.
     // Four unaccepted offers are retained; the fifth must leave the winner live.
     for(unsigned n=0;n<5;++n){protocol::Writer offer(protocol::FileTransfer);offer.number(1);offer.number(static_cast<unsigned>(transfer::Kind::Offer));offer.string(Storage::newMessageId());offer.string("capacity.bin");offer.number(1);offer.bytes(Blob(32,0));require(left.sendTransfer(offer.data),"Capacity fixture send failed");exchange(left,right);}
