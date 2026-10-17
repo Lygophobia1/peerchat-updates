@@ -295,13 +295,13 @@ public partial class DesktopApplication {
                 if(state=="accepted"&&(!reply.TryGetValue("requestId",out value)||!String.Equals(value as string,request,StringComparison.Ordinal)||!reply.TryGetValue("operation",out value)||!String.Equals(value as string,"cache_dm_prepare",StringComparison.Ordinal)))throw new InvalidDataException("Attachment preflight correlation failed.");
             }else state=dmAttachmentExecution==null?"":dmAttachmentExecution.LastState;
         }catch{if(!closing)Notify("Offline attachment readiness could not be verified. Nothing was queued; retry after the authenticated connection recovers.");return DmAttachmentDeliveryMode.Cancel;}
-        if(closing||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
+        if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
         if(state=="accepted")return DmAttachmentDeliveryMode.EncryptedCache;
         if(!DmAttachmentDelivery.CompatibilityBlocked(state)){Notify("Attachment preflight did not authorize delivery ("+(state??"unavailable")+"). No cache checks were bypassed and no direct transfer was started.");return DmAttachmentDeliveryMode.Cancel;}
         // A direct transfer is a distinct user-selected scope, never conversion
         // of a failed upload. Try only the existing route owner before offering it.
         if(DmAttachmentDelivery.OnlineSelectable(target)&&!DmAttachmentDelivery.OnlineReady(target))await DemandReadyRoute(target,"attachment compatibility choice");
-        if(closing||owner!=discovery||profile!=profileSessionGeneration||target.Contact==null||target.Contact.peer!=peer||target.AccountId!=account||!target.IsFriend)return DmAttachmentDeliveryMode.Cancel;
+        if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||target.Contact==null||target.Contact.peer!=peer||target.AccountId!=account||!target.IsFriend)return DmAttachmentDeliveryMode.Cancel;
         var dialog=new Window{Title="Attachment delivery",Owner=window,Width=530,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),FontFamily=new FontFamily("Segoe UI"),FontSize=15,Resources=window.Resources};
         var panel=new StackPanel{Margin=new Thickness(26)};dialog.Content=panel;
         panel.Children.Add(new TextBlock{Text="Offline attachment compatibility",FontSize=23,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,16)});
@@ -313,7 +313,7 @@ public partial class DesktopApplication {
         var cancel=new Button{Content="Cancel",IsCancel=true,HorizontalAlignment=HorizontalAlignment.Right};cancel.Click+=(s,e)=>dialog.DialogResult=false;panel.Children.Add(cancel);
         dialog.Loaded+=(s,e)=>cancel.Focus();if(dialog.ShowDialog()!=true)return DmAttachmentDeliveryMode.Cancel;
         if(mode==DmAttachmentDeliveryMode.OnlineDevice){if(!DmAttachmentDelivery.OnlineSelectable(target)||!await DemandReadyRoute(target,"explicit online attachment")){Notify("The selected verified device is not connected. No attachment was queued and no cache fallback was used.");return DmAttachmentDeliveryMode.Cancel;}}
-        if(closing||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
+        if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
         return mode;
     }
     async Task SendChatSnippet(string text){
