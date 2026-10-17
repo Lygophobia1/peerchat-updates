@@ -1,5 +1,30 @@
 # Transfer cache integration manifest
 
+## Online transfer compatibility repair
+
+The dev.174 candidate keeps encrypted cache preferred but restores an explicit
+online-only compatibility choice when a linked device lacks cache capability.
+Windows checkpoints `51df50c`, `5d0efd6` and `cf89d7a` add the strict local selector,
+UI preflight and stale-conversation protection. The matching Android integration
+uses the same explicit device-only choice and stale-scope rejection. See
+`DEV174_TRANSFER_COMPATIBILITY.md` for the final candidate evidence and handoff.
+
+Shared interface changes are local only: Windows file operation 21 accepts
+`online:<canonical account>`; Android's existing TransferBridge request accepts a
+scoped probe/commit operation 16. Android additionally uses the read-only internal
+`ReliableEndpoint::permitsDirectFileTransfer(authenticationGeneration)` predicate.
+These require matching Desktop/Core and Kotlin/JNI packages. No C/JNI signature,
+peer/server wire format, encrypted record, journal schema or group API changes.
+The current parallel Android worktree at `ac7ab34` was inspected read-only before
+these changes; its planned enrollment/group/voice interfaces do not conflict.
+
+Direct choice requires the exact verified current recipient and an authenticated
+file-capable non-archive winning route; pending choices cannot establish trust or
+grant account-wide delivery. Cache missing-capability, HPKE, revocation and frozen
+audience checks remain unchanged. Authorization/stale-scope/network failures do
+not trigger silent fallback. Existing queued cache jobs are not converted.
+The Pi is not changed by this repair; dev.173 remains the compatible server.
+
 ## Offline DM cache integration — dev.173 test handoff
 
 As of 2026-10-16, the active branch remains `codex/native-unicode-emoji` in
