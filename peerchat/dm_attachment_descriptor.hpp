@@ -26,7 +26,7 @@ inline Audience parseAudience(const Blob& wire,std::uint64_t sourceAccount,const
 }
 // The caller must verify each binding's signature against authenticated current
 // account/device evidence. Parsing alone is not enrollment or trust promotion.
-inline void verifyAudience(const Audience& a,const std::function<Blob(std::uint64_t,const std::string&)>& identity){
- auto verify=[&](const auto& b){auto key=identity(b.accountId,b.device);protocol::check(mailbox::verifyBinding(b,b.accountId,b.device,key,verifyDevicePayload,Storage::publicKeyId));};verify(a.source);for(const auto& b:a.recipients)verify(b);
+inline void verifyAudience(const Audience& a,const std::function<Blob(std::uint64_t,const std::string&)>& identity,const char** stage=nullptr){
+ auto verify=[&](const auto& b,bool source){if(stage)*stage=source?"prepare_source_identity":"prepare_recipient_identity";auto key=identity(b.accountId,b.device);if(stage)*stage=source?"prepare_source_signature":"prepare_recipient_signature";protocol::check(mailbox::verifyBinding(b,b.accountId,b.device,key,verifyDevicePayload,Storage::publicKeyId));};verify(a.source,true);for(const auto& b:a.recipients)verify(b,false);
 }
 }

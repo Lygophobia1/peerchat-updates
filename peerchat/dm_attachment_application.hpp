@@ -126,14 +126,15 @@ private:
   evidence.current=[mapping,relationship](const auto& b,const std::string& rel,std::uint64_t other){return rel==relationship&&mapping(b,rel,other);};return evidence;
  }
  void acknowledgeNotice(Job& j){auto evidence=authorizedEvidence(j);validateBody(*j.body,header(j),&evidence);storage_.observeLogicalOrder(j.order);mailbox::Receipt ack;ack.recipientAccount=j.recipient;ack.recipientDevice=identity_.peerId;ack.senderDevice=header(j).senderDevice;ack.messageId=j.message;ack.envelopeDigest=digest(j.envelope);ack.signature=signDevicePayload(mailbox::receiptPayload(ack),identity_);auto previous=j.noticeAck;auto state=j.state;j.noticeAck=mailbox::serializeReceipt(ack);j.state=j.accepted?"downloading":"available";try{save();}catch(...){j.noticeAck=std::move(previous);j.state=state;j.contextUntil=0;throw;}}
- void beginSeal(Job& j){
+ void beginSeal(Job& j,const char*& stage){
   // Reserve enough protected-state capacity for every immutable notice BEFORE
   // encrypting any bytes. Keep room for receipts and storage encryption overhead.
+  stage="prepare_audience_parse";
   auto count=parseAudience(j.audience,j.account,identity_.peerId,j.recipient).recipients.size();std::uint64_t reserve=(j.audience.size()+8192)*(count+3);if(reserve>850*1024){j.state="failed";j.error="Protected attachment state capacity is full; no ciphertext was prepared";j.input.reset();save();return;}
-  auto a=parseAudience(j.audience,j.account,identity_.peerId,j.recipient);auto evidence=authorizedEvidence(j);verifyAudience(a,evidence.identity);protocol::check(evidence.current(a.source,a.relationship,j.recipient));for(const auto& r:a.recipients)protocol::check(evidence.current(r,a.relationship,j.account));
+  auto a=parseAudience(j.audience,j.account,identity_.peerId,j.recipient);stage="prepare_evidence";auto evidence=authorizedEvidence(j);verifyAudience(a,evidence.identity,&stage);stage="prepare_source_binding";protocol::check(evidence.current(a.source,a.relationship,j.recipient));stage="prepare_recipient_binding";for(const auto& r:a.recipients)protocol::check(evidence.current(r,a.relationship,j.account));
   group_attachments::Binding b;b.attachment=j.id;b.sender=identity_.peerId;b.account=j.account;b.direct=true;b.recipientAccount=j.recipient;b.relationship=a.relationship;b.audienceDigest=Storage::publicKeyId(j.audience);
   auto length=j.input->size();transfer::Metadata m{j.id,"ciphertext.peerchat",group_attachments::HeaderBytes+length+std::max<std::uint64_t>(1,(length+group_attachments::BlockBytes-1)/group_attachments::BlockBytes)*group_attachments::TagBytes,{}};
-  if(j.cipherToken.empty())j.sink=io_.stage(m);else {protocol::check(bool(io_.resumeStage));j.sink=io_.resumeStage(m,j.cipherToken);}protocol::check(bool(j.sink));j.cipherToken=io_.location(*j.sink);protocol::check(!j.cipherToken.empty());save();j.ph=io_.hash();j.ch=io_.hash();protocol::check(j.ph&&j.ch);j.sealer=std::make_unique<group_attachments::Sealer>(*j.input,*j.sink,std::move(b),*j.ph,*j.ch);j.state="preparing";save();
+  stage="prepare_staging";if(j.cipherToken.empty())j.sink=io_.stage(m);else {protocol::check(bool(io_.resumeStage));j.sink=io_.resumeStage(m,j.cipherToken);}protocol::check(bool(j.sink));j.cipherToken=io_.location(*j.sink);protocol::check(!j.cipherToken.empty());stage="prepare_staging_save";save();stage="prepare_sealer";j.ph=io_.hash();j.ch=io_.hash();protocol::check(j.ph&&j.ch);j.sealer=std::make_unique<group_attachments::Sealer>(*j.input,*j.sink,std::move(b),*j.ph,*j.ch);j.state="preparing";stage="prepare_sealer_save";save();
  }
  void prepare(Job& j){
   if(!j.sealer->step())return;
@@ -245,6 +246,8 @@ inline void Application::reply(const Blob& wire){
  }
  if(q.operation=="cache_dm_register"){supported_=state=="accepted"&&cacheVersion==2&&dmVersion==1;capability_=supported_?1:0;probeAt_=io_.wall()+10000;return;}
  auto& j=job(q.job);if(j.server!=server_)return;
+ // Fixed local labels only: never include provider text, keys or payload data.
+ const char* stage="reply_validation";
  try{
   if(q.operation=="cache_dm_context"||q.operation=="cache_dm_prepare")protocol::check(io_.wall()>=q.sentAt&&io_.wall()-q.sentAt<30000);
   if(state!="accepted"){
@@ -254,7 +257,7 @@ inline void Application::reply(const Blob& wire){
    pause(j,state.size()<=96?state:"Cache rejected attachment operation");return;
   }
   protocol::check(cacheVersion==2&&dmVersion==1);if(j.body&&size)protocol::check(size==metadata(j).size);if(!descriptorWire.empty()&&j.body)protocol::check(descriptorWire==j.descriptor);if(!audience.empty()&&j.body)protocol::check(audience==j.audience);
-  if(q.operation=="cache_dm_prepare"){protocol::check(!j.body&&j.input&&!audience.empty()&&expires>io_.wall()/1000);protocol::check(j.audience.empty()||j.audience==audience);j.noticeDeadline=expires*1000;j.audience=std::move(audience);j.contextUntil=io_.wall()+30000;save();beginSeal(j);return;}
+  if(q.operation=="cache_dm_prepare"){stage="prepare_fields";protocol::check(!j.body&&j.input&&!audience.empty()&&expires>io_.wall()/1000);stage="prepare_audience_consistency";protocol::check(j.audience.empty()||j.audience==audience);j.noticeDeadline=expires*1000;j.audience=std::move(audience);j.contextUntil=io_.wall()+30000;stage="prepare_save";save();beginSeal(j,stage);return;}
   if(q.operation=="cache_dm_admit"){j.admitted=true;save();enqueue(&j,"cache_dm_acquire");return;}
   if(q.operation=="cache_dm_status"){
    protocol::check(size==metadata(j).size&&offset<=size);j.admitted=true;if(!q.frame.empty()){protocol::Reader frame(q.frame);frame.number();auto kind=static_cast<transfer::Kind>(frame.number());if(kind==transfer::Kind::Finish){protocol::check(complete);receive(j,control(j,transfer::Kind::Complete));}else receive(j,control(j,transfer::Kind::Resume,offset));return;}if(complete){j.uploaded=true;j.state="notice_pending";save();if(uploadHandshake(j)){if(j.lease.empty())enqueue(&j,"cache_dm_acquire");else activate(j);}return;}save();if(j.lease.empty())enqueue(&j,"cache_dm_acquire");else activate(j);return;
@@ -273,7 +276,7 @@ inline void Application::reply(const Blob& wire){
    j.cursor=more?cursor:"";if(std::all_of(j.recipients.begin(),j.recipients.end(),[](const auto& p){return p.verified;}))j.state="complete";save();if(more){j.retry=0;enqueue(&j,"cache_dm_receipts",0,0,Blob(cursor.begin(),cursor.end()));}return;
   }
   protocol::check(false);
- }catch(...){pause(j,"Attachment response failed validation or protected storage");throw;}
+ }catch(...){pause(j,std::string("Attachment response failed validation or protected storage: ")+stage);throw;}
 }
 inline void Application::failure(const Blob& wire){
  protocol::Reader r(wire);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DMCacheFailure/v1");auto generation=r.number();auto id=r.string();protocol::check(r.string()=="network_unavailable");r.end();if(generation!=generation_||!account_)return;auto found=std::find_if(requests_.begin(),requests_.end(),[&](const auto& q){return q.id==id&&q.dispatched;});if(found==requests_.end())return;auto q=std::move(*found);requests_.erase(found);if(q.job.empty()){supported_=false;capability_=0;probeAt_=io_.wall()+10000;}else pause(job(q.job),"Cache connection unavailable; durable attachment data retained");
