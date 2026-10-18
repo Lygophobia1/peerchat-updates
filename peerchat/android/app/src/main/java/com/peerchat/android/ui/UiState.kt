@@ -101,6 +101,7 @@ data class PeerChatUiState(
     val mailboxStorageAllowed:Boolean=false,
     val archiveEnrollment:ArchiveEnrollmentSnapshot?=null,val archiveBusy:Boolean=false,val archiveProgress:com.peerchat.android.application.ArchiveSyncProgress=com.peerchat.android.application.ArchiveSyncProgress(),
     val ownDevices:com.peerchat.android.application.OwnDeviceInventory?=null,
+    val localDeviceFingerprint:String="",val identityDirectoryStatus:String="Identity directory not checked",val identityBusy:Boolean=false,
     val attachmentPreviews:Map<String,String> = emptyMap(),
     val attachmentCompatibility:com.peerchat.android.application.AttachmentCompatibilityChoice?=null,val attachmentCompatibilityBusy:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
@@ -129,6 +130,10 @@ class UnconnectedAccountAccess : AccountAccess {
 }
 
 sealed interface UiAction {
+    data class SelectIdentityAuthority(val confirmedFingerprint:String):UiAction
+    data class EndorseOwnIdentityDevice(val targetDevice:String,val confirmedFingerprint:String):UiAction
+    data class VerifyContactAuthority(val account:Long,val confirmedFingerprint:String):UiAction
+    data class VerifyOwnAccountAuthority(val confirmedFingerprint:String):UiAction
     data object OpenTransferSettings:UiAction
     data class SaveTransferSettings(val value:com.peerchat.android.application.TransferSettingsSnapshot):UiAction
     data class SaveAttachmentSendMode(val mode:AttachmentSendMode):UiAction
@@ -199,6 +204,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
     fun updateSelected(transform: (ConversationUi) -> ConversationUi) = state.copy(conversations =
         state.conversations.map { if (it.id == state.selectedId) transform(it) else it })
     return when (action) {
+        is UiAction.SelectIdentityAuthority,is UiAction.EndorseOwnIdentityDevice,is UiAction.VerifyContactAuthority,is UiAction.VerifyOwnAccountAuthority -> state
         UiAction.OpenTransferSettings -> state.copy(route=Route.TransferSettings,notice=null)
         is UiAction.SaveTransferSettings -> state
         is UiAction.Contacts -> state.copy(route=Route.Contacts,contactPage=action.page,notice=null)

@@ -53,6 +53,15 @@ class AttachmentDeviceSessionTest {
         }
         throw new Exception(stage+" native readiness timed out: "+last);
     }
+    static object IdentityClient(DiscoveryClient session,CoreAdapter core,long account,string device,long generation){
+        var type=typeof(CoreAdapter).Assembly.GetType("PeerChatDesktop.DeviceIdentityDirectoryClient",true);
+        var constructor=type.GetConstructors(BindingFlags.Instance|BindingFlags.NonPublic).Single();
+        return constructor.Invoke(new object[]{session,account,device,generation,new Func<byte[],byte[]>(input=>core.Mailbox(14,input)),new Func<bool>(()=>true)});
+    }
+    static object IdentityCall(object client,string method,params object[] arguments){
+        try{return client.GetType().GetMethod(method,BindingFlags.Instance|BindingFlags.NonPublic).Invoke(client,arguments);}
+        catch(TargetInvocationException error){throw error.InnerException;}
+    }
     static void NativeBridge(string root,int port,string pin){
         string profile=Path.Combine(root,"native-profile");Directory.CreateDirectory(profile);
         var main=new DiscoveryClient("localhost",port,pin);
@@ -74,7 +83,11 @@ class AttachmentDeviceSessionTest {
                 Rejected(()=>AttachmentDeviceSession.Open(main,core,2,device,profile,true,()=>false),"Stopped profile reached native enrollment");
                 Check(!AttachmentDeviceSession.HasCredential(main,2,device,profile),"Stopped profile wrote a credential");
                 var enrolled=AttachmentDeviceSession.Open(main,core,2,device,profile,true,()=>true);
-                try{Check(enrolled.MatchesAttachmentDeviceSession(2,device)&&AttachmentDeviceSession.HasCredential(main,2,device,profile)&&main.SessionToken==token,"Native mailbox enrollment changed messaging state or failed to persist");string state=Convert.ToString(PendingKeys(enrolled,2,device)["state"]);Check(state=="accepted","Native-proof enrolled session could not access attachment cache: "+state);}
+                try{Check(enrolled.MatchesAttachmentDeviceSession(2,device)&&AttachmentDeviceSession.HasCredential(main,2,device,profile)&&main.SessionToken==token,"Native mailbox enrollment changed messaging state or failed to persist");string state=Convert.ToString(PendingKeys(enrolled,2,device)["state"]);Check(state=="accepted","Native-proof enrolled session could not access attachment cache: "+state);
+                    var identities=IdentityClient(enrolled,core,2,device,1);Check(((byte[])IdentityCall(identities,"RegisterSelf")).Length>0,"Native possession proof was not registered over pinned RPC");
+                    var selected=IdentityCall(identities,"ChooseAuthority",device);Check((bool)IdentityCall(identities,"Apply",selected,""),"Explicit own authority did not reconcile through native operation 14");
+                    Check(main.SessionToken==token,"Identity enrollment changed the messaging token");
+                }
                 finally{enrolled.CloseRpc();}
             }
             using(var reopened=new CoreAdapter()){
@@ -85,7 +98,9 @@ class AttachmentDeviceSessionTest {
                 Check(reopened.Mailbox(7).Length==72,"Restarted native proof public key was unavailable");
                 string token=main.SessionToken;
                 var resumed=AttachmentDeviceSession.Open(main,reopened,2,device,profile,false,()=>true);
-                try{Check(resumed.MatchesAttachmentDeviceSession(2,device)&&main.SessionToken==token,"Native mailbox resume failed or changed messaging token");string state=Convert.ToString(PendingKeys(resumed,2,device)["state"]);Check(state=="accepted","Native-proof resumed session could not access attachment cache: "+state);}
+                try{Check(resumed.MatchesAttachmentDeviceSession(2,device)&&main.SessionToken==token,"Native mailbox resume failed or changed messaging token");string state=Convert.ToString(PendingKeys(resumed,2,device)["state"]);Check(state=="accepted","Native-proof resumed session could not access attachment cache: "+state);
+                    var identities=IdentityClient(resumed,reopened,2,device,2);var snapshot=IdentityCall(identities,"Snapshot",2L);Check((bool)IdentityCall(identities,"Apply",snapshot,""),"Restarted native directory did not accept fresh authenticated own snapshot");
+                }
                 finally{resumed.CloseRpc();}
             }
         }finally{main.CloseRpc();}

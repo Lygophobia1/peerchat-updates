@@ -133,26 +133,184 @@ public partial class DesktopApplication {
             });
             if(!ManagedContext(owner,generation,token,actor))return false;
             if(!AccountDeviceSnapshot.CanApply(managedDevices,result))throw new InvalidDataException("A stale device snapshot was rejected. Refresh after reconnecting.");
-            if(opened!=null){managedDeviceSession=opened;opened=null;}managedDeviceOwner=owner;managedDeviceGeneration=generation;managedDeviceToken=token;managedDevices=result;SharedOwnNames.Update(result);RefreshSharedDeviceNames();managedDeviceStatus="Verified account "+account+" · revision "+result.Revision+" · updated "+DateTime.Now.ToString("t");managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);return true;
+            if(opened!=null){managedDeviceSession=opened;opened=null;}managedDeviceOwner=owner;managedDeviceGeneration=generation;managedDeviceToken=token;managedDevices=result;SharedOwnNames.Update(result);RefreshSharedDeviceNames();managedDeviceStatus="Verified account "+account+" · revision "+result.Revision+" · updated "+DateTime.Now.ToString("t");managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);identityNextUtc=DateTime.MinValue;return true;
         }catch(Exception error){if(ManagedContext(owner,generation,token,actor)){managedDeviceStatus=DeviceManagementClient.Failure(error);var stale=managedDeviceSession;managedDeviceSession=null;if(stale!=null)_=Task.Run(()=>stale.CloseRpc());managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);}return false;}
         finally{if(opened!=null){var unused=opened;_=Task.Run(()=>unused.CloseRpc());}managedDeviceBusy=false;PublishManagedDevices();}
+    }
+    readonly Dictionary<long,DeviceIdentitySnapshot> identitySnapshots=new Dictionary<long,DeviceIdentitySnapshot>();
+    bool identityBusy,identityRegistered;DateTime identityNextUtc=DateTime.MinValue;int identityOffset,identityPriorityOffset;long identityUrgentAccount;string identityStatus="Verify this device to refresh enrollment evidence.";
+    DiscoveryClient identityOwner;ulong identitySession,identityProfile,identityGeneration;string identityPin;
+    event EventHandler IdentityDirectoryChanged;
+    void PublishIdentityDirectory(){var changed=IdentityDirectoryChanged;if(changed!=null)changed(this,EventArgs.Empty);}
+    bool IdentityContext(DiscoveryClient owner,ulong session,ulong profile,ulong friends,string token,string pin,string actor,long account){
+        return ManagedContext(owner,session,token,actor)&&profileSessionGeneration==profile&&authenticatedFriendSnapshotGeneration==friends&&
+            mailboxContextAccount==account&&owner.CertificateSha256==pin;
+    }
+    DeviceIdentityDirectoryClient OpenIdentityClient(DiscoveryClient owner,ulong session,ulong profile,ulong friends,string token,string pin,string actor,long account,out DiscoveryClient opened){
+        Func<bool> same=()=>IdentityContext(owner,session,profile,friends,token,pin,actor,account);
+        if(!same()||!AttachmentDeviceSession.HasCredential(owner,account,actor,directory))throw new InvalidDataException("Verify this device before using enrollment evidence.");
+        opened=AttachmentDeviceSession.Open(owner,core,account,actor,directory,false,same);
+        return new DeviceIdentityDirectoryClient(opened,account,actor,checked((long)friends),input=>core.Mailbox(14,input),same);
+    }
+    long[] ActiveIdentityRecipients(bool storageAllowed){
+        var accounts=new HashSet<long>();
+        try{using(var record=new MailboxExecution.Record(core.Mailbox(2,null,"",storageAllowed),4)){
+            long count=record.Number();if(count>64)throw new InvalidDataException("Mailbox pending count exceeds bound.");
+            for(long index=0;index<count;index++){record.Text();record.Text();long account=record.Number();if(account>0)accounts.Add(account);}record.End();
+        }}catch(Exception error){if(error is OutOfMemoryException)throw;}
+        try{var snapshot=core.DmAttachments();foreach(var row in snapshot.items??new CoreAdapter.FileTransferData[0])
+            if(row!=null&&row.dmCache&&row.sending&&row.account>0&&row.dmState!="complete"&&row.dmState!="failed"&&row.dmState!="canceled")accounts.Add(row.account);
+        }catch(Exception error){if(error is OutOfMemoryException)throw;}
+        return accounts.OrderBy(x=>x).ToArray();
+    }
+    async void PumpDeviceIdentity(){
+        var owner=discovery;if(closing||identityBusy||owner==null||owner.AccountId<=0||mailboxContextAccount!=owner.AccountId||authenticatedFriendSnapshotGeneration==0||DateTime.UtcNow<identityNextUtc)return;
+        if(identityOwner!=owner||identitySession!=discoverySessionGeneration||identityProfile!=profileSessionGeneration||identityGeneration!=authenticatedFriendSnapshotGeneration||identityPin!=owner.CertificateSha256){
+            identitySnapshots.Clear();identityRegistered=false;identityOwner=owner;identitySession=discoverySessionGeneration;identityProfile=profileSessionGeneration;identityGeneration=authenticatedFriendSnapshotGeneration;identityPin=owner.CertificateSha256;identityOffset=identityPriorityOffset=0;PublishIdentityDirectory();
+        }
+        bool enrolled;try{enrolled=AttachmentDeviceSession.HasCredential(owner,owner.AccountId,model.OwnId,directory);}catch(Exception error){if(error is OutOfMemoryException)throw;enrolled=false;}
+        if(!enrolled){identityStatus="Verify this device to publish its possession proof.";identityNextUtc=DateTime.UtcNow.AddSeconds(60);PublishIdentityDirectory();return;}
+        var friends=conversationIndex==null?new long[0]:conversationIndex.Records.Where(x=>x.ActiveFriend&&x.AccountId>0).Select(x=>x.AccountId).Distinct().OrderBy(x=>x).ToArray();
+        if(identityUrgentAccount>0&&!friends.Contains(identityUrgentAccount))identityUrgentAccount=0;
+        // Idle contacts rotate in a bounded page. Active cached and mailbox work
+        // gets its own page so a large contact list cannot starve pending jobs.
+        var general=friends.Length<=8?friends:Enumerable.Range(0,8).Select(n=>friends[(identityOffset+n)%friends.Length]).ToArray();if(friends.Length>0)identityOffset=(identityOffset+general.Length)%friends.Length;
+        long urgent=identityUrgentAccount;bool storageAllowed=mailboxStorageAllowed,registered=identityRegistered;
+        identityBusy=true;identityNextUtc=DateTime.UtcNow.AddSeconds(20);PublishIdentityDirectory();
+        var session=discoverySessionGeneration;var profile=profileSessionGeneration;var generation=authenticatedFriendSnapshotGeneration;var token=owner.SessionToken;var pin=owner.CertificateSha256;var actor=model.OwnId;long account=owner.AccountId;
+        DiscoveryClient opened=null;try{
+            var result=await Task.Run(()=>{
+                var snapshots=new Dictionary<long,DeviceIdentitySnapshot>();var errors=new List<string>();
+                var client=OpenIdentityClient(owner,session,profile,generation,token,pin,actor,account,out opened);
+                bool submitted=false;if(!registered){client.RegisterSelf();submitted=true;}
+                var own=client.Snapshot(account);
+                if(!own.HasPossession(actor)){
+                    if(!submitted){client.RegisterSelf();own=client.Snapshot(account);}
+                    if(!own.HasPossession(actor))throw new InvalidDataException("This device's signed possession was not present in the authenticated directory.");
+                }
+                snapshots[account]=own;
+                if(own.AuthorityProof.Length!=0){try{client.Apply(own);}catch(InvalidDataException){errors.Add("Own authority needs explicit selection or current evidence.");}catch(InvalidOperationException){errors.Add("Own authority needs explicit selection or current evidence.");}}
+                else errors.Add("Choose this account's enrollment authority to enable device approval.");
+                var active=ActiveIdentityRecipients(storageAllowed).Where(friends.Contains).ToArray();
+                var priority=active.Length<=16?active:Enumerable.Range(0,16).Select(n=>active[(identityPriorityOffset+n)%active.Length]).ToArray();if(active.Length>0)identityPriorityOffset=(identityPriorityOffset+priority.Length)%active.Length;
+                var targets=(urgent>0&&friends.Contains(urgent)?new[]{urgent}:new long[0]).Concat(priority).Concat(general).Distinct().Take(25).ToArray();
+                foreach(long friend in targets){
+                    if(!IdentityContext(owner,session,profile,generation,token,pin,actor,account))break;
+                    try{var snapshot=client.Snapshot(friend);snapshots[friend]=snapshot;if(snapshot.AuthorityProof.Length!=0)client.Apply(snapshot);else errors.Add("Account "+friend+": no enrollment authority; verify directly when available.");}
+                    catch(Exception error){if(error is OutOfMemoryException)throw;errors.Add("Account "+friend+": enrollment evidence needs verification or refresh.");}
+                }
+                return Tuple.Create(snapshots,errors,active.Length,true);
+            });
+            if(!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return;
+            foreach(var pair in result.Item1)identitySnapshots[pair.Key]=pair.Value;
+            identityRegistered=result.Item4;
+            if(identityUrgentAccount>0&&result.Item1.ContainsKey(identityUrgentAccount))identityUrgentAccount=0;
+            identityNextUtc=DateTime.UtcNow.AddSeconds(result.Item3>0||identityUrgentAccount>0?10:20);
+            identityStatus=result.Item2.Count==0?"Enrollment evidence refreshed at "+DateTime.Now.ToString("t")+".":String.Join(" ",result.Item2.Take(3));
+        }catch(Exception error){if(IdentityContext(owner,session,profile,generation,token,pin,actor,account)){identityStatus=error is DiscoveryRequestException?"This server has no available enrollment directory: "+((DiscoveryRequestException)error).ErrorCode:"Enrollment evidence refresh failed; existing verified identities remain available.";identityNextUtc=DateTime.UtcNow.AddSeconds(60);}}
+        finally{if(opened!=null){var stale=opened;_=Task.Run(()=>stale.CloseRpc());}identityBusy=false;PublishIdentityDirectory();}
+    }
+    async Task<bool> RefreshIdentityForCachedSend(long recipient,Func<bool> selected){
+        var owner=discovery;if(owner==null||recipient<=0||selected==null||!selected())return false;
+        var session=discoverySessionGeneration;var profile=profileSessionGeneration;var generation=authenticatedFriendSnapshotGeneration;
+        var token=owner.SessionToken;var pin=owner.CertificateSha256;var actor=model.OwnId;long account=owner.AccountId;
+        if(!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return false;
+        var until=DateTime.UtcNow.AddSeconds(8);
+        while(identityBusy&&DateTime.UtcNow<until){await Task.Delay(100);if(!selected()||!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return false;}
+        if(identityBusy){Notify("Enrollment evidence is still refreshing. Nothing was queued; retry shortly.");return false;}
+        identityBusy=true;PublishIdentityDirectory();
+        DiscoveryClient opened=null;
+        try{
+            var result=await Task.Run(()=>{
+                var client=OpenIdentityClient(owner,session,profile,generation,token,pin,actor,account,out opened);
+                var current=client.Snapshot(recipient);
+                bool applied=false;
+                if(current.AuthorityProof.Length!=0){ // Inactive roots must reach native revocation reconciliation immediately.
+                    try{applied=client.Apply(current);}catch(InvalidDataException){}catch(InvalidOperationException){}
+                }
+                return Tuple.Create(current,applied);
+            });
+            if(!selected()||!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return false;
+            identitySnapshots[recipient]=result.Item1;
+            if(!result.Item2)identityStatus="Account "+recipient+": enrollment authority is unverified or unavailable; existing verified pins remain in force. Verify its full fingerprint to enroll other devices.";
+            PublishIdentityDirectory();return true; // Native cache admission still decides whether the existing verified audience is sufficient.
+        }catch(DiscoveryRequestException error){
+            if(!selected()||!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return false;
+            if(error.ErrorCode=="unsupported_request")return true; // Older server: the existing verified-pin path remains authoritative.
+            Notify("Recipient enrollment evidence could not be refreshed ("+error.ErrorCode+"). Nothing was queued.");return false;
+        }catch(Exception error){
+            if(error is OutOfMemoryException)throw;
+            if(selected()&&IdentityContext(owner,session,profile,generation,token,pin,actor,account))Notify(error is InvalidDataException?error.Message:"Recipient enrollment evidence could not be verified. Nothing was queued.");
+            return false;
+        }finally{if(opened!=null){var stale=opened;_=Task.Run(()=>stale.CloseRpc());}identityBusy=false;PublishIdentityDirectory();}
+    }
+    async Task<bool> RunIdentityAction(Func<DeviceIdentityDirectoryClient,DeviceIdentitySnapshot> action){
+        var owner=discovery;if(identityBusy||owner==null||owner.AccountId<=0||mailboxContextAccount!=owner.AccountId)return false;
+        var session=discoverySessionGeneration;var profile=profileSessionGeneration;var generation=authenticatedFriendSnapshotGeneration;var token=owner.SessionToken;var pin=owner.CertificateSha256;var actor=model.OwnId;long account=owner.AccountId;
+        identityBusy=true;PublishIdentityDirectory();DiscoveryClient opened=null;
+        try{var result=await Task.Run(()=>action(OpenIdentityClient(owner,session,profile,generation,token,pin,actor,account,out opened)));
+            if(!IdentityContext(owner,session,profile,generation,token,pin,actor,account))return false;
+            identitySnapshots[result.Account]=result;identityStatus="Enrollment evidence updated at "+DateTime.Now.ToString("t")+".";identityNextUtc=DateTime.MinValue;return true;
+        }catch(Exception error){if(IdentityContext(owner,session,profile,generation,token,pin,actor,account))identityStatus=error is InvalidDataException?error.Message:error is DiscoveryRequestException?"Enrollment request rejected: "+((DiscoveryRequestException)error).ErrorCode:"Enrollment request could not finish. Refresh and retry.";return false;}
+        finally{if(opened!=null){var stale=opened;_=Task.Run(()=>stale.CloseRpc());}identityBusy=false;PublishIdentityDirectory();}
+    }
+    void ConfirmExactIdentity(Window owner,string title,string explanation,string fingerprint,Func<string,Task<bool>> action){
+        if(!DeviceIdentityDirectoryClient.Hex(fingerprint))return;
+        var body=new StackPanel{Margin=new Thickness(20)};var prompt=new Window{Title=title,Owner=owner,Width=560,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,Background=owner.Background,Foreground=owner.Foreground,Resources=owner.Resources,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=body};
+        body.Children.Add(HistoryTitle(title));body.Children.Add(HistoryText(explanation+"\n\nFull fingerprint:\n"+fingerprint+"\n\nCompare it through a trusted channel, then type all 64 characters to confirm."));
+        var typed=new TextBox{MaxLength=64,Margin=new Thickness(0,12,0,12)};AutomationProperties.SetName(typed,"Confirmed full identity fingerprint");body.Children.Add(typed);var status=HistoryText("");body.Children.Add(status);
+        var actions=new WrapPanel();body.Children.Add(actions);actions.Children.Add(HistoryButton("Cancel",()=>prompt.Close()));actions.Children.Add(HistoryButton("Confirm exact fingerprint",async()=>{
+            if(typed.Text!=fingerprint){status.Text="The complete fingerprint does not match.";return;}
+            prompt.IsEnabled=false;try{if(await action(typed.Text))prompt.Close();else status.Text=identityStatus;}finally{prompt.IsEnabled=true;}
+        }));prompt.ShowDialog();
     }
     StackPanel DeviceManagerPanel(Window dialog){
         var panel=new StackPanel{Margin=new Thickness(4),MaxWidth=760,HorizontalAlignment=HorizontalAlignment.Stretch};panel.Children.Add(HistoryTitle("Device Manager"));panel.Children.Add(HistoryText("Manage verified devices belonging to this account only. Device names are labels, not fingerprints or trust decisions."));
         var status=HistoryText(managedDeviceStatus);panel.Children.Add(status);var buttons=new WrapPanel{Margin=new Thickness(0,12,0,12)};panel.Children.Add(buttons);
         var refresh=HistoryButton("Refresh",async()=>await RunDeviceManagement(null,false));var verify=HistoryButton("Verify this device",async()=>{if(Confirm("Verify this device","Use this profile's existing identity key to establish a device-bound management session? No keys, history, trust or grants will be replaced.","Verify"))await RunDeviceManagement(null,true);});buttons.Children.Add(refresh);buttons.Children.Add(verify);
+        var identityLine=HistoryText(identityStatus);panel.Children.Add(identityLine);
+        var identityActions=new WrapPanel{Margin=new Thickness(0,0,0,12)};panel.Children.Add(identityActions);
+        var identityRefresh=HistoryButton("Refresh enrollment evidence",()=>{identityNextUtc=DateTime.MinValue;PumpDeviceIdentity();});identityActions.Children.Add(identityRefresh);
+        var chooseAuthority=HistoryButton("Choose this device as enrollment authority",()=>{
+            string local=model.OwnId;ConfirmExactIdentity(dialog,"Choose enrollment authority","This lets this device approve additional devices for this exact account. It does not grant history, group or cache access. Only choose it after checking its fingerprint.",local,typed=>RunIdentityAction(client=>client.ChooseAuthority(typed)));
+        });identityActions.Children.Add(chooseAuthority);
+        var verifyOwnAuthority=HistoryButton("Verify existing account authority",()=>{
+            if(discovery==null||identityOwner!=discovery||identitySession!=discoverySessionGeneration||identityGeneration!=authenticatedFriendSnapshotGeneration)return;
+            DeviceIdentitySnapshot evidence;if(!identitySnapshots.TryGetValue(discovery.AccountId,out evidence)||evidence.AuthorityProof.Length==0||!evidence.AuthorityActive)return;
+            string fingerprint;try{fingerprint=evidence.AuthorityFingerprint();}catch(InvalidDataException){identityStatus="Account authority evidence is malformed.";PublishIdentityDirectory();return;}
+            long ownAccount=discovery.AccountId;
+            ConfirmExactIdentity(dialog,"Verify existing account authority","This account already has an enrollment authority. Compare this full fingerprint through a trusted channel. This one-time approval permits that authority's direct device endorsements; an existing device pin alone does not grant that scope.",fingerprint,typed=>RunIdentityAction(client=>{var fresh=client.Snapshot(ownAccount);if(fresh.AuthorityFingerprint()!=typed)throw new InvalidDataException("The account authority changed. Refresh and compare again.");client.Apply(fresh,typed);return fresh;}));
+        });identityActions.Children.Add(verifyOwnAuthority);
+        var contactAuthority=HistoryButton("Verify contact enrollment authority",()=>{
+            var selected=model.Groups?null:model.Selected;DeviceIdentitySnapshot evidence;
+            if(discovery==null||identityOwner!=discovery||identitySession!=discoverySessionGeneration||identityGeneration!=authenticatedFriendSnapshotGeneration||identityPin!=discovery.CertificateSha256||selected==null||selected.AccountId<=0||selected.Contact==null||!selected.IsFriend||!identitySnapshots.TryGetValue(selected.AccountId,out evidence)||evidence.AuthorityProof.Length==0){identityStatus="Select a friend and refresh enrollment evidence first.";PublishIdentityDirectory();return;}
+            string fingerprint;try{fingerprint=evidence.AuthorityFingerprint();}catch(InvalidDataException){identityStatus="Contact authority evidence is malformed.";PublishIdentityDirectory();return;}
+            long targetAccount=selected.AccountId;string contactName=selected.Name;
+            ConfirmExactIdentity(dialog,"Verify contact enrollment authority","One-time authorization for "+contactName+" (account "+targetAccount+"). Compare this authority fingerprint directly with the contact. Existing verified device pins do not grant enrollment authority.",fingerprint,typed=>RunIdentityAction(client=>{var fresh=client.Snapshot(targetAccount);if(fresh.AuthorityFingerprint()!=typed)throw new InvalidDataException("The contact authority changed. Refresh and compare again.");client.Apply(fresh,typed);return fresh;}));
+        });identityActions.Children.Add(contactAuthority);
         var rows=new StackPanel();panel.Children.Add(rows);panel.Children.Add(HistoryText("Revocation preserves local history and queued ciphertext. It blocks future authorized server access; it cannot erase data or keys already held by a device. Self/last-device revocation and reactivation are unavailable."));
         Action render=()=>{
             status.Text=managedDeviceStatus;refresh.IsEnabled=verify.IsEnabled=!managedDeviceBusy&&discovery!=null;
+            identityLine.Text=identityStatus;identityRefresh.IsEnabled=!identityBusy&&discovery!=null;
+            DeviceIdentitySnapshot ownIdentity=null;bool hasOwnIdentity=discovery!=null&&identitySnapshots.TryGetValue(discovery.AccountId,out ownIdentity)&&ownIdentity.AuthorityProof.Length!=0;
+            chooseAuthority.IsEnabled=!identityBusy&&discovery!=null&&managedDevices!=null&&managedDevices.Account==discovery.AccountId&&managedDeviceOwner==discovery&&managedDeviceGeneration==discoverySessionGeneration&&!hasOwnIdentity;
+            verifyOwnAuthority.IsEnabled=!identityBusy&&hasOwnIdentity&&ownIdentity.AuthorityActive&&identityOwner==discovery&&identitySession==discoverySessionGeneration&&identityGeneration==authenticatedFriendSnapshotGeneration;
+            var selectedContact=model.Groups?null:model.Selected;DeviceIdentitySnapshot selectedEvidence;
+            contactAuthority.IsEnabled=!identityBusy&&discovery!=null&&identityOwner==discovery&&identitySession==discoverySessionGeneration&&identityGeneration==authenticatedFriendSnapshotGeneration&&identityPin==discovery.CertificateSha256&&selectedContact!=null&&selectedContact.IsFriend&&identitySnapshots.TryGetValue(selectedContact.AccountId,out selectedEvidence)&&selectedEvidence.AuthorityProof.Length!=0;
             rows.Children.Clear();var snapshot=managedDevices;if(snapshot==null||discovery==null||snapshot.Account!=discovery.AccountId||managedDeviceOwner!=discovery||managedDeviceGeneration!=discoverySessionGeneration){rows.Children.Add(HistoryText("No current verified inventory. Other accounts and historical contact identities are not listed here."));return;}
             foreach(var entry in snapshot.Devices.OrderByDescending(d=>d.Current).ThenBy(d=>d.State).ThenBy(d=>d.DisplayName,StringComparer.CurrentCultureIgnoreCase)){
                 var content=new StackPanel{Margin=new Thickness(14)};var title=HistoryTitle(entry.DisplayName+(entry.Current?" · This device":""));title.FontSize=17;title.TextWrapping=TextWrapping.Wrap;content.Children.Add(title);content.Children.Add(HistoryText(entry.Identity.Substring(0,12)+"…"+entry.Identity.Substring(56)+" · "+entry.Status));content.Children.Add(HistoryText("Platform: "+entry.Platform+" · Version: "+entry.Version+"\nOffline attachments: "+entry.CacheDisplay+"\nEncrypted message capability: Not available"));
                 var details=new StackPanel();var fingerprint=new TextBox{Text=entry.Identity,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,6,0,8)};AutomationProperties.SetName(fingerprint,"Full device fingerprint");details.Children.Add(fingerprint);string created="Not available";try{if(entry.CreatedUtc>0)created=DateTimeOffset.FromUnixTimeSeconds(entry.CreatedUtc).LocalDateTime.ToString("g");}catch(ArgumentOutOfRangeException){}details.Children.Add(HistoryText("Enrolled: "+created+"\nLast verified activity: Not retained\nAccount: "+snapshot.Account+"\nHistory permissions: managed separately in Privacy & Security"));content.Children.Add(new Expander{Header="Identity and authorization details",Content=details,Foreground=Brush("#A1AEBB"),Margin=new Thickness(0,8,0,4)});
                 var actions=new WrapPanel();content.Children.Add(actions);var rename=HistoryButton("Rename",()=>ManageDeviceName(dialog,snapshot,entry));rename.IsEnabled=!managedDeviceBusy&&entry.State=="active";actions.Children.Add(rename);var revoke=HistoryButton("Revoke device",()=>RevokeManagedDevice(dialog,snapshot,entry));revoke.IsEnabled=!managedDeviceBusy&&snapshot.CanRevoke(entry);revoke.ToolTip=entry.Current?"This device cannot revoke itself.":entry.State=="revoked"?"Revoked devices cannot automatically re-enroll.":"Require account password and this device's signed proof.";actions.Children.Add(revoke);
+                if(!entry.Current&&entry.State=="active"){
+                    DeviceIdentitySnapshot ownEvidence;string authority="";if(identitySnapshots.TryGetValue(snapshot.Account,out ownEvidence)&&ownEvidence.AuthorityProof.Length!=0&&ownEvidence.AuthorityActive)try{authority=ownEvidence.AuthorityFingerprint();}catch(InvalidDataException){}
+                    var enroll=HistoryButton("Endorse for device identity",()=>ConfirmExactIdentity(dialog,"Endorse device identity","Approve this registered device as another identity for account "+snapshot.Account+". This does not grant history, group or cache access.",entry.Identity,typed=>RunIdentityAction(client=>client.Endorse(entry.Identity,typed))));
+                    enroll.IsEnabled=!identityBusy&&authority==model.OwnId;actions.Children.Add(enroll);
+                }
                 rows.Children.Add(new Border{Child=content,BorderBrush=Brush("#2B3946"),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Margin=new Thickness(0,0,0,12)});
             }
         };
-        EventHandler changed=(s,e)=>render();ManagedDevicesChanged+=changed;dialog.Closed+=(s,e)=>ManagedDevicesChanged-=changed;panel.IsVisibleChanged+=(s,e)=>{if(panel.IsVisible){render();managedDeviceNextUtc=DateTime.MinValue;PumpDeviceManagement();}};render();return panel;
+        EventHandler changed=(s,e)=>render();ManagedDevicesChanged+=changed;IdentityDirectoryChanged+=changed;dialog.Closed+=(s,e)=>{ManagedDevicesChanged-=changed;IdentityDirectoryChanged-=changed;};panel.IsVisibleChanged+=(s,e)=>{if(panel.IsVisible){render();managedDeviceNextUtc=DateTime.MinValue;identityNextUtc=DateTime.MinValue;PumpDeviceManagement();PumpDeviceIdentity();}};render();return panel;
     }
     void ManageDeviceName(Window owner,AccountDeviceSnapshot snapshot,ManagedAccountDevice device){
         var body=new StackPanel{Margin=new Thickness(20)};var dialog=new Window{Title="Rename device",Owner=owner,Width=480,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,Background=owner.Background,Foreground=owner.Foreground,Resources=owner.Resources,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=body};body.Children.Add(HistoryText("Shared label for account "+snapshot.Account+"\n"+device.Identity));var name=new TextBox{Text=device.Name,MaxLength=64,Margin=new Thickness(0,12,0,12)};AutomationProperties.SetName(name,"Device display name");body.Children.Add(name);var message=HistoryText("");body.Children.Add(message);var save=HistoryButton("Save name",async()=>{try{string value=AccountDeviceSnapshot.NormalizeName(name.Text);dialog.IsEnabled=false;bool ok=await RunDeviceManagement(client=>client.Rename(snapshot,device.Identity,value),false);if(ok)dialog.Close();else message.Text=managedDeviceStatus;}catch(Exception error){message.Text=error.Message;}finally{dialog.IsEnabled=true;}});body.Children.Add(save);dialog.ShowDialog();

@@ -74,7 +74,8 @@ public sealed partial class DiscoveryClient {
                     var bytes=Encoding.UTF8.GetBytes(channelJson.Serialize(request));
                     if(bytes.Length>(type.StartsWith("mailbox_",StringComparison.Ordinal)||AttachmentCacheOperation(type)?100000:4096))throw new InvalidDataException("RPC request exceeds bound");
                     phase=System.Diagnostics.Stopwatch.GetTimestamp();WriteFrame(rpcTls,bytes);
-                    var reply=channelJson.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(rpcTls,100000)));
+                    bool identityReply=type.StartsWith("device_identity_",StringComparison.Ordinal);
+                    var reply=(identityReply?new JavaScriptSerializer{MaxJsonLength=150000}:channelJson).Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(ReadFrame(rpcTls,identityReply?150000:100000)));
                     exchange=System.Diagnostics.Stopwatch.GetTimestamp()-phase;phase=0;
                     if(Text(reply,"type")!="rpc_result"||Text(reply,"rpcRequestId")!=id||Text(reply,"operation")!=type)throw new InvalidDataException("RPC correlation failed");
                     var body=reply["body"] as Dictionary<string,object>;if(body==null)throw new InvalidDataException("RPC body missing");

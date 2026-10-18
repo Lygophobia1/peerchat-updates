@@ -33,11 +33,12 @@ internal fun nativeSqlStatements(sql:String):List<String> {
 
 // Platform execution/crypto only. Native Storage retains ALL schema, record,
 // history/outbox, ordering, dedupe and transaction policy.
-class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false,private val registryDiagnostic:((String)->Unit)?=null) : AutoCloseable {
+class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false,
+    private val identityDirectoryOnly:Boolean=false,private val registryDiagnostic:((String)->Unit)?=null) : AutoCloseable {
     private val applicationContext = context.applicationContext
     private val state = ProfileSecurity(context.applicationContext, profile)
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
-    private val file = File(directory, if (registryOnly) "device-key-registry.sqlite" else "peerchat.sqlite")
+    private val file = File(directory, when { identityDirectoryOnly->"identity-directory.sqlite";registryOnly->"device-key-registry.sqlite";else->"peerchat.sqlite" })
     private val recipient by lazy { AndroidRecipientKeyProvider(applicationContext, profile) }
     private val recipientEvidence=RecipientDiagnostic()
     val recipientDiagnostic:String get()=recipientEvidence.value
@@ -91,8 +92,12 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
     // Separate DB file avoids self-contention while a KeyManager lease spans
     // decryption and durable message acceptance on the normal profile database.
     fun keyRegistryProvider(): Any = recipientOperation("key_registry_provider") {
-        checkOpen(); invalid(!registryOnly)
+        checkOpen(); invalid(!registryOnly&&!identityDirectoryOnly)
         AndroidStoragePlatform(applicationContext, profile, true){recipientEvidence.record(it)}
+    }
+    fun identityDirectoryProvider():Any {
+        checkOpen();invalid(!registryOnly&&!identityDirectoryOnly)
+        return AndroidStoragePlatform(applicationContext,profile,identityDirectoryOnly=true)
     }
     private fun <T> registryOperation(stage:String,operation:()->T):T {
         registryDiagnostic?.invoke("stage=$stage")

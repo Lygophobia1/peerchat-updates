@@ -45,6 +45,9 @@ interface MessagingApplication:AutoCloseable {
     suspend fun searchPeople(query:String):List<DirectoryAccountSnapshot> = error("People search unavailable")
     suspend fun cancelFriend(accountId:Long) { error("Request cancellation unavailable") }
     suspend fun refreshContacts() { error("Contact refresh unavailable") }
+    suspend fun selectIdentityAuthority(confirmedFingerprint:String) { error("Identity authority unavailable") }
+    suspend fun endorseOwnDevice(targetDevice:String,confirmedFingerprint:String) { error("Identity endorsement unavailable") }
+    suspend fun verifyContactAuthority(account:Long,confirmedFingerprint:String) { error("Contact identity verification unavailable") }
     suspend fun transferSettings():TransferSettingsSnapshot = error("Transfer settings unavailable")
     suspend fun saveTransferSettings(value:TransferSettingsSnapshot) { error("Transfer settings unavailable") }
     suspend fun respondFriend(accountId:Long,accept:Boolean)

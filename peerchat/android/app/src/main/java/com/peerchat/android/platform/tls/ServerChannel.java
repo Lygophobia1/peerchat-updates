@@ -186,7 +186,7 @@ public final class ServerChannel implements AutoCloseable {
     }
     public byte[] read(int maximum)throws IOException {
         operations.check();
-        if(maximum<1||maximum>100000)throw new IOException("Invalid frame bound");
+        if(maximum<1||maximum>131072)throw new IOException("Invalid frame bound");
         DataInputStream input=new DataInputStream(socket.getInputStream());int size=input.readInt();
         if(size<1||size>maximum)throw new IOException("Invalid server frame size");
         byte[] data=new byte[size];input.readFully(data);return data;

@@ -171,7 +171,8 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         connection=when {snapshot.authenticated&&snapshot.serverPresenceLive->ConnectionState.Online
             snapshot.authenticated->ConnectionState.Reconnecting
             else->ConnectionState.Offline},
-        load=if(conversations.isEmpty())LoadState.Empty else LoadState.Ready,recentCalls=emptyList(),groupInvitations=snapshot.groupInvitations)
+        load=if(conversations.isEmpty())LoadState.Empty else LoadState.Ready,recentCalls=emptyList(),groupInvitations=snapshot.groupInvitations,
+        localDeviceFingerprint=if(snapshot.authenticated)snapshot.localPeerId else "",identityDirectoryStatus=snapshot.identityDirectoryStatus)
 }
 
 class NativePresenter(application: Application,private val backend:MessagingApplication,
@@ -883,6 +884,27 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.MailboxStorage -> viewModelScope.launch {
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
                 catch(failure:Exception){mutable.value=mutable.value.copy(notice=if(failure is com.peerchat.android.application.MailboxConsentChangeUnavailable)failure.message else "Mailbox privacy preference could not be saved; existing consent is unchanged.")}
+            }
+            is UiAction.SelectIdentityAuthority,is UiAction.EndorseOwnIdentityDevice,is UiAction.VerifyContactAuthority,is UiAction.VerifyOwnAccountAuthority -> {
+                if(mutable.value.identityBusy)return
+                val epoch=uiGeneration;val account=current.accountId
+                mutable.value=mutable.value.copy(identityBusy=true,notice=null)
+                viewModelScope.launch{
+                    try{
+                        when(action){
+                            is UiAction.SelectIdentityAuthority->backend.selectIdentityAuthority(action.confirmedFingerprint)
+                            is UiAction.EndorseOwnIdentityDevice->backend.endorseOwnDevice(action.targetDevice,action.confirmedFingerprint)
+                            is UiAction.VerifyContactAuthority->backend.verifyContactAuthority(action.account,action.confirmedFingerprint)
+                            is UiAction.VerifyOwnAccountAuthority->backend.verifyContactAuthority(account,action.confirmedFingerprint)
+                            else->error("Unreachable")
+                        }
+                        if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice="Identity verification saved for the exact fingerprint shown.")
+                    }catch(failure:Exception){
+                        if(failure is CancellationException)throw failure
+                        retainDiagnostic("Identity","Identity verification failed closed")
+                        if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice="Identity verification was not accepted. Check the exact fingerprint and current account, then retry.")
+                    }finally{if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(identityBusy=false)}
+                }
             }
             UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize -> {
                 if(mutable.value.archiveBusy)return

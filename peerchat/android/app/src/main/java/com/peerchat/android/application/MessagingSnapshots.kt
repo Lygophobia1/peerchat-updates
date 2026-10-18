@@ -29,7 +29,8 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val groupInvitations:List<GroupInvitationSnapshot> = emptyList(),val groupDiagnostics:String="Group authorization not loaded",
     val voice:VoiceSnapshot=VoiceSnapshot(),val voiceRooms:List<GroupVoiceRoomsSnapshot> = emptyList(),val deviceVerifications:List<DeviceVerification> = emptyList(),
     val mailboxReenrollment:MailboxReenrollment?=null,val mailboxRecoveryError:String?=null,
-    val freshMailboxMessageIds:Set<String> = emptySet(),val ownDevices:OwnDeviceInventory?=null)
+    val freshMailboxMessageIds:Set<String> = emptySet(),val ownDevices:OwnDeviceInventory?=null,
+    val identityDirectoryStatus:String="Identity directory not checked")
 
 // Fixed native decision codes only: never format provider exception messages,
 // server payloads, credentials or key material into the diagnostic projection.

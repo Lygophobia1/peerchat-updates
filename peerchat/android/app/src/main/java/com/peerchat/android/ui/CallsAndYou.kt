@@ -110,6 +110,7 @@ internal fun voiceStatus(state:Long):String=when(state){
         if(!state.demo){
             OutlinedButton({dispatch(UiAction.OpenTransferSettings)},Modifier.fillMaxWidth().testTag("open-transfer-settings")){Text("File Transfer Settings")}
             ArchiveDevicesSection(state,dispatch)
+            DeviceIdentitySettingsSection(state,dispatch)
             Text("Offline encrypted mailbox storage",style=MaterialTheme.typography.titleMedium)
             Row(verticalAlignment=Alignment.CenterVertically){
                 Switch(state.mailboxStorageAllowed,{dispatch(UiAction.MailboxStorage(it))})

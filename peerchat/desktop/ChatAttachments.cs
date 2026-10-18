@@ -365,7 +365,10 @@ public partial class DesktopApplication {
             }else state=dmAttachmentExecution==null?"":dmAttachmentExecution.LastState;
         }catch(Exception error){if(!preflightRequestStarted||!DmAttachmentDelivery.PreflightTransportUnavailable(error)){if(!closing)Notify("Offline attachment readiness could not be verified. Nothing was queued; retry after the authenticated connection recovers.");return DmAttachmentDeliveryMode.Cancel;}state="preflight_transport_unavailable";}
         if(closing||model.Groups||model.Selected!=target||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=peer)return DmAttachmentDeliveryMode.Cancel;
-        if(state=="accepted")return DmAttachmentDeliveryMode.EncryptedCache;
+        if(state=="accepted"){
+            if(!await RefreshIdentityForCachedSend(account,sameScope)||!sameScope())return DmAttachmentDeliveryMode.Cancel;
+            identityUrgentAccount=account;identityNextUtc=DateTime.MinValue;PumpDeviceIdentity();return DmAttachmentDeliveryMode.EncryptedCache;
+        }
         if(state!="preflight_transport_unavailable"&&!DmAttachmentDelivery.CompatibilityBlocked(state)){Notify("Attachment preflight did not authorize delivery ("+(state??"unavailable")+"). No cache checks were bypassed and no direct transfer was started.");return DmAttachmentDeliveryMode.Cancel;}
         // A direct transfer is a distinct user-selected scope, never conversion
         // of a failed upload. Try only the existing route owner before offering it.

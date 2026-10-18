@@ -64,7 +64,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
                 .put("rpcRequestId",id).put("sessionToken",token).put("publicIdentity",device)
             if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))request.put("requestId",id)
             connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))100000 else 4096)
-            val reply=JSONObject(connection.read(100000).toString(Charsets.UTF_8))
+            val reply=JSONObject(connection.read(if(type.startsWith("device_identity_"))131072 else 100000).toString(Charsets.UTF_8))
             check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
             val body=reply.getJSONObject("body")
             if(type.startsWith("cache_dm_"))require(body.getString("requestId")==id)
@@ -92,7 +92,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         val response=try {if(allowRpc&&authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
-            JSONObject(channel.read(if(type=="device_inventory"||type=="device_metadata")100000 else if(type=="friend_state")65536 else 16384).toString(Charsets.UTF_8))
+            JSONObject(channel.read(if(type.startsWith("device_identity_"))131072 else if(type=="device_inventory"||type=="device_metadata")100000 else if(type=="friend_state")65536 else 16384).toString(Charsets.UTF_8))
         }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
         if(!response.optBoolean("ok")) {
             val code=response.optString("error", "request_failed")
@@ -196,6 +196,21 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         }
         return request("device_inventory",JSONObject().put("publicIdentity",device),allowRpc=false)
     }
+    // Every request uses this session's token and its registered public identity.
+    // The caller fences account/profile/generation on either side of the wait.
+    fun identityRegister(proof:String):JSONObject=request("device_identity_register",JSONObject().put("proof",proof).put("publicIdentity",device),allowRpc=false)
+    fun identitySnapshot(account:Long):JSONObject {
+        require(account>0)
+        return request("device_identity_snapshot",JSONObject().put("accountId",account.toString()).put("publicIdentity",device),allowRpc=false)
+    }
+    fun identityChallenge(endorsementTarget:String?=null):JSONObject {
+        require(endorsementTarget==null||endorsementTarget.matches(Regex("[0-9a-f]{64}")))
+        return request(if(endorsementTarget==null)"device_identity_authority_challenge" else "device_identity_endorse_challenge",
+            JSONObject().put("publicIdentity",device).also{if(endorsementTarget!=null)it.put("targetDevice",endorsementTarget)},allowRpc=false)
+    }
+    fun identityCommit(proof:String,endorsement:Boolean):JSONObject=request(
+        if(endorsement)"device_identity_endorse_commit" else "device_identity_authority_commit",
+        JSONObject().put("proof",proof).put("publicIdentity",device),allowRpc=false)
     fun bootstrap():JSONObject {
         val active=checkNotNull(session)
         if(active.bootstrapVersion!=1){presence();return friends()} // Existing servers, same fail-closed checks.

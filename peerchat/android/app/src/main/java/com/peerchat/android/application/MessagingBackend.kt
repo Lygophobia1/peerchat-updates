@@ -5,6 +5,7 @@ import com.peerchat.android.NativeProfile
 import com.peerchat.android.ProfileBridge
 import com.peerchat.android.ReliableBridge
 import com.peerchat.android.MailboxBridge
+import com.peerchat.android.IdentityDirectoryBridge
 import com.peerchat.android.platform.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -52,6 +53,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val cacheLane=BackendWorkLane()
     private val archiveLane=BackendWorkLane()
     private val pushLane=BackendWorkLane()
+    private val identityLane=BackendWorkLane()
+    private var identityAt=0L
+    private var identityUnsupported=false
+    private var identityCursor=0
+    private var identityRegistration:ScopedBackendWork.Identity?=null
     private var eligibilityAt=0L
     private var pushAt=0L
     private var nativeDiagnosticAt=0L
@@ -868,6 +874,26 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(ready==2L)throw AttachmentModeUnavailable("cached_unsupported")
         return ready==1L
     }
+    /** Repair selected recipient evidence before cached admission. The server
+     * supplies signed records only; an unconfirmed authority is never promoted. */
+    private fun refreshSelectedIdentity(work:ScopedBackendWork,p:PendingAttachmentCompatibility){
+        if(identityUnsupported)return
+        val started=System.currentTimeMillis()
+        try{
+            val snapshot=DeviceIdentityDirectoryExecution.snapshot(work.network{p.owner.identitySnapshot(p.recipient)},
+                p.recipient,p.owner.endpoint.certificatePin,p.session.accountId)
+            if(snapshot.authorityProof.isNotEmpty())work.local{
+                check(compatibilityScope(p))
+                DeviceIdentityDirectoryExecution.applyIfVerified(
+                    {bytes->checkNotNull(IdentityDirectoryBridge.request(checkNotNull(profile).handle,bytes))},
+                    snapshot,p.session.accountId,p.generation,started)
+            }
+        }catch(failure:ScopedBackendWork.Superseded){throw failure}
+        catch(failure:Exception){
+            if(expiredServerSession(failure))throw failure
+            work.finish{identityAt=0L}
+        }
+    }
     override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:AttachmentSendMode):String=withContext(Dispatchers.IO){
         val (intent, selected)=synchronized(gate){
             attachmentSelection.begin {
@@ -920,6 +946,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 if(failure.reason=="cached_unsupported")throw AttachmentModeUnavailable("direct_device_offline; cached_unsupported")
                 throw failure
             }catch(_:AttachmentReadinessUnavailable){throw AttachmentModeUnavailable("direct_device_offline; cached_readiness_timeout")}
+            refreshSelectedIdentity(work,bound)
             val alternative=work.network{attachmentSendPreflight(bound.recipient,
                 {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
             if(alternative!=AttachmentSendPreflight.Cached)throw AttachmentModeUnavailable(
@@ -929,6 +956,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(pending.token,pending.name,false,pending.peer,
                 cachedReady=true,selectedDirect=true))
         }
+        refreshSelectedIdentity(work,bound)
         val preflight=work.network{attachmentSendPreflight(bound.recipient,
             {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -956,6 +984,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         if(mode==AttachmentSendMode.Cached){
             check(pending.cachedReady){"Cached transfer was not explicitly offered"}
             val work=ScopedBackendWork(gate){attachmentSelection.pending===pending&&compatibilityScope(pending)}
+            refreshSelectedIdentity(work,pending)
             val preflight=work.network{attachmentSendPreflight(pending.recipient,
                 {synchronized(gate){attachmentSelection.pending===pending&&compatibilityScope(pending)}},pending.owner::directAttachmentCache)}
             if(preflight!=AttachmentSendPreflight.Cached)throw AttachmentModeUnavailable(
@@ -1005,6 +1034,68 @@ class MessagingBackend(context: Context,private val profileName: String="default
         check(!stopped&&authorizationSnapshotInstalled)
         contactsDirty=true;refreshAt=0L;groupRefreshAt=0L;projectionCadence.dirty()
     }}
+    override suspend fun selectIdentityAuthority(confirmedFingerprint:String)=withContext(Dispatchers.IO){
+        val captured=synchronized(gate){
+            val scope=checkNotNull(backendWorkScope());val owner=checkNotNull(accounts);val active=checkNotNull(owner.session)
+            val opened=checkNotNull(profile);val device=mutable.value.localPeerId
+            require(confirmedFingerprint==device&&device.matches(Regex("[0-9a-f]{64}")))
+            Triple(scope,owner,Pair(active.accountId,Pair(opened.handle,generation)))
+        }
+        val (scope,owner,ids)=captured;val account=ids.first;val handle=ids.second.first;val revision=ids.second.second
+        val pin=owner.endpoint.certificatePin
+        val possession=scope.local{checkNotNull(IdentityDirectoryBridge.request(handle,
+            DeviceIdentityDirectoryExecution.command(0,account,revision,pin,System.currentTimeMillis())))}
+        require(possession.size in 1..1024)
+        scope.network{owner.identityRegister(DeviceIdentityDirectoryExecution.encoded(possession))}
+        val challenge=DeviceIdentityDirectoryExecution.challenge(scope.network{owner.identityChallenge()},account,pin)
+        val proof=scope.local{checkNotNull(IdentityDirectoryBridge.request(handle,
+            DeviceIdentityDirectoryExecution.command(1,account,revision,pin,System.currentTimeMillis()){
+                it.blob(challenge);it.text(confirmedFingerprint)
+            }))}
+        require(proof.size in 1..2048)
+        scope.network{owner.identityCommit(DeviceIdentityDirectoryExecution.encoded(proof),false)}
+        val snapshotStarted=System.currentTimeMillis()
+        val snapshot=DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(account)},account,pin,account)
+        scope.local{DeviceIdentityDirectoryExecution.apply({bytes->checkNotNull(IdentityDirectoryBridge.request(handle,bytes))},
+            snapshot,account,revision,snapshotStarted,confirmedFingerprint);identityAt=0L}
+    }
+    override suspend fun endorseOwnDevice(targetDevice:String,confirmedFingerprint:String)=withContext(Dispatchers.IO){
+        require(targetDevice==confirmedFingerprint&&targetDevice.matches(Regex("[0-9a-f]{64}")))
+        val captured=synchronized(gate){
+            val scope=checkNotNull(backendWorkScope());val owner=checkNotNull(accounts);val active=checkNotNull(owner.session)
+            val opened=checkNotNull(profile);val inventory=mutable.value.ownDevices
+            check(inventory?.account==active.accountId&&inventory.devices.any{it.peerId==targetDevice&&!it.revoked&&!it.current})
+            Triple(scope,owner,Pair(active.accountId,Pair(opened.handle,generation)))
+        }
+        val (scope,owner,ids)=captured;val account=ids.first;val handle=ids.second.first;val revision=ids.second.second
+        val pin=owner.endpoint.certificatePin
+        val snapshotStarted=System.currentTimeMillis()
+        val ownSnapshot=DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(account)},account,pin,account)
+        scope.local{DeviceIdentityDirectoryExecution.apply({bytes->checkNotNull(IdentityDirectoryBridge.request(handle,bytes))},
+            ownSnapshot,account,revision,snapshotStarted)}
+        val challenge=DeviceIdentityDirectoryExecution.challenge(scope.network{owner.identityChallenge(targetDevice)},account,pin)
+        val proof=scope.local{checkNotNull(IdentityDirectoryBridge.request(handle,
+            DeviceIdentityDirectoryExecution.command(2,account,revision,pin,System.currentTimeMillis()){
+                it.blob(challenge);it.text(confirmedFingerprint)
+            }))}
+        require(proof.size in 1..2048)
+        scope.network{owner.identityCommit(DeviceIdentityDirectoryExecution.encoded(proof),true)}
+        scope.finish{identityAt=0L}
+        Unit
+    }
+    override suspend fun verifyContactAuthority(account:Long,confirmedFingerprint:String)=withContext(Dispatchers.IO){
+        require(account>0&&confirmedFingerprint.matches(Regex("[0-9a-f]{64}")))
+        val captured=synchronized(gate){
+            val scope=checkNotNull(backendWorkScope());check(account==mutable.value.accountId||friends.any{it.accountId==account})
+            val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val opened=checkNotNull(profile)
+            Triple(scope,owner,Pair(active.accountId,Pair(opened.handle,generation)))
+        }
+        val (scope,owner,ids)=captured;val local=ids.first;val handle=ids.second.first;val revision=ids.second.second
+        val snapshotStarted=System.currentTimeMillis()
+        val snapshot=DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(account)},account,owner.endpoint.certificatePin,local)
+        scope.local{check(account==mutable.value.accountId||friends.any{it.accountId==account});DeviceIdentityDirectoryExecution.apply(
+            {bytes->checkNotNull(IdentityDirectoryBridge.request(handle,bytes))},snapshot,local,revision,snapshotStarted,confirmedFingerprint)}
+    }
     override suspend fun transferSettings():TransferSettingsSnapshot=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&profile!=null);TransferSettingsSnapshot.decode(transfer(6))
     }}
@@ -1017,6 +1108,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        identityAt=0L;identityUnsupported=false;identityCursor=0;identityRegistration=null
         stopGroupVoice();groupVoiceRooms.reset();groupVoiceSnapshotAt=0L
         voiceConsents.reset();voiceOwnedCall=null;voiceScopeIdentity=null;voiceOwner="";voiceCredentials=null
         voiceCredentialRefresh=null;voiceCredentialRetryAt=0L
@@ -1192,6 +1284,67 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }}finally {synchronized(gate){if(ownDeviceRequest===request)ownDeviceRequest=null}}
         }
     }
+    /** Optional discovery work uses its own bounded lane and a captured device-bound session. */
+    private fun refreshIdentityDirectory(now:Long){
+        if(identityUnsupported||now<identityAt||identityLane.busy())return
+        val owner=accounts?:return;val active=owner.session?:return;val opened=profile?:return
+        val account=active.accountId;val revision=generation;val pin=owner.endpoint.certificatePin
+        if(!pin.matches(Regex("[0-9a-f]{64}")))return
+        identityAt=now+10000
+        launchBackendWork(identityLane){scope->
+            try {
+                fun register(){
+                    val started=System.currentTimeMillis()
+                    val possession=scope.local{checkNotNull(IdentityDirectoryBridge.request(opened.handle,
+                        DeviceIdentityDirectoryExecution.command(0,account,revision,pin,started)))}
+                    require(possession.size in 1..1024)
+                    scope.network{owner.identityRegister(DeviceIdentityDirectoryExecution.encoded(possession))}
+                    scope.local{identityRegistration=ScopedBackendWork.Identity(opened,owner,active,account,revision,lifetimeRevision)}
+                }
+                val registered=scope.local{identityRegistration?.matches(opened,owner,active,account,revision,lifetimeRevision)==true}
+                if(!registered)register()
+                var ownStarted=System.currentTimeMillis()
+                var ownSnapshot=DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(account)},account,pin,account)
+                if(registered&&ownSnapshot.possessionProofs.isEmpty()){
+                    register();ownStarted=System.currentTimeMillis()
+                    ownSnapshot=DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(account)},account,pin,account)
+                }
+                val accountsToRead=scope.local{
+                    val contacts=friends.map{it.accountId}.distinct().sorted()
+                    val selected=if(contacts.isEmpty())emptyList() else {
+                        val start=identityCursor%contacts.size
+                        identityCursor=(start+32)%contacts.size
+                        List(minOf(32,contacts.size)){contacts[(start+it)%contacts.size]}
+                    }
+                    listOf(account)+listOf(preferredLocalAccount).filter{it in contacts}+selected.filter{it!=preferredLocalAccount}
+                }.distinct()
+                var configured=0
+                var needsVerification=false
+                for(remote in accountsToRead){
+                    val snapshotStarted=if(remote==account)ownStarted else System.currentTimeMillis()
+                    val snapshot=if(remote==account)ownSnapshot else DeviceIdentityDirectoryExecution.snapshot(scope.network{owner.identitySnapshot(remote)},remote,pin,account)
+                    if(snapshot.authorityProof.isEmpty()){needsVerification=true;continue}
+                    val applied=scope.local{DeviceIdentityDirectoryExecution.applyIfVerified(
+                        {bytes->checkNotNull(IdentityDirectoryBridge.request(opened.handle,bytes))},snapshot,account,revision,snapshotStarted)}
+                    if(applied)configured++ else needsVerification=true
+                }
+                scope.finish{mutable.value=mutable.value.copy(identityDirectoryStatus=
+                    if(needsVerification)"One-time verification required for identity discovery" else if(configured>0)"Identity directory refreshed" else "Identity directory has no configured authorities")}
+            }catch(failure:Exception){
+                if(failure is ScopedBackendWork.Superseded)return@launchBackendWork
+                scope.finish{
+                    if(expiredServerSession(failure)){handleTickFailure(failure);return@finish}
+                    if(failure is ServerRejected&&failure.code in setOf("unsupported_request","unknown_request")){
+                        identityUnsupported=true;identityAt=Long.MAX_VALUE
+                        mutable.value=mutable.value.copy(identityDirectoryStatus="Identity discovery unavailable on this server")
+                    }else{
+                        identityAt=System.nanoTime()/1_000_000+30000
+                        mutable.value=mutable.value.copy(identityDirectoryStatus="Identity directory refresh pending")
+                    }
+                }
+            }
+        }
+    }
     private fun tick() {
         if(!inUse)return
         operations.check()
@@ -1227,6 +1380,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         }else {stopGroupVoice();groupVoiceRooms.reset();groupVoiceSnapshotAt=0L;mutable.value=mutable.value.copy(voiceRooms=emptyList());events?.close();events=null;eventWasConnected=false}
         if(events?.connected==true&&authorizationSnapshotInstalled)refreshOwnDevices(now)
+        if(authorizationSnapshotInstalled&&mutable.value.authenticated)refreshIdentityDirectory(now)
         // Drain call control before optional metadata/history projection. The
         // server channel remains the sole authority for room membership.
         if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&events?.connected==true)pumpGroupVoice(now)

@@ -602,7 +602,7 @@ public partial class DesktopApplication {
         if(busy||closing)return;
         try{
             if(!discoveryRestored&&discovery==null)RestoreDiscoverySession();
-            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();PumpDeviceManagement();
+            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();PumpDeviceManagement();PumpDeviceIdentity();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -1889,7 +1889,7 @@ public partial class DesktopApplication {
 			if (discovery != null)
 			{
                 if(notification!=null&&notification.Event=="device_management_changed"){
-                    if(notification.AccountId==discovery.AccountId&&(String.IsNullOrEmpty(notification.ServerEpoch)||notification.ServerEpoch==discovery.PresenceEpoch)){managedDeviceNextUtc=DateTime.MinValue;PumpDeviceManagement();}return;
+                    if(notification.AccountId==discovery.AccountId&&(String.IsNullOrEmpty(notification.ServerEpoch)||notification.ServerEpoch==discovery.PresenceEpoch)){managedDeviceNextUtc=DateTime.MinValue;identityNextUtc=DateTime.MinValue;PumpDeviceManagement();PumpDeviceIdentity();}return;
                 }
                 if(notification!=null&&(notification.Event=="mailbox_ready"||notification.Event=="mailbox_receipt_ready")){
                     RequestMailbox(notification.Event);PumpMailbox();return;
@@ -2296,7 +2296,7 @@ public partial class DesktopApplication {
             if(submitted&&account>0)authenticatedFriendPublication.Published(account,discoverySessionGeneration,profileSessionGeneration,authenticatedMapping);
             else authenticatedFriendPublication.Reset();
         }
-        RequestMailbox("authenticated friend state refreshed");
+        RequestMailbox("authenticated friend state refreshed");identityNextUtc=DateTime.MinValue;
 		HashSet<long> hashSet = new HashSet<long>();
 		foreach (DiscoverySearchResult item in state.Friends)
 		{
@@ -4571,6 +4571,7 @@ public partial class DesktopApplication {
         finally{directSendInFlight=false;}
         if(!queued){Notify("Message could not be durably queued. Your draft was kept.");return;}
         RequestMailbox("native durable outbox acceptance");
+        if(conversation.AccountId>0){identityUrgentAccount=conversation.AccountId;identityNextUtc=DateTime.MinValue;PumpDeviceIdentity();}
         if(!conversation.Contact.verified){
             DiscoverySearchResult friend;
             if(friendDirectory.TryGetValue(conversation.AccountId,out friend))ConnectFriendCandidate(friend,conversation,true,"explicit send: bounded device verification");
