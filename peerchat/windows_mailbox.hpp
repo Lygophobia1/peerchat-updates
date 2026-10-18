@@ -31,6 +31,7 @@ class WindowsMailbox {
     std::shared_ptr<platform::HpkeProvider> hpke_;
     const Profile& profile_;
     std::map<std::string,std::uint64_t> rememberedChallenges_;
+    std::map<std::string,std::uint64_t> managementChallenges_;
     static std::uint64_t now(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
     Contact contact(Storage& storage,const reliable::AuthenticatedFriendSnapshot& friends,const std::string& device,std::uint64_t account){
         require(account>0&&friends.accountFor(device)==account);
@@ -58,6 +59,28 @@ public:
         protocol::Writer response(protocol::Accepted);response.bytes(profile_.publicKey);response.bytes(signDevicePayload(original,profile_));
         return response.data;
     }
+    // Separate administrative purpose: never expand the remembered-login signer
+    // into a generic signature service. The pinned managed adapter authenticates
+    // the challenge origin; native repeats its exact scope/canonical checks.
+    Blob deviceManagementProof(const Blob& input,std::uint64_t linkedAccount,std::uint64_t authenticatedAccount){
+        require(!input.empty()&&input.size()<=2048&&linkedAccount>0&&linkedAccount==authenticatedAccount);
+        protocol::Reader request(input);
+        require(request.type()==protocol::FileTransfer&&request.string()=="PeerChat/DeviceManagementProof/v1");
+        auto localIssued=request.number(),account=request.number();
+        auto actor=request.string(),target=request.string();auto revision=request.number();
+        auto fingerprint=request.string(),epoch=request.string();auto issued=request.number(),expires=request.number();
+        auto nonce=request.string(),binding=request.string();auto original=request.bytes();request.end();
+        auto hex=[](const std::string& value,size_t size){return value.size()==size&&std::all_of(value.begin(),value.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');});};
+        require(account==linkedAccount&&actor==profile_.peerId&&Storage::publicKeyId(profile_.publicKey)==actor);
+        require(hex(actor,64)&&hex(target,64)&&target!=actor&&hex(fingerprint,64)&&hex(epoch,32)&&hex(nonce,64)&&hex(binding,64));
+        const auto current=now();
+        require(localIssued<=current&&current-localIssued<=60000&&issued<=current/1000&&expires>current/1000&&expires>=issued&&expires-issued<=60);
+        const auto expected="PeerChat device management v1|revoke|"+std::to_string(account)+"|"+actor+"|"+target+"|"+std::to_string(revision)+"|"+fingerprint+"|"+epoch+"|"+std::to_string(issued)+"|"+std::to_string(expires)+"|"+nonce+"|"+binding;
+        require(original==Blob(expected.begin(),expected.end()));
+        for(auto it=managementChallenges_.begin();it!=managementChallenges_.end();){if(current>=it->second&&current-it->second>60000)it=managementChallenges_.erase(it);else ++it;}
+        require(managementChallenges_.size()<256&&managementChallenges_.emplace(nonce,current).second);
+        protocol::Writer result(protocol::Accepted);result.bytes(profile_.publicKey);result.bytes(signDevicePayload(original,profile_));return result.data;
+    }
     // Node-only attachment adapter; the existing device-key registry and HPKE
     // provider retain key custody and operation leases.
     void attachmentKeys(const std::function<void(DeviceKeyManager&,platform::HpkeProvider&,platform::IdentityProvider&)>& operation){operation(keys_,*hpke_,identity_);}
@@ -71,6 +94,7 @@ public:
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
                  session::SessionTransportManager& sessions){
         if(operation==9){require(id.empty()&&!allowed);return rememberedDeviceProof(input,storage.groupAccount().accountId,friends.localAccount());}
+        if(operation==13){require(id.empty()&&!allowed);return deviceManagementProof(input,storage.groupAccount().accountId,friends.localAccount());}
         if(operation==10){require(id.empty()&&input.empty()&&!allowed);auto text=storage.mailboxDiagnostics();return Blob(text.begin(),text.end());}
         if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
         require(input.size()<=MaxWire);

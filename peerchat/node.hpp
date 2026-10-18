@@ -17,6 +17,7 @@ struct AuthenticatedFriend {
     std::uint64_t accountId = 0;
     std::string expectedPeerId;
     std::vector<std::string> knownPeerIds;
+    std::vector<std::string> revokedPeerIds{};
 };
 struct NodeEvent {
     enum class Kind { Ready, Contacts, TrustRequired, Connected, Disconnected, Message, History, Delivered, Error, Groups, GroupMessage, GroupHistory, GroupDelivered, VoiceCall, ConnectionAttempt, ReconnectScheduled, ConnectionLifecycle, SessionSnapshot, RelayRequested, ScreenShare, GroupCiphertext, GroupCiphertextAck, FileTransfer };

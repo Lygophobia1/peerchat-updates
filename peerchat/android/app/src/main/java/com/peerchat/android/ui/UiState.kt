@@ -91,6 +91,7 @@ data class PeerChatUiState(
     val notificationPreview:NotificationPreview=NotificationPreview.SenderOnly,
     val mailboxStorageAllowed:Boolean=false,
     val archiveEnrollment:ArchiveEnrollmentSnapshot?=null,val archiveBusy:Boolean=false,val archiveProgress:com.peerchat.android.application.ArchiveSyncProgress=com.peerchat.android.application.ArchiveSyncProgress(),
+    val ownDevices:com.peerchat.android.application.OwnDeviceInventory?=null,
     val attachmentPreviews:Map<String,String> = emptyMap(),
     val attachmentCompatibility:com.peerchat.android.application.AttachmentCompatibilityChoice?=null,val attachmentCompatibilityBusy:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,

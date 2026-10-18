@@ -84,7 +84,16 @@ UI_API int ui_promote_scoped_p2p(void* handle,const wchar_t* peer,const wchar_t*
 UI_API void ui_cancel_scoped_p2p(void* handle,const wchar_t* peer){try{static_cast<UiBridge*>(handle)->node.cancelScopedP2p(identity(peer));}catch(...){} }
 UI_API int ui_authenticated_friends(void* handle,unsigned long long localAccount,unsigned long long generation,const wchar_t* encoded){try{
     std::vector<peerchat::AuthenticatedFriend> friends;std::wstring value=encoded?encoded:L"";std::wstringstream rows(value);std::wstring row;
-    while(std::getline(rows,row,L'\n')){auto first=row.find(L'|'),second=first==std::wstring::npos?std::wstring::npos:row.find(L'|',first+1);if(first==std::wstring::npos||second==std::wstring::npos)continue;unsigned long long account=0;try{account=std::stoull(row.substr(0,first));}catch(...){continue;}peerchat::AuthenticatedFriend friendState;friendState.accountId=account;friendState.expectedPeerId=identity(row.substr(first+1,second-first-1).c_str());std::wstringstream peers(row.substr(second+1));std::wstring peer;while(std::getline(peers,peer,L','))if(!peer.empty())friendState.knownPeerIds.push_back(identity(peer.c_str()));friends.push_back(std::move(friendState));}
+    while(std::getline(rows,row,L'\n')){
+        auto first=row.find(L'|'),second=first==std::wstring::npos?std::wstring::npos:row.find(L'|',first+1);
+        if(first==std::wstring::npos||second==std::wstring::npos)continue;
+        auto third=row.find(L'|',second+1);unsigned long long account=0;try{account=std::stoull(row.substr(0,first));}catch(...){continue;}
+        peerchat::AuthenticatedFriend friendState;friendState.accountId=account;friendState.expectedPeerId=identity(row.substr(first+1,second-first-1).c_str());
+        std::wstringstream peers(row.substr(second+1,third==std::wstring::npos?third:third-second-1));std::wstring peer;
+        while(std::getline(peers,peer,L','))if(!peer.empty())friendState.knownPeerIds.push_back(identity(peer.c_str()));
+        if(third!=std::wstring::npos){std::wstringstream revoked(row.substr(third+1));while(std::getline(revoked,peer,L','))if(!peer.empty())friendState.revokedPeerIds.push_back(identity(peer.c_str()));}
+        friends.push_back(std::move(friendState));
+    }
     static_cast<UiBridge*>(handle)->node.replaceAuthenticatedFriends(localAccount,generation,std::move(friends));return 1;
 }catch(...){return 0;}}
 UI_API int ui_pin_initial_authenticated_friend_identity(void* handle,const wchar_t* peer,unsigned long long attempt,unsigned long long generation){try{return static_cast<UiBridge*>(handle)->node.pinInitialAuthenticatedFriendIdentity(identity(peer),attempt,generation)?1:0;}catch(...){return 0;}}

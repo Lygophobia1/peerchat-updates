@@ -660,6 +660,17 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
             for(std::uint64_t j=0;j<known;++j){auto peer=reader.string();peerchat::protocol::check(peerchat::protocol::id(peer));value.knownPeerIds.push_back(std::move(peer));}
             values.push_back(std::move(value));
         }
+        if(reader.remaining()){
+            peerchat::protocol::check(reader.string()=="PeerChat/RevokedFriendDevices/v1"&&reader.number()==values.size());
+            std::set<std::uint64_t> seen;
+            for(std::size_t i=0;i<values.size();++i){
+                const auto owner=reader.number(),revoked=reader.number();
+                auto value=std::find_if(values.begin(),values.end(),[&](const auto& row){return row.accountId==owner;});
+                peerchat::protocol::check(value!=values.end()&&seen.insert(owner).second&&revoked<=64);
+                std::set<std::string> ids;
+                for(std::uint64_t j=0;j<revoked;++j){auto peer=reader.string();peerchat::protocol::check(peerchat::protocol::id(peer)&&ids.insert(peer).second);value->revokedPeerIds.push_back(std::move(peer));}
+            }
+        }
         reader.end();peerchat::protocol::check(account||values.empty());
         // Friend reconciliation is not archive revocation. A genuinely new
         // authenticated account/generation still invalidates archive evidence.

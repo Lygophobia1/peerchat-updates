@@ -86,6 +86,7 @@ struct FriendIdentity {
     std::uint64_t accountId=0;
     std::string expectedPeerId;
     std::vector<std::string> knownPeerIds;
+    std::vector<std::string> revokedPeerIds{};
 };
 enum class InitialPinDecision { Allowed, StaleIdentity, NoCurrentFriendship, HistoricalPin, StoredKeyMismatch };
 // An instance-local projection of authenticated account-service data, not trust
@@ -94,8 +95,11 @@ class AuthenticatedFriendSnapshot {
     struct Friend { std::uint64_t accountId=0;std::set<std::string> knownPeerIds; };
     std::uint64_t account_=0,generation_=0;
     std::map<std::string,Friend> friends_;
+    std::set<std::string> revoked_;
 public:
-    bool contains(const std::string& peer)const{return account_&&friends_.count(peer)!=0;}
+    bool revoked(const std::string& peer)const{return account_&&revoked_.count(peer)!=0;}
+    bool contains(const std::string& peer)const{return account_&&!revoked(peer)&&friends_.count(peer)!=0;}
+    bool isActive(const std::string& peer)const{return accountFor(peer)>0&&!revoked(peer);}
     std::uint64_t localAccount()const noexcept{return account_;}
     std::uint64_t accountFor(const std::string& peer)const {
         if(!account_)return 0;
@@ -108,10 +112,15 @@ public:
     }
     std::uint64_t generation()const noexcept{return generation_;}
     void replace(std::uint64_t account,std::uint64_t generation,const std::vector<FriendIdentity>& values) {
+        if(account==account_&&generation<generation_)return;
+        if(account!=account_)revoked_.clear();
         account_=account;generation_=generation;friends_.clear();
         if(!account_)return;
         for(const auto& value:values){
             if(!value.accountId||!protocol::id(value.expectedPeerId))continue;
+            // Denial is separate from historical ownership. No reactivation is
+            // supported, so a delayed/legacy snapshot cannot undo a tombstone.
+            for(const auto& peer:value.revokedPeerIds)if(protocol::id(peer))revoked_.insert(peer);
             Friend state;state.accountId=value.accountId;state.knownPeerIds.insert(value.expectedPeerId);
             for(const auto& peer:value.knownPeerIds)if(protocol::id(peer))state.knownPeerIds.insert(peer);
             friends_.emplace(value.expectedPeerId,std::move(state));
@@ -126,7 +135,7 @@ public:
            generation!=generation_||!tlsKey||Storage::publicKeyId(*tlsKey)!=state->peerId)
             return InitialPinDecision::StaleIdentity;
         auto found=friends_.find(state->peerId);
-        if(!account_||found==friends_.end()||!found->second.accountId)
+        if(!account_||revoked(state->peerId)||found==friends_.end()||!found->second.accountId)
             return InitialPinDecision::NoCurrentFriendship;
         for(const auto& contact:contacts)
             if(found->second.knownPeerIds.count(contact.first)&&contact.second.verified)
@@ -159,7 +168,7 @@ struct TextReceipt {
 inline std::string queueRecipient(const std::string& requested,const std::vector<Contact>& contacts,
                                   const AuthenticatedFriendSnapshot& friends) {
     auto pinned=[&](const Contact& value){return value.verified&&protocol::id(value.peerId)&&
-        !value.publicKey.empty()&&Storage::publicKeyId(value.publicKey)==value.peerId;};
+        !friends.revoked(value.peerId)&&!value.publicKey.empty()&&Storage::publicKeyId(value.publicKey)==value.peerId;};
     for(const auto& value:contacts)if(value.peerId==requested&&pinned(value))return requested;
     const auto account=friends.accountFor(requested);
     if(friends.contains(requested)&&account)for(const auto& value:contacts)
@@ -173,7 +182,7 @@ inline StoredMessage queueText(Storage& store,const Profile& local,const Contact
     const bool pinned=contact&&contact->peerId==destination&&contact->verified&&
         !contact->publicKey.empty()&&Storage::publicKeyId(contact->publicKey)==destination;
     const bool accountAdmitted=friends&&friends->contains(destination)&&friends->accountFor(destination)>0;
-    protocol::check((pinned||accountAdmitted)&&protocol::id(destination)&&
+    protocol::check((!friends||!friends->revoked(destination))&&(pinned||accountAdmitted)&&protocol::id(destination)&&
         protocol::id(messageId,32)&&!text.empty()&&unicode::utf16Units(text)<=protocol::MaxChatCharacters);
     StoredMessage message{messageId,local.peerId,destination,text,utcMilliseconds,Delivery::Queued,0,store.nextLogicalOrder()};
     if(friends&&deliveryOwner&&friends->localAccount()>0&&friends->accountFor(destination)>0){

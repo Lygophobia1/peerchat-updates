@@ -11,6 +11,7 @@ public sealed class FriendConversationBinding {
     public long AccountId;
     public string Username="",CurrentPeerId="";
     public List<string> KnownPeerIds=new List<string>();
+    [ScriptIgnore] public List<string> RevokedPeerIds=new List<string>();
     public bool ActiveFriend;
 }
 
@@ -33,6 +34,8 @@ internal sealed class AuthenticatedFriendPublication {
             foreach(var peer in (item.KnownPeerIds??new List<string>())
                 .Where(value=>!String.IsNullOrEmpty(value)&&value.IndexOfAny(new[]{'|',',','\r','\n'})<0)
                 .Distinct(StringComparer.Ordinal).OrderBy(value=>value,StringComparer.Ordinal))result.Append(peer).Append(',');
+            result.Append('|');
+            foreach(var peer in (item.RevokedPeerIds??new List<string>()).Distinct(StringComparer.Ordinal).OrderBy(value=>value,StringComparer.Ordinal))result.Append(peer).Append(',');
             result.Append('\n');
         }
         return result.ToString();

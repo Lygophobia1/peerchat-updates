@@ -14,6 +14,13 @@ static Blob request(std::uint64_t issued,const std::string& action,std::uint64_t
     wire.string(action);wire.number(account);wire.string(device);wire.string(challenge);wire.string(binding);
     wire.bytes(Blob(text.begin(),text.end()));return wire.data;
 }
+static Blob management(std::uint64_t localIssued,std::uint64_t account,const std::string& actor,
+                       const std::string& target,const std::string& nonce,std::uint64_t issued,std::uint64_t expires,bool tamper=false){
+    const auto pin=std::string(64,'f'),epoch=std::string(32,'e'),binding=std::string(64,'b');
+    auto text="PeerChat device management v1|revoke|"+std::to_string(account)+"|"+actor+"|"+target+"|7|"+pin+"|"+epoch+"|"+std::to_string(issued)+"|"+std::to_string(expires)+"|"+nonce+"|"+binding;
+    if(tamper)text+="|rename";
+    protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/DeviceManagementProof/v1");w.number(localIssued);w.number(account);w.string(actor);w.string(target);w.number(7);w.string(pin);w.string(epoch);w.number(issued);w.number(expires);w.string(nonce);w.string(binding);w.bytes(Blob(text.begin(),text.end()));return w.data;
+}
 int main(int argc,char** argv){try{
     check(argc==2,"fixture directory required");auto root=std::filesystem::absolute(argv[1]);std::filesystem::create_directories(root);
     Storage storage((root/L"profile").wstring());auto profile=storage.profile();
@@ -55,6 +62,36 @@ int main(int argc,char** argv){try{
     auto dispatchedProof=adapter.execute(9,dispatched,"",false,storage,deliveries,friends,sessions);
     protocol::Reader accepted(dispatchedProof);check(accepted.type()==protocol::Accepted&&accepted.bytes()==profile.publicKey&&accepted.bytes().size()==64,"mailbox op9 output");accepted.end();
     rejected([&]{adapter.execute(9,dispatched,"",false,storage,deliveries,friends,sessions);});
-    std::cout<<"PASS scoped native remembered-device enroll/resume proof, account/device/purpose/freshness/replay/ABI\n";
+    stage="scoped administrative proof";
+    const auto current=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    const auto target=std::string(64,'a'),nonce=std::string(64,'c');
+    auto scoped=management(current,account,profile.peerId,target,nonce,current/1000,current/1000+60);
+    rejected([&]{adapter.deviceManagementProof(scoped,account,0);});
+    rejected([&]{adapter.deviceManagementProof(scoped,account+1,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,target,profile.peerId,nonce,current/1000,current/1000+60),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,profile.peerId,profile.peerId,nonce,current/1000,current/1000+60),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,profile.peerId,target,nonce,current/1000,current/1000+60,true),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current-61000,account,profile.peerId,target,nonce,current/1000,current/1000+60),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,profile.peerId,target,nonce,current/1000-61,current/1000-1),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,profile.peerId,target,nonce,current/1000+1,current/1000+61),account,account);});
+    rejected([&]{adapter.deviceManagementProof(management(current,account,profile.peerId,target,nonce,current/1000,current/1000+61),account,account);});
+    rejected([&]{adapter.execute(13,scoped,"unexpected",false,storage,deliveries,friends,sessions);});
+    rejected([&]{adapter.execute(13,scoped,"",true,storage,deliveries,friends,sessions);});
+    auto signedManagement=adapter.execute(13,scoped,"",false,storage,deliveries,friends,sessions);
+    protocol::Reader signedResult(signedManagement);check(signedResult.type()==protocol::Accepted,"management result type");
+    auto managementKey=signedResult.bytes(),managementSignature=signedResult.bytes();signedResult.end();
+    protocol::Reader raw(scoped);raw.string();raw.number();raw.number();raw.string();raw.string();raw.number();raw.string();raw.string();raw.number();raw.number();raw.string();raw.string();auto canonical=raw.bytes();raw.end();
+    check(managementKey==profile.publicKey&&verifyDevicePayload(canonical,managementSignature,managementKey),"management proof must use original identity and canonical bytes");
+    rejected([&]{adapter.deviceManagementProof(scoped,account,account);});
+    // A revocation does not erase historical account provenance, and cannot be
+    // reversed by an old snapshot or missing legacy field in this login.
+    friends.replace(account,2,{{72,target,{target},{target}}});
+    check(friends.revoked(target)&&!friends.contains(target)&&!friends.isActive(target)&&friends.accountFor(target)==72,"revocation/provenance separation");
+    friends.replace(account,1,{{72,target,{target}}});
+    check(friends.revoked(target)&&friends.generation()==2,"stale generation restored device");
+    friends.replace(account,3,{{72,target,{target}}});
+    check(friends.revoked(target)&&friends.accountFor(target)==72,"legacy snapshot undid revocation");
+    friends.replace(account+1,1,{});check(!friends.revoked(target),"revocation leaked across accounts");
+    std::cout<<"PASS scoped native remembered-device and administrative proof, account/device/purpose/freshness/replay/ABI; current revocation separated from history\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<stage<<": "<<error.what()<<'\n';return 1;}}

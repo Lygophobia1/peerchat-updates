@@ -19,6 +19,24 @@ import org.robolectric.annotation.Config
 @Config(sdk=[34],qualifiers="w360dp-h800dp-port")
 class ArchiveDevicesUiTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun ownAccountNamesRefreshWithoutTrustPromotionAndRevokedDeviceCannotBeManaged(){
+        val local="a".repeat(64);val remote="b".repeat(64)
+        val context=ArchiveEnrollmentSnapshot(8,3,local,listOf(ArchiveDeviceSnapshot(remote,false,false,false,false)))
+        val inventory=OwnDeviceInventory(8,"c".repeat(32),1,listOf(OwnDeviceMetadata(local,"Phone",false,true),OwnDeviceMetadata(remote,"Home PC",false,false)))
+        val state=mutableStateOf(PeerChatUiState(demo=false,account=AccountUi("8","Test"),archiveEnrollment=context,ownDevices=inventory))
+        val actions=mutableListOf<UiAction>()
+        compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state.value,actions::add)}}}
+        compose.onNodeWithText("Home PC").assertExists()
+        compose.onNodeWithText("Approval required").assertExists()
+        compose.runOnIdle{state.value=state.value.copy(ownDevices=inventory.copy(revision=2,devices=inventory.devices.map{if(it.peerId==remote)it.copy(name="Office PC",revoked=true)else it}))}
+        compose.onNodeWithText("Home PC").assertDoesNotExist()
+        compose.onNodeWithText("Office PC").assertExists()
+        compose.onNodeWithText("Account device revoked; retained history is unchanged").assertExists()
+        compose.onNodeWithText("Manage").performScrollTo().assertIsNotEnabled()
+        compose.runOnIdle{assertTrue(actions.isEmpty());state.value=state.value.copy(ownDevices=inventory.copy(account=3))}
+        compose.onNodeWithText("Home PC").assertDoesNotExist()
+        compose.onNodeWithText("Manage").assertIsEnabled()
+    }
     @Test fun unknownPolicyIsNotOffAndVerifiedSnapshotsRestoreBothPreferences(){
         val id="a".repeat(64);val context=ArchiveEnrollmentSnapshot(8,3,id,emptyList(),true)
         val state=mutableStateOf(PeerChatUiState(demo=false,account=AccountUi("8","Test")))

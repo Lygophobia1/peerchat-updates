@@ -419,7 +419,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             if(group!=null)viewModelScope.launch{try{backend.groupHistory(group.id)}catch(_:Exception){}}
         }
         if(!snapshot.authenticated||!snapshot.serverPresenceLive||mutable.value.archiveEnrollment?.accountId!=snapshot.accountId)mutable.value=mutable.value.copy(archiveEnrollment=null)
-        mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress)
+        mutable.value=mutable.value.copy(mailboxStorageAllowed=snapshot.mailboxStorageAllowed,archiveProgress=snapshot.archiveProgress,
+            ownDevices=snapshot.ownDevices?.takeIf{snapshot.authenticated&&it.account==snapshot.accountId})
         if(!automaticResumeSuppressed&&snapshot.localHistoryReady&&mutable.value.route in setOf(Route.Welcome,Route.Login)) {
             mutable.value=mutable.value.copy(startupStatus=null,route=Route.Home)
         }

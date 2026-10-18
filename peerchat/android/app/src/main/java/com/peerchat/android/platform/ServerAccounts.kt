@@ -18,6 +18,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         private set
     private var supportsRpc=false
     private var rpcAuthorized=false
+    @Volatile private var ownMetadataPublished=false
     private val stages=ConnectionStageHistory()
     fun diagnostics():String=stages.snapshot()
     private val rpcOwner=com.peerchat.android.platform.tls.BoundedRpc<ServerChannel>({
@@ -72,7 +73,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         val response=try {if(allowRpc&&authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
-            JSONObject(channel.read(16384).toString(Charsets.UTF_8))
+            JSONObject(channel.read(if(type=="device_inventory"||type=="device_metadata")100000 else 16384).toString(Charsets.UTF_8))
         }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
         if(!response.optBoolean("ok")) {
             val code=response.optString("error", "request_failed")
@@ -91,7 +92,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         val next = AccountSession(response.getLong("accountId"), response.getString("username"),
             response.getString("sessionToken"), response.optBoolean("relayOnlyPresence"),response.optInt("messagingBootstrapVersion",0))
         check(next.accountId > 0 && next.token.isNotEmpty() && next.relayOnly) { "Server lacks required relay-only capability" }
-        closeRpc();rpcAuthorized=false;supportsRpc=response.optInt("rpcVersion")==1
+        closeRpc();rpcAuthorized=false;ownMetadataPublished=false;supportsRpc=response.optInt("rpcVersion")==1
         session = next
         return next
     }
@@ -152,6 +153,25 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         return result
     }
     fun friends(): JSONObject = request("friend_state")
+    // A bounded independent connection: optional inventory may not queue text
+    // delivery or ACK work behind the shared persistent RPC owner's lock.
+    fun ownDevices():JSONObject {
+        val active=checkNotNull(session)
+        if(!ownMetadataPublished){
+            try {
+                val response=request("device_metadata",JSONObject().put("publicIdentity",device)
+                    .put("platform","Android").put("appVersion",com.peerchat.android.BuildConfig.VERSION_NAME),allowRpc=false)
+                if(session===active)ownMetadataPublished=true
+                return response
+            }catch(failure:ServerRejected){
+                if(failure.code!="unsupported_request")throw failure
+                // A server supporting inventory but not the optional self-report
+                // remains usable. Never infer a platform from a fingerprint.
+                if(session===active)ownMetadataPublished=true
+            }
+        }
+        return request("device_inventory",JSONObject().put("publicIdentity",device),allowRpc=false)
+    }
     fun bootstrap():JSONObject {
         val active=checkNotNull(session)
         if(active.bootstrapVersion!=1){presence();return friends()} // Existing servers, same fail-closed checks.

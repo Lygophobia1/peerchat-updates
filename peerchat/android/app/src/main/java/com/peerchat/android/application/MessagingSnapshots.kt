@@ -4,7 +4,7 @@ package com.peerchat.android.application
 class MessagingStartupFailure(cause:Exception):Exception("Messaging startup failed after authentication",cause)
 
 data class FriendIdentity(val accountId: Long,val username: String,val peerId: String,val online: Boolean,
-    val knownPeerIds: List<String> = listOf(peerId))
+    val knownPeerIds: List<String> = listOf(peerId),val revokedPeerIds:List<String> = emptyList())
 data class MessageSnapshot(val id: String,val senderDevice: String,val recipientDevice: String,
     val timestamp: Long,val logicalOrder: Long,val sequence: Long,val delivery: Long,val text: String,
     val deliveryTargets:DeliveryTargetsSnapshot?=null)
@@ -29,7 +29,7 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val groupInvitations:List<GroupInvitationSnapshot> = emptyList(),val groupDiagnostics:String="Group authorization not loaded",
     val voice:VoiceSnapshot=VoiceSnapshot(),val deviceVerifications:List<DeviceVerification> = emptyList(),
     val mailboxReenrollment:MailboxReenrollment?=null,val mailboxRecoveryError:String?=null,
-    val freshMailboxMessageIds:Set<String> = emptySet())
+    val freshMailboxMessageIds:Set<String> = emptySet(),val ownDevices:OwnDeviceInventory?=null)
 
 // Fixed native decision codes only: never format provider exception messages,
 // server payloads, credentials or key material into the diagnostic projection.
@@ -48,7 +48,7 @@ internal fun initialFriendPinResult(result:ByteArray?):String {
 }
 
 internal fun expiredServerSession(failure:Exception):Boolean = failure is com.peerchat.android.platform.ServerRejected &&
-    failure.code in setOf("session_invalid","session_superseded","event_session_superseded")
+    failure.code in setOf("session_invalid","session_superseded","event_session_superseded","device_revoked")
 
 // Safe classification only: never expose exception messages, request bodies,
 // session tokens, credentials, or TLS provider buffers to the UI/diagnostics.
@@ -63,7 +63,7 @@ data class DirectoryAccountSnapshot(val accountId:Long,val username:String,val o
 /** Network quiescence never destroys the local-history projection. */
 internal fun localOfflineSnapshot(snapshot:MessagingSnapshot,status:String):MessagingSnapshot = snapshot.copy(
     authenticated=false,serverPresenceLive=false,incomingRequests=emptyList(),outgoingRequests=emptyList(),deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null,status=status,
-    freshMailboxMessageIds=emptySet(),
+    freshMailboxMessageIds=emptySet(),ownDevices=null,
     groups=snapshot.groups.map{it.copy(ready=false)},groupInvitations=emptyList(),voice=VoiceSnapshot(diagnostic="Voice authorization unavailable"),
     conversations=snapshot.conversations.map{it.copy(friend=it.friend.copy(online=false),connection=ConnectionSnapshot())})
 
@@ -148,6 +148,7 @@ internal fun reconcileFriends(previous: List<FriendIdentity>,current: List<Frien
     val old=previous.associateBy {it.accountId}
     return current.map {friend ->
         require(friend.accountId>0&&friend.username.length<=64&&friend.peerId.matches(Regex("[0-9a-f]{64}")))
+        require(friend.revokedPeerIds.size<=64&&friend.revokedPeerIds.distinct().size==friend.revokedPeerIds.size&&friend.revokedPeerIds.all{it.matches(Regex("[0-9a-f]{64}"))})
         val ids=((old[friend.accountId]?.knownPeerIds ?: emptyList())+friend.peerId).distinct()
         require(ids.size<=32&&ids.all {it.matches(Regex("[0-9a-f]{64}"))})
         friend.copy(knownPeerIds=ids.toList())

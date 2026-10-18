@@ -126,6 +126,26 @@ public final class ReliableProfileProof {
         PeerTlsProof.check(request.length()<512&&exchange.length()<512&&!request.contains(side.id)&&!exchange.contains(side.other));
         PeerTlsProof.check(side.operation(2).length==2&&side.ready());
     }
+    static Record friends(Side side){Record value=new Record(1);value.num(1);value.num(20);value.str(side.other);value.num(1);value.str(side.other);return value;}
+    static void deviceRevocation(Side side,String message,long count){
+        // This is the production JNI parser/runtime, not a fabricated endpoint.
+        // An invalid extension must not mutate a healthy established TLS route.
+        Record malformed=friends(side);malformed.str("PeerChat/RevokedFriendDevices/v1");malformed.num(1);malformed.num(21);malformed.num(1);malformed.str(side.other);
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.friends(side.handle,10,2,malformed.bytes())!=0);
+        PeerTlsProof.check(side.ready());
+        Record revoke=friends(side);revoke.str("PeerChat/RevokedFriendDevices/v1");revoke.num(1);revoke.num(20);revoke.num(1);revoke.str(side.other);
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.friends(side.handle,10,2,revoke.bytes())==0);
+        PeerTlsProof.check(!side.ready());
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.demand(side.handle,utf8(side.other))!=0);
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.send(side.handle,utf8(side.other),utf8("must not queue to revoked device"))==null);
+        PeerTlsProof.check(history(side,message,count)==2);
+        // A late legacy-shaped projection does not clear observed revocation.
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.friends(side.handle,10,3,friends(side).bytes())==0);
+        PeerTlsProof.check(!side.ready());
+        PeerTlsProof.check(com.peerchat.android.ReliableBridge.demand(side.handle,utf8(side.other))!=0);
+        PeerTlsProof.check(history(side,message,count)==2);
+        System.out.println("PASS: production JNI authenticated device revocation closes existing peer TLS, denies demand/send, rejects malformed scope, retains history and survives a legacy-shaped refresh; no profile/identity deletion");
+    }
     public static void main(String[] args)throws Exception{
         PeerTlsProof.Identity a=new PeerTlsProof.Identity(),b=new PeerTlsProof.Identity();
         String aid=PeerTls.peerId(a.pub),bid=PeerTls.peerId(b.pub),pending=null;
@@ -144,7 +164,8 @@ public final class ReliableProfileProof {
                     PeerTlsProof.check(history(left,pending,cycle+1)==0);
                 }else{exchange(left,right);PeerTlsProof.check(history(left,pending,cycle+1)==2);}
                 PeerTlsProof.check(history(right,pending,cycle+1)==2);
-                left.closeRoute();right.closeRoute();
+                if(cycle==7)deviceRevocation(left,pending,cycle+1);else left.closeRoute();
+                right.closeRoute();
             }
         }
         System.out.println("PASS: production JNI/Profile + real SQLite/DPAPI + pinned original-signing TLS; 8 profile reopen/Hello/trust/message/ACK cycles; lost ACK restart retry preserves ID, dedupe and durable history. HOST ONLY, test identities; no Android runtime claim.");

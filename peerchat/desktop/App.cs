@@ -585,7 +585,7 @@ public partial class DesktopApplication {
     void Poll(){
         if(busy||closing)return;
         try{
-            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();
+            PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();PumpDeviceManagement();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
             // it is reconnecting. Login and event-channel reconnects request an immediate
@@ -1868,6 +1868,9 @@ public partial class DesktopApplication {
 		{
 			if (discovery != null)
 			{
+                if(notification!=null&&notification.Event=="device_management_changed"){
+                    if(notification.AccountId==discovery.AccountId&&(String.IsNullOrEmpty(notification.ServerEpoch)||notification.ServerEpoch==discovery.PresenceEpoch)){managedDeviceNextUtc=DateTime.MinValue;PumpDeviceManagement();}return;
+                }
                 if(notification!=null&&(notification.Event=="mailbox_ready"||notification.Event=="mailbox_receipt_ready")){
                     RequestMailbox(notification.Event);PumpMailbox();return;
                 }
@@ -1914,6 +1917,7 @@ public partial class DesktopApplication {
                 }
                 if (notification != null && notification.Event == "channel_connected")
                 {
+                    managedDeviceNextUtc=DateTime.MinValue;
                     model.Status = "Discovery reconnected · reconciling friend state…";
                     Refresh();
                     // One bounded reconciliation after a real channel reconnect. The channel
@@ -2250,6 +2254,7 @@ public partial class DesktopApplication {
 			friendRequestStates[item3.AccountId] = "Request Sent";
 		}
 		conversationIndex.Reconcile(state.Friends);
+        foreach(var binding in conversationIndex.Records){List<string> revoked;binding.RevokedPeerIds=state.RevokedDevices.TryGetValue(binding.AccountId,out revoked)?new List<string>(revoked):new List<string>();}
         var account=discovery == null ? 0 : discovery.AccountId;
         var authenticatedBindings=conversationIndex.Records.Where(binding=>binding.ActiveFriend).ToArray();
         var authenticatedMapping=AuthenticatedFriendPublication.Mapping(authenticatedBindings);
@@ -2975,7 +2980,7 @@ public partial class DesktopApplication {
 		});
 		Action<string> showSettingsPage = null;
 		Dictionary<string, Button> settingsNavigation = new Dictionary<string, Button>(StringComparer.Ordinal);
-		string[] array = new string[9] { "General", "Privacy & Security", "Voice", "Video", "Screen Sharing", "File Transfers", "Network", "Updates", "Advanced" };
+		string[] array = new string[10] { "General", "Privacy & Security", "Device Manager", "Voice", "Video", "Screen Sharing", "File Transfers", "Network", "Updates", "Advanced" };
 		foreach (string text in array)
 		{
 			Button navigationButton = new Button
@@ -3262,6 +3267,7 @@ public partial class DesktopApplication {
 			return panel;
 		};
 		settingsPages.Add("General", createInfoPage("General", "General client preferences will appear here as they are introduced. Local profile and account controls remain available from the profile bubble."));
+		settingsPages.Add("Device Manager", DeviceManagerPanel(dialog));
 		settingsPages.Add("Privacy & Security", createInfoPage("Privacy & Security", "Your messages and devices"));
         var privacyPage=settingsPages["Privacy & Security"];privacyPage.MaxWidth=720;privacyPage.HorizontalAlignment=HorizontalAlignment.Left;privacyPage.Margin=new Thickness(20,12,20,20);((TextBlock)privacyPage.Children[0]).FontSize=24;
         EventHandler sizePrivacy=(s,e)=>{double width=Math.Max(1,Math.Min(720,scrollViewer2.ViewportWidth-40));if(Math.Abs(privacyPage.Width-width)>0.5||Double.IsNaN(privacyPage.Width))privacyPage.Width=width;};privacyPage.LayoutUpdated+=sizePrivacy;dialog.Closed+=(s,e)=>privacyPage.LayoutUpdated-=sizePrivacy;

@@ -15,6 +15,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 
 /** Accessed under the backend gate; a completed choice may outlive its presenter. */
 internal class AttachmentSelectionOwner<T> {
@@ -40,6 +44,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val gate=Any()
     private val ownerTimings=OwnerStageTimings(slow={stage,elapsed->android.util.Log.i("PeerChatWake","stage=owner_$stage elapsed_ms=$elapsed")})
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
+    private val metadataWork=CoroutineScope(SupervisorJob()+Dispatchers.IO)
+    private val ownDeviceProjection=OwnDeviceInventoryProjection()
+    private var ownDeviceRequest:Any?=null
+    private var ownDeviceAt=0L
+    private var ownDeviceStatus="not_requested"
     private val mutable=MutableStateFlow(MessagingSnapshot())
     private val relayFailureDiagnostics=linkedMapOf<Long,String>()
     private val pendingDeviceVerifications=linkedMapOf<String,DeviceVerification>()
@@ -180,6 +189,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         check(!stopped&&authorizationSnapshotInstalled&&mutable.value.serverPresenceLive&&livePeerWorkAllowed)
         val owner=checkNotNull(accounts);val session=checkNotNull(owner.session);val native=checkNotNull(profile);val local=mutable.value.localPeerId
         require(snapshot.accountId==session.accountId&&snapshot.authenticationGeneration==generation&&snapshot.localPeerId==local)
+        require(pause||mutable.value.ownDevices?.devices?.none{it.peerId==source&&it.revoked}!=false){"The selected account device has been revoked"}
         val execution=archiveExecution(owner,native);val rows=execution.refreshCurrent(session.accountId,generation,local)
         if(pause)execution.pauseSync(session.accountId,generation)else{require(snapshot.devices.any{it.peerId==source&&!it.local&&it.mayServe});execution.startSync(session.accountId,generation,checkNotNull(source))}
         mutable.value=mutable.value.copy(archiveProgress=execution.progress(session.accountId,generation));archiveMetadataAt=System.nanoTime()/1_000_000+10000
@@ -190,6 +200,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val owner=checkNotNull(accounts);val session=checkNotNull(owner.session);val native=checkNotNull(profile)
         val local=mutable.value.localPeerId
         require(snapshot.accountId==session.accountId&&snapshot.authenticationGeneration==generation&&snapshot.localPeerId==local&&snapshot.devices.any{it.peerId==device})
+        require(mutable.value.ownDevices?.devices?.none{it.peerId==device&&it.revoked}!=false){"The selected account device has been revoked"}
         val execution=archiveExecution(owner,native)
         val currentRows=execution.devices(session.accountId,generation,execution.refresh(session.accountId,generation,local))
         val capabilities=(if(read)1L else 0L) or (if(serve)2L else 0L)
@@ -318,9 +329,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         if(expiredServerSession(failure)){
             android.util.Log.w("PeerChatNetwork","event=authentication_invalidated generation=$generation reason="+(failure as ServerRejected).code)
-            generation++;clearAuthorization();accounts=null;index=null
+            if(failure.code=="device_revoked")resumeSuppressed=true
+            accounts?.closeRpc();generation++;clearAuthorization();accounts=null;index=null
             friends=friends.map{it.copy(online=false)}
-            mutable.value=localOfflineSnapshot(mutable.value,"Session expired; local history retained; sign in again")
+            mutable.value=localOfflineSnapshot(mutable.value,if(failure.code=="device_revoked")"This device has been revoked. Local keys, history and queued messages are retained; automatic re-enrollment is not permitted." else "Session expired; local history retained; sign in again")
             // Expiring access sessions are not remembered credentials.
             // One bounded refresh through the same coordinator; never
             // fight a superseded session or bypass server revocation.
@@ -694,6 +706,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        ownDeviceRequest=null;ownDeviceAt=0L;ownDeviceProjection.reset();ownDeviceStatus="not_requested"
         attachmentSelection.pending=null // Private source bytes are retained.
         invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
         retentionUntil=0L
@@ -701,7 +714,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mailboxEnrollmentScope=null;mailboxEnrollmentEndpoint=null
         profile?.let{try{com.peerchat.android.TransferBridge.request(it.handle,11,NativeRecordWriter(30).also{w->w.number(0);w.number(0)}.bytes())}catch(_:Exception){}}
         pendingDeviceVerifications.clear();declinedDeviceVerifications.clear();relayFailureDiagnostics.clear()
-        mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null)
+        mutable.value=mutable.value.copy(deviceVerifications=emptyList(),mailboxReenrollment=null,mailboxRecoveryError=null,ownDevices=null)
         groupRefreshAt=0L;groupProjectionAt=0L;groupCompletionAt=0L;groupCompletionObserved.clear()
         peerAuthenticationDiagnostics.clear()
         authorizationSnapshotInstalled=false
@@ -755,12 +768,19 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         val list=state.getJSONArray("friends");require(list.length()<=128)
         val projected=List(list.length()) {i->val item=list.getJSONObject(i)
-            FriendIdentity(item.getLong("accountId"),item.getString("username"),item.getString("publicIdentity"),item.getBoolean("online"))
+            val revoked=item.optJSONArray("revokedPublicIdentities")
+            require(revoked==null||revoked.length()<=64)
+            FriendIdentity(item.getLong("accountId"),item.getString("username"),item.getString("publicIdentity"),item.getBoolean("online"),
+                revokedPeerIds=if(revoked==null)emptyList()else List(revoked.length()){revoked.getString(it)})
         };require(projected.none {it.accountId==active.accountId})
         val authoritative=if(projected.map{it.copy(knownPeerIds=emptyList())}==friends.map{it.copy(knownPeerIds=emptyList())})friends else checkNotNull(index).reconcile(projected)
         android.util.Log.i("PeerChatWake","stage=friend_devices_restored contacts=${authoritative.size} devices=${authoritative.sumOf{it.knownPeerIds.size}}")
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
         authoritative.forEach {friend->writer.number(friend.accountId);writer.text(friend.peerId);writer.number(friend.knownPeerIds.size.toLong());friend.knownPeerIds.forEach {writer.text(it)}}
+        // Optional local JNI extension, not a messaging wire change. Historical
+        // identities remain intact; native authority keeps a separate deny set.
+        writer.text("PeerChat/RevokedFriendDevices/v1");writer.number(authoritative.size.toLong())
+        authoritative.forEach{friend->writer.number(friend.accountId);writer.number(friend.revokedPeerIds.size.toLong());friend.revokedPeerIds.forEach{writer.text(it)}}
         val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
         if(identityChanged){
             invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
@@ -779,13 +799,47 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val outgoing=state.getJSONArray("outgoing");require(outgoing.length()<=128)
         val sent=List(outgoing.length()){i->val row=outgoing.getJSONObject(i);val id=row.getLong("accountId");val name=row.getString("username");require(id>0&&name.length<=64);AccountRequestSnapshot(id,name)}
         mutable.value=mutable.value.copy(incomingRequests=requests.toList(),outgoingRequests=sent)
-        friends.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
+        friends.filter{it.peerId !in it.revokedPeerIds}.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
         val presenceLive=!livePeerWorkAllowed||events?.connected==true
         mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated server presence available; message delivery requires a verified peer or mailbox ACK" else "Connecting authenticated server events; local history available")
         // Complete application projection as part of backend bootstrap, not a
         // later UI collector/tick or optional vendor registration side effect.
         publish()
         android.util.Log.i("PeerChatWake","stage=conversations_projected contacts=${mutable.value.conversations.size}")
+    }
+    /** One optional, bounded metadata request at a time. It borrows the exact
+     * login/session/profile epoch, never holds gate during TLS, and uses no
+     * persistent message or transfer RPC lane. Settings need not be open. */
+    private fun refreshOwnDevices(now:Long) {
+        if(ownDeviceRequest!=null||now<ownDeviceAt)return
+        val owner=accounts?:return;val active=owner.session?:return
+        val epoch=owner.presenceEpoch
+        if(!epoch.matches(Regex("[0-9a-f]{32}")))return
+        ownDeviceProjection.bind(active.accountId,epoch)
+        if(mutable.value.ownDevices?.epoch!=epoch)mutable.value=mutable.value.copy(ownDevices=null)
+        val scope=backendWorkScope{accounts===owner&&owner.session===active&&owner.presenceEpoch==epoch}?:return
+        val request=Any();ownDeviceRequest=request;ownDeviceAt=now+60000
+        metadataWork.launch {
+            try {
+                val response=scope.network{owner.ownDevices()}
+                val inventory=decodeOwnDeviceInventory(response,active.accountId,owner.device,epoch)
+                scope.finish {
+                    if(ownDeviceRequest!==request)return@finish
+                    if(ownDeviceProjection.accept(inventory)){
+                        if(inventory.devices.single{it.current}.revoked){handleTickFailure(ServerRejected("device_revoked"));return@finish}
+                        ownDeviceStatus="current";mutable.value=mutable.value.copy(ownDevices=inventory)
+                    }else {ownDeviceStatus="stale_snapshot_rejected";ownDeviceAt=System.nanoTime()/1_000_000+5000}
+                }
+            }catch(failure:Exception){scope.finish {
+                if(ownDeviceRequest!==request)return@finish
+                if(expiredServerSession(failure)){handleTickFailure(failure);return@finish}
+                val unsupported=failure is ServerRejected&&failure.code in setOf("unsupported_request","unknown_request","device_management_session_required")
+                ownDeviceStatus=if(unsupported)"unavailable_for_server_or_session" else "refresh_failed"
+                // Older servers and unbound password sessions are not silently
+                // enrolled. A new authenticated session may retry support.
+                if(unsupported)ownDeviceAt=Long.MAX_VALUE
+            }}finally {synchronized(gate){if(ownDeviceRequest===request)ownDeviceRequest=null}}
+        }
     }
     private fun tick() {
         if(!inUse)return
@@ -802,7 +856,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             if(events==null&&now>=eventRetryAt){events=ForegroundEvents(checkNotNull(accounts),::eventActivity);android.util.Log.i("PeerChatNetwork","event=connecting")}
             events?.let {stream->
                 if(stream.connected&&!eventWasConnected){
-                    eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L
+                    eventWasConnected=true;eventRetryDelay=1000L;refreshAt=0L;mailboxAt=0L;ownDeviceAt=0L
                     groupPendingMore=true;groupPendingAt=0L
                     try{groupExecution.resetPending(native,mutable.value.accountId,generation)}catch(_:Exception){}
                     android.util.Log.i("PeerChatNetwork","event=connected repair=requested")
@@ -819,6 +873,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }
             }
         }else {events?.close();events=null;eventWasConnected=false}
+        if(events?.connected==true&&authorizationSnapshotInstalled)refreshOwnDevices(now)
         // Server authorization and stored delivery precede NEW peer attempts.
         // Existing peer executions remain independent platform workers.
         if(now>=refreshAt||contactsDirty) {
@@ -1083,6 +1138,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
             return
         }
         when(val kind=event.optString("event")){
+            "device_management_changed"->{
+                if(ownDeviceProjection.hint(event.optLong("accountId"),event.optString("serverEpoch"),event.optLong("authorityRevision")))ownDeviceAt=0L
+                // Reconcile existing group/archive permission owners as well as
+                // metadata. An event itself never changes a grant or receipt.
+                if(event.optLong("accountId")==mutable.value.accountId&&event.optString("serverEpoch")==accounts?.presenceEpoch){groupRefreshAt=0L;archiveMetadataAt=0L;contactsDirty=true}
+            }
             "group_roster_changed","group_invite_changed"->{groupRefreshAt=0L}
             "mailbox_ready","mailbox_receipt_ready"->{mailboxAt=0L;android.util.Log.i("PeerChatNetwork","mailbox_trigger=$kind")}
             "presence_changed","friend_request","friend_request_updated","friendship_changed"->{contactsDirty=true}
@@ -1164,6 +1225,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             appendLine(ownerTimings.summary())
             appendLine("event_session_connected=${events?.connected==true} retry_at_monotonic_ms=$eventRetryAt retry_delay_ms=$eventRetryDelay next_mailbox_monotonic_ms=$mailboxAt next_archive_monotonic_ms=$archiveRetryAt")
             appendLine(accounts?.diagnostics() ?: "network_history=not_retained_for_closed_session")
+            appendLine("own_device_inventory=$ownDeviceStatus revision=${mutable.value.ownDevices?.revision?:0} devices=${mutable.value.ownDevices?.devices?.size?:0}")
             appendLine(profile?.recipientDiagnostics() ?: "stage=no_local_profile")
             appendLine(profile?.localDiagnostics() ?: "local_storage=unavailable")
             appendLine(profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)} ?: "native_registration_stage=unavailable")
@@ -1222,6 +1284,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     override fun close() {
         if(stopped)return;stopped=true
+        metadataWork.cancel()
         operations.configure(false,Long.MAX_VALUE)
         // Do not block the UI waiting for an in-progress bounded server request.
         executor.execute {synchronized(gate){

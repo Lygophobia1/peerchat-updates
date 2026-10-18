@@ -54,9 +54,12 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
         val devices=enrollment?.devices?.filter{it.local==local}.orEmpty()
         if(devices.isEmpty())Text(if(local)"Sign in to verify this device." else "No other registered devices.",style=MaterialTheme.typography.bodySmall)
         devices.forEach {device->
+            val own=state.ownDevices?.takeIf{it.account==enrollment?.accountId}?.devices?.singleOrNull{it.peerId==device.peerId}
             OutlinedCard(Modifier.fillMaxWidth()){
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
-                    Text(if(device.local)"This device" else "Device "+device.peerId.take(12)+"…",style=MaterialTheme.typography.titleSmall)
+                    Text(own?.name?.takeIf{it.isNotEmpty()}?:if(device.local)"This device" else "Device "+device.peerId.take(12)+"…",style=MaterialTheme.typography.titleSmall)
+                    if(own?.name?.isNotEmpty()==true)Text((if(device.local)"This device · "else "Device · ")+device.peerId.take(12)+"…",style=MaterialTheme.typography.bodySmall)
+                    if(own?.revoked==true)Text("Account device revoked; retained history is unchanged",style=MaterialTheme.typography.bodySmall)
                     Text(if(device.approved)"Approved" else if(device.mayRead||device.mayServe)"Verified history access" else if(device.authorized)"Registered grant · review trust and permissions" else if(device.revoked)"Access revoked" else "Approval required",style=MaterialTheme.typography.bodySmall)
                     Text(if(!device.local&&device.peerId==progress.source&&progress.running&&progress.displayState=="Syncing")"Available · transferring verified history" else "Availability unknown",style=MaterialTheme.typography.bodySmall)
                     Row{
@@ -65,10 +68,10 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
                                 ArchiveDeviceAction.SetUp->pending=PendingArchiveConsent(checkNotNull(enrollment),action,device.peerId,true,true)
                                 ArchiveDeviceAction.ApproveIssuer->pending=PendingArchiveConsent(checkNotNull(enrollment),action,device.approvalIssuer)
                                 else->managed=device.peerId
-                            }},enabled=!state.archiveBusy,contentPadding=PaddingValues(horizontal=12.dp,vertical=4.dp)){Text(when(action){ArchiveDeviceAction.SetUp->"Set up";ArchiveDeviceAction.ApproveIssuer->"Approve";else->"Authorize"})}
+                            }},enabled=!state.archiveBusy&&own?.revoked!=true,contentPadding=PaddingValues(horizontal=12.dp,vertical=4.dp)){Text(when(action){ArchiveDeviceAction.SetUp->"Set up";ArchiveDeviceAction.ApproveIssuer->"Approve";else->"Authorize"})}
                         }
-                        TextButton({managed=device.peerId},enabled=!state.archiveBusy){Text("Manage")}
-                        if(!device.local&&device.mayServe)TextButton({dispatch(UiAction.ArchiveSynchronize(checkNotNull(enrollment),device.peerId))},enabled=!state.archiveBusy&&enrollment?.historySyncEnabled==true&&!progress.running){Text("Sync now")}
+                        TextButton({managed=device.peerId},enabled=!state.archiveBusy&&own?.revoked!=true){Text("Manage")}
+                        if(!device.local&&device.mayServe)TextButton({dispatch(UiAction.ArchiveSynchronize(checkNotNull(enrollment),device.peerId))},enabled=!state.archiveBusy&&own?.revoked!=true&&enrollment?.historySyncEnabled==true&&!progress.running){Text("Sync now")}
                     }
                     if(device.approvalKnown&&!device.approved&&device.primaryAction==null)Text("Approve from an enabled trusted history device. Signing in alone never grants history access.",style=MaterialTheme.typography.bodySmall)
                 }
@@ -82,7 +85,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
         Text(progress.state+" · ${progress.processed} records processed · ${progress.attachments} attachment records (not downloaded)",style=MaterialTheme.typography.bodySmall)
         if(enrollment!=null&&progress.running)TextButton({dispatch(UiAction.ArchiveSynchronize(enrollment,pause=true))},enabled=!state.archiveBusy){Text("Pause synchronization")}
     }
-    val selected=enrollment?.devices?.firstOrNull{it.peerId==managed}
+    val selected=enrollment?.devices?.firstOrNull{it.peerId==managed&&state.ownDevices?.takeIf{own->own.account==enrollment.accountId}?.devices?.any{own->own.peerId==it.peerId&&own.revoked}!=true}
     if(selected!=null&&enrollment!=null){
         var custom by remember(selected.peerId){mutableStateOf(false)}
         var read by remember(selected.peerId,selected.grantedRead){mutableStateOf(if(selected.authorized)selected.grantedRead else true)}

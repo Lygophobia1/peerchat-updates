@@ -988,6 +988,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         }
     }
     void online(Connection& c){
+        protocol::check(!authenticatedFriends.revoked(c.peerId)&&!authenticatedFriends.revoked(c.expected));
         if(c.online||!c.approved||!c.remoteApproved)return;
         if(!sessionTransports)return;
         auto decision=sessionTransports->arbitrateWinner(sessionEpoch,{c.attemptId},nowMilliseconds());
@@ -1032,11 +1033,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
         outbox(c);groupOutbox(c);
     }
     void approve(Connection& c){
+        protocol::check(!authenticatedFriends.revoked(c.peerId)&&!authenticatedFriends.revoked(c.expected));
         c.locallyTrusted();if(c.directTransport){project(c,c.directTransport->locallyTrusted());if(sessionTransports)sessionTransports->markLocallyTrusted(sessionEpoch,{c.attemptId});}protocol::Writer ready(protocol::Accepted);packet(c,ready);online(c);
     }
     void process(Connection& c,const Blob& frame){
+        protocol::check(!authenticatedFriends.revoked(c.peerId)&&!authenticatedFriends.revoked(c.expected));
         protocol::Reader r(frame);
         auto kind=c.enter(r,c.relay,c.tls->remotePublicKey(),profile.peerId);
+        protocol::check(!authenticatedFriends.revoked(c.peerId));
         if(kind==reliable::SharedPeerRuntime::FrameKind::Hello){
             // The shared runtime parsed Hello; recover the advertised bitset for
             // existing group/route observers without parsing the frame again.
@@ -1476,13 +1480,14 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 mediaIce=std::move(command.ice);
             }
             else if(command.action==Action::AuthenticatedFriends){
+                if(command.accountId==authenticatedFriends.localAccount()&&command.sourceHandle<authenticatedFriends.generation())continue;
                 if(command.accountId!=authenticatedFriends.localAccount())clearGroupAttachmentSession();
                 if(archiveApplication&&(command.accountId!=authenticatedFriends.localAccount()||
                    command.sourceHandle!=authenticatedFriends.generation()))archiveApplication->invalidate();
                 archiveAuthenticated=command.accountId>0;
                 std::vector<reliable::FriendIdentity> snapshot;
                 for(const auto& value:command.friends){
-                    snapshot.push_back({value.accountId,value.expectedPeerId,value.knownPeerIds});
+                    snapshot.push_back({value.accountId,value.expectedPeerId,value.knownPeerIds,value.revokedPeerIds});
                 }
                 auto validatedFriends=authenticatedFriends;
                 validatedFriends.replace(command.accountId,command.sourceHandle,snapshot);
@@ -1494,6 +1499,11 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                     }
                 }
                 authenticatedFriends=std::move(validatedFriends);
+                for(auto& connection:connections)if(!connection->dead&&(authenticatedFriends.revoked(connection->peerId)||authenticatedFriends.revoked(connection->expected))){
+                    connection->closeReason=L"Device authorization revoked";connection->dead=true;
+                    if(deliveries)deliveries->retireTransport({connection->attemptId});
+                    if(sessionTransports)sessionTransports->closeTransport(sessionEpoch,{connection->attemptId},"device authorization revoked",false);
+                }
                 if(deliveries)deliveries->invalidateEligibility(authenticatedFriends.localAccount(),authenticatedFriends.generation());
             }
             else if(command.action==Action::PinInitialAuthenticatedFriendIdentity){
@@ -1904,7 +1914,7 @@ Node::Node():impl_(std::make_unique<Impl>()){}Node::~Node()=default;
 void Node::start(const std::wstring& directory,std::uint16_t port,const std::wstring& name,bool startDirectListener){impl_->stop();{std::lock_guard<std::mutex> lock(impl_->eventMutex);impl_->events.clear();}impl_->running=true;impl_->worker=std::thread([this,directory,port,name,startDirectListener]{impl_->run(directory,port,name,startDirectListener);});}
 void Node::stop(){impl_->stop();}
 Blob Node::mailbox(unsigned operation,const Blob& input,const std::string& messageId,bool storageAllowed){
-    if(operation>12||input.size()>(operation==9?1024u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed))||(operation==10&&(!input.empty()||!messageId.empty()||storageAllowed))||(operation>=11&&(!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
+    if(operation>13||input.size()>(operation==9?1024u:operation==13?2048u:mailbox::MaxWire)||(!messageId.empty()&&!protocol::id(messageId,32))||(operation==9&&(!messageId.empty()||storageAllowed))||(operation==10&&(!input.empty()||!messageId.empty()||storageAllowed))||(operation>=11&&(!messageId.empty()||storageAllowed)))throw std::invalid_argument("Invalid native mailbox command");
     auto response=std::make_shared<std::promise<Blob>>();auto future=response->get_future();Impl::Command command{};
     command.mailbox=true;command.sourceKind=operation;command.bytes=input;command.id=messageId;command.accepted=storageAllowed;command.bytesResponse=response;
     if(!impl_->command(std::move(command)))throw std::runtime_error("Native profile unavailable");
