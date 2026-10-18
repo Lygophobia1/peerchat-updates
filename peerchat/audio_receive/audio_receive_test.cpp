@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cfenv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,8 +48,10 @@ std::vector<Packet> fixture(int count,uint32_t seed=0,bool fec=true,bool silence
  std::vector<Packet> out;
  for(int n=0;n<count;++n){std::array<int16_t,320> pcm{};for(int i=0;i<320;++i){double t=(n*320+i)/16000.;double envelope=.65+.3*std::sin(t*11);pcm[i]=static_cast<int16_t>(envelope*(10000*std::sin(t*2*3.141592653589793*220)+4000*std::sin(t*2*3.141592653589793*441)));}
   if(silence&&n>=count/2)pcm.fill(0);
-  std::array<uint8_t,4096> encoded{};int len=opus_encode(enc,pcm.data(),320,encoded.data(),encoded.size());CHECK(len>0);
-  out.push_back({std::vector<uint8_t>(encoded.begin(),encoded.begin()+len),seed+uint32_t(n*960),uint16_t(65500+n),uint64_t(n*20+40)});
+  if(silence&&(n==40||n==140)){uint64_t energy=0;for(auto sample:pcm)energy+=std::abs(int(sample));std::printf("Fixture frame=%d input_energy=%llu\n",n,(unsigned long long)energy);}
+  std::array<uint8_t,4096> encoded{};int len=opus_encode(enc,pcm.data(),320,encoded.data(),encoded.size());CHECK(len>0&&size_t(len)<=encoded.size());
+  std::vector<uint8_t> payload(size_t(len),0);std::copy_n(encoded.data(),len,payload.data());
+  out.push_back({std::move(payload),seed+uint32_t(n*960),uint16_t(65500+n),uint64_t(n*20+40)});
  }
  opus_encoder_destroy(enc);return out;
 }
@@ -76,7 +79,7 @@ Result scenario(Api& a,const char* label,int mode,bool fec=true){
  auto cfg=config();pc_rx_engine e=0;CHECK(a.pc_rx_create(&cfg,&e)==0);auto sc=source(0);pc_rx_source s=0;CHECK(a.pc_rx_source_add(e,&sc,&s)==0);
  size_t next=0;uint64_t energy=0,hash=1469598103934665603ull;uint32_t fecRate=0;uint64_t clockStart=0,loudEnergy=0,silentEnergy=0;
  for(uint64_t t=0;t<4600;t+=10){while(next<packets.size()&&packets[next].arrival<=t){if(!packets[next].bytes.empty()){int r=insert(a,e,s,sc,packets[next],t);CHECK(r==0||r==PC_RX_FAILED);}++next;}
-  std::array<int16_t,162> frame{};frame[0]=1234;frame[161]=4321;CHECK(a.pc_rx_pull_10ms(e,t,frame.data()+1,160)==0);CHECK(frame[0]==1234&&frame[161]==4321);
+  std::array<int16_t,162> frame{};frame[0]=1234;frame[161]=4321;CHECK(a.pc_rx_pull_10ms(e,t,&frame[1],160)==0);CHECK(frame[0]==1234&&frame[161]==4321);
   for(int i=1;i<=160;++i){auto level=std::abs(int(frame[i]));energy+=level;if(t>=500&&t<900)loudEnergy+=level;if(t>=2600&&t<3000)silentEnergy+=level;hash=(hash^uint16_t(frame[i]))*1099511628211ull;}
   auto current=stats(a,e,s);fecRate=std::max(fecRate,current.secondary_decoded_rate_q14);
   if(mode==0&&t==2000)clockStart=current.playout_timestamp;
@@ -85,8 +88,26 @@ Result scenario(Api& a,const char* label,int mode,bool fec=true){
  auto v=stats(a,e,s);CHECK(v.sample_rate==16000&&v.channels==1&&v.rtp_clock_rate==48000);CHECK(v.pulled_blocks==460&&v.pull_failures==0);CHECK(v.target_delay_ms<=200);CHECK(energy>1000000);CHECK(v.playout_timestamp_valid);
  std::printf("PASS %s: pulls=%llu concealed=%llu fec=%llu delay=%u/%u energy=%llu hash=%llu\n",label,(unsigned long long)v.pulled_blocks,(unsigned long long)v.concealed_samples,(unsigned long long)v.fec_packets_received,v.current_delay_ms,v.target_delay_ms,(unsigned long long)energy,(unsigned long long)hash);
  std::printf("FEC secondary decoded max Q14=%u\n",fecRate);
- if(mode==11)CHECK(silentEnergy<loudEnergy/10);
+ if(mode==11){std::printf("Silence transition loud_energy=%llu silent_energy=%llu\n",(unsigned long long)loudEnergy,(unsigned long long)silentEnergy);CHECK(silentEnergy<loudEnergy/10);}
  CHECK(a.pc_rx_destroy(e)==0);CHECK(a.pc_rx_destroy(e)==PC_RX_INVALID);return {v,energy,hash,fecRate};
+}
+void codecSilence(){
+ long (*volatile roundFloat)(float)=&std::lrintf;
+ std::printf("Codec arithmetic rounding_mode=%d lrintf={%ld,%ld,%ld,%ld,%ld}\n",std::fegetround(),roundFloat(0.f),roundFloat(1.f),roundFloat(-1.f),roundFloat(1000.25f),roundFloat(-1000.25f));
+ CHECK(roundFloat(0.f)==0&&roundFloat(1.f)==1&&roundFloat(-1.f)==-1&&roundFloat(1000.25f)==1000&&roundFloat(-1000.25f)==-1000);
+ auto packets=fixture(180,0,true,true);
+ // Optional synthetic fixture exchange isolates encoder/decoder compatibility
+ // between builds. These files contain generated test tones only, never audio
+ // captured from a user or application call.
+ if(const char* path=std::getenv("PC_RX_CODEC_OUTPUT")){
+  auto* f=std::fopen(path,"wb");CHECK(f);for(const auto& p:packets){uint32_t size=uint32_t(p.bytes.size());std::array<unsigned char,4> le{static_cast<unsigned char>(size),static_cast<unsigned char>(size>>8),static_cast<unsigned char>(size>>16),static_cast<unsigned char>(size>>24)};CHECK(std::fwrite(le.data(),1,4,f)==4);CHECK(std::fwrite(p.bytes.data(),1,size,f)==size);}CHECK(std::fclose(f)==0);
+ }
+ if(const char* path=std::getenv("PC_RX_CODEC_INPUT")){
+  auto* f=std::fopen(path,"rb");CHECK(f);for(auto& p:packets){std::array<unsigned char,4> le{};CHECK(std::fread(le.data(),1,4,f)==4);uint32_t size=uint32_t(le[0])|(uint32_t(le[1])<<8)|(uint32_t(le[2])<<16)|(uint32_t(le[3])<<24);CHECK(size>0&&size<=4096);p.bytes.resize(size);CHECK(std::fread(p.bytes.data(),1,size,f)==size);}CHECK(std::fgetc(f)==EOF);CHECK(!std::ferror(f));CHECK(std::fclose(f)==0);
+ }
+ int err=0;auto* decoder=opus_decoder_create(16000,1,&err);CHECK(decoder&&err==OPUS_OK);
+ uint64_t loud=0,silent=0;for(size_t n=0;n<packets.size();++n){std::array<int16_t,320> pcm{};auto& p=packets[n];CHECK(opus_decode(decoder,p.bytes.data(),int(p.bytes.size()),pcm.data(),320,0)==320);uint64_t frameEnergy=0;for(auto sample:pcm){frameEnergy+=std::abs(int(sample));if(n>=25&&n<45)loud+=std::abs(int(sample));if(n>=130&&n<150)silent+=std::abs(int(sample));}if(n==40||n==140)std::printf("Codec frame=%zu packet_bytes=%zu toc=%u output_energy=%llu first_sample=%d\n",n,p.bytes.size(),p.bytes.front(),(unsigned long long)frameEnergy,pcm.front());}
+ opus_decoder_destroy(decoder);std::printf("Direct Opus silence loud_energy=%llu silent_energy=%llu\n",(unsigned long long)loud,(unsigned long long)silent);CHECK(loud>100000);CHECK(silent<loud/10);
 }
 void lifecycle(Api& a){
  auto cfg=config();CHECK(a.pc_rx_create(nullptr,nullptr)==PC_RX_INVALID);cfg.max_sources=33;pc_rx_engine e=0;CHECK(a.pc_rx_create(&cfg,&e)==PC_RX_INVALID);cfg=config();auto packets=fixture(10);
@@ -151,8 +172,8 @@ void devicePaced(Api& a){
  for(size_t i=0;i<packets.size();++i){
   CHECK(insert(a,e,s,c,packets[i],UINT64_MAX-i)==PC_RX_OK);
   std::array<int16_t,322> pcm{};pcm.front()=1234;pcm.back()=4321;
-  CHECK(a.pc_rx_pull_10ms(e,0,pcm.data()+1,160)==PC_RX_OK);
-  CHECK(a.pc_rx_pull_10ms(e,0,pcm.data()+161,160)==PC_RX_OK);
+  CHECK(a.pc_rx_pull_10ms(e,0,&pcm[1],160)==PC_RX_OK);
+  CHECK(a.pc_rx_pull_10ms(e,0,&pcm[161],160)==PC_RX_OK);
   CHECK(pcm.front()==1234&&pcm.back()==4321);for(size_t n=1;n<=320;++n)energy+=std::abs(int(pcm[n]));
   std::this_thread::sleep_for(std::chrono::milliseconds(i%2?18:22));
  }
@@ -162,12 +183,17 @@ void devicePaced(Api& a){
  std::puts("PASS: real-clock receive, irregular device-paced 20 ms pairs, independent packet arrival, fixed buffers");
 }
 int main(int argc,char** argv){
+#if defined(PC_RX_CODEC_ONLY)
+ (void)argc;(void)argv;codecSilence();std::puts("PASS: isolated codec proof completed");return 0;
+#else
 #if defined(_WIN32)
  CHECK(argc==2);Api a(argv[1]);
 #else
  CHECK(argc==1);(void)argv;Api a;
 #endif
- lifecycle(a);boundariesAndConcurrency(a);devicePaced(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
+ codecSilence();lifecycle(a);boundariesAndConcurrency(a);devicePaced(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
  scenario(a,"moderate reorder",1);auto fec=scenario(a,"single loss/FEC",2);CHECK(fec.fec_decode_rate>0);auto plc=scenario(a,"burst loss/PLC",3,false);CHECK(plc.stats.concealed_samples>clean.stats.concealed_samples);scenario(a,"late packet",4);scenario(a,"timestamp wrap",5);scenario(a,"jitter variation",6);scenario(a,"increasing delay",7);scenario(a,"decreasing delay",8);scenario(a,"timestamp discontinuity",9);auto duplicate=scenario(a,"duplicate",10);CHECK(duplicate.hash==clean.hash);scenario(a,"source becomes silent",11);
  for(int n:{1,2,3,4,8})mix(a,n);
- std::puts("PASS: standalone receive/mix proof tests completed");}
+ std::puts("PASS: standalone receive/mix proof tests completed");return 0;
+#endif
+}

@@ -1,0 +1,30 @@
+diff --git a/modules/audio_coding/codecs/opus/audio_encoder_opus.cc b/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
+--- a/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
++++ b/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
+@@ -154,7 +154,7 @@ int GetFrameSizeMs(const SdpAudioFormat& format) {
+       }
+     }
+     // If none was found, return the largest supported frame length.
+-    return *(std::end(kOpusSupportedFrameLengths) - 1);
++    return kOpusSupportedFrameLengths.back();
+   }
+ 
+   return AudioEncoderOpusConfig::kDefaultFrameSizeMs;
+diff --git a/modules/audio_processing/agc2/limiter.cc b/modules/audio_processing/agc2/limiter.cc
+--- a/modules/audio_processing/agc2/limiter.cc
++++ b/modules/audio_processing/agc2/limiter.cc
+@@ -110,10 +110,10 @@ void Limiter::Process(DeinterleavedView<float> signal) {
+ 
+   RTC_DCHECK_EQ(level_estimate.size() + 1, scaling_factors_.size());
+   scaling_factors_[0] = last_scaling_factor_;
+-  std::transform(level_estimate.begin(), level_estimate.end(),
+-                 scaling_factors_.begin() + 1, [this](float x) {
+-                   return interp_gain_curve_.LookUpGainToApply(x);
+-                 });
++  for (size_t i = 0; i < level_estimate.size(); ++i) {
++    scaling_factors_[i + 1] =
++        interp_gain_curve_.LookUpGainToApply(level_estimate[i]);
++  }
+ 
+   MonoView<float> per_sample_scaling_factors(&per_sample_scaling_factors_[0],
+                                              signal.samples_per_channel());

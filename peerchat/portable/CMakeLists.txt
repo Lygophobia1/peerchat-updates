@@ -32,7 +32,7 @@ if(ANDROID)
     # JNI exports must be part of the shared object, not an unreferenced archive.
     target_sources(peerchat_messaging PRIVATE audio_android.cpp)
     # Keep statically linked C++ runtime symbols private to this C ABI library.
-    target_link_options(peerchat_messaging PRIVATE "-Wl,--exclude-libs,ALL")
+    target_link_options(peerchat_messaging PRIVATE "-Wl,--exclude-libs,ALL,-z,max-page-size=16384")
 endif()
 # Explicit Android adapters reuse shared Storage, TLS, calls and media. Node,
 # Windows platform APIs/Schannel and ScreenMedia remain excluded. The profile

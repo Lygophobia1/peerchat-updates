@@ -1,8 +1,31 @@
 # Android NetEq receive dependency audit
 
-Status: **build path identified; Android receive library unavailable and unvalidated**. This audit is read-only evidence from the `codex/native-unicode-emoji` checkout at `be502d2`. No Linux build, Android runtime execution, phone installation, or Raspberry Pi deployment was performed.
+Status: **genuine Android ARM64 receive archive built and independently link-proven; full ARM64/Bionic receive and mixer suite passes under QEMU 8.2.2; ARM64 codec-silence check still fails under Android x86_64 translation; application voice readiness remains unvalidated**. The audit history below records earlier states. No physical-device performance or end-to-end call acceptance is established.
+
+## Build progress — 2026-10-17
+
+- The approved WSL2 Ubuntu build environment is running. The separate Linux checkout is `/home/peerchatbuild/deps/webrtc-6cf6bcb-android/src`, pinned to `6cf6bcb585b31414aac02377df2bc8fec770d0e8`. The Windows dependency checkout and accepted packages remain separate and untouched by this build.
+- The receive archive was built for ARM64 with the NDK 27 target sysroot and Chromium Clang 24, API 26, `rtc_rust=false`, and a complete non-thin static archive. The isolated WebRTC checkout uses the documented patch for unsafe iterator constructions. Output and configuration evidence are under `build/android-neteq/arm64-v8a`; the archive contains 999 ARM64 ELF object members.
+- Independent links against the archive passed in both normal and whole-archive modes. The proof directory is `build/tests/android-receive-proof-27a2d0af8350498187a5d797def5e732`; its saved `runtime.log` contains passing receive lifetime, bounds/malformed-input, timing, packet ordering, reorder and loss/FEC cases.
+- At the time of this initial progress entry, an Android ARM64-under-x86_64-translation codec-only run failed the direct Opus silence assertion. Later QEMU and comparison results are recorded below. The Android translation failure remains open and these results do not establish production app voice readiness or successful end-to-end calls.
+- The emulator proof is limited to ARM64 execution through emulator ARM64 translation. It provides no evidence about physical ARM64 device performance, latency, battery use, audio routing, or call quality. No phone installation or Pi deployment was performed.
+
+## Cross-architecture runtime evidence — 2026-10-17
+
+- Added Ubuntu `qemu-user` and the AArch64 GNU C++ cross compiler to the WSL build environment. The installed package versions are `qemu-user 1:8.2.2+ds-0ubuntu1.18` and `g++-aarch64-linux-gnu 4:13.2.0-7ubuntu1`; the compiler reports `aarch64-linux-gnu-g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`. The retained emulator version file reports `qemu-aarch64 8.2.2`.
+- The unchanged ARM64/Bionic receive and mixer suite passes under QEMU. Evidence is in `build/tests/android-receive-qemu-8f13301bb33f433eb892a6b0dd5c3c4b/runtime.log`; `elf.txt` identifies an AArch64 ELF64 executable, and `qemu-version.txt` records QEMU 8.2.2. The log includes the source-becomes-silent assertion, loss/reorder/jitter cases, lifecycle checks, and 1–8-source mixing checks.
+- The codec-only Android x86_64 diagnostic passes. It exercises the synthetic Opus codec-silence function only; it is not a NetEq or receive/mixer test and does not validate the production Android app.
+- On the Android x86_64 emulator using `libndk_translation`, the ARM64 codec-only silence assertion fails across the Chromium Clang 24/NDK27 and the NDK Clang18/NDK27 NEON/scalar diagnostic variants. The retained proof logs report loud energy `45186613`, silent energy `38194940`, and failure of `silent < loud/10` (for example, `build/tests/android-receive-proof-e4ddaefcdcc84b0ca0e94735077cfe87/runtime.log` and `build/tests/android-receive-proof-0e33bee8c25247a3b450fcb8732396bd/runtime.log`).
+- The different ARM64 results on QEMU and `libndk_translation` suggest a translation/runtime boundary as the investigation focus. No exact instruction-level root cause has been established. QEMU functional success does not resolve the emulator codec failure or establish physical-device behavior.
 
 ## Existing implementation and pins
+
+### Subsequent application link and native-emulator proof
+
+- The full, unchanged receive/mixer suite passed natively as x86_64 Android JNI (not ARM translation): `build/tests/android-receive-proof-ad1d90fadfa8422da36b35219cb129e3/runtime.log`. Genuine x64 archive SHA-256 `671d90a6a95d4bfc4a8561dbd28196138662449a98ccefd1a9334d9da190a14e`; all 1006 members are ELF64 X86-64 relocatables. The separate GN output changes only target CPU and matched NDK27 unwind path. The codec-only log is now retained at `build/tests/opus-ndk27-comparison/codec-x64-proof/runtime.log`.
+- Actual ARM64 `peerchat_jni` and `peerchat_messaging` targets linked successfully with the complete genuine archive in `build/android-voice-integration/arm64-v8a`. This dependency-link checkpoint retains application voice capability OFF. The messaging SO hash is `a00f6205d1a10ba6887af9fbd6d2eb052f45292ccc0c229cfacf79c63091d7a6`; JNI SO hash `433e97cb13c311079514378f8b085d2bb2837ab384b6a7604c134d0209c70089`. Both remain behind the existing C ABI; final release/package hashes will differ after application integration.
+- CMake uses the receive archive's matching WebRTC Opus headers and encoder/decoder together, rather than also linking the old standalone Opus. Final ARM64 messaging ELF loads are 16-KiB aligned, with only `liblog`, `libdl`, `libm`, and `libc` dynamic requirements. Archive symbols remain hidden; static libc++ is private to each C ABI library. No duplicate-symbol suppression is used.
+- These are synthetic functional/ABI results, not microphone, network, physical ARM64 performance, or call acceptance. Android app foreground ownership, explicit consent, authenticated TURN and real call integration remain separate gates.
 
 - The pinned WebRTC checkout is `C:\Peerchatdep\deps\webrtc-complete-src\src`, revision `6cf6bcb585b31414aac02377df2bc8fec770d0e8` (verified with `git -c safe.directory=... rev-parse HEAD`). Its parent `.gclient` currently sets `checkout_android: False`.
 - `audio_receive/peerchat_audio_receive.cpp` wraps WebRTC `DefaultNetEqFactory`, its Opus decoder, a device-paced clock, and `AudioMixer` behind the existing `pc_rx_*` C ABI in `audio_receive/peerchat_audio_receive.h`. `audio_receive/BUILD.gn` lists the NetEq, Opus, environment, and mixer GN dependencies, but currently declares a Windows-oriented shared library.
@@ -10,7 +33,7 @@ Status: **build path identified; Android receive library unavailable and unvalid
 - `voice_receive_engine.cpp` already selects direct `pc_rx_*` symbols under `__ANDROID__ && PEERCHAT_ANDROID_STATIC_RECEIVE`; Windows keeps dynamic loading. `android/voice-media/CMakeLists.txt` accepts an ARM64 static archive in `PEERCHAT_ANDROID_RECEIVE_LIBRARY` and defines that receive gate when supplied. `android/voice-media/media_capabilities.cpp` reports unavailable otherwise. The Android JNI target is linked through `portable/CMakeLists.txt` and `android/app/src/main/cpp/CMakeLists.txt`.
 - The existing Android media CMake project pins Opus `ddbe48383984d56acd9e1ab6a090c54ca6b735a6`, libdatachannel `c6696d157b5612df2a741d9a03b192b47ab6cefb`, MbedTLS `068ff080b369adfac81509f9b57b2afabaf82dc5`, libjuice `22145ec3473c73d811417ac9a6aee0de530aaa3f`, libsrtp `24b3bf8f19b6f5ab4cd2bcceb4f4064efca86fd5`, usrsctp `fec583d54493f879d2ae44a743423bf8a04371ab`, and plog `94899e0b926ac1b0f4750bfbd495167b4a6ae9ef`.
 
-## Host evidence and blocker
+## Earlier host evidence and blocker (superseded by the WSL setup below)
 
 The pinned `build/config/BUILDCONFIG.gn` asserts `host_os == "linux"` for `target_os == "android"`, with message `Android builds are only supported on Linux.` The earlier probe is documented in `docs/ANDROID_CHECKPOINT_AND_REMAINING_WORK.md`; its saved log was not present in this checkout. This restriction is in the pinned build toolchain, not evidence that NetEq itself lacks Android support.
 
@@ -20,7 +43,9 @@ The WebRTC tree occupies approximately 9.15 GB across 442,392 files. Its Android
 
 The Android compiler is also not simply the compiler bundled with the NDK. `build/toolchain/android/BUILD.gn` uses the Chromium Clang toolchain; `tools/clang/scripts/update.py` pins `llvmorg-24-init-7747-g62397f8b`, subrevision `31`. The NDK supplies the Android sysroot. Record both toolchain identities separately. The app's NDK 27 linker/runtime must not be assumed compatible with newer LLVM bitcode or every NDK 30 libc++ symbol.
 
-## Supported build sequence — **UNVALIDATED**
+## Build sequence from the original audit
+
+The separate WSL build has since completed the archive and independent-link steps below. The remaining app-link, runtime, and physical-device gates are still open.
 
 On an appropriate Linux build host, use a separate pinned WebRTC checkout so the existing Windows dependency checkout remains intact:
 

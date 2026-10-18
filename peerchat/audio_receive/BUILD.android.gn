@@ -1,0 +1,54 @@
+# Copied as BUILD.gn only into the isolated pinned Android WebRTC checkout.
+# The existing Windows shared-library target remains unchanged.
+import("//webrtc.gni")
+declare_args() {
+  # Explicit runtime from the same NDK27 package as the application sysroot.
+  peerchat_ndk_unwind_library = ""
+}
+assert(peerchat_ndk_unwind_library != "", "Provide the matched NDK unwind archive")
+static_library("peerchat_audio_receive") {
+  output_name = "peerchat_audio_receive"
+  complete_static_lib = true
+  sources = [ "peerchat_audio_receive.cpp" ]
+  defines = [ "PC_RECEIVE_BUILD" ]
+  # Match upstream standalone WebRTC: Chromium-specific style plugins do not
+  # apply to WebRTC headers. Keep unsafe-buffer diagnostics and sanitizers.
+  configs -= rtc_remove_configs
+  configs -= [
+    "//build/config/compiler:no_exceptions",
+    "//build/config/compiler:thin_archive",
+  ]
+  configs += [ "//build/config/compiler:exceptions" ]
+  # Standalone NDK libc++ does not supply Chromium's unwind configuration.
+  # Both the exception-catching C ABI and WebRTC Android stack traces need it.
+  libs = [ peerchat_ndk_unwind_library ]
+  deps = [
+    "//api/neteq:default_neteq_factory",
+    "//api/audio_codecs/opus:audio_decoder_opus",
+    "//api/environment:environment_factory",
+    "//api:make_ref_counted",
+    "//modules/audio_mixer:audio_mixer_impl",
+    "//system_wrappers",
+  ]
+}
+
+copy("test_opus_headers") {
+  sources = [
+    "//third_party/opus/src/include/opus.h",
+    "//third_party/opus/src/include/opus_types.h",
+    "//third_party/opus/src/include/opus_defines.h",
+  ]
+  outputs = [ "$root_gen_dir/peerchat_audio_receive/include/opus/{{source_file_part}}" ]
+}
+
+# Runs the existing real NetEq proof, not a fake receive implementation.
+executable("peerchat_audio_receive_test") {
+  testonly = true
+  sources = [ "audio_receive_test.cpp" ]
+  include_dirs = [ "$root_gen_dir/peerchat_audio_receive/include" ]
+  configs -= rtc_remove_configs
+  configs -= [ "//build/config/compiler:no_exceptions" ]
+  configs += [ "//build/config/compiler:exceptions" ]
+  ldflags = [ "-Wl,-Map=" + rebase_path("$root_out_dir/receive-test-link.map", root_build_dir) ]
+  deps = [ ":peerchat_audio_receive", ":test_opus_headers" ]
+}

@@ -1,0 +1,19 @@
+# Exact WebRTC pin: 6cf6bcb585b31414aac02377df2bc8fec770d0e8
+# NDK27 target paths are supplied by build-android-neteq.sh and recorded in output.
+target_os = "android"
+target_cpu = "arm64"
+is_debug = false
+is_official_build = false
+is_component_build = false
+rtc_include_tests = false
+rtc_build_examples = false
+rtc_build_tools = false
+# This adapter accepts Opus payloads, not video RTP extensions. The upstream
+# C++ configuration avoids separately linked Rust crates outside our archive.
+rtc_rust = false
+default_min_sdk_version = 26
+android_ndk_api_level = 26
+use_custom_libcxx = false
+use_custom_libcxx_for_host = true
+use_thin_lto = false
+use_siso = false
