@@ -2,6 +2,7 @@ package com.peerchat.android.application
 
 import com.peerchat.android.platform.AccountSession
 import com.peerchat.android.platform.ServerEndpoint
+import com.peerchat.android.platform.AttachmentSendMode
 import kotlinx.coroutines.flow.StateFlow
 
 /** UI/application seam only. Implementations expose owner snapshots and commands,
@@ -36,8 +37,8 @@ interface MessagingApplication:AutoCloseable {
     suspend fun sendGroup(id:String,text:String):String=error("Group send unavailable")
     suspend fun retryGroup(id:String,message:String){error("Group retry unavailable")}
     suspend fun groupHistory(id:String,before:Long=Long.MAX_VALUE):List<GroupMessageSnapshot> = error("Group history unavailable")
-    suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String = error("File sharing unavailable")
-    suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? = error("File sharing unavailable")
+    suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:AttachmentSendMode):String = error("File sharing unavailable")
+    suspend fun resolveAttachmentCompatibility(token:String,mode:AttachmentSendMode?):String? = error("File sharing unavailable")
     suspend fun attachmentAction(id:String,accept:Boolean) { error("File sharing unavailable") }
     suspend fun attachmentText(id:String):String = error("Text preview unavailable")
     suspend fun requestFriend(username:String)

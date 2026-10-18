@@ -338,7 +338,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         OpaquePushWake.refreshPeriodic(context)
         mailboxExecution=MailboxExecution();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
-    private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
+    private fun configureMailboxScope(owner:ServerAccounts,native:Long){
         val session=checkNotNull(owner.session)
         val server=owner.endpoint.host.lowercase(java.util.Locale.ROOT)+":"+owner.endpoint.port
         check(MailboxBridge.configureEnrollment(native,session.accountId,generation,server.toByteArray(Charsets.US_ASCII),owner.endpoint.certificatePin.lowercase(java.util.Locale.ROOT).toByteArray(Charsets.US_ASCII))==0){"Authenticated mailbox scope is unavailable"}
@@ -350,6 +350,10 @@ class MessagingBackend(context: Context,private val profileName: String="default
             mailboxEnrollmentScope=ScopedBackendWork.Identity(checkNotNull(profile),owner,session,session.accountId,generation)
             mailboxEnrollmentEndpoint=owner.endpoint
         }
+    }
+    private fun configureMailboxEnrollment(owner:ServerAccounts,native:Long){
+        configureMailboxScope(owner,native)
+        val session=checkNotNull(owner.session)
         val scope=NativeRecordWriter(30).also{it.number(session.accountId);it.number(generation)}.bytes()
         // Optional capability setup cannot block ordinary text mailbox work.
         try{com.peerchat.android.TransferBridge.request(native,11,scope)}catch(_:Exception){}
@@ -790,7 +794,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     private data class PendingAttachmentCompatibility(val token:String,val owner:ServerAccounts,val session:com.peerchat.android.platform.AccountSession,
         val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String,
-        val preflightTransportUnavailable:Boolean=false)
+        val preflightTransportUnavailable:Boolean=false,val cachedReady:Boolean=false,val selectedDirect:Boolean=false)
     private val attachmentSelection=AttachmentSelectionOwner<PendingAttachmentCompatibility>()
     private fun compatibilityScope(p:PendingAttachmentCompatibility)=!stopped&&authorizationSnapshotInstalled&&accounts===p.owner&&
         p.owner.session===p.session&&generation==p.generation&&friends.any{it.peerId==p.peer&&it.accountId==p.recipient}
@@ -801,7 +805,16 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private fun directCompatibilityStatus(p:PendingAttachmentCompatibility):Boolean?=try{
         check(compatibilityScope(p));val r=NativeRecord(directCompatibility(p,false),30);val ready=r.number();r.end();require(ready in 0..1);ready==1L
     }catch(_:Exception){null}
-    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){
+    private fun attachmentCacheReady(p:PendingAttachmentCompatibility):Boolean {
+        check(compatibilityScope(p))
+        configureMailboxEnrollment(p.owner,checkNotNull(profile).handle)
+        if(!mailboxExecution.registrationAccepted){if(mailboxInFlight==null)mailboxAt=0L;return false}
+        val r=NativeRecord(transfer(11){it.number(p.session.accountId);it.number(p.generation)},30)
+        val ready=r.number();r.end()
+        if(ready==2L)throw AttachmentModeUnavailable("cached_unsupported")
+        return ready==1L
+    }
+    override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:AttachmentSendMode):String=withContext(Dispatchers.IO){
         val (intent, selected)=synchronized(gate){
             attachmentSelection.begin {
                 check(!stopped&&!resetting){"Attachment selection is unavailable"}
@@ -814,23 +827,20 @@ class MessagingBackend(context: Context,private val profileName: String="default
         try{
         // A picker may return before remembered authentication. Wait outside
         // the owner gate, bound to the original local profile/account/server.
-        val pending=awaitAttachmentReadiness(probe={synchronized(gate){
+        val pending=awaitAttachmentReadiness(probe={synchronized(gate){attachmentModeReadiness(mode,{
             check(!stopped&&!resetting&&attachmentSelection.isPreparing(intent)&&profile===selectedProfile&&
                 localReadContext?.account==selectedLocal.account&&localReadContext?.endpoint==selectedLocal.endpoint){"Attachment profile changed; nothing was sent"}
-            if(!inUse||!authorizationSnapshotInstalled||!mutable.value.authenticated)return@synchronized null
-            val owner=accounts?:return@synchronized null
-            val session=owner.session?:return@synchronized null
+            if(!inUse||!authorizationSnapshotInstalled||!mutable.value.authenticated)return@attachmentModeReadiness null
+            val owner=accounts?:return@attachmentModeReadiness null
+            val session=owner.session?:return@attachmentModeReadiness null
             check(session.accountId==selectedLocal.account&&owner.endpoint==selectedLocal.endpoint)
             check(friends.any{it.peerId==peerId}){"Recipient authorization changed"}
-            configureMailboxEnrollment(owner,selectedProfile.handle)
-            if(!mailboxExecution.registrationAccepted){if(mailboxInFlight==null)mailboxAt=0L;return@synchronized null}
-            val r=NativeRecord(transfer(11){it.number(session.accountId);it.number(generation)},30)
-            val ready=r.number();r.end()
-            check(ready!=2L){"Offline attachments are unsupported by this server"}
-            if(ready!=1L)return@synchronized null
+            // Native direct route validation needs only this authenticated scope,
+            // not a registered cache key or cache capability.
+            configureMailboxScope(owner,selectedProfile.handle)
             PendingAttachmentCompatibility(java.util.UUID.randomUUID().toString().replace("-",""),owner,session,generation,
                 peerId,friends.single{it.peerId==peerId}.accountId,"","")
-        }})
+        },{attachmentCacheReady(it)})}})
         val work=ScopedBackendWork(gate){attachmentSelection.isPreparing(intent)&&profile===selectedProfile&&inUse&&compatibilityScope(pending)}
         val directory=work.local{val r=NativeRecord(transfer(0),30);java.io.File(r.text()).also{r.end()}}
         // Slow SAF providers, copying and fsync must not hold the messaging gate.
@@ -838,39 +848,76 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val imported=work.network{importAttachment(context,uri,directory)}
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         val bound=pending.copy(path=imported.first,name=imported.second)
+        if(mode==AttachmentSendMode.Direct){
+            val ready=awaitAttachmentDirectRoute(
+                {synchronized(gate){if(!attachmentSelection.isPreparing(intent))null else directCompatibilityStatus(bound)}},
+                {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)&&
+                    ReliableBridge.demand(checkNotNull(profile).handle,bound.peer.toByteArray(Charsets.US_ASCII))==0}})
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if(ready)return@withContext work.local{
+                val response=NativeRecord(directCompatibility(bound,true),30);val id=response.text();response.end();publish();id
+            }
+            // An offline Direct selection may offer Cached only after the same
+            // registration/capability gate as an explicit Cached selection.
+            try{awaitAttachmentReadiness(probe={synchronized(gate){
+                check(attachmentSelection.isPreparing(intent)&&compatibilityScope(bound))
+                if(attachmentCacheReady(bound))bound else null
+            }})}catch(failure:AttachmentModeUnavailable){
+                if(failure.reason=="cached_unsupported")throw AttachmentModeUnavailable("direct_device_offline; cached_unsupported")
+                throw failure
+            }catch(_:AttachmentReadinessUnavailable){throw AttachmentModeUnavailable("direct_device_offline; cached_readiness_timeout")}
+            val alternative=work.network{attachmentSendPreflight(bound.recipient,
+                {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
+            if(alternative!=AttachmentSendPreflight.Cached)throw AttachmentModeUnavailable(
+                if(alternative==AttachmentSendPreflight.UpgradeChoice)"direct_device_offline; cached_recipient_upgrade_required"
+                else "direct_device_offline; cached_preflight_unavailable")
+            val pending=work.local{bound.copy(cachedReady=true,selectedDirect=true).also{attachmentSelection.pending=it}}
+            throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(pending.token,pending.name,false,pending.peer,
+                cachedReady=true,selectedDirect=true))
+        }
         val preflight=work.network{attachmentSendPreflight(bound.recipient,
             {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
-        val prepared:Any=work.local{
-            if(preflight!=AttachmentSendPreflight.Cached){
-                bound.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice).also{attachmentSelection.pending=it}
-            }else{
-                val response=NativeRecord(transfer(10){it.text(peerId);it.text(bound.path);it.text(bound.name)},30)
-                val id=response.text();response.end();publish();id
-            }
+        if(preflight==AttachmentSendPreflight.Cached)return@withContext work.local{
+            val response=NativeRecord(transfer(10){it.text(peerId);it.text(bound.path);it.text(bound.name)},30)
+            val id=response.text();response.end();publish();id
         }
-        if(prepared is PendingAttachmentCompatibility){
-            val ready=try{awaitAttachmentDirectRoute(
-                {synchronized(gate){if(attachmentSelection.pending!==prepared)null else directCompatibilityStatus(prepared)}},
-                {synchronized(gate){compatibilityScope(prepared)&&attachmentSelection.pending===prepared&&
-                    ReliableBridge.demand(checkNotNull(profile).handle,prepared.peer.toByteArray(Charsets.US_ASCII))==0}})
-            }catch(failure:Throwable){synchronized(gate){attachmentSelection.clearIfCurrent(prepared)};throw failure}
-            synchronized(gate){if(!compatibilityScope(prepared)||attachmentSelection.pending!==prepared){
-                attachmentSelection.clearIfCurrent(prepared)
-                error("Attachment authorization changed; private source retained")
-            }}
-            throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer,prepared.preflightTransportUnavailable))
-        }
-        prepared as String
+        val prepared=work.local{bound.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice).also{attachmentSelection.pending=it}}
+        val ready=try{awaitAttachmentDirectRoute(
+            {synchronized(gate){if(attachmentSelection.pending!==prepared)null else directCompatibilityStatus(prepared)}},
+            {synchronized(gate){compatibilityScope(prepared)&&attachmentSelection.pending===prepared&&
+                ReliableBridge.demand(checkNotNull(profile).handle,prepared.peer.toByteArray(Charsets.US_ASCII))==0}})
+        }catch(failure:Throwable){synchronized(gate){attachmentSelection.clearIfCurrent(prepared)};throw failure}
+        synchronized(gate){if(!compatibilityScope(prepared)||attachmentSelection.pending!==prepared){
+            attachmentSelection.clearIfCurrent(prepared)
+            error("Attachment authorization changed; private source retained")
+        }}
+        throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer,prepared.preflightTransportUnavailable))
         }finally{synchronized(gate){attachmentSelection.finish(intent)}}
     }
-    override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String?=withContext(Dispatchers.IO){synchronized(gate){
-        val pending=attachmentSelection.pending
-        if(!direct){if(pending?.token==token)attachmentSelection.clearIfCurrent(pending);return@synchronized null}
-        check(pending!=null&&pending.token==token&&compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
-        val response=NativeRecord(directCompatibility(pending,true),30);val id=response.text();response.end()
-        attachmentSelection.clearIfCurrent(pending);publish();id
-    }}
+    override suspend fun resolveAttachmentCompatibility(token:String,mode:AttachmentSendMode?):String?=withContext(Dispatchers.IO){
+        val pending=synchronized(gate){attachmentSelection.pending}
+        if(mode==null){synchronized(gate){if(pending?.token==token)attachmentSelection.clearIfCurrent(pending)};return@withContext null}
+        check(pending!=null&&pending.token==token&&synchronized(gate){compatibilityScope(pending)}){"Attachment authorization changed; private source retained"}
+        if(mode==AttachmentSendMode.Cached){
+            check(pending.cachedReady){"Cached transfer was not explicitly offered"}
+            val work=ScopedBackendWork(gate){attachmentSelection.pending===pending&&compatibilityScope(pending)}
+            val preflight=work.network{attachmentSendPreflight(pending.recipient,
+                {synchronized(gate){attachmentSelection.pending===pending&&compatibilityScope(pending)}},pending.owner::directAttachmentCache)}
+            if(preflight!=AttachmentSendPreflight.Cached)throw AttachmentModeUnavailable(
+                if(preflight==AttachmentSendPreflight.UpgradeChoice)"cached_recipient_upgrade_required" else "cached_preflight_unavailable")
+            return@withContext work.local{
+                if(!attachmentCacheReady(pending))throw AttachmentModeUnavailable("cached_readiness_lost")
+                val response=NativeRecord(transfer(10){it.text(pending.peer);it.text(pending.path);it.text(pending.name)},30)
+                val id=response.text();response.end();attachmentSelection.clearIfCurrent(pending);publish();id
+            }
+        }
+        synchronized(gate){
+            check(!pending.selectedDirect&&attachmentSelection.pending===pending&&compatibilityScope(pending))
+            val response=NativeRecord(directCompatibility(pending,true),30);val id=response.text();response.end()
+            attachmentSelection.clearIfCurrent(pending);publish();id
+        }
+    }
     override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled);transfer(if(accept)2 else 3){it.text(id)};publish();Unit
     }}
@@ -1446,7 +1493,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             "mailbox_ready","mailbox_receipt_ready"->{mailboxAt=0L;android.util.Log.i("PeerChatNetwork","mailbox_trigger=$kind")}
             "presence_changed","friend_request","friend_request_updated","friendship_changed"->{contactsDirty=true}
             "relay_demand"->{
-                if(event.optString("purpose")=="group_control"){
+                if(event.optString("purpose")=="group_key"){
                     if(!livePeerWorkAllowed||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                     try{groupExecution.incomingControl(event,checkNotNull(profile).handle,mutable.value.accountId,generation)}
                     catch(_:Exception){groupRefreshAt=0L}

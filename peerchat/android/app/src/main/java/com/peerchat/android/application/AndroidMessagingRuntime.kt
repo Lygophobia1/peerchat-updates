@@ -87,8 +87,8 @@ object AndroidMessagingRuntime {
             endGraceForScopeChange()
             owner.resetNetworkSession()
         }
-        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String {
-            val id=owner.sendAttachment(peerId,uri)
+        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:com.peerchat.android.platform.AttachmentSendMode):String {
+            val id=owner.sendAttachment(peerId,uri,mode)
             if(wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
             return id
         }
@@ -96,8 +96,8 @@ object AndroidMessagingRuntime {
             owner.attachmentAction(id,accept)
             if(accept&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
         }
-        override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? {
-            val id=owner.resolveAttachmentCompatibility(token,direct)
+        override suspend fun resolveAttachmentCompatibility(token:String,mode:com.peerchat.android.platform.AttachmentSendMode?):String? {
+            val id=owner.resolveAttachmentCompatibility(token,mode)
             if(id!=null&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
             return id
         }

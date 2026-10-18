@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.peerchat.android.application.TransferSettingsSnapshot
+import com.peerchat.android.platform.AttachmentSendMode
 import java.math.BigDecimal
 
 internal fun transferMbps(bits:Long):String=BigDecimal.valueOf(bits).movePointLeft(6).stripTrailingZeros().toPlainString()
@@ -27,6 +28,17 @@ private fun transferPreset(bits:Long)=when(bits){0L->"Unlimited";10_000_000L->"1
             state.transferSettingsError?.let{Text(it,color=MaterialTheme.colorScheme.error)}
             state.notice?.let{Text(it)}
             if(state.transferSettingsBusy)LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("Default DM file sending mode",style=MaterialTheme.typography.titleLarge)
+            Text("Direct sends to a verified online device, using the authenticated relay when needed. Cached stores encrypted content for authorized devices to retrieve later. Incoming files of either type are handled automatically.",style=MaterialTheme.typography.bodySmall)
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                FilterChip(state.attachmentSendMode==AttachmentSendMode.Direct,
+                    {dispatch(UiAction.SaveAttachmentSendMode(AttachmentSendMode.Direct))},label={Text("Direct transfer")},
+                    modifier=Modifier.testTag("default-direct"))
+                FilterChip(state.attachmentSendMode==AttachmentSendMode.Cached,
+                    {dispatch(UiAction.SaveAttachmentSendMode(AttachmentSendMode.Cached))},label={Text("Cached transfer")},
+                    modifier=Modifier.testTag("default-cached"))
+            }
+            Text("Choose either mode for one DM file from the conversation attachment menu without changing this default.",style=MaterialTheme.typography.bodySmall)
             val saved=state.transferSettings
             if(saved==null){
                 Text("Loading your saved transfer preferences…")

@@ -15,6 +15,7 @@ import com.peerchat.android.application.VoiceCallTarget
 import com.peerchat.android.application.VoiceConsent
 import com.peerchat.android.application.VoiceControl
 import com.peerchat.android.application.VoiceSnapshot
+import com.peerchat.android.platform.AttachmentSendMode
 
 enum class Route { Welcome, Login, Register, Server, Home, Conversation, Details, Diagnostics, Contacts, TransferSettings }
 enum class ContactPage { Menu, FindPeople, Incoming, Outgoing, Invitations, NewChat }
@@ -80,6 +81,8 @@ data class PeerChatUiState(
     val peopleLoading:Boolean=false,val peopleError:String?=null,val contactBusy:Boolean=false,
     val transferSettings:com.peerchat.android.application.TransferSettingsSnapshot?=null,
     val transferSettingsBusy:Boolean=false,val transferSettingsError:String?=null,
+    val attachmentSendMode:AttachmentSendMode=AttachmentSendMode.Direct,
+    val attachmentContextGeneration:Long=0L,
     val groupInvitations:List<com.peerchat.android.application.GroupInvitationSnapshot> = emptyList(),
     val route: Route = Route.Welcome, val tab: Tab = Tab.Chats, val kind: ChatKind = ChatKind.Direct,
     val conversations: List<ConversationUi> = emptyList(), val selectedId: String? = null,
@@ -128,6 +131,7 @@ class UnconnectedAccountAccess : AccountAccess {
 sealed interface UiAction {
     data object OpenTransferSettings:UiAction
     data class SaveTransferSettings(val value:com.peerchat.android.application.TransferSettingsSnapshot):UiAction
+    data class SaveAttachmentSendMode(val mode:AttachmentSendMode):UiAction
     data class Contacts(val page:ContactPage=ContactPage.Menu):UiAction
     data class PeopleQuery(val text:String):UiAction
     data object RefreshContacts:UiAction
@@ -162,8 +166,9 @@ sealed interface UiAction {
     data class HistorySync(val context:ArchiveEnrollmentSnapshot,val enabled:Boolean):UiAction
     data class ArchiveConsent(val context:ArchiveEnrollmentSnapshot,val action:ArchiveDeviceAction,val device:String,val read:Boolean=false,val serve:Boolean=false):UiAction
     data class PreviewMessage(val text: String) : UiAction
-    data class SendAttachment(val uri:android.net.Uri):UiAction
-    data class ResolveAttachmentCompatibility(val token:String,val direct:Boolean):UiAction
+    data class SendAttachment(val uri:android.net.Uri,val mode:AttachmentSendMode=AttachmentSendMode.Direct,
+        val conversationId:String?=null,val accountId:String?=null,val contextGeneration:Long?=null):UiAction
+    data class ResolveAttachmentCompatibility(val token:String,val mode:AttachmentSendMode?):UiAction
     data class AttachmentAction(val id:String,val accept:Boolean):UiAction
     data class AttachmentPreview(val id:String):UiAction
     data object Older : UiAction
@@ -236,7 +241,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
         UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize,
-        is UiAction.SendAttachment,is UiAction.ResolveAttachmentCompatibility,is UiAction.AttachmentAction,is UiAction.AttachmentPreview -> state // Real application commands only, never demo trust.
+        is UiAction.SendAttachment,is UiAction.ResolveAttachmentCompatibility,is UiAction.AttachmentAction,is UiAction.AttachmentPreview,is UiAction.SaveAttachmentSendMode -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(

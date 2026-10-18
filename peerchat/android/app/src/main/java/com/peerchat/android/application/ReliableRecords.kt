@@ -42,7 +42,7 @@ data class ArchiveRelayScope(val account:Long,val issuer:String,val source:Strin
 }
 data class GroupRelayScope(val account:Long,val authenticationGeneration:Long,val group:String,val epoch:Long,val targetAccount:Long,val targetDevice:String){
     init{require(account>0&&authenticationGeneration>0&&epoch>0&&targetAccount>0&&group.matches(Regex("[0-9a-f]{32}"))&&targetDevice.matches(Regex("[0-9a-f]{64}")))}
-    fun fields()=org.json.JSONObject().put("purpose","group_control").put("groupId",group).put("rosterGeneration",epoch.toString())
+    fun fields()=org.json.JSONObject().put("purpose","group_key").put("groupId",group).put("rosterGeneration",epoch.toString())
     companion object{fun parse(bytes:ByteArray):GroupRelayScope{
         val r=NativeRecord(bytes,27);require(r.text()=="PeerChat/AndroidGroupRelay/v1")
         val result=GroupRelayScope(r.number(),r.number(),r.text(),r.number(),r.number(),r.text());r.end();return result

@@ -290,9 +290,34 @@ public partial class DesktopApplication {
         if(target.AccountId>0){var owner=discovery;ulong profile=profileSessionGeneration;string recipient=target.Contact.peer;long account=target.AccountId;var mode=await SelectDmAttachmentDelivery(target);if(mode==DmAttachmentDeliveryMode.Cancel)return;foreach(string path in files){if(closing||owner!=discovery||profile!=profileSessionGeneration||!target.IsFriend||target.AccountId!=account||target.Contact==null||target.Contact.peer!=recipient)return;await FileOperation(21,recipient,DmAttachmentDelivery.Target(mode,account),path);}return;}
         string peer=target.Contact.peer;foreach(string path in files)await FileOperation(1,peer,"",path);
     }
+    DmAttachmentDeliveryMode ChooseDmAttachmentMode(ConversationModel target){
+        var dialog=new Window{Title="Attachment delivery",Owner=window,Width=530,SizeToContent=SizeToContent.Height,ResizeMode=ResizeMode.NoResize,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false,Background=Brush("#101820"),Foreground=Brush("#EDF1F5"),Resources=window.Resources};
+        var panel=new StackPanel{Margin=new Thickness(24)};dialog.Content=panel;
+        panel.Children.Add(new TextBlock{Text="Send attachment to "+target.Name,FontSize=22,TextWrapping=TextWrapping.Wrap});
+        var choice=new ComboBox{ItemsSource=new[]{"Direct Transfer","Cached Transfer"},SelectedIndex=new AttachmentSendPreferenceStore(directory).Load()==DmAttachmentDeliveryMode.EncryptedCache?1:0,Margin=new Thickness(0,16,0,12)};panel.Children.Add(choice);
+        var description=new TextBlock{TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,16)};panel.Children.Add(description);
+        Action explain=()=>description.Text=choice.SelectedIndex==0?DmAttachmentDelivery.OnlineDescription+"\nSelected verified device: "+(target.Contact.verified?target.Contact.peer:"Not verified — direct sending is unavailable")+"\nThis encrypted peer connection can use the relay; it is not LAN-only.":DmAttachmentDelivery.CacheDescription+"\nRecipients can retrieve the encrypted attachment after you disconnect.";
+        choice.SelectionChanged+=(s,e)=>explain();explain();
+        panel.Children.Add(new TextBlock{Text="This choice applies only to this send. Change the profile default in File Transfer Settings.",TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,16)});
+        var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};panel.Children.Add(buttons);
+        var cancel=new Button{Content="Cancel",IsCancel=true,Margin=new Thickness(0,0,12,0)};cancel.Click+=(s,e)=>dialog.DialogResult=false;buttons.Children.Add(cancel);
+        var proceed=new Button{Content="Continue",IsDefault=true};proceed.Click+=(s,e)=>dialog.DialogResult=true;buttons.Children.Add(proceed);
+        if(dialog.ShowDialog()!=true)return DmAttachmentDeliveryMode.Cancel;
+        return choice.SelectedIndex==1?DmAttachmentDeliveryMode.EncryptedCache:DmAttachmentDeliveryMode.OnlineDevice;
+    }
     async Task<DmAttachmentDeliveryMode> SelectDmAttachmentDelivery(ConversationModel target){
         if(target==null||target.Contact==null||!target.IsFriend||target.AccountId<=0)return DmAttachmentDeliveryMode.Cancel;
         var owner=discovery;ulong profile=profileSessionGeneration;string peer=target.Contact.peer;long account=target.AccountId;
+        var selectedMode=ChooseDmAttachmentMode(target);
+        if(selectedMode==DmAttachmentDeliveryMode.Cancel)return selectedMode;
+        Func<bool> sameScope=()=>!closing&&!model.Groups&&model.Selected==target&&owner==discovery&&profile==profileSessionGeneration&&target.IsFriend&&target.AccountId==account&&target.Contact!=null&&target.Contact.peer==peer;
+        if(!sameScope())return DmAttachmentDeliveryMode.Cancel;
+        if(selectedMode==DmAttachmentDeliveryMode.OnlineDevice){
+            if(DmAttachmentDelivery.OnlineSelectable(target)&&await DemandReadyRoute(target,"selected direct attachment")&&sameScope()&&DmAttachmentDelivery.OnlineReady(target))return DmAttachmentDeliveryMode.OnlineDevice;
+            if(!sameScope())return DmAttachmentDeliveryMode.Cancel;
+            if(MessageBox.Show(window,"Direct delivery requires the selected verified device to be connected. No attachment was queued.\n\nCheck encrypted Cached delivery for the authorized account audience instead? All device and cache authorization checks still apply.","Direct recipient unavailable",MessageBoxButton.YesNo,MessageBoxImage.Information)!=MessageBoxResult.Yes)return DmAttachmentDeliveryMode.Cancel;
+            if(!sameScope())return DmAttachmentDeliveryMode.Cancel;
+        }
         string state="";bool preflightRequestStarted=false;
         try{
             if(await EnsureDmAttachmentReady(false)){

@@ -43,7 +43,7 @@ class AttachmentPresenterOrphanTest {
         val pending get()=selection.pending
         var attempts=0
         var cancellations=0
-        override suspend fun sendAttachment(peerId:String,uri:Uri):String {
+        override suspend fun sendAttachment(peerId:String,uri:Uri,mode:com.peerchat.android.platform.AttachmentSendMode):String {
             val (intent,_)=selection.begin {check(peerId=="b".repeat(64))}
             attempts++
             val choice=AttachmentCompatibilityChoice(attempts.toString().padStart(32,'f'),"selected.bin",true,peerId)
@@ -51,8 +51,8 @@ class AttachmentPresenterOrphanTest {
             selection.finish(intent)
             throw AttachmentCompatibilityRequired(choice)
         }
-        override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? {
-            if(!direct&&pending?.token==token){selection.clearIfCurrent(checkNotNull(pending));cancellations++}
+        override suspend fun resolveAttachmentCompatibility(token:String,mode:com.peerchat.android.platform.AttachmentSendMode?):String? {
+            if(mode==null&&pending?.token==token){selection.clearIfCurrent(checkNotNull(pending));cancellations++}
             return null
         }
         override suspend fun signIn(endpoint:ServerEndpoint,username:String,password:String)=AccountSession(19,"Jonah","fixture",true)
@@ -105,7 +105,7 @@ class AttachmentPresenterOrphanTest {
             val secondChoice=checkNotNull(second.state.value.attachmentCompatibility)
             assertEquals(secondChoice,backend.pending)
             assertNotEquals(firstChoice.token,secondChoice.token)
-            kotlinx.coroutines.runBlocking{backend.resolveAttachmentCompatibility(firstChoice.token,false)}
+            kotlinx.coroutines.runBlocking{backend.resolveAttachmentCompatibility(firstChoice.token,null)}
             assertEquals(secondChoice,backend.pending)
             assertEquals(0,backend.cancellations)
         }finally{firstStore.clear();secondStore.clear();Dispatchers.resetMain()}

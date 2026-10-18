@@ -17,6 +17,9 @@ int main(int argc,char** argv){try{
     r.distributorPeerId=pa.peerId;r.generation=1;r.creationProof=proof;r.devices={{1,pa.peerId,GroupRole::Owner,false}};
     ga.authenticated(1,{r});r.generation=2;r.devices.push_back({2,pb.peerId,GroupRole::Member,false});
     ga.authenticated(1,{r});gb.authenticated(1,{r});
+    check(!group_keys::GroupKeyManager::matchesSignedLedger(r,ga.ledger(create.groupId)->state())&&
+          gb.ledger(create.groupId)==nullptr&&a.groupKey(create.groupId,2).empty()&&b.groupKey(create.groupId,2).empty(),
+          "Authenticated membership alone supplied signed readiness or an epoch key");
     session::ReliableAuthorization ab{session::ReliableAuthorizationScope::GroupControl,r.serverGroupId,2,pb.peerId};
     session::ReliableAuthorization ba{session::ReliableAuthorizationScope::GroupControl,r.serverGroupId,2,pa.peerId};
     da.authorizeTransport({1},pb.peerId);db.authorizeTransport({2},pa.peerId);
@@ -24,6 +27,11 @@ int main(int argc,char** argv){try{
     auto exchange=[&]{for(int pass=0;pass<12;++pass){for(auto& f:left.outgoing(1001+pass))for(auto& ack:right.receive(f,1001+pass))left.receive(ack,1001+pass);
         for(auto& f:right.outgoing(1001+pass))for(auto& ack:left.receive(f,1001+pass))right.receive(ack,1001+pass);}};
     exchange();check(ga.ledger(create.groupId)->state().members.size()==2&&gb.ledger(create.groupId)->state().members.size()==2,"Signed membership did not converge");
+    check(group_keys::GroupKeyManager::matchesSignedLedger(r,ga.ledger(create.groupId)->state())&&
+          group_keys::GroupKeyManager::matchesSignedLedger(r,gb.ledger(create.groupId)->state())&&
+          a.groupKey(create.groupId,2).size()==32&&b.groupKey(create.groupId,2)==a.groupKey(create.groupId,2)&&
+          a.hasGroupKeyReceipt(create.groupId,2,pb.peerId),
+          "Signed membership and the current epoch key did not become ready after authenticated handoff");
     const auto eventCount=ga.ledger(create.groupId)->events().size(),storedEvents=a.groupEvents(create.groupId).size();
     const auto name=ga.ledger(create.groupId)->state().name;
     for(std::uint64_t n=0;n<32;n++){

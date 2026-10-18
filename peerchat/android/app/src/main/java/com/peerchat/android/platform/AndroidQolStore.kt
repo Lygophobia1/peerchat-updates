@@ -5,9 +5,11 @@ import org.json.JSONObject
 import java.security.MessageDigest
 
 enum class NotificationPreview { SenderAndMessage, SenderOnly, HideContent }
+enum class AttachmentSendMode { Direct, Cached }
 data class ConversationPreference(val draft:String="",val readSequence:Long=0,val notifiedSequence:Long=0,val baselinePending:Boolean=false)
 data class AndroidQolState(val preview:NotificationPreview=NotificationPreview.SenderOnly,
-    val notifications:Boolean=true,val conversations:Map<String,ConversationPreference> = emptyMap(),val mailboxStorageAllowed:Boolean=true)
+    val notifications:Boolean=true,val conversations:Map<String,ConversationPreference> = emptyMap(),val mailboxStorageAllowed:Boolean=true,
+    val attachmentSendMode:AttachmentSendMode=AttachmentSendMode.Direct)
 interface AndroidQolRepository {
     fun load():AndroidQolState
     fun save(value:AndroidQolState)
@@ -33,7 +35,9 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
             val r=rows.getJSONObject(key);ConversationPreference(r.getString("draft"),r.getLong("read"),r.getLong("notified"),if(r.has("baselinePending"))r.getBoolean("baselinePending") else false).also{require(it.draft.length<=4096&&it.readSequence>=0&&it.notifiedSequence>=0)}
         }
         // Absent is a product default, never an overwrite of explicit OFF. Malformed protected data still throws.
-        return AndroidQolState(NotificationPreview.valueOf(json.getString("preview")),json.getBoolean("notifications"),values,if(json.has("mailboxStorageAllowed"))json.getBoolean("mailboxStorageAllowed") else true)
+        return AndroidQolState(NotificationPreview.valueOf(json.getString("preview")),json.getBoolean("notifications"),values,
+            if(json.has("mailboxStorageAllowed"))json.getBoolean("mailboxStorageAllowed") else true,
+            if(json.has("attachmentSendMode"))AttachmentSendMode.valueOf(json.getString("attachmentSendMode")) else AttachmentSendMode.Direct)
     }
     override fun save(value:AndroidQolState) {
         require(value.conversations.size<=128)
@@ -43,7 +47,9 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
             if(r.baselinePending)row.put("baselinePending",true)
             rows.put(key,row)
         }
-        val plain=JSONObject().put("version",1).put("preview",value.preview.name).put("notifications",value.notifications).put("mailboxStorageAllowed",value.mailboxStorageAllowed).put("conversations",rows).toString().toByteArray(Charsets.UTF_8)
+        val plain=JSONObject().put("version",1).put("preview",value.preview.name).put("notifications",value.notifications)
+            .put("mailboxStorageAllowed",value.mailboxStorageAllowed).put("attachmentSendMode",value.attachmentSendMode.name)
+            .put("conversations",rows).toString().toByteArray(Charsets.UTF_8)
         require(plain.size<=1000000);write(protector().protect(plain,label))
     }
 }

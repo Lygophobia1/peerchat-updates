@@ -94,14 +94,16 @@ class NativePresenterTest {
         var compatibility:AttachmentCompatibilityChoice?=null
         var attachmentFailure=false
         var attachmentBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
-        val compatibilityResolutions=mutableListOf<Pair<String,Boolean>>()
-        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String {
+        val attachmentModes=mutableListOf<AttachmentSendMode>()
+        val compatibilityResolutions=mutableListOf<Pair<String,AttachmentSendMode?>>()
+        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:AttachmentSendMode):String {
+            attachmentModes.add(mode)
             attachmentBlocker?.await()
             if(attachmentFailure)error("test-only network failure")
             compatibility?.let{throw AttachmentCompatibilityRequired(it)};return "d".repeat(32)
         }
-        override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? {
-            compatibilityResolutions.add(token to direct);return if(direct)"d".repeat(32)else null
+        override suspend fun resolveAttachmentCompatibility(token:String,mode:AttachmentSendMode?):String? {
+            compatibilityResolutions.add(token to mode);return if(mode==AttachmentSendMode.Direct)"d".repeat(32)else null
         }
         override suspend fun requestFriend(username:String) {}
         val searches=mutableListOf<String>()
@@ -122,9 +124,9 @@ class NativePresenterTest {
     }
     @Before fun start(){Dispatchers.setMain(dispatcher)}
     @After fun stop(){store.clear();Dispatchers.resetMain()}
-    private fun presenter(commands:Commands):NativePresenter {
+    private fun presenter(commands:Commands,preferences:Preferences=Preferences()):NativePresenter {
         val settings=Settings().apply{saved=ServerEndpoint("localhost",7443,"a".repeat(64))}
-        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,Preferences()){"a".repeat(64)}
+        val p=NativePresenter(ApplicationProvider.getApplicationContext<Application>(),commands,settings,dispatcher,preferences){"a".repeat(64)}
         store.put("native",p);dispatcher.scheduler.runCurrent()
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
         dispatcher.scheduler.advanceUntilIdle()
@@ -192,34 +194,80 @@ class NativePresenterTest {
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.Draft("account:8","keep typing"))
         p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.advanceUntilIdle()
         assertEquals(commands.compatibility,p.state.value.attachmentCompatibility);assertTrue(commands.compatibilityResolutions.isEmpty());assertEquals("keep typing",p.state.value.drafts["account:8"])
-        p.dispatch(UiAction.ResolveAttachmentCompatibility("wrong",true));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.isEmpty())
-        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),true));dispatcher.scheduler.advanceUntilIdle()
-        assertEquals(listOf("f".repeat(32) to true),commands.compatibilityResolutions);assertNull(p.state.value.attachmentCompatibility);assertEquals("keep typing",p.state.value.drafts["account:8"])
+        p.dispatch(UiAction.ResolveAttachmentCompatibility("wrong",AttachmentSendMode.Direct));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.isEmpty())
+        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),AttachmentSendMode.Direct));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf("f".repeat(32) to AttachmentSendMode.Direct),commands.compatibilityResolutions);assertNull(p.state.value.attachmentCompatibility);assertEquals("keep typing",p.state.value.drafts["account:8"])
+    }
+    @Test fun savedModeAndPerSendOverrideKeepTheirSeparateMeanings(){
+        val preferences=Preferences();val commands=Commands().apply{reject=false};val p=presenter(commands,preferences)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        assertEquals(AttachmentSendMode.Direct,p.state.value.attachmentSendMode)
+        p.dispatch(UiAction.SaveAttachmentSendMode(AttachmentSendMode.Cached));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(AttachmentSendMode.Cached,preferences.load().attachmentSendMode)
+        assertEquals(AttachmentSendMode.Cached,p.state.value.attachmentSendMode)
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/direct"),AttachmentSendMode.Direct,"account:8"))
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/cached"),AttachmentSendMode.Cached,"account:8"))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf(AttachmentSendMode.Direct,AttachmentSendMode.Cached),commands.attachmentModes)
+        assertEquals(AttachmentSendMode.Cached,preferences.load().attachmentSendMode)
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/wrong"),AttachmentSendMode.Direct,"account:7"))
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/stale"),AttachmentSendMode.Cached,
+            "account:8","account:19",p.state.value.attachmentContextGeneration+1))
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/other-profile"),AttachmentSendMode.Cached,
+            "account:8","account:20",p.state.value.attachmentContextGeneration))
+        dispatcher.scheduler.advanceUntilIdle();assertEquals(2,commands.attachmentModes.size)
+    }
+    @Test fun directOfflineCanOfferCachedButOnlyExplicitSelectionStartsIt(){
+        val choice=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",false,"b".repeat(64),cachedReady=true,selectedDirect=true)
+        val commands=Commands().apply{reject=false;compatibility=choice};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"))
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected"),AttachmentSendMode.Direct,"account:8"))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(choice,p.state.value.attachmentCompatibility);assertTrue(commands.compatibilityResolutions.isEmpty())
+        p.dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,AttachmentSendMode.Direct))
+        dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.isEmpty())
+        p.dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,AttachmentSendMode.Cached))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf(choice.token to AttachmentSendMode.Cached),commands.compatibilityResolutions)
+        assertNull(p.state.value.attachmentCompatibility)
+        p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/again"),AttachmentSendMode.Direct,"account:8"))
+        dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,null))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(listOf(choice.token to AttachmentSendMode.Cached,choice.token to null),commands.compatibilityResolutions)
+        assertNull(p.state.value.attachmentCompatibility)
     }
     @Test fun offlineCompatibilityChoiceRequiresCancelAndNeverAttemptsDirect(){
         val commands=Commands().apply{reject=false;compatibility=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",false,"b".repeat(64))};val p=presenter(commands)
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.advanceUntilIdle()
-        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),true));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.isEmpty())
-        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),false));dispatcher.scheduler.advanceUntilIdle();assertEquals(listOf("f".repeat(32) to false),commands.compatibilityResolutions);assertNull(p.state.value.attachmentCompatibility)
+        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),AttachmentSendMode.Direct));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.isEmpty())
+        p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),null));dispatcher.scheduler.advanceUntilIdle();assertEquals(listOf("f".repeat(32) to null),commands.compatibilityResolutions);assertNull(p.state.value.attachmentCompatibility)
     }
     @Test fun genericAttachmentFailureNeverPresentsCompatibilityOrSendsDirect(){
         val commands=Commands().apply{reject=false;attachmentFailure=true};val p=presenter(commands)
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.advanceUntilIdle()
-        assertNull(p.state.value.attachmentCompatibility);assertTrue(commands.compatibilityResolutions.isEmpty());assertTrue(p.state.value.notice!!.contains("could not be offered"))
+        assertNull(p.state.value.attachmentCompatibility);assertTrue(commands.compatibilityResolutions.isEmpty());assertTrue(p.state.value.notice!!.contains("Direct transfer could not reach"))
+    }
+    @Test fun cachedRejectionsAndDirectOfflineHaveSpecificFailureText(){
+        val cache=attachmentSendFailureText(AttachmentSendMode.Cached,AttachmentCachePreflightRejected("cache_storage_unavailable"))
+        assertTrue(cache.contains("encrypted cache storage is unavailable"));assertTrue(cache.contains("No attachment was sent"))
+        val direct=attachmentSendFailureText(AttachmentSendMode.Direct,AttachmentModeUnavailable("direct_device_offline; cached_recipient_upgrade_required"))
+        assertTrue(direct.contains("verified device online"));assertTrue(direct.contains("needs an update"))
+        assertFalse(direct.contains("Send Cached"))
     }
     @Test fun lostAuthenticationDismissesStaleAttachmentChoiceWithoutDirectSend(){
         val commands=Commands().apply{reject=false;compatibility=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",true,"b".repeat(64))};val p=presenter(commands)
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.advanceUntilIdle()
         assertNotNull(p.state.value.attachmentCompatibility);commands.state.value=commands.state.value.copy(authenticated=false);dispatcher.scheduler.runCurrent()
-        assertNull(p.state.value.attachmentCompatibility);p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),true));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.none{it.second})
+        assertNull(p.state.value.attachmentCompatibility);p.dispatch(UiAction.ResolveAttachmentCompatibility("f".repeat(32),AttachmentSendMode.Direct));dispatcher.scheduler.advanceUntilIdle();assertTrue(commands.compatibilityResolutions.none{it.second==AttachmentSendMode.Direct})
     }
     @Test fun leavingChatDuringConnectionWaitCannotPresentAnOldRecipientChoice(){
         val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();val commands=Commands().apply{reject=false;attachmentBlocker=blocker;compatibility=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",true,"b".repeat(64))};val p=presenter(commands)
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.Draft("account:8","retained draft"));p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.runCurrent()
-        assertEquals("Checking encrypted file delivery…",p.state.value.notice)
+        assertEquals("Preparing direct encrypted file delivery…",p.state.value.notice)
         p.dispatch(UiAction.Navigate(Route.Home));blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
-        assertNull(p.state.value.attachmentCompatibility);assertEquals(listOf("f".repeat(32) to false),commands.compatibilityResolutions);assertEquals("retained draft",p.state.value.drafts["account:8"])
-        assertNotEquals("Checking encrypted file delivery…",p.state.value.notice)
+        assertNull(p.state.value.attachmentCompatibility);assertEquals(listOf("f".repeat(32) to null),commands.compatibilityResolutions);assertEquals("retained draft",p.state.value.drafts["account:8"])
+        assertNotEquals("Preparing direct encrypted file delivery…",p.state.value.notice)
     }
     @Test fun viewingAnUnknownAttachmentNeverStartsFileDeliveryNotice(){
         val commands=Commands().apply{reject=false};val p=presenter(commands)

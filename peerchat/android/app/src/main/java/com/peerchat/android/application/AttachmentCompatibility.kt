@@ -4,10 +4,12 @@ import org.json.JSONObject
 
 /** A disposable choice, not transfer authority or another outbox. */
 data class AttachmentCompatibilityChoice(val token:String,val name:String,val directReady:Boolean,val device:String,
-    val preflightTransportUnavailable:Boolean=false) {
+    val preflightTransportUnavailable:Boolean=false,val cachedReady:Boolean=false,val selectedDirect:Boolean=false) {
     init{require(token.matches(Regex("[0-9a-f]{32}"))&&device.matches(Regex("[0-9a-f]{64}")))}
 }
-class AttachmentCompatibilityRequired(val choice:AttachmentCompatibilityChoice):Exception("Recipient device upgrade required for cached attachments")
+class AttachmentCompatibilityRequired(val choice:AttachmentCompatibilityChoice):Exception("Explicit attachment mode choice required")
+class AttachmentCachePreflightRejected(val state:String):Exception("Cached transfer rejected at recipient preflight: $state")
+class AttachmentModeUnavailable(val reason:String):Exception(reason)
 
 internal enum class AttachmentRecipientPreflight { Ready, UpgradeRequired }
 internal enum class AttachmentSendPreflight { Cached, UpgradeChoice, TransportChoice }
@@ -46,6 +48,6 @@ internal fun attachmentRecipientPreflight(recipient:Long,current:()->Boolean,req
     return when(reply.getString("state")){
         "accepted"->{require(reply.getInt("dmAttachmentVersion")==1);AttachmentRecipientPreflight.Ready}
         "cache_dm_recipient_upgrade_required"->AttachmentRecipientPreflight.UpgradeRequired
-        else->error("Attachment cache recipient preflight unavailable; private source retained")
+        else->throw AttachmentCachePreflightRejected(reply.getString("state"))
     }
 }

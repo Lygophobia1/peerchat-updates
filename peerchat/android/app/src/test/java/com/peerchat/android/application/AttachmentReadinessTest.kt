@@ -1,5 +1,6 @@
 package com.peerchat.android.application
 
+import com.peerchat.android.platform.AttachmentSendMode
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
@@ -15,6 +16,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AttachmentReadinessTest {
+    @Test fun directOnlyRequiresAuthenticatedScopeWhileCachedChecksServerCapability(){
+        var cacheChecks=0
+        val unsupported:(String)->Boolean={cacheChecks++;throw AttachmentModeUnavailable("cached_unsupported")}
+        assertEquals("authenticated-current-peer",attachmentModeReadiness(AttachmentSendMode.Direct,
+            {"authenticated-current-peer"},unsupported))
+        assertEquals(0,cacheChecks)
+        val failure=assertThrows(AttachmentModeUnavailable::class.java){
+            attachmentModeReadiness(AttachmentSendMode.Cached,{"authenticated-current-peer"},unsupported)}
+        assertEquals("cached_unsupported",failure.reason);assertEquals(1,cacheChecks)
+        assertNull(attachmentModeReadiness(AttachmentSendMode.Direct,{null as String?},unsupported))
+        assertEquals(1,cacheChecks)
+    }
     @Test fun readinessWaitReleasesOwnerGateAndResumesAfterAcceptance()=runBlocking {
         val gate=Any()
         var accepted=false

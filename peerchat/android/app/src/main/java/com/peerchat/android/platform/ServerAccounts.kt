@@ -190,7 +190,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     private fun openRelayMeasured(targetAccount:Long,targetDevice:String,archive:JSONObject?,diagnosticAttempt:Long,onOpened:(ServerChannel)->Unit):RelayConnection {
         require(targetAccount>0 && targetDevice.matches(Regex("[0-9a-f]{64}")))
         val active=checkNotNull(session)
-        val group=archive?.optString("purpose")=="group_control"
+        val group=archive?.optString("purpose")=="group_key"
         if(group)require(archive!!.getString("groupId").matches(Regex("[0-9a-f]{32}"))&&archive.getLong("rosterGeneration")>0)
         else if(archive==null)require(active.accountId!=targetAccount)
         else require(active.accountId==targetAccount&&archive.getString("purpose")=="archive_history"&&
@@ -206,7 +206,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             channel.write(fields.toString().toByteArray(Charsets.UTF_8),4096)
             val response=JSONObject(channel.read(16384).toString(Charsets.UTF_8))
             if(!response.optBoolean("ok"))throw ServerRejected(response.optString("error","relay_rejected"))
-            check(session===active && response.getString("type")=="relay_ready" && response.getString("purpose")== (if(group)"group_control" else if(archive==null)"friend" else "archive_history"))
+            check(session===active && response.getString("type")=="relay_ready" && response.getString("purpose")== (if(group)"group_key" else if(archive==null)"friend" else "archive_history"))
             archive?.keys()?.forEach{key->check(response.getString(key)==archive.getString(key))}
             if(!group)check(response.getString("groupId").isEmpty() && response.getLong("rosterGeneration")==0L)
             val id=response.getString("sessionId");com.peerchat.android.platform.tls.RelayFrames(id)

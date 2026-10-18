@@ -39,6 +39,17 @@ public partial class DesktopApplication {
    var owner=Application.Current.Windows.OfType<Window>().LastOrDefault(w=>w.IsActive)??window;
    var panel=TransferTuningEditor.Create(value,p=>{if(profile!=profileSessionGeneration)throw new InvalidOperationException("Profile changed");core.FileTransfer(13,id:id,path:p.Wire);},String.IsNullOrEmpty(id));
    panel.Children.Insert(1,new TextBlock{Text=String.IsNullOrEmpty(id)?"Profile defaults · upload cap shared by every outgoing transfer":"This transfer only · cannot bypass the aggregate upload ceiling",TextWrapping=TextWrapping.Wrap});
+   if(String.IsNullOrEmpty(id)){
+    var preference=new AttachmentSendPreferenceStore(directory);
+    var sending=new StackPanel{Margin=new Thickness(0,12,0,16)};
+    sending.Children.Add(new TextBlock{Text="Default DM attachment sending mode"});
+    var mode=new ComboBox{ItemsSource=new[]{"Direct Transfer","Cached Transfer"},SelectedIndex=preference.Load()==DmAttachmentDeliveryMode.EncryptedCache?1:0,Margin=new Thickness(0,6,0,6)};sending.Children.Add(mode);
+    sending.Children.Add(new TextBlock{Text="Direct sends to the selected verified online device (including over relay). Cached sends to the authorized account audience for offline retrieval. You can override this choice for each send. Receiving both stays automatic. Group attachments continue using the encrypted cache.",TextWrapping=TextWrapping.Wrap});
+    var result=new TextBlock{TextWrapping=TextWrapping.Wrap};
+    var saveMode=new Button{Content="Save sending preference",HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,4)};
+    saveMode.Click+=(s,e)=>{try{if(profile!=profileSessionGeneration||closing)throw new InvalidOperationException();preference.Save(mode.SelectedIndex==1?DmAttachmentDeliveryMode.EncryptedCache:DmAttachmentDeliveryMode.OnlineDevice);result.Text="Sending preference saved for this profile.";}catch{result.Text="Could not save the sending preference. Your existing preference is retained.";}};
+    sending.Children.Add(saveMode);sending.Children.Add(result);panel.Children.Insert(2,sending);
+   }
    var dialog=new Window{Title="PeerChat file transfers",Owner=owner,Width=560,Height=580,MinWidth=420,MinHeight=350,Background=Brush("#111920"),Foreground=Brush("#EDF1F5"),Resources=window.Resources,Content=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Content=panel}};dialog.ShowDialog();
   }catch{if(!closing)Notify("File transfer settings are unavailable in this profile.");}
  }

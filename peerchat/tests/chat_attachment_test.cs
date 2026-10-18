@@ -12,6 +12,19 @@ class ChatAttachmentTest {
     static string Put(string root,string name,byte[] bytes){string path=Path.Combine(root,name);File.WriteAllBytes(path,bytes);return path;}
     [STAThread] static int Main(string[] args){try{
         var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};string root=args[0];Directory.CreateDirectory(root);
+        var preferencePath=Path.Combine(root,"sending-preferences");
+        var preferences=new AttachmentSendPreferenceStore(preferencePath);
+        Check(preferences.Load()==DmAttachmentDeliveryMode.OnlineDevice,"new profile did not default to Direct");
+        preferences.Save(DmAttachmentDeliveryMode.EncryptedCache);
+        Check(new AttachmentSendPreferenceStore(preferencePath).Load()==DmAttachmentDeliveryMode.EncryptedCache,"Cached preference did not survive restart");
+        var otherPath=Path.Combine(root,"other-profile");Directory.CreateDirectory(otherPath);
+        Check(new AttachmentSendPreferenceStore(otherPath).Load()==DmAttachmentDeliveryMode.OnlineDevice,"another profile inherited Cached preference");
+        File.Copy(Path.Combine(preferencePath,"attachment-send-preference.dat"),Path.Combine(otherPath,"attachment-send-preference.dat"));
+        Check(new AttachmentSendPreferenceStore(otherPath).Load()==DmAttachmentDeliveryMode.OnlineDevice,"copied preference was not profile-bound");
+        bool invalidPreference=false;try{preferences.Save(DmAttachmentDeliveryMode.Cancel);}catch(ArgumentException){invalidPreference=true;}
+        Check(invalidPreference&&preferences.Load()==DmAttachmentDeliveryMode.EncryptedCache,"cancel/invalid per-send choice overwrote default");
+        preferences.Save(DmAttachmentDeliveryMode.OnlineDevice);Check(preferences.Load()==DmAttachmentDeliveryMode.OnlineDevice,"Direct preference not retained");
+        File.WriteAllText(Path.Combine(preferencePath,"attachment-send-preference.dat"),"corrupt");Check(preferences.Load()==DmAttachmentDeliveryMode.OnlineDevice,"damaged optional preference blocked defaults");
         var conversation=new ConversationModel{Contact=new ContactData{peer="peer",name="test"}};
         var delivery=new ConversationModel{AccountId=4,IsFriend=true,Contact=new ContactData{peer=new string('a',64),verified=true}};
         Check(DmAttachmentDelivery.OnlineSelectable(delivery),"verified device cannot request an online route");
@@ -38,7 +51,7 @@ class ChatAttachmentTest {
         var completed=new CoreAdapter.FileTransferData{id="complete",name="a.txt",size=1,state=4,time=200};
         var chat=new ChatViewModel();var typed=chat.Get("peer" );ChatAttachmentProjection.Apply(typed,new CoreAdapter.FileTransferData{id="same-id",peer="peer",senderPeer="peer",state=2});
         chat.Apply(new CoreEvent{kind=5,peer="peer",messages=new[]{new MessageData{id="same-id",sender="peer",text="separate text identity",time=1}}});Check(typed.Messages.Count==2,"attachment suppressed a text message with the same ID" );
-        chat.Apply(new CoreEvent{kind=7,messages=new[]{new MessageData{id="same-id",delivery=2}}});Check(typed.Messages.Single(value=>value.Attachment==null).Data.delivery==2&&typed.Messages.Single(value=>value.Attachment!=null).Data.delivery==0,"text ACK affected attachment state" );
+        chat.Apply(new CoreEvent{kind=7,messages=new[]{new MessageData{id="same-id",sender="peer",delivery=2}}});Check(typed.Messages.Single(value=>value.Attachment==null).Data.delivery==2&&typed.Messages.Single(value=>value.Attachment!=null).Data.delivery==0,"text ACK affected attachment state" );
         var restore=new CoreAdapter.FileTransferData{id="restore-transfer",logicalId="logical-file",isArchive=true,originalSending=true,state=3,name="message.txt",time=100};
         ChatAttachmentProjection.Apply(conversation,restore);Check(conversation.Messages.Count==1&&conversation.Messages[0].Attachment.id=="restore-transfer"&&conversation.Messages[0].Outgoing,"restore created a new logical bubble or rewrote author side");
         var reopened=new ConversationModel{Contact=conversation.Contact};ChatAttachmentProjection.Apply(reopened,completed);Check(reopened.Messages.Count==1&&reopened.Messages[0].Attachment.state==4,"completed reload projection");

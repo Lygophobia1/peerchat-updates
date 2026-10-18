@@ -25,6 +25,16 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.delay
+import com.peerchat.android.platform.AttachmentSendMode
+
+internal data class AttachmentPickerBinding(val accountId:String,val conversationId:String,val contextGeneration:Long,
+    val mode:AttachmentSendMode)
+
+internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPickerBinding?,state:PeerChatUiState):UiAction.SendAttachment? {
+    if(binding==null||state.demo||state.route!=Route.Conversation||state.account?.accountId!=binding.accountId||
+        state.selectedId!=binding.conversationId||state.attachmentContextGeneration!=binding.contextGeneration)return null
+    return UiAction.SendAttachment(uri,binding.mode,binding.conversationId,binding.accountId,binding.contextGeneration)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ConversationScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
@@ -36,8 +46,18 @@ import kotlinx.coroutines.delay
     var positioning by remember(c.id){mutableStateOf(false)}
     var scrollRequest by remember(c.id){mutableIntStateOf(0)}
     val viewportHeight by remember(list){derivedStateOf{list.layoutInfo.viewportSize.height}}
+    var attachmentMenu by remember(c.id){mutableStateOf(false)}
+    // Save primitive launch fields so an Activity recreation during the system
+    // picker cannot reinterpret the result using a later conversation closure.
+    var pickerAccount by rememberSaveable{mutableStateOf<String?>(null)}
+    var pickerConversation by rememberSaveable{mutableStateOf<String?>(null)}
+    var pickerGeneration by rememberSaveable{mutableLongStateOf(-1L)}
+    var pickerMode by rememberSaveable{mutableStateOf<String?>(null)}
     val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
-        if(uri!=null)dispatch(UiAction.SendAttachment(uri))
+        val binding=if(pickerAccount!=null&&pickerConversation!=null&&pickerMode!=null)
+            AttachmentPickerBinding(pickerAccount!!,pickerConversation!!,pickerGeneration,AttachmentSendMode.valueOf(pickerMode!!)) else null
+        pickerAccount=null;pickerConversation=null;pickerMode=null;pickerGeneration=-1L
+        if(uri!=null)attachmentPickerAction(uri,binding,state)?.let(dispatch)
     }
     LaunchedEffect(c.id,state.drafts[c.id]){if(!state.demo)draft=state.drafts[c.id] ?: ""}
     LaunchedEffect(c.id) {
@@ -84,7 +104,22 @@ import kotlinx.coroutines.delay
             } }
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-                if(c.kind==ChatKind.Direct)ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)picker.launch(arrayOf("*/*")) })
+                if(c.kind==ChatKind.Direct)Box {
+                    ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)attachmentMenu=true })
+                    DropdownMenu(attachmentMenu,{attachmentMenu=false}) {
+                        listOf(AttachmentSendMode.Direct,AttachmentSendMode.Cached).forEach{mode->
+                            DropdownMenuItem(text={Text((if(mode==AttachmentSendMode.Direct)"Direct transfer" else "Cached transfer")+
+                                (if(mode==state.attachmentSendMode)" · default" else ""))},onClick={
+                                attachmentMenu=false
+                                val account=state.account?.accountId
+                                if(account!=null&&state.route==Route.Conversation&&state.selectedId==c.id){
+                                    pickerAccount=account;pickerConversation=c.id;pickerGeneration=state.attachmentContextGeneration;pickerMode=mode.name
+                                    picker.launch(arrayOf("*/*"))
+                                }
+                            },modifier=Modifier.testTag("send-${mode.name.lowercase()}"))
+                        }
+                    }
+                }
                 OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null), minLines = 1, maxLines = 5,
                     modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)

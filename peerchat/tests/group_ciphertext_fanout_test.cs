@@ -43,6 +43,39 @@ internal static class GroupCiphertextFanoutTest {
         }
         Console.WriteLine("PASS: authenticated pending pairing releases ownership promptly on disconnect, before retry.");
     }
+    static void GroupRelayPurpose(DiscoveryServer server,DiscoveryClient owner,DiscoveryClient member,string ownerDevice,string memberDevice,string group,long generation){
+        var json=new System.Web.Script.Serialization.JavaScriptSerializer();
+        Func<DiscoveryClient,string,string,string,string,Dictionary<string,object>> attach=(client,local,target,purpose,targetAccount)=>
+            new Dictionary<string,object>{{"version",1},{"type","relay_attach"},{"sessionToken",client.SessionToken},
+                {"publicIdentity",local},{"targetAccountId",targetAccount},{"targetPublicIdentity",target},
+                {"purpose",purpose},{"groupId",group},{"rosterGeneration",generation.ToString()}};
+        TcpClient rejectedTcp;using(var rejected=owner.OpenAuthenticatedStream(out rejectedTcp,true))using(rejectedTcp){
+            DiscoveryClient.WriteFrame(rejected,Encoding.UTF8.GetBytes(json.Serialize(attach(owner,ownerDevice,memberDevice,"group_control","2"))));
+            var response=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(rejected,16384)));
+            Require(!Convert.ToBoolean(response["ok"])&&Convert.ToString(response["error"])=="relay_not_authorized","Legacy group_control purpose acquired a relay.");
+        }
+        Require(RelayCount(server)==0,"Rejected purpose retained relay ownership.");
+        TcpClient ownerTcp,memberTcp;
+        using(var left=owner.OpenAuthenticatedStream(out ownerTcp,true))using(ownerTcp)
+        using(var right=member.OpenAuthenticatedStream(out memberTcp,true))using(memberTcp){
+            DiscoveryClient.WriteFrame(left,Encoding.UTF8.GetBytes(json.Serialize(attach(owner,ownerDevice,memberDevice,"group_key","2"))));
+            DiscoveryClient.WriteFrame(right,Encoding.UTF8.GetBytes(json.Serialize(attach(member,memberDevice,ownerDevice,"group_key","1"))));
+            var leftReady=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(left,16384)));
+            var rightReady=json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(DiscoveryClient.ReadFrame(right,16384)));
+            Require(Convert.ToBoolean(leftReady["ok"])&&Convert.ToBoolean(rightReady["ok"])&&
+                Convert.ToString(leftReady["purpose"])=="group_key"&&Convert.ToString(rightReady["purpose"])=="group_key"&&
+                Convert.ToString(leftReady["groupId"])==group&&Convert.ToString(rightReady["groupId"])==group&&
+                Convert.ToInt64(leftReady["rosterGeneration"])==generation&&Convert.ToInt64(rightReady["rosterGeneration"])==generation,
+                "Current group_key purpose did not pair in both directions.");
+            var session=Convert.ToString(leftReady["sessionId"]);Require(session==Convert.ToString(rightReady["sessionId"]),"Paired relay session IDs differ.");
+            foreach(var path in new[]{new[]{left,right},new[]{right,left}}){
+                var payload=Encoding.ASCII.GetBytes(session+"opaque_group_tls_frame");
+                DiscoveryClient.WriteFrame(path[0],payload);
+                Require(DiscoveryClient.ReadFrame(path[1],16384).SequenceEqual(payload),"Group relay failed opaque forwarding in one direction.");
+            }
+        }
+        Console.WriteLine("PASS: server rejects group_control and pairs/forwards group_key in both directions.");
+    }
     static void Network(string directory,string certificate,string password,string owner,string member,string third,string group,long generation,byte[] wire,AccountDatabase database){
         var probe=new TcpListener(IPAddress.Loopback,0);probe.Start();int port=((IPEndPoint)probe.LocalEndpoint).Port;probe.Stop();
         var config=new ServerConfiguration{DataDirectory=directory,DatabasePath=Path.Combine(directory,"server.db"),LogDirectory=Path.Combine(directory,"logs"),Port=port,CertificatePath=certificate,CertificatePassword=password};
@@ -60,6 +93,7 @@ internal static class GroupCiphertextFanoutTest {
             }
             Wait(()=>clients.All(c=>c.EventChannelConnected),"Three authenticated existing event channels did not connect.");
             CancelledPairing(server,clients[0],owner,member,group,generation);
+            GroupRelayPurpose(server,clients[0],clients[1],owner,member,group,generation);
             // Exercise the production pinned-TLS request and typed projection,
             // not reflection-only dispatch. Ordinary membership epochs have no
             // signed device-transition proof: recovery must expose the gap.

@@ -16,15 +16,15 @@ abstract class UiFlowChecks {
         val token="a".repeat(32);val actions=mutableListOf<UiAction>()
         var state by mutableStateOf(PeerChatUiState(demo=false,attachmentCompatibility=com.peerchat.android.application.AttachmentCompatibilityChoice(token,"selected.bin",false,"b".repeat(64))))
         compose.setContent{PeerChatTheme(true){PeerChatShell(state,{actions.add(it)})}}
-        compose.onNodeWithText("Send Directly to Online Device").assertIsNotEnabled()
-        compose.onNodeWithText("Offline attachment compatibility").assertIsDisplayed()
+        compose.onNodeWithText("Send Directly").assertDoesNotExist()
+        compose.onNodeWithText("Cached transfer compatibility").assertIsDisplayed()
         compose.onNodeWithText("Some recipient devices need an update for cached delivery. The server did not provide the affected device IDs.").assertIsDisplayed()
         compose.runOnIdle{assertEquals(emptyList<UiAction>(),actions);state=state.copy(attachmentCompatibility=state.attachmentCompatibility!!.copy(directReady=true))}
-        compose.onNodeWithText("Send Directly to Online Device").assertIsEnabled().performClick()
+        compose.onNodeWithText("Send Directly").assertIsEnabled().performClick()
         compose.onNodeWithText("Selected verified device: "+"b".repeat(64)).assertIsDisplayed()
-        compose.runOnIdle{assertEquals(listOf(UiAction.ResolveAttachmentCompatibility(token,true)),actions)}
+        compose.runOnIdle{assertEquals(listOf(UiAction.ResolveAttachmentCompatibility(token,com.peerchat.android.platform.AttachmentSendMode.Direct)),actions)}
         compose.onNodeWithText("Cancel").performClick()
-        compose.runOnIdle{assertEquals(UiAction.ResolveAttachmentCompatibility(token,false),actions.last())}
+        compose.runOnIdle{assertEquals(UiAction.ResolveAttachmentCompatibility(token,null),actions.last())}
     }
     @Test fun sendCapturesAndClearsComposerBeforeLocalCommitAndKeepsNewTyping(){
         val chat=ConversationUi("account:8","Sammy",ChatKind.Direct,false,"","")

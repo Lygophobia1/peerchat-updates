@@ -40,6 +40,37 @@ internal fun voiceConsentMatchesCurrent(consent:VoiceConsent,preparedTarget:Voic
         consent.peer==preparedTarget.peer&&consent.id==preparedTarget.id
     else preparedTarget==null&&!voice.active
 
+internal fun attachmentSendFailureText(mode:AttachmentSendMode,failure:Exception):String {
+    val retained=" No attachment was sent; the private source is retained."
+    if(failure is AttachmentModeUnavailable)return when(failure.reason){
+        "direct_device_offline; cached_recipient_upgrade_required"->"Direct needs the recipient's verified device online. Cached delivery is unavailable because a recipient device needs an update."+retained
+        "direct_device_offline; cached_preflight_unavailable"->"Direct needs the recipient's verified device online. Cached delivery could not be confirmed with the server; retry when connected."+retained
+        "direct_device_offline; cached_unsupported"->"Direct needs the recipient's verified device online. Cached delivery is not supported by this server or device."+retained
+        "direct_device_offline; cached_readiness_timeout"->"Direct needs the recipient's verified device online. Cached delivery is not ready; reconnect and retry."+retained
+        "cached_recipient_upgrade_required"->"Cached delivery is no longer available because a recipient device needs an update."+retained
+        "cached_unsupported"->"Cached delivery is not supported by this server or device."+retained
+        "cached_readiness_lost"->"Cached delivery is no longer ready for this authenticated session. Reconnect and retry."+retained
+        else->"The selected delivery mode is unavailable."+retained
+    }
+    val code=when(failure){
+        is AttachmentCachePreflightRejected->failure.state
+        is ServerRejected->failure.code
+        else->null
+    }
+    val reason=when(code){
+        "cache_access_denied"->"the server denied cached access"
+        "cache_storage_unavailable"->"the server's encrypted cache storage is unavailable"
+        "cache_dm_source_upgrade_required"->"this app needs an update for cached delivery"
+        "cache_dm_recipient_upgrade_required"->"a recipient device needs an update for cached delivery"
+        "cache_expired"->"the cached offer expired"
+        "cache_malformed_request"->"the server rejected the cached request"
+        else->if(code!=null)"the server rejected it (${code.take(80).filter{it.isLetterOrDigit()||it=='_'}})" else null
+    }
+    if(reason!=null)return (if(mode==AttachmentSendMode.Direct)"Direct needs the recipient's verified device online; cached delivery failed because " else "Cached delivery failed because ")+reason+"."+retained
+    return if(mode==AttachmentSendMode.Direct)"Direct transfer could not reach the recipient's verified online device."+retained
+        else "Cached transfer could not be offered. Check connection, file access and available storage."+retained
+}
+
 internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState): PeerChatUiState {
     fun accountName(account:Long)=if(account==snapshot.accountId)snapshot.username else snapshot.conversations.firstOrNull{it.friend.accountId==account}?.friend?.username?:"Account $account"
     val conversations=snapshot.conversations.map { c ->
@@ -317,7 +348,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
         mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline,
-            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false,localSendCount=0,voiceBusy=false)
+            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false,localSendCount=0,voiceBusy=false,
+            attachmentContextGeneration=uiGeneration)
         viewModelScope.launch {
             var completed=false
             try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
@@ -388,13 +420,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         if(attachmentCompatibilityScope?.let{it.first!=current.accountId||it.second!=uiGeneration||!current.authenticated||mutable.value.route!=Route.Conversation||attachmentCompatibilityConversation!=mutable.value.selectedId}==true){
             val choice=mutable.value.attachmentCompatibility
             attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)
-            if(choice!=null)viewModelScope.launch{try{backend.resolveAttachmentCompatibility(choice.token,false)}catch(_:Exception){}}
+            if(choice!=null)viewModelScope.launch{try{backend.resolveAttachmentCompatibility(choice.token,null)}catch(_:Exception){}}
         }
         val combined=current.copy(conversations=current.conversations.map {c ->
             c.copy(messages=chronologicalMessages((older[c.friend.accountId] ?: emptyList())+c.messages))
         })
         // projectMessaging's paging hint is overridden by the actual native page result.
-        mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(conversations=s.conversations.map {c->
+        mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(attachmentContextGeneration=uiGeneration,conversations=s.conversations.map {c->
             if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted||current.conversations.any{original->"account:${original.friend.accountId}"==c.id&&original.attachmentsHaveOlder})
         })}
         val nativeIds=mutable.value.conversations.flatMap{c->c.messages.map{it.id}+c.attachments.map{it.id}}.toSet()
@@ -433,7 +465,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val row=qolState.conversations[key] ?: ConversationPreference()
                 c.copy(unread=incoming.count{it.sequence>row.readSequence})
             }
-            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (if(c.kind==ChatKind.Group)mutable.value.drafts[c.id]?:"" else largeDrafts[c.id] ?: qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview)
+            mutable.value=mutable.value.copy(conversations=unseen,drafts=unseen.associate{c->c.id to (if(c.kind==ChatKind.Group)mutable.value.drafts[c.id]?:"" else largeDrafts[c.id] ?: qolState.conversations[conversationPreferenceKey(accountKey,c.id.removePrefix("account:").toLong())]?.draft ?: "")},notificationsEnabled=qolState.notifications,notificationPreview=qolState.preview,attachmentSendMode=qolState.attachmentSendMode)
         }
         if(groupQolReady){
             val groups=current.groups.associateBy{it.id}
@@ -521,6 +553,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         // index. Publish them independently when ready, without network work.
         viewModelScope.launch {
         try{qolState=withContext(configurationDispatcher){qol.load()};qolReady=true
+            mutable.value=mutable.value.copy(attachmentSendMode=qolState.attachmentSendMode)
             earlyDrafts.forEach{(key,text)->
                 qolState=qolState.copy(conversations=qolState.conversations+(key to (qolState.conversations[key] ?: ConversationPreference()).copy(draft=text)))
                 savePreference(key){it.copy(draft=text)}
@@ -834,6 +867,19 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 viewModelScope.launch{try{qolState=withContext(configurationDispatcher){qol.update{it.copy(notifications=action.enabled,preview=action.preview)};qol.load()}}
                     catch(_:Exception){mutable.value=mutable.value.copy(notice="Notification settings could not be saved securely.")}}
             }
+            is UiAction.SaveAttachmentSendMode -> viewModelScope.launch {
+                if(!qolReady){mutable.value=mutable.value.copy(notice="Saved preferences are still loading. Try again.");return@launch}
+                val account=current.accountId;val requestGeneration=uiGeneration
+                try{
+                    val saved=withContext(configurationDispatcher){qol.update{it.copy(attachmentSendMode=action.mode)};qol.load()}
+                    if(account==current.accountId&&requestGeneration==uiGeneration){
+                        qolState=saved;mutable.value=mutable.value.copy(attachmentSendMode=saved.attachmentSendMode,
+                            notice="Default sending mode saved: ${if(saved.attachmentSendMode==AttachmentSendMode.Direct)"Direct" else "Cached"}.")
+                    }
+                }catch(failure:Exception){if(failure is CancellationException)throw failure
+                    if(account==current.accountId&&requestGeneration==uiGeneration)
+                        mutable.value=mutable.value.copy(notice="Sending preference could not be saved securely; the previous default remains.")}
+            }
             is UiAction.MailboxStorage -> viewModelScope.launch {
                 try{backend.setMailboxStorageAllowed(action.allowed);qolState=qol.load()}
                 catch(failure:Exception){mutable.value=mutable.value.copy(notice=if(failure is com.peerchat.android.application.MailboxConsentChangeUnavailable)failure.message else "Mailbox privacy preference could not be saved; existing consent is unchanged.")}
@@ -909,30 +955,35 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
             is UiAction.SendAttachment -> {
                 if(mutable.value.attachmentCompatibility!=null)return
+                if(action.contextGeneration!=null&&action.contextGeneration!=uiGeneration)return
+                if(action.accountId!=null&&action.accountId!="account:${current.accountId}")return
+                if(action.conversationId!=null&&action.conversationId!=mutable.value.selectedId)return
                 val c=current.conversations.find{"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 val account=current.accountId;val requestGeneration=uiGeneration
-                mutable.value=mutable.value.copy(notice="Checking encrypted file delivery…")
-                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri)
-                        if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice=="Checking encrypted file delivery…")mutable.value=mutable.value.copy(notice=null)}
+                val preparing="Preparing ${if(action.mode==AttachmentSendMode.Direct)"direct" else "cached"} encrypted file delivery…"
+                mutable.value=mutable.value.copy(notice=preparing)
+                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri,action.mode)
+                        if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice==preparing)mutable.value=mutable.value.copy(notice=null)}
                     catch(required:AttachmentCompatibilityRequired){
                         if(account==current.accountId&&requestGeneration==uiGeneration&&current.authenticated&&mutable.value.route==Route.Conversation&&mutable.value.selectedId=="account:${c.friend.accountId}"){attachmentCompatibilityScope=account to requestGeneration;attachmentCompatibilityConversation=mutable.value.selectedId
                             mutable.value=mutable.value.copy(attachmentCompatibility=required.choice,attachmentCompatibilityBusy=false,notice=null)}
-                        else {try{backend.resolveAttachmentCompatibility(required.choice.token,false)}catch(_:Exception){}
-                            if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice=="Checking encrypted file delivery…")mutable.value=mutable.value.copy(notice=null)}
+                        else {try{backend.resolveAttachmentCompatibility(required.choice.token,null)}catch(_:Exception){}
+                            if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice==preparing)mutable.value=mutable.value.copy(notice=null)}
                     }
                     catch(_:com.peerchat.android.application.AttachmentReadinessUnavailable){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="Attachment connection is not ready. Return to PeerChat, wait for authenticated connection readiness, then retry. No attachment was sent.")}
                     catch(cancelled:kotlinx.coroutines.CancellationException){throw cancelled}
-                    catch(_:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="File could not be offered. Check connection, file access and available storage. The private source is retained.")}}
+                    catch(failure:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice=attachmentSendFailureText(action.mode,failure))}}
             }
             is UiAction.ResolveAttachmentCompatibility -> {
                 val choice=mutable.value.attachmentCompatibility ?: return
-                if(choice.token!=action.token||attachmentCompatibilityConversation!=mutable.value.selectedId||mutable.value.attachmentCompatibilityBusy||action.direct&&!choice.directReady)return
+                if(choice.token!=action.token||attachmentCompatibilityConversation!=mutable.value.selectedId||mutable.value.attachmentCompatibilityBusy||
+                    action.mode==AttachmentSendMode.Direct&&!choice.directReady||action.mode==AttachmentSendMode.Cached&&!choice.cachedReady)return
                 val scope=attachmentCompatibilityScope
                 mutable.value=mutable.value.copy(attachmentCompatibilityBusy=true)
-                viewModelScope.launch{try{backend.resolveAttachmentCompatibility(action.token,action.direct)
+                viewModelScope.launch{try{backend.resolveAttachmentCompatibility(action.token,action.mode)
                     if(scope==attachmentCompatibilityScope){attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)}}
-                    catch(_:Exception){if(scope==attachmentCompatibilityScope)mutable.value=mutable.value.copy(attachmentCompatibility=choice.copy(directReady=false),attachmentCompatibilityBusy=false,
-                        notice="Direct sending requires the same currently connected, verified device. The selected private file is retained.")}}
+                    catch(failure:Exception){if(scope==attachmentCompatibilityScope)mutable.value=mutable.value.copy(attachmentCompatibility=choice.copy(directReady=false,cachedReady=false),attachmentCompatibilityBusy=false,
+                        notice=attachmentSendFailureText(action.mode?:AttachmentSendMode.Direct,failure))}}
             }
             is UiAction.AttachmentAction -> viewModelScope.launch{try{backend.attachmentAction(action.id,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}

@@ -127,18 +127,23 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
     Surface(Modifier.fillMaxSize()) {
         state.attachmentCompatibility?.let { choice ->
-            AlertDialog(onDismissRequest={if(!state.attachmentCompatibilityBusy)dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,false))},
-                title={Text(if(choice.preflightTransportUnavailable)"Offline attachment unavailable" else "Offline attachment compatibility")},
+            AlertDialog(onDismissRequest={if(!state.attachmentCompatibilityBusy)dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,null))},
+                title={Text(if(choice.selectedDirect)"Direct device unavailable" else if(choice.preflightTransportUnavailable)"Cached transfer unavailable" else "Cached transfer compatibility")},
                 text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
-                    Text(if(choice.preflightTransportUnavailable)
+                    Text(if(choice.selectedDirect)
+                        "The verified online file connection is unavailable. No file was sent. Cached delivery can reach the full authorized, compatible device audience after a fresh server check."
+                        else if(choice.preflightTransportUnavailable)
                         "The offline attachment check timed out or disconnected. No cached file was started."
                         else "Some recipient devices need an update for cached delivery. The server did not provide the affected device IDs.")
                     Text((if(choice.directReady)"Selected verified device: " else "Selected device (verified online connection required): ")+choice.device,style=MaterialTheme.typography.labelSmall)
-                    Text("${choice.name}\nDirect sending reaches only the currently connected, verified device; other devices will not receive this file. No automatic fallback has occurred.")
-                    if(!choice.directReady)Text("A verified online file connection is required. Connect to the recipient and select the file again. The private source is retained.")
+                    Text("${choice.name}\nDirect sending reaches only the selected verified device. Cached sending uses the existing authorized recipient audience. No automatic fallback has occurred.")
+                    if(!choice.directReady&&!choice.cachedReady)Text("Connect to the recipient and select the file again. The private source is retained.")
                 }},
-                confirmButton={TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,true))},enabled=choice.directReady&&!state.attachmentCompatibilityBusy){Text("Send Directly to Online Device")}},
-                dismissButton={TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,false))},enabled=!state.attachmentCompatibilityBusy){Text("Cancel")}})
+                confirmButton={Row {
+                    if(choice.cachedReady)TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,com.peerchat.android.platform.AttachmentSendMode.Cached))},enabled=!state.attachmentCompatibilityBusy){Text("Send Cached")}
+                    if(choice.directReady)TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,com.peerchat.android.platform.AttachmentSendMode.Direct))},enabled=!state.attachmentCompatibilityBusy){Text("Send Directly")}
+                }},
+                dismissButton={TextButton(onClick={dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,null))},enabled=!state.attachmentCompatibilityBusy){Text("Cancel")}})
         }
         if(state.serverTrust==null)state.deviceVerification?.let { value ->
             fun fingerprint(id:String)=id.chunked(4).joinToString(" ").uppercase()

@@ -38,6 +38,25 @@ class AndroidQolTest {
         disk=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
         assertThrows(Exception::class.java){open().load()}
     }
+    @Test fun directDefaultAndExplicitCachedModeSurviveProtectedReopenWithoutMigration() {
+        var first:ByteArray?=null;var second:ByteArray?=null
+        fun primary()=ProtectedAndroidQolStore({first},{first=it.copyOf()},{records})
+        fun anotherProfile()=ProtectedAndroidQolStore({second},{second=it.copyOf()},{records})
+        assertEquals(AttachmentSendMode.Direct,primary().load().attachmentSendMode)
+        primary().save(AndroidQolState(attachmentSendMode=AttachmentSendMode.Cached))
+        repeat(8){assertEquals(AttachmentSendMode.Cached,primary().load().attachmentSendMode)}
+        assertEquals(AttachmentSendMode.Direct,anotherProfile().load().attachmentSendMode)
+        anotherProfile().save(AndroidQolState())
+        assertEquals(AttachmentSendMode.Cached,primary().load().attachmentSendMode)
+        val label="android-qol-v1".toByteArray(Charsets.US_ASCII)
+        val old=org.json.JSONObject(records.unprotect(first!!,label).toString(Charsets.UTF_8))
+        old.remove("attachmentSendMode")
+        first=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
+        assertEquals(AttachmentSendMode.Direct,primary().load().attachmentSendMode)
+        old.put("attachmentSendMode","Invalid")
+        first=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
+        assertThrows(Exception::class.java){primary().load()}
+    }
     private fun conversation()=ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),listOf(
         MessageSnapshot("c".repeat(32),"b".repeat(64),"a".repeat(64),100,1,9,2,"PRIVATE received text"),
         MessageSnapshot("d".repeat(32),"a".repeat(64),"b".repeat(64),101,2,10,2,"outgoing")))

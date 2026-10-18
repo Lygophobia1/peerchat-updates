@@ -5,6 +5,24 @@ using System.Text;
 using System.Web.Script.Serialization;
 
 namespace PeerChatDesktop {
+public static class DiscoveryRestoreRetryPolicy {
+    public static bool SessionRejected(Exception error){
+        var response=error as DiscoveryRequestException;
+        if(response!=null)return response.ErrorCode=="session_invalid"||response.ErrorCode=="session_superseded";
+        string message=(error.Message??"").ToLowerInvariant();
+        return message.Contains("different server account")||message.Contains("already linked");
+    }
+    public static bool Transient(Exception error){
+        // Protocol, certificate, identity and authorization rejection must never
+        // be relabeled as a temporary outage or trigger automatic re-enrollment.
+        return error is System.Net.Sockets.SocketException||error is TimeoutException||
+            error is IOException&&!(error is InvalidDataException);
+    }
+    public static int DelayMilliseconds(int failures){return failures<=1?2000:failures==2?4000:failures==3?8000:failures==4?16000:30000;}
+    public static bool ScopeCurrent(bool closing,ulong profile,ulong currentProfile,ulong session,ulong currentSession,bool hasDiscovery,long attempt=0,long currentAttempt=0){
+        return !closing&&!hasDiscovery&&profile==currentProfile&&session==currentSession&&attempt==currentAttempt;
+    }
+}
 public sealed class ProfileAccountLink {
     public int Version=1;
     public long AccountId;
@@ -82,6 +100,20 @@ public sealed class PendingGroupRegistrationStore {
 }
 
 public static class GroupRegistrationPolicy {
+    // An event is only a demand hint. Both endpoints must still match the
+    // current authenticated roster; native admission and peer TLS remain final.
+    public static bool IncomingControlReady(ServerGroupRoster roster,DiscoveryEvent demand,long accountId,string peerId){
+        if(roster==null||demand==null||demand.Purpose!="group_key"||demand.TargetPublicIdentity!=peerId||
+           roster.GroupId!=demand.GroupId||roster.RosterGeneration<1||roster.RosterGeneration!=demand.RosterGeneration||
+           accountId<=0||demand.AccountId<=0||demand.AccountId==accountId||demand.PublicIdentity==peerId||roster.Members==null)return false;
+        bool local=false,remote=false;
+        foreach(var member in roster.Members){
+            if(member.State!="member")continue;
+            local|=member.AccountId==accountId&&member.PeerId==peerId;
+            remote|=member.AccountId==demand.AccountId&&member.PeerId==demand.PublicIdentity;
+        }
+        return local&&remote;
+    }
     public static bool OwnerRosterReady(ServerGroupRoster roster,string localGroupId,long accountId,string peerId){
         return roster!=null&&roster.LegacyGroupId==localGroupId&&roster.GroupId!=null&&roster.GroupId.Length==32&&
             roster.RosterGeneration==1&&roster.Members!=null&&roster.Members.Count==1&&

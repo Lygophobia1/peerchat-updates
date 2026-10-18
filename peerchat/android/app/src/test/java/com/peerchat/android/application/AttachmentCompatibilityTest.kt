@@ -38,7 +38,7 @@ class AttachmentCompatibilityTest {
         demands=0;waits=0;probes=0;assertFalse(awaitAttachmentDirectRoute({if(++probes==1)false else null},{demands++;true},{waits++}));assertEquals(1,demands);assertEquals(1,waits)
     }
     private fun reply(state:String)=JSONObject().put("type","cache_result").put("operation","cache_dm_prepare").put("cacheVersion",2).put("dmAttachmentVersion",1).put("state",state)
-    @Test fun cacheRemainsPreferredAndOnlyExactUpgradeStateOffersChoice(){
+    @Test fun exactCacheEligibilityAndUpgradeStatesAreDistinguished(){
         for((state,expected) in listOf("accepted" to AttachmentRecipientPreflight.Ready,"cache_dm_recipient_upgrade_required" to AttachmentRecipientPreflight.UpgradeRequired)){
             var calls=0;assertEquals(expected,attachmentRecipientPreflight(8,{true}){op,body->calls++;assertEquals("cache_dm_prepare",op);assertEquals(8,body.getLong("recipientAccountId"));reply(state)});assertEquals(1,calls)
         }
@@ -52,8 +52,9 @@ class AttachmentCompatibilityTest {
         assertEquals(AttachmentSendPreflight.UpgradeChoice,attachmentSendPreflight(8,{true}){_,_->reply("cache_dm_recipient_upgrade_required")})
     }
     @Test fun preflightRejectionsAndChangedScopeCannotOfferDirectChoice(){
-        assertThrows(IllegalStateException::class.java){
+        val denied=assertThrows(AttachmentCachePreflightRejected::class.java){
             attachmentSendPreflight(8,{true}){_,_->reply("cache_access_denied")}}
+        assertEquals("cache_access_denied",denied.state)
         assertThrows(com.peerchat.android.platform.ServerRejected::class.java){
             attachmentSendPreflight(8,{true}){_,_->throw com.peerchat.android.platform.ServerRejected("cache_access_denied")}}
         assertThrows(javax.net.ssl.SSLException::class.java){
@@ -66,7 +67,7 @@ class AttachmentCompatibilityTest {
     }
     @Test fun securityNetworkAndOtherCacheFailuresNeverBecomeDirectChoice(){
         for(state in listOf("cache_access_denied","cache_dm_source_upgrade_required","cache_storage_unavailable","cache_expired","cache_malformed_request")){
-            try{attachmentRecipientPreflight(8,{true}){_,_->reply(state)};fail(state)}catch(_:IllegalStateException){}
+            try{attachmentRecipientPreflight(8,{true}){_,_->reply(state)};fail(state)}catch(failure:AttachmentCachePreflightRejected){assertEquals(state,failure.state)}
         }
         assertThrows(java.io.IOException::class.java){attachmentRecipientPreflight(8,{true}){_,_->throw java.io.IOException("test-only")}}
     }

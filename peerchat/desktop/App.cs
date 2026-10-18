@@ -341,6 +341,9 @@ public partial class DesktopApplication {
     string historyScrollKey="";
     double historyScrollOffset,historyScrollExtent;
     bool discoveryRestored;
+    long discoveryRestoreRetryAt;
+    long discoveryRestoreEpoch;
+    int discoveryRestoreFailures;
     Task<bool> presenceRefreshTask;
     Task<bool> friendRefreshTask;
     readonly HashSet<string> reconnectRepairs=new HashSet<string>();
@@ -572,19 +575,33 @@ public partial class DesktopApplication {
             return false;
         }finally{mediaTurnRefreshInFlight=false;}
     }
-    static bool SessionRejected(Exception error){string value=(error.Message??"").ToLowerInvariant();return value.Contains("session_invalid")||value.Contains("different server account")||value.Contains("already linked");}
+    static bool SessionRejected(Exception error){return DiscoveryRestoreRetryPolicy.SessionRejected(error);}
     async void RestoreDiscoverySession(){
-        if(discoveryRestored||discovery!=null||String.IsNullOrEmpty(model.OwnId))return;discoveryRestored=true;accountLink=accountStore.Load();DiscoveryClient saved=null;long expectedAccount=accountLink==null?0:accountLink.AccountId;
+        if(closing||discoveryRestored||discovery!=null||String.IsNullOrEmpty(model.OwnId)||System.Diagnostics.Stopwatch.GetTimestamp()<discoveryRestoreRetryAt)return;
+        discoveryRestored=true;var restoreProfile=profileSessionGeneration;var restoreSession=discoverySessionGeneration;var restoreEpoch=discoveryRestoreEpoch;string restorePeer=model.OwnId,restoreStage="load_saved_session";
+        Func<bool> restoreCurrent=()=>DiscoveryRestoreRetryPolicy.ScopeCurrent(closing,restoreProfile,profileSessionGeneration,restoreSession,discoverySessionGeneration,discovery!=null,restoreEpoch,discoveryRestoreEpoch);
+        DiscoveryClient saved=null;long expectedAccount=0;
         try{
+            accountLink=accountStore.Load();expectedAccount=accountLink==null?0:accountLink.AccountId;
             if(accountLink!=null&&accountLink.HasSession)saved=new DiscoveryClient(accountLink.Host,accountLink.Port,accountLink.CertificateSha256,ConfirmDiscoveryCertificate){Username=accountLink.Username,SessionToken=accountLink.SessionToken,AccountId=accountLink.AccountId};
             else if(accountLink==null&&File.Exists(DiscoverySessionPath)){var lines=Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(DiscoverySessionPath),null,DataProtectionScope.CurrentUser)).Split(new[]{"\n"},StringSplitOptions.None);int serverPort;long legacyAccount=0;if((lines.Length!=5&&lines.Length!=6)||!Int32.TryParse(lines[1],out serverPort))throw new InvalidDataException("Legacy account session is invalid.");if(lines.Length==6)Int64.TryParse(lines[5],out legacyAccount);expectedAccount=legacyAccount;saved=new DiscoveryClient(lines[0],serverPort,lines[2],ConfirmDiscoveryCertificate){Username=lines[3],SessionToken=lines[4],AccountId=legacyAccount};}
             if(saved==null){model.Status=accountLink==null?(accountStore.Exists?"Protected account link unavailable · Offline / Server Relay":"Local profile ready · Sign in, create an account, or continue offline"):"@"+accountLink.Username+" signed out · Local history remains available";Refresh();PromptProfileAccountSetup();return;}
-            await Task.Run(()=>saved.RefreshSessionInfo());if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");var presence=await Task.Run(()=>saved.ReportPresence(model.OwnId,"",0,"",0,false));discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationsAttempted.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();foreach(string id in pendingGroupStore.Load(saved.AccountId,model.OwnId)){pendingNewGroupRegistrations.Add(id);groupRegistrationStatus[id]="New group registration pending; group is not active";groupRegistrationStage[id]="awaiting signed creation proof";groupRegistrationFailure[id]="none";}groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();RefreshGroupState();
-        }catch(Exception error){if(SessionRejected(error)){accountLink=accountStore.ClearSession();try{if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{}}string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;model.Status=linked+" · Offline / Server Relay · "+(SessionRejected(error)?"sign-in required":"server unavailable");Refresh();}
+            restoreStage="session_info";await Task.Run(()=>saved.RefreshSessionInfo());if(!restoreCurrent())return;if(expectedAccount>0&&saved.AccountId!=expectedAccount)throw new InvalidOperationException("This profile session belongs to a different server account.");restoreStage="presence";var presence=await Task.Run(()=>saved.ReportPresence(restorePeer,"",0,"",0,false));if(!restoreCurrent())return;discoveryRestoreFailures=0;discoveryRestoreRetryAt=0;discovery=saved;discoverySessionGeneration++;mediaTurnCredentials=null;serverGroupRosters.Clear();model.ClearGroupSenderNames();groupControlRequested.Clear();groupControlViews.Clear();pendingNewGroupRegistrations.Clear();groupRegistrationsInFlight.Clear();groupRegistrationsAttempted.Clear();groupRegistrationStatus.Clear();groupRegistrationStage.Clear();groupRegistrationFailure.Clear();foreach(string id in pendingGroupStore.Load(saved.AccountId,model.OwnId)){pendingNewGroupRegistrations.Add(id);groupRegistrationStatus[id]="New group registration pending; group is not active";groupRegistrationStage[id]="awaiting signed creation proof";groupRegistrationFailure[id]="none";}groupStateRevision++;groupStateRefreshQueued=false;groupStateRefreshTask=null;ApplyPresenceDiagnostics(presence);core.SetGroupAccount(saved.AccountId,saved.Username);core.LoadGroups();saved.StartEventChannel(model.OwnId,HandleDiscoveryEvent);SaveDiscoverySession();model.Status="Signed in as "+saved.Username+" · Discoverable";Refresh();RefreshFriendState();RefreshGroupState();
+        }catch(Exception error){
+            if(!restoreCurrent())return;
+            bool rejected=SessionRejected(error),retry=!rejected&&DiscoveryRestoreRetryPolicy.Transient(error);
+            int retryMs=0;
+            if(rejected){try{accountLink=accountStore.ClearSession();if(File.Exists(DiscoverySessionPath))File.Delete(DiscoverySessionPath);}catch{TraceUi("saved_session_restore invalid_session_local_cleanup_deferred");}}
+            else if(retry){retryMs=DiscoveryRestoreRetryPolicy.DelayMilliseconds(++discoveryRestoreFailures);discoveryRestoreRetryAt=System.Diagnostics.Stopwatch.GetTimestamp()+(long)(retryMs*(System.Diagnostics.Stopwatch.Frequency/1000.0));discoveryRestored=false;}
+            TraceUi("saved_session_restore stage="+restoreStage+" result="+error.GetType().Name+" retry_ms="+retryMs);
+            string linked=accountLink==null?"Unlinked profile":"@"+accountLink.Username;
+            model.Status=linked+" · Offline / Server Relay · "+(rejected?"sign-in required":retry?"temporary connection failure; retrying":"connection rejected; open account settings or diagnostics");Refresh();
+        }
     }
     void Poll(){
         if(busy||closing)return;
         try{
+            if(!discoveryRestored&&discovery==null)RestoreDiscoverySession();
             PumpMailbox();PumpArchive();PumpGroupAttachmentNetwork();PumpDmAttachmentNetwork();PumpDeviceManagement();
             // Push notifications are the normal update path. Keep only a slow reconciliation
             // snapshot: three minutes while the event channel is healthy, and one minute while
@@ -1693,6 +1710,7 @@ public partial class DesktopApplication {
 
 	private async void Account(bool login)
 	{
+		if(busy||closing)return;
 		if (string.IsNullOrEmpty(model.OwnId))
 		{
 			Notify("Wait for the encrypted profile to finish opening.");
@@ -1716,6 +1734,7 @@ public partial class DesktopApplication {
 		}
 		if(values.Length==0){window.Dispatcher.BeginInvoke((Action)(()=>Account(!login)));return;}
 		DiscoveryClient candidate = null;
+		++discoveryRestoreEpoch;discoveryRestored=true;discoveryRestoreRetryAt=0;
 		try
 		{
 			busy = true;
@@ -1800,6 +1819,7 @@ public partial class DesktopApplication {
 
 	private async void SignOut()
 	{
+		++discoveryRestoreEpoch;discoveryRestored=true;discoveryRestoreRetryAt=0;
 		DiscoveryClient signedOut = discovery;
         mailboxContextAccount=0;
         StopGroupAttachmentNetwork();
@@ -1883,6 +1903,14 @@ public partial class DesktopApplication {
                             execution.RefreshCurrent(service.AccountId,(long)generation,local);execution.IncomingArchive(service.AccountId,(long)generation,scope);});
                             if(discovery==service){archiveServingUntilUtc=DateTime.UtcNow.AddSeconds(60);archiveMetadataUtc=DateTime.UtcNow.AddSeconds(10);}
                         }catch(Exception error){TraceUi("incoming archive route denied: "+error.GetType().Name);}
+                        return;
+                    }
+                    if(notification.Purpose=="group_key"){
+                        ServerGroupRoster roster;
+                        if(service!=null&&notification.GroupId!=null&&serverGroupRosters.TryGetValue(notification.GroupId,out roster)&&
+                           GroupRegistrationPolicy.IncomingControlReady(roster,notification,service.AccountId,model.OwnId))
+                            core.BeginGroupControl(roster.GroupId,notification.AccountId,notification.PublicIdentity,discoverySessionGeneration);
+                        else RefreshGroupState();
                         return;
                     }
                     DiscoverySearchResult friend;
