@@ -10,6 +10,12 @@ using PeerChat.Server;
 using PeerChat.ServerShared;
 using PeerChatDesktop;
 
+// This isolated host seeds disposable server-side device sessions directly.
+// The server still validates those sessions on every pinned identity RPC.
+namespace PeerChatDesktop { public sealed partial class DiscoveryClient {
+ public bool MatchesAttachmentDeviceSession(long account,string device){return account>0&&AccountId==account&&RegisteredPublicIdentity==device&&!String.IsNullOrEmpty(SessionToken);}
+}}
+
 // Isolated process bridge to the actual authenticated TLS server and shipping
 // Windows transport codec. Only public test keys and encrypted wire cross it.
 class DirectAttachmentApplicationHost {
@@ -59,7 +65,10 @@ partial class AttachmentCacheRuntimeTest {
   var timings=new List<long>();long cachedBytes=0;int appendRequests=0,readRequests=0;var offsets=new HashSet<string>();Dictionary<string,object> lastPublication=null;int lastPublisher=0;
   var capabilityTraces=new int[3];
   try{
-   restart();for(int i=0;i<3;i++){clients[i]=new DiscoveryClient("localhost",port,pin){AccountId=accountsByActor[i],SessionToken=tokens[i],RegisteredPublicIdentity=devices[i]};clients[i].RefreshSessionInfo();}
+   restart();for(int i=0;i<3;i++){clients[i]=new DiscoveryClient("localhost",port,pin){AccountId=accountsByActor[i],SessionToken=tokens[i],RegisteredPublicIdentity=devices[i]};clients[i].RefreshSessionInfo();Check(clients[i].AccountId==accountsByActor[i],"DM seeded device session account");
+    // session_info reports the account's primary device. This fixture's third
+    // disposable token is instead bound to its exact sibling in device_sessions.
+    clients[i].RegisteredPublicIdentity=devices[i];}
    send(new Dictionary<string,object>{{"pin",pin},{"port",port},{"accounts",accountsByActor}});
    string line;while((line=Console.ReadLine())!=null){Check(line.Length<=150000,"DM host command bound");var command=json.Deserialize<Dictionary<string,object>>(line);string operation=(string)command["operation"];
     if(operation=="native_command"){
@@ -81,6 +90,13 @@ partial class AttachmentCacheRuntimeTest {
        if(type=="cache_dm_publish"){lastPublication=new Dictionary<string,object>(payload);lastPublisher=actor;}
       }return result;
      });timings.Add(watch.ElapsedTicks*1000000/System.Diagnostics.Stopwatch.Frequency);control.WriteLine(Convert.ToBase64String(response));control.Flush();continue;
+    }
+    if(operation=="identity"){
+     int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM identity actor");
+     string type=(string)command["type"];
+     Check(new[]{"device_identity_register","device_identity_snapshot","device_identity_authority_challenge","device_identity_authority_commit","device_identity_endorse_challenge","device_identity_endorse_commit"}.Contains(type),"DM identity operation");
+     var fields=new Dictionary<string,object>();foreach(string field in new[]{"proof","accountId","targetDevice"})if(command.ContainsKey(field))fields[field]=command[field];
+     send(clients[actor].DeviceIdentityRequest(type,devices[actor],fields,accountsByActor[actor],clients[actor].SessionToken,clients[actor].CertificateSha256));continue;
     }
     if(operation=="events_start"){int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM event actor");eventActors[actor]=true;startEvents(actor);send(new Dictionary<string,object>{{"connected",true},{"mailboxReady",System.Threading.Volatile.Read(ref eventHints[actor])}});continue;}
     if(operation=="event_hints"){int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM hint actor");send(new Dictionary<string,object>{{"mailboxReady",System.Threading.Volatile.Read(ref eventHints[actor])}});continue;}

@@ -2,7 +2,8 @@ param(
  [string]$Serial='emulator-5580',
  [string]$Adb='C:\Users\Livel\AppData\Local\Android\Sdk\platform-tools\adb.exe',
  [string]$FixtureRoot='F:\PeerChat-isolated-cache-tests',
- [string]$PrebuiltBinary
+ [string]$PrebuiltBinary,
+ [string]$ManagedHost
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
@@ -14,7 +15,7 @@ $profiles=Join-Path $evidence 'profiles'
 New-Item -ItemType Directory -Force -Path $evidence,$profiles | Out-Null
 Push-Location $root
 try {
- $managed=(Resolve-Path 'tests/portable/bin/Release/net10.0/PeerChat.DirectAttachmentApplicationHost.dll').Path
+ $managed=if($ManagedHost){(Resolve-Path -LiteralPath $ManagedHost).Path}else{(Resolve-Path 'tests/portable/bin/Release/net10.0/PeerChat.DirectAttachmentApplicationHost.dll').Path}
  $binary=if($PrebuiltBinary){(Resolve-Path -LiteralPath $PrebuiltBinary).Path}else{Join-Path $evidence 'dm-emulator.exe'}
  if(-not $PrebuiltBinary){
   & scripts/build-go-hpke.ps1 -OutputDirectory $evidence

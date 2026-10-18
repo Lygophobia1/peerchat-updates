@@ -5,7 +5,7 @@
   <EnableDefaultCompileItems>false</EnableDefaultCompileItems><Nullable>disable</Nullable><ImplicitUsings>disable</ImplicitUsings>
  </PropertyGroup>
  <ItemGroup>
-  <Compile Include="PortableTestKey.cs;../attachment_cache_runtime_test.cs;../attachment_cache_keys_test.cs;../attachment_cache_context_test.cs;../attachment_application_host.cs;../dm_attachment_application_host.cs;../group_roster_proof_test.cs;../../shared/VersionInfo.cs;../../server/portable/PortableJson.cs;../../server/portable/PortablePlatform.cs;../../desktop/DeviceNameMetadata.cs;../../desktop/DiscoveryClient.cs;../../desktop/ArchiveEnrollmentExecution.cs;../../desktop/DmAttachmentExecution.cs" />
+  <Compile Include="PortableTestKey.cs;../attachment_cache_runtime_test.cs;../attachment_cache_keys_test.cs;../attachment_cache_context_test.cs;../attachment_application_host.cs;../dm_attachment_application_host.cs;../group_roster_proof_test.cs;../../shared/VersionInfo.cs;../../server/portable/PortableJson.cs;../../server/portable/PortablePlatform.cs;../../desktop/DeviceNameMetadata.cs;../../desktop/DiscoveryClient.cs;../../desktop/DeviceIdentityDirectory.cs;../../desktop/ArchiveEnrollmentExecution.cs;../../desktop/DmAttachmentExecution.cs" />
   <Compile Include="../../server/*.cs" Exclude="../../server/PeerChat.Server.Admin.cs;../../server/DiscoveryIntegrationTest.cs" />
  </ItemGroup>
 </Project>

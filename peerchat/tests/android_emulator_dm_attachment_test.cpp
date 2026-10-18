@@ -7,21 +7,28 @@
 #include <winsock.h>
 #include "windows_dm_attachment_adapter.hpp"
 #include "reliable_transfer_interop_fixture.hpp"
+#include "../device_identity_application.hpp"
+#include <chrono>
 
 using namespace peerchat;
 namespace ri=peerchat::reliable;
 namespace dm=peerchat::dm_attachments;
 static void need(bool value,const std::string& reason){need(value,reason.c_str());}
+static std::uint64_t utcMilliseconds(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
+static Blob identityCommand(unsigned op,unsigned account,const std::string& pin,const std::function<void(protocol::Writer&)>& fields={},std::uint64_t started=0){
+ protocol::Writer writer(protocol::FileTransfer);writer.string("PeerChat/IdentityDirectoryCommand/v1");writer.number(op);writer.number(account);writer.number(1);writer.string(pin);writer.number(started?started:utcMilliseconds());if(fields)fields(writer);return writer.data;
+}
 
 struct DmPeer {
  ApplicationPeer crypto;unsigned account;std::string pin;std::vector<DmPeer*>* trusted=nullptr;
+ std::shared_ptr<platform::SqlDatabase> directoryDatabase;std::unique_ptr<device_identity::Application> directory;
  std::unique_ptr<dm::windows::Adapter> io;std::unique_ptr<io::DurableJournal> ordinary;
  std::unique_ptr<cache::CacheStateStore> groupJournal;std::unique_ptr<transfer::DirectCacheJournal> journal;
  std::unique_ptr<transfer::TransferManager> manager;std::unique_ptr<dm::Application> app;
  DmPeer(const std::filesystem::path& root,unsigned value):crypto(root,value),account(value){}
  dm::Evidence evidence(){
   dm::Evidence e;
-  e.identity=[this](std::uint64_t owner,const std::string& device){for(auto* peer:*trusted)if(peer->account==owner&&peer->crypto.profile.peerId==device)return peer->crypto.profile.publicKey;throw std::runtime_error("Unverified test directory identity");return Blob{};};
+  e.identity=[this](std::uint64_t owner,const std::string& device){need(bool(directory),"Native identity directory missing");return directory->resolve(account,1,owner,device,utcMilliseconds(),GetTickCount64());};
   e.current=[this,identity=e.identity](const mailbox::RecipientBinding& binding,const std::string& relationship,std::uint64_t other){
    if(!protocol::id(relationship,32)||other==binding.accountId||!binding.storageAllowed)return false;
    for(auto* peer:*trusted)if(peer->account==binding.accountId&&peer->crypto.profile.peerId==binding.device&&mailbox::serializeBinding(peer->crypto.binding)==mailbox::serializeBinding(binding))return mailbox::verifyBinding(binding,binding.accountId,binding.device,identity(binding.accountId,binding.device),verifyDevicePayload,Storage::publicKeyId);
@@ -29,7 +36,7 @@ struct DmPeer {
   };return e;
  }
  void activate(const std::string& server,std::vector<DmPeer*>& peers){
-  pin=server;trusted=&peers;io=std::make_unique<dm::windows::Adapter>(crypto.root.wstring());ordinary=std::make_unique<io::DurableJournal>(crypto.root.wstring(),crypto.profile.peerId);
+  pin=server;trusted=&peers;directoryDatabase=platform::openWindowsSqlDatabase((crypto.root/L"identity-directory").wstring());directory=std::make_unique<device_identity::Application>(crypto.identity,*directoryDatabase,crypto.protector,crypto.profile.peerId);io=std::make_unique<dm::windows::Adapter>(crypto.root.wstring());ordinary=std::make_unique<io::DurableJournal>(crypto.root.wstring(),crypto.profile.peerId);
   groupJournal=std::make_unique<cache::CacheStateStore>(crypto.root.wstring(),crypto.profile.peerId,*ordinary,[](const transfer::DurableState&)->std::unique_ptr<transfer::Source>{throw std::runtime_error("Unexpected group journal record");});groupJournal->load();
   journal=std::make_unique<transfer::DirectCacheJournal>(crypto.storage,crypto.profile.peerId,*groupJournal,[this](const auto& row){return app->reopen(row);},[this](const auto& row){return io->receive(row);});
   manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<io::Sha256>();},journal.get());
@@ -42,6 +49,7 @@ struct DmPeer {
   host.write("{\"operation\":\"native_command\",\"actor\":"+std::to_string(actor)+",\"command\":\""+rpc::base64(command,false)+"\"}");app->reply(host.read());
  }
  dm::Application::Snapshot snapshot(const std::string& id){for(const auto& row:app->snapshots())if(row.id==id)return row;throw std::runtime_error("Windows DM snapshot missing");}
+ Blob identity(const Blob& command){auto mapped=[this](const std::string& id)->std::uint64_t{for(auto* peer:*trusted)if(peer->crypto.profile.peerId==id)return peer->account;return 0;};return directory->execute(command,account,1,utcMilliseconds(),GetTickCount64(),{},mapped);}
 };
 
 struct DeviceSocket {
@@ -103,6 +111,29 @@ static AndroidRow emulatorRow(DeviceSocket& device,const std::string& id){
 static V managed(Host& host,const std::string& operation,unsigned actor,const Blob& receipt={}){
  V request=V::map();request["operation"]=V(operation);request["actor"]=V(std::uint64_t(actor));if(!receipt.empty())request["receipt"]=V(rpc::base64(receipt,false));host.write(rpc::json(request));return host.decode(host.read());
 }
+static V identityRpc(Host& host,unsigned actor,const std::string& operation,const std::string& field="",const std::string& value=""){
+ V request=V::map();request["operation"]=V("identity");request["actor"]=V(std::uint64_t(actor));request["type"]=V(operation);if(!field.empty())request[field]=V(value);
+ host.write(rpc::json(request));auto response=host.decode(host.read());need(response.at("ok").flag(),"Pinned identity RPC rejected "+operation);return response;
+}
+static Blob identityNative(DeviceSocket& device,DmPeer& first,DmPeer& second,unsigned actor,const Blob& command){
+ if(actor==1){Sleep(600);return device.call("I|"+rpc::base64(command,false));}return (actor==2?first:second).identity(command);
+}
+static void registerIdentity(DeviceSocket& device,Host& host,DmPeer& first,DmPeer& second,unsigned actor,unsigned account,const std::string& pin){
+ auto proof=identityNative(device,first,second,actor,identityCommand(0,account,pin));need(proof.size()>100,"Native signed possession missing for actor "+std::to_string(actor)+" (reply bytes "+std::to_string(proof.size())+")");identityRpc(host,actor,"device_identity_register","proof",rpc::base64(proof,false));
+}
+static void selectIdentityAuthority(DeviceSocket& device,Host& host,DmPeer& first,DmPeer& second,unsigned actor,unsigned account,const std::string& pin,const std::string& fingerprint){
+ auto challenge=identityRpc(host,actor,"device_identity_authority_challenge");auto payload=rpc::unbase64(challenge.string("payload"),2048,false);
+ auto proof=identityNative(device,first,second,actor,identityCommand(1,account,pin,[&](auto& w){w.bytes(payload);w.string(fingerprint);}));need(proof.size()>100,"Native authority signature missing");identityRpc(host,actor,"device_identity_authority_commit","proof",rpc::base64(proof,false));
+}
+static void endorseIdentity(DeviceSocket& device,Host& host,DmPeer& first,DmPeer& second,unsigned actor,unsigned account,const std::string& pin,const std::string& target){
+ auto challenge=identityRpc(host,actor,"device_identity_endorse_challenge","targetDevice",target);auto payload=rpc::unbase64(challenge.string("payload"),2048,false);
+ auto proof=identityNative(device,first,second,actor,identityCommand(2,account,pin,[&](auto& w){w.bytes(payload);w.string(target);}));need(proof.size()>100,"Native endorsement signature missing");identityRpc(host,actor,"device_identity_endorse_commit","proof",rpc::base64(proof,false));
+}
+static void applyIdentity(DeviceSocket& device,Host& host,DmPeer& first,DmPeer& second,unsigned actor,unsigned local,unsigned remote,const std::string& pin,const std::string& confirmed){
+ auto started=utcMilliseconds();auto snapshot=identityRpc(host,actor,"device_identity_snapshot","accountId",std::to_string(remote));auto authority=rpc::unbase64(snapshot.string("authorityProof"),2048,false);need(!authority.empty()&&snapshot.at("authorityActive").flag(),"Fixture authority inactive");
+ auto endorsements=snapshot.at("endorsements").array;auto command=identityCommand(3,local,pin,[&](auto& w){w.number(remote);w.number(snapshot.integer("revision"));w.bytes(authority);w.number(1);w.number(endorsements.size());for(const auto& e:endorsements){w.bytes(rpc::unbase64(e.string("proof"),2048,false));w.number(e.at("active").flag()?1:0);}w.string(confirmed);},started);
+ need(identityNative(device,first,second,actor,command)==Blob{1},"Native identity snapshot/explicit root confirmation rejected");
+}
 
 int main(int argc,char** argv){try{
  need(argc==4,"Usage android-emulator-dm root managed-host.dll bridge-port");
@@ -123,8 +154,23 @@ int main(int argc,char** argv){try{
  Host host(std::filesystem::absolute(argv[2]),root);auto ready=host.decode(host.read());
  first.activate(ready.string("pin"),peers);second.activate(ready.string("pin"),peers);
  protocol::Writer server(protocol::FileTransfer);server.string("PeerChat/EmulatorDmServer/v1");server.number(ready.integer("port"));server.string(ready.string("pin"));device.line(rpc::base64(server.data,false));
- stage="Android↔Windows authenticated live TLS device pinning";
- for(unsigned index=0;index<2;++index){
+ stage="Signed device enrollment over pinned authenticated RPC";
+ const auto identityPin=ready.string("pin");
+ registerIdentity(device,host,first,second,2,2,identityPin);
+ registerIdentity(device,host,first,second,3,2,identityPin);
+ registerIdentity(device,host,first,second,1,1,identityPin);
+ selectIdentityAuthority(device,host,first,second,1,1,identityPin,androidId);
+ selectIdentityAuthority(device,host,first,second,2,2,identityPin,first.crypto.profile.peerId);
+ applyIdentity(device,host,first,second,2,2,2,identityPin,first.crypto.profile.peerId);
+ endorseIdentity(device,host,first,second,2,2,identityPin,second.crypto.profile.peerId);
+ applyIdentity(device,host,first,second,1,1,1,identityPin,androidId);
+ applyIdentity(device,host,first,second,2,2,2,identityPin,"");
+ applyIdentity(device,host,first,second,3,2,2,identityPin,first.crypto.profile.peerId);
+ applyIdentity(device,host,first,second,1,1,2,identityPin,first.crypto.profile.peerId);
+ applyIdentity(device,host,first,second,2,2,1,identityPin,androidId);
+ applyIdentity(device,host,first,second,3,2,1,identityPin,androidId);
+ stage="Android↔first Windows authenticated live TLS device pinning; second sibling remains offline";
+ for(unsigned index=0;index<1;++index){
   DmPeer& window=index?second:first;need(device.call("T|"+std::to_string(index))==Blob{1},"Android relay demand/open");
   WindowsPinSide side(window.crypto.root,androidId,2,androidId<window.crypto.profile.peerId);
   Blob toAndroid;bool complete=false;
@@ -178,6 +224,6 @@ int main(int argc,char** argv){try{
  need(reverseComplete,"Windows source did not verify Android signed file receipt");
  for(unsigned i=0;i<4;++i){emulatorStep(device,host);first.step(host,2);second.step(host,3);}
  need(device.call("Q")==Blob{1},"Android fixture shutdown");need(host.command("quit").at("stopped").flag(),"Managed fixture shutdown");
- std::cout<<"PASS real emulator POSIX/Keystore↔Windows Schannel live TLS initial/second-device explicit verification, pinned managed TLS server DM cache registration, bidirectional cached Unicode binary plaintext, durable signed notice ACKs, and sender-verified signed file receipts; server RPC proxied by Windows fixture, not Android ServerAccounts\n";
+ std::cout<<"PASS real emulator POSIX/Keystore↔Windows first-device Schannel TLS pin, offline second Windows sibling resolved only through signed identity directory, pinned managed TLS server DM cache registration, bidirectional cached Unicode binary plaintext, durable signed notice ACKs, and sender-verified signed file receipts; server RPC proxied by Windows fixture, not Android ServerAccounts\n";
  return 0;
  }catch(const std::exception& error){std::cerr<<stage<<": "<<error.what()<<'\n';return 1;}}

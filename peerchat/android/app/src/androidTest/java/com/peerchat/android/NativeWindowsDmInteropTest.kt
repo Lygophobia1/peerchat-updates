@@ -127,6 +127,7 @@ class NativeWindowsDmInteropTest {
                                 checkNotNull(TransferBridge.request(handle, 12, byteArrayOf()))
                             }
                             "R" -> byteArrayOf(if (TransferBridge.request(handle, 13, dec(parts[1])) != null) 1 else 0)
+                            "I" -> IdentityDirectoryBridge.request(handle,dec(parts[1])) ?: byteArrayOf(0)
                             "P" -> checkNotNull(TransferBridge.request(handle, 11, session))
                             "V" -> checkNotNull(TransferBridge.request(handle, 4, record()))
                             "T" -> {
