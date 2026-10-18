@@ -29,11 +29,12 @@ class LocalConversationContextTest {
         var disk:ByteArray?=null
         fun open()=ProtectedLocalConversationContextStore({disk},{disk=it.copyOf()},records)
         assertNull(open().load(endpoint))
-        val value=LocalConversationContext(19,"Jonah","a".repeat(64),listOf(FriendIdentity(8,"Other","b".repeat(64),true)))
+        val value=LocalConversationContext(19,"Jonah","a".repeat(64),listOf(FriendIdentity(8,"Other","b".repeat(64),true,deviceNames=mapOf("b".repeat(64) to "Office PC"))))
         open().save(endpoint,value)
         repeat(100){val reopened=open().load(endpoint)!!
             assertEquals(19L,reopened.account);assertEquals(value.device,reopened.device)
-            assertEquals(8L,reopened.friends.single().accountId);assertFalse(reopened.friends.single().online)}
+            assertEquals(8L,reopened.friends.single().accountId);assertFalse(reopened.friends.single().online)
+            assertEquals("Office PC",reopened.friends.single().deviceNames!!["b".repeat(64)])}
         assertFalse(disk!!.toString(Charsets.UTF_8).contains("Jonah"))
         assertNull(open().load(endpoint.copy(certificatePin="e".repeat(64))))
         assertNull(open().load(endpoint.copy(host="another.example")))

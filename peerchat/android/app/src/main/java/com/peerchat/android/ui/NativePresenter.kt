@@ -47,7 +47,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                         DeliveryTargetStatus.Pending->DeliveryTargetStatusUi.Pending
                         DeliveryTargetStatus.Acknowledged->DeliveryTargetStatusUi.Received
                         DeliveryTargetStatus.Unavailable->DeliveryTargetStatusUi.Unavailable
-                    })})}else null)
+                    },c.friend.deviceNames?.get(target.deviceId)?.takeIf(::validDeviceDisplayName).orEmpty())})}else null)
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8||c.attachmentsHaveOlder,attachments=c.attachments)

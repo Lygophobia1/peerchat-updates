@@ -94,11 +94,14 @@ public class MessageModel : ObservableModel {
     // Null means that this row has no authoritative recipient manifest (legacy
     // history and imported messages retain their original aggregate stamp).
     DeliveryTargetsData deliveryTargets;
+    Func<string,string> deviceName;
+    public void SetDeviceNameResolver(Func<string,string> resolver){deviceName=resolver;Changed("DeliveryRows");}
+    string DeliveryName(string peer){string name=null;try{if(deviceName!=null)name=deviceName(peer);}catch{/* Optional cosmetic labels must not interfere with receipts. */}return String.IsNullOrEmpty(name)?"Device "+peer.Substring(0,12)+"…":name+" · "+peer.Substring(0,12)+"…";}
     public Visibility DeliveryVisibility {get{return Outgoing&&!IsGroupMessage&&deliveryTargets!=null?Visibility.Visible:Visibility.Collapsed;}}
     public DeliveryDeviceRow[] DeliveryRows {get{
         if(deliveryTargets==null)return new DeliveryDeviceRow[0];
         return ValidTargets(deliveryTargets).Select(target=>new DeliveryDeviceRow{
-            Label="Device "+target.device.Substring(0,12)+"…",
+            Label=DeliveryName(target.device),
             FullIdentity="Device identity: "+target.device,
             State=target.status==1?"Received":target.status==2?"Unavailable":"Pending"
         }).ToArray();
@@ -146,6 +149,10 @@ public class MessageModel : ObservableModel {
 public class ChatViewModel {
     public readonly Dictionary<string,ConversationModel> Conversations=new Dictionary<string,ConversationModel>();
     readonly Dictionary<string,ConversationModel> conversationsByPeer=new Dictionary<string,ConversationModel>(StringComparer.Ordinal);
+    Func<long,string,string> deviceNames;
+    public void SetDeviceNameResolver(Func<long,string,string> resolver){deviceNames=resolver;RefreshDeviceNames();}
+    public void RefreshDeviceNames(){foreach(var conversation in Conversations.Values)foreach(var message in conversation.Messages)BindDeviceNames(conversation,message);}
+    void BindDeviceNames(ConversationModel conversation,MessageModel message){message.SetDeviceNameResolver(peer=>deviceNames==null?null:deviceNames(conversation.AccountId,peer));}
     public readonly Dictionary<string,GroupModel> GroupChats=new Dictionary<string,GroupModel>();
     // Display-only projection of authenticated server rosters. Never use ledger
     // labels or message metadata as account identity, and never rewrite message IDs.
@@ -202,7 +209,7 @@ public class ChatViewModel {
         string previous=conversation.Contact.peer??"";bool changed=!String.IsNullOrEmpty(previous)&&!String.IsNullOrEmpty(currentPeer)&&previous!=currentPeer;
         if(changed&&conversation.Contact.verified)conversation.PreviousVerifiedPeerId=previous;
         if(!String.IsNullOrEmpty(currentPeer)){conversation.KnownPeerIds.Add(currentPeer);conversationsByPeer[currentPeer]=conversation;if(changed)conversation.Contact=new ContactData{peer=currentPeer,name=username,host="",verified=false};else{conversation.Contact.peer=currentPeer;conversation.Contact.name=username;}}
-        OrderMessages(conversation.Messages);conversation.Refresh();return conversation;
+        foreach(var message in conversation.Messages)BindDeviceNames(conversation,message);OrderMessages(conversation.Messages);conversation.Refresh();return conversation;
     }
     public void ReconcileFriends(ISet<long> activeAccounts){foreach(var conversation in Conversations.Values)if(conversation.AccountId>0)conversation.IsFriend=activeAccounts.Contains(conversation.AccountId);}
     // Social eligibility is independent of presence, route availability and trust.
@@ -230,7 +237,7 @@ public class ChatViewModel {
         if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(item.SessionRevision==0&&(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId)){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
         if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];if(!item.Online){item.ConnectionState="Awaiting peer verification";item.Refresh();}}}
         if(e.kind==9)Status=e.text;
-        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.ResetHistoryPaging();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}if(e.kind==6)item.ObserveHistoryPage(e.peer,e.messages);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};model.InitializeNativeDelivery();item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
+        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.ResetHistoryPaging();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}if(e.kind==6)item.ObserveHistoryPage(e.peer,e.messages);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};model.InitializeNativeDelivery();BindDeviceNames(item,model);item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
         if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==receipt.id&&m.Data.sender==receipt.sender);if(match!=null)match.ProjectNativeDelivery(receipt.delivery,receipt.deliveryTargets);}
         if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online&&item.SessionRevision==0){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}

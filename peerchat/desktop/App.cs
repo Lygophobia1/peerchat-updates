@@ -363,7 +363,7 @@ public partial class DesktopApplication {
         conversationIndex=new FriendConversationIndex(directory);connectionLog=new ConnectionDiagnosticLog(directory);accountStore=new ProfileAccountStore(directory);pendingGroupStore=new PendingGroupRegistrationStore(directory);foreach(string id in pendingGroupStore.AllIds())markedNewGroupIds.Add(id);connectionPreferenceStore=new ConnectionPreferenceStore(directory);connectionPreferences=connectionPreferenceStore.Load();voicePreferenceStore=new VoicePreferenceStore(directory);voicePreferences=voicePreferenceStore.Load();screenPreferenceStore=new ScreenSharePreferenceStore(directory);screenPreferences=screenPreferenceStore.Load();updateClient=new DesktopUpdateClient();updateHealthToken=healthToken;accountLink=accountStore.Load();interactiveAccountSetup=capturePath==null;
         DiagnosticsRetentionStore retention=null;IList<FailureSnapshot> unclean=new List<FailureSnapshot>().AsReadOnly();try{retention=new DiagnosticsRetentionStore(directory);unclean=retention.RecoverUncleanOperations(PeerChat.VersionInfo.Display);}catch(Exception error){TraceUi("diagnostic retention initialization unavailable: "+error.GetType().Name);}diagnosticsRetention=retention;startupUncleanOperations=unclean;
         foreach(var binding in conversationIndex.Records){bool reused;model.BindFriend(binding.AccountId,binding.Username,binding.CurrentPeerId,binding.KnownPeerIds,out reused).IsFriend=binding.ActiveFriend;}
-        profileManager=manager;localProfile=selectedProfile;
+        profileManager=manager;localProfile=selectedProfile;model.SetDeviceNameResolver(SharedDeviceName);
         diagnosticsService=new DiagnosticsService(new DiagnosticsSources{Transfers=AttachmentDiagnostics,HistorySync=()=>CurrentHistoryDiagnostics(),Connection=()=>ConnectionDiagnosticsText(),ConnectionEvents=()=>connectionLog.Read(),Security=()=>localTlsCertificateDiagnostics,VoiceData=CaptureVoiceDiagnosticsData,ScreenShare=()=>String.IsNullOrEmpty(lastScreenDiagnosticText)?core.ScreenShareDiagnostics():lastScreenDiagnosticText,Groups=CaptureGroupDiagnosticsData,Local=()=>"profile_id="+(localProfile==null?"local":localProfile.Id)+"\nlocal_peer_id="+(model.OwnId??"unavailable")+MediaPerformanceSummary.ProcessSnapshot()+groupAttachmentCapabilityDiagnostic+"\n"+core.LocalQueueDiagnostics+"\n"+(mailboxExecution==null?"mailbox_service=not_started":mailboxExecution.DiagnosticsSnapshot()),Status=()=>model.Status,Build=()=>PeerChat.VersionInfo.Display,Profile=()=>localProfile==null?"Local":localProfile.Name});
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("Main.xaml"))window=(Window)XamlReader.Load(stream);string iconPath=System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"peerchat-client.ico");if(File.Exists(iconPath))window.Icon=new BitmapImage(new Uri(iconPath));
         if(compact){window.Width=1120;window.Height=740;}
@@ -2253,7 +2253,8 @@ public partial class DesktopApplication {
 		{
 			friendRequestStates[item3.AccountId] = "Request Sent";
 		}
-		conversationIndex.Reconcile(state.Friends);
+		conversationIndex.Reconcile(state.Friends,state.DeviceNames);
+        RefreshSharedDeviceNames();
         foreach(var binding in conversationIndex.Records){List<string> revoked;binding.RevokedPeerIds=state.RevokedDevices.TryGetValue(binding.AccountId,out revoked)?new List<string>(revoked):new List<string>();}
         var account=discovery == null ? 0 : discovery.AccountId;
         var authenticatedBindings=conversationIndex.Records.Where(binding=>binding.ActiveFriend).ToArray();

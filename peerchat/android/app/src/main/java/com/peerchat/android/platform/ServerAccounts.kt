@@ -73,7 +73,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         val response=try {if(allowRpc&&authenticated&&supportsRpc&&rpcAuthorized&&(!fields.has("publicIdentity")||fields.optString("publicIdentity")==device)&&!type.startsWith("remember_"))rpc(type,fields) else channel(safeOperation(type)).use { channel ->
             channel.write(bytes, 4096)
             android.util.Log.i("PeerChatWake","stage=server_request_written operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)
-            JSONObject(channel.read(if(type=="device_inventory"||type=="device_metadata")100000 else 16384).toString(Charsets.UTF_8))
+            JSONObject(channel.read(if(type=="device_inventory"||type=="device_metadata")100000 else if(type=="friend_state")65536 else 16384).toString(Charsets.UTF_8))
         }} finally {android.util.Log.i("PeerChatWake","stage=server_request_returned operation="+safeOperation(type)+" elapsed_ms="+(System.nanoTime()-started)/1_000_000)}
         if(!response.optBoolean("ok")) {
             val code=response.optString("error", "request_failed")
@@ -152,7 +152,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         check(result.getLong("accountId")==checkNotNull(session).accountId)
         return result
     }
-    fun friends(): JSONObject = request("friend_state")
+    fun friends(): JSONObject = friendStateWithOptionalNames{fields->request("friend_state",fields)}
     // A bounded independent connection: optional inventory may not queue text
     // delivery or ACK work behind the shared persistent RPC owner's lock.
     fun ownDevices():JSONObject {
@@ -273,6 +273,14 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
 class RelayConnection(val channel: ServerChannel,val sessionId: String,val incoming: Boolean)
 class ServerRejected(val code: String) : Exception("Server request rejected: " +
     code.take(80).filter { it.isLetterOrDigit() || it=='_' })
+
+/** Optional labels cannot suppress a fresh friendship/revocation snapshot. */
+internal fun friendStateWithOptionalNames(request:(JSONObject)->JSONObject):JSONObject = try {
+    request(JSONObject().put("deviceNamesVersion",1))
+}catch(failure:ServerRejected){
+    if(failure.code !in setOf("device_names_response_too_large","device_names_unavailable"))throw failure
+    request(JSONObject())
+}
 
 internal fun validateMessagingBootstrap(response:JSONObject,account:Long,device:String):JSONObject {
     require(response.getInt("version")==1&&response.getInt("bootstrapVersion")==1)

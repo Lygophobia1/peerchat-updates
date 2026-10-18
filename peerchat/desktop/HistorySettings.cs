@@ -56,9 +56,9 @@ public partial class DesktopApplication {
     HistoryDeviceNames HistoryNames {get{return historyNames??(historyNames=new HistoryDeviceNames(directory));}}
     string HistoryName(long account,ArchiveEnrollmentExecution.Device device){
         int index=Array.FindIndex(historyDevices,d=>d.PeerId==device.PeerId);
-        string name=HistoryNames.Get(account,device.PeerId,device.Local?"This PC":"History device "+(index+1));
+        string name=SharedDeviceName(account,device.PeerId)??HistoryNames.Get(account,device.PeerId,device.Local?"This PC":"History device "+(index+1));
         // Duplicate friendly names do not collapse targets or replace identity.
-        if(historyDevices.Count(d=>HistoryNames.Get(account,d.PeerId,d.Local?"This PC":"History device "+(Array.IndexOf(historyDevices,d)+1))==name)>1)name+=" · device "+(index+1);
+        if(historyDevices.Count(d=>(SharedDeviceName(account,d.PeerId)??HistoryNames.Get(account,d.PeerId,d.Local?"This PC":"History device "+(Array.IndexOf(historyDevices,d)+1)))==name)>1)name+=" · "+device.PeerId.Substring(0,Math.Min(12,device.PeerId.Length))+"…";
         return name;
     }
     string HistoryPeerName(string peer){if(String.IsNullOrEmpty(peer))return "No source selected";var d=historyDevices.FirstOrDefault(item=>item.PeerId==peer);return d==null?"Device "+peer.Substring(0,Math.Min(12,peer.Length))+"…":HistoryName(historyAccount,d);}
@@ -152,7 +152,7 @@ public partial class DesktopApplication {
             var focus=new Window{Owner=dialog,Title=setup?"New history device":HistoryName(account,device),Width=510,Height=590,MinWidth=440,MinHeight=480,Background=Brush("#0C1116"),Foreground=Brush("#EDF1F5"),Resources=window.Resources,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=new ScrollViewer{Content=body,VerticalScrollBarVisibility=ScrollBarVisibility.Auto}};
             body.Children.Add(HistoryTitle(setup?"New history device":HistoryName(account,device)));
             if(setup)body.Children.Add(HistoryText("Device: "+device.PeerId.Substring(0,12)+"… Compare the full identity in Advanced before authorizing."));
-            body.Children.Add(HistoryText("Nickname"));var nickname=new TextBox{Text=HistoryNames.Get(account,device.PeerId,device.Local?"This PC":"New history device"),MaxLength=64,Margin=new Thickness(0,4,0,12)};body.Children.Add(nickname);
+            body.Children.Add(HistoryText("Shared device name"));var nickname=HistoryText(HistoryName(account,device));body.Children.Add(nickname);
             bool initialRead=device.LocalGrantPresent?device.LocalGrantRead:device.GrantedRead,initialServe=device.LocalGrantPresent?device.LocalGrantServe:device.GrantedServe;
             bool newNormal=setup&&!initialRead&&!initialServe;
             var receive=VoiceProcessingSwitch("Receive history",newNormal||initialRead);var provide=VoiceProcessingSwitch("Provide history",newNormal||initialServe);var autoSwitch=VoiceProcessingSwitch("Sync automatically",!automatic.ContainsKey(device.PeerId)||automatic[device.PeerId]);
@@ -162,6 +162,7 @@ public partial class DesktopApplication {
             detail.Children.Insert(0,autoSwitch);detail.Children.Insert(0,provide);detail.Children.Insert(0,receive);
             detail.Children.Add(HistoryButton("Trust history authorizer",async()=>{if(await run(4,device,0,null))message.Text="Authorizer trust updated.";}));detail.Children.Add(HistoryButton("Disable authorizer",async()=>{if(await run(7,device,0,null))message.Text="Authorizer disabled.";}));body.Children.Add(new Expander{Header="Advanced",Content=detail,IsExpanded=false});
             Func<bool> same=()=>account==originalAccount&&generation==originalGeneration&&historyDevices.Any(d=>d.PeerId==originalPeer);
+            controls.Children.Add(HistoryButton("Rename device…",async()=>{if(!same()){message.Text="Account/device context changed; reopen Manage.";return;}if(!await RunDeviceManagement(null,false)){message.Text=managedDeviceStatus+" Open Settings → Device Manager to verify this device if needed.";return;}var target=managedDevices==null||managedDevices.Account!=originalAccount?null:managedDevices.Devices.FirstOrDefault(d=>d.Identity==originalPeer&&d.State=="active");if(target==null){message.Text="The exact device is not currently manageable for this account.";return;}ManageDeviceName(focus,managedDevices,target);nickname.Text=HistoryName(account,device);focus.Title=HistoryName(account,device);render();}));
             Action revoke=async()=>{if(!same()){message.Text="Account/device context changed; reopen Manage.";return;}if(await run(6,device,0,null))focus.Close();};
             bool restoring=false;
             RoutedEventHandler lastPermission=(s,e)=>{if(restoring||receive.IsChecked==true||provide.IsChecked==true)return;restoring=true;((CheckBox)s).IsChecked=true;restoring=false;message.Text="At least one history permission is required while this device is authorized. Revoke the device if you want to disable history access completely.";if(!setup&&Confirm("History permission required",message.Text,"Revoke device"))revoke();};
@@ -171,7 +172,7 @@ public partial class DesktopApplication {
                 if(!same()){message.Text="Account/device context changed; reopen this dialog.";return;}
                 long caps=(receive.IsChecked==true?1:0)|(provide.IsChecked==true?2:0);if(caps==0){message.Text="At least one history permission is required.";return;}
                 bool changed=setup||receive.IsChecked!=initialRead||provide.IsChecked!=initialServe;
-                focus.IsEnabled=false;bool ok=await run(changed?5u:0u,device,caps,autoSwitch.IsChecked==true);focus.IsEnabled=true;if(ok){try{HistoryNames.Set(account,device.PeerId,nickname.Text);render();focus.Close();}catch{message.Text="Permissions were verified, but the nickname could not be saved. Retry Save changes.";}}else message.Text=status.Text;
+                focus.IsEnabled=false;bool ok=await run(changed?5u:0u,device,caps,autoSwitch.IsChecked==true);focus.IsEnabled=true;if(ok){render();focus.Close();}else message.Text=status.Text;
             }));
             // Aggregate ON switches may describe a different issuer's grant.
             // A separate explicit action can establish the requested local-issuer
@@ -228,7 +229,8 @@ public partial class DesktopApplication {
         sync.Click+=async(s,e)=>{if(!updating){desiredSync=sync.IsChecked==true;await run(11,null,0,null);}};
         render();panel.Loaded+=async(s,e)=>{historySettingsOpen=true;await run(0,null,0,null);};
         panel.Unloaded+=(s,e)=>historySettingsOpen=false;
-        EventHandler tick=async(s,e)=>{if(!dialog.IsVisible||!panel.IsVisible||operating)return;bool current=discovery!=null&&account>0&&account==discovery.AccountId&&generation==authenticatedFriendSnapshotGeneration;if(!current){historyDevices=new ArchiveEnrollmentExecution.Device[0];automatic.Clear();localPanel.Children.Clear();remotePanel.Children.Clear();sync.IsEnabled=false;sync.IsChecked=null;await run(0,null,0,null);}else {if(renderedRows!=historyDevices){automatic=historyDevices.ToDictionary(d=>d.PeerId,d=>d.Automatic);render();}else progress();retry.Visibility=archiveProgress==null||archiveProgress.DisplayState=="Error"||archiveProgress.DisplayState=="Waiting"||archiveProgress.DisplayState=="Paused"?Visibility.Visible:Visibility.Collapsed;}};
+        long displayedNameRevision=sharedDeviceNameRevision;
+        EventHandler tick=async(s,e)=>{if(!dialog.IsVisible||!panel.IsVisible||operating)return;bool current=discovery!=null&&account>0&&account==discovery.AccountId&&generation==authenticatedFriendSnapshotGeneration;if(!current){historyDevices=new ArchiveEnrollmentExecution.Device[0];automatic.Clear();localPanel.Children.Clear();remotePanel.Children.Clear();sync.IsEnabled=false;sync.IsChecked=null;await run(0,null,0,null);}else {if(renderedRows!=historyDevices||displayedNameRevision!=sharedDeviceNameRevision){displayedNameRevision=sharedDeviceNameRevision;automatic=historyDevices.ToDictionary(d=>d.PeerId,d=>d.Automatic);render();}else progress();retry.Visibility=archiveProgress==null||archiveProgress.DisplayState=="Error"||archiveProgress.DisplayState=="Waiting"||archiveProgress.DisplayState=="Paused"?Visibility.Visible:Visibility.Collapsed;}};
         DateTime nextPresentation=DateTime.MinValue;EventHandler contextTick=(s,e)=>{if(DateTime.UtcNow<nextPresentation)return;nextPresentation=DateTime.UtcNow.AddSeconds(1);tick(s,e);};
         panel.Loaded+=(s,e)=>{HistoryPresentationChanged-=tick;HistoryPresentationChanged+=tick;timer.Tick-=contextTick;timer.Tick+=contextTick;};
         panel.Unloaded+=(s,e)=>{HistoryPresentationChanged-=tick;timer.Tick-=contextTick;};

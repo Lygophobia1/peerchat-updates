@@ -12,8 +12,10 @@ public sealed class FriendConversationBinding {
     public string Username="",CurrentPeerId="";
     public List<string> KnownPeerIds=new List<string>();
     [ScriptIgnore] public List<string> RevokedPeerIds=new List<string>();
+    public Dictionary<string,string> DeviceNames=new Dictionary<string,string>(StringComparer.Ordinal);
     public bool ActiveFriend;
 }
+
 
 // A friend-state refresh can update names and presence without changing the
 // authenticated account/device mapping consumed by native message selection.
@@ -64,14 +66,14 @@ public sealed class FriendConversationIndex {
     public FriendConversationIndex(string profileDirectory,Func<byte[],byte[]> protectData,Func<byte[],byte[]> unprotectData){path=Path.Combine(profileDirectory,"friend-conversations.dat");protect=protectData;unprotect=unprotectData;Load();}
     void Load(){
         if(!File.Exists(path))return;
-        try{var plain=unprotect(File.ReadAllBytes(path));var loaded=json.Deserialize<List<FriendConversationBinding>>(Encoding.UTF8.GetString(plain))??new List<FriendConversationBinding>();foreach(var item in loaded){if(item==null||item.AccountId<=0)continue;item.Username=item.Username??"";item.CurrentPeerId=PeerId(item.CurrentPeerId)?item.CurrentPeerId:"";item.KnownPeerIds=(item.KnownPeerIds??new List<string>()).Where(PeerId).Distinct(StringComparer.Ordinal).ToList();if(PeerId(item.CurrentPeerId)&&!item.KnownPeerIds.Contains(item.CurrentPeerId))item.KnownPeerIds.Add(item.CurrentPeerId);records[item.AccountId]=item;}}
+        try{var plain=unprotect(File.ReadAllBytes(path));var loaded=json.Deserialize<List<Dictionary<string,object>>>(Encoding.UTF8.GetString(plain))??new List<Dictionary<string,object>>();foreach(var row in loaded){if(row==null)continue;object rawNames;row.TryGetValue("DeviceNames",out rawNames);row.Remove("DeviceNames");var item=json.ConvertToType<FriendConversationBinding>(row);if(item==null||item.AccountId<=0)continue;item.DeviceNames=CosmeticDeviceNames.Read(rawNames);item.Username=item.Username??"";item.CurrentPeerId=PeerId(item.CurrentPeerId)?item.CurrentPeerId:"";item.KnownPeerIds=(item.KnownPeerIds??new List<string>()).Where(PeerId).Distinct(StringComparer.Ordinal).ToList();if(PeerId(item.CurrentPeerId)&&!item.KnownPeerIds.Contains(item.CurrentPeerId))item.KnownPeerIds.Add(item.CurrentPeerId);records[item.AccountId]=item;}}
         catch(CryptographicException){/* A mapping from another Windows user is not trusted. */}
         catch(InvalidOperationException){/* Malformed local cache is ignored; server snapshot repairs it. */}
     }
-    public void Reconcile(IEnumerable<DiscoverySearchResult> friends){
+    public void Reconcile(IEnumerable<DiscoverySearchResult> friends,Dictionary<long,Dictionary<string,string>> names=null){
         foreach(var item in records.Values)item.ActiveFriend=false;
         foreach(var friend in friends??Enumerable.Empty<DiscoverySearchResult>()){
-            if(friend.AccountId<=0)continue;FriendConversationBinding item;if(!records.TryGetValue(friend.AccountId,out item)){item=new FriendConversationBinding{AccountId=friend.AccountId};records.Add(friend.AccountId,item);}item.Username=friend.Username??item.Username;item.ActiveFriend=true;if(PeerId(friend.PublicIdentity)){item.CurrentPeerId=friend.PublicIdentity;if(!item.KnownPeerIds.Contains(friend.PublicIdentity))item.KnownPeerIds.Add(friend.PublicIdentity);}
+            if(friend.AccountId<=0)continue;FriendConversationBinding item;if(!records.TryGetValue(friend.AccountId,out item)){item=new FriendConversationBinding{AccountId=friend.AccountId};records.Add(friend.AccountId,item);}item.Username=friend.Username??item.Username;item.ActiveFriend=true;if(PeerId(friend.PublicIdentity)){item.CurrentPeerId=friend.PublicIdentity;if(!item.KnownPeerIds.Contains(friend.PublicIdentity))item.KnownPeerIds.Add(friend.PublicIdentity);}Dictionary<string,string> labels;if(names!=null&&names.TryGetValue(friend.AccountId,out labels))item.DeviceNames=CosmeticDeviceNames.Read(labels);
         }
         Save();
     }

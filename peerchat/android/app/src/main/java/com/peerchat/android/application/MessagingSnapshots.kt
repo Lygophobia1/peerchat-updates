@@ -4,7 +4,7 @@ package com.peerchat.android.application
 class MessagingStartupFailure(cause:Exception):Exception("Messaging startup failed after authentication",cause)
 
 data class FriendIdentity(val accountId: Long,val username: String,val peerId: String,val online: Boolean,
-    val knownPeerIds: List<String> = listOf(peerId),val revokedPeerIds:List<String> = emptyList())
+    val knownPeerIds: List<String> = listOf(peerId),val revokedPeerIds:List<String> = emptyList(),val deviceNames:Map<String,String>? = null)
 data class MessageSnapshot(val id: String,val senderDevice: String,val recipientDevice: String,
     val timestamp: Long,val logicalOrder: Long,val sequence: Long,val delivery: Long,val text: String,
     val deliveryTargets:DeliveryTargetsSnapshot?=null)
@@ -151,6 +151,6 @@ internal fun reconcileFriends(previous: List<FriendIdentity>,current: List<Frien
         require(friend.revokedPeerIds.size<=64&&friend.revokedPeerIds.distinct().size==friend.revokedPeerIds.size&&friend.revokedPeerIds.all{it.matches(Regex("[0-9a-f]{64}"))})
         val ids=((old[friend.accountId]?.knownPeerIds ?: emptyList())+friend.peerId).distinct()
         require(ids.size<=32&&ids.all {it.matches(Regex("[0-9a-f]{64}"))})
-        friend.copy(knownPeerIds=ids.toList())
+        friend.copy(knownPeerIds=ids.toList(),deviceNames=friend.deviceNames?:old[friend.accountId]?.deviceNames?:emptyMap())
     }
 }

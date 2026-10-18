@@ -6,7 +6,7 @@ $out=(Resolve-Path -LiteralPath $FixtureDirectory).Path
 $serverExecutable=Join-Path (Resolve-Path -LiteralPath $ServerDirectory).Path 'PeerChat.Server.exe'
 if(!(Test-Path -LiteralPath $serverExecutable)){throw 'Current-worktree Server executable missing'}
 $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-& "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$out\relay-auth-fixture.exe" "/reference:$framework\System.Web.Extensions.dll" "$root\desktop\DiscoveryClient.cs" "$root\desktop\ArchiveEnrollmentExecution.cs" "$root\desktop\ProfileAccounts.cs" "$root\tests\RelayAccountFixture.cs"
+& "$framework\csc.exe" /nologo /target:exe /platform:x64 /optimize+ "/out:$out\relay-auth-fixture.exe" "/reference:$framework\System.Web.Extensions.dll" "$root\desktop\DeviceNameMetadata.cs" "$root\desktop\DiscoveryClient.cs" "$root\desktop\ArchiveEnrollmentExecution.cs" "$root\desktop\ProfileAccounts.cs" "$root\tests\RelayAccountFixture.cs"
 if($LASTEXITCODE -ne 0){throw 'Relay account host fixture compilation failed'}
 # Read public certificate metadata only. Reuse the existing configured developer
 # certificate; never alter production config or create a second server identity.

@@ -29,7 +29,7 @@ data class MessageUi(
     val deliveryTargets:DeliveryTargetsUi?=null
 )
 enum class DeliveryTargetStatusUi { Received, Pending, Unavailable }
-data class DeliveryTargetUi(val deviceId:String,val status:DeliveryTargetStatusUi)
+data class DeliveryTargetUi(val deviceId:String,val status:DeliveryTargetStatusUi,val displayName:String="")
 data class DeliveryTargetsUi(val selectionUnresolved:Boolean,val targets:List<DeliveryTargetUi>) {
     val received:Int get()=targets.count{it.status==DeliveryTargetStatusUi.Received}
     val pending:Int get()=targets.count{it.status==DeliveryTargetStatusUi.Pending}

@@ -19,6 +19,26 @@ import org.robolectric.annotation.Config
 @Config(sdk=[34],qualifiers="w360dp-h800dp-port")
 class ArchiveDevicesUiTest {
     @get:Rule val compose=createComposeRule()
+    @Test fun sourceAndDetailUseSameOwnAccountNameWithoutChangingPermissions(){
+        val local="a".repeat(64);val remote="b".repeat(64)
+        val context=ArchiveEnrollmentSnapshot(8,3,local,listOf(ArchiveDeviceSnapshot(remote,false,false,false,false)))
+        val inventory=OwnDeviceInventory(8,"c".repeat(32),1,listOf(OwnDeviceMetadata(local,"Phone",false,true),OwnDeviceMetadata(remote,"Home PC",false,false)))
+        val state=mutableStateOf(PeerChatUiState(demo=false,account=AccountUi("8","Test"),archiveEnrollment=context,ownDevices=inventory,archiveProgress=ArchiveSyncProgress(source=remote)))
+        val actions=mutableListOf<UiAction>()
+        compose.setContent{PeerChatTheme(true){Column(Modifier.verticalScroll(rememberScrollState())){ArchiveDevicesSection(state.value,actions::add)}}}
+        compose.onNodeWithText("Reader source: Home PC · ${remote.take(12)}…",substring=true).assertExists()
+        compose.onNodeWithText("Manage").performScrollTo().performClick()
+        compose.onNodeWithText("Home PC · ${remote.take(12)}…").assertExists()
+        compose.runOnIdle{state.value=state.value.copy(ownDevices=inventory.copy(revision=2,devices=inventory.devices.map{if(it.peerId==remote)it.copy(name="Office PC")else it}))}
+        compose.onNodeWithText("Office PC · ${remote.take(12)}…").assertExists()
+        compose.onNodeWithText("Advanced",substring=false).performClick()
+        compose.onNodeWithText("Peer ID: $remote").assertExists()
+        compose.runOnIdle{assertTrue(actions.isEmpty())}
+        compose.onNodeWithText("Close",substring=false).performClick()
+        compose.onNodeWithText("Reader source: Office PC · ${remote.take(12)}…",substring=true).assertExists()
+        compose.runOnIdle{state.value=state.value.copy(ownDevices=inventory.copy(account=3))}
+        compose.onNodeWithText("Reader source: Device ${remote.take(12)}…",substring=true).assertExists()
+    }
     @Test fun ownAccountNamesRefreshWithoutTrustPromotionAndRevokedDeviceCannotBeManaged(){
         val local="a".repeat(64);val remote="b".repeat(64)
         val context=ArchiveEnrollmentSnapshot(8,3,local,listOf(ArchiveDeviceSnapshot(remote,false,false,false,false)))

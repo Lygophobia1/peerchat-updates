@@ -12,6 +12,9 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
 
 @Composable internal fun ArchiveDevicesSection(state:PeerChatUiState,dispatch:(UiAction)->Unit){
     val enrollment=state.archiveEnrollment
+    val ownDevices=state.ownDevices?.takeIf{it.account==(enrollment?.accountId?:state.account?.accountId?.toLongOrNull())}
+    fun deviceName(peer:String)=ownDevices?.devices?.singleOrNull{it.peerId==peer}?.name?.takeIf(::validDeviceDisplayName)
+    fun deviceLabel(peer:String,local:Boolean=false)=deviceName(peer)?.let{"$it · ${peer.take(12)}…"}?:if(local)"This device" else "Device "+peer.take(12)+"…"
     var pending by remember(enrollment?.accountId,enrollment?.authenticationGeneration){mutableStateOf<PendingArchiveConsent?>(null)}
     var managed by remember(enrollment?.accountId,enrollment?.authenticationGeneration){mutableStateOf<String?>(null)}
     var advanced by remember {mutableStateOf(false)}
@@ -36,7 +39,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     }
     Text("Sync Status",style=MaterialTheme.typography.titleMedium)
     val progress=state.archiveProgress
-    Text("Current activity: "+progress.currentActivity+" · Reader source: "+if(progress.source.isEmpty())"No source selected" else "Device "+progress.source.take(12)+"…")
+    Text("Current activity: "+progress.currentActivity+" · Reader source: "+if(progress.source.isEmpty())"No source selected" else deviceLabel(progress.source))
     Text("Last completed result: "+progress.lastResultSummary,style=MaterialTheme.typography.bodySmall)
     Text("Source role: ${progress.providers.size} active readers · ${progress.providedQueued} records queued for readers (retries included; not confirmed imports)",style=MaterialTheme.typography.bodySmall)
     Text("${progress.received} new messages received this session · ${progress.conversations} conversations completed",style=MaterialTheme.typography.bodySmall)
@@ -57,7 +60,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
             val own=state.ownDevices?.takeIf{it.account==enrollment?.accountId}?.devices?.singleOrNull{it.peerId==device.peerId}
             OutlinedCard(Modifier.fillMaxWidth()){
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
-                    Text(own?.name?.takeIf{it.isNotEmpty()}?:if(device.local)"This device" else "Device "+device.peerId.take(12)+"…",style=MaterialTheme.typography.titleSmall)
+                    Text(deviceName(device.peerId)?:if(device.local)"This device" else "Device "+device.peerId.take(12)+"…",style=MaterialTheme.typography.titleSmall)
                     if(own?.name?.isNotEmpty()==true)Text((if(device.local)"This device · "else "Device · ")+device.peerId.take(12)+"…",style=MaterialTheme.typography.bodySmall)
                     if(own?.revoked==true)Text("Account device revoked; retained history is unchanged",style=MaterialTheme.typography.bodySmall)
                     Text(if(device.approved)"Approved" else if(device.mayRead||device.mayServe)"Verified history access" else if(device.authorized)"Registered grant · review trust and permissions" else if(device.revoked)"Access revoked" else "Approval required",style=MaterialTheme.typography.bodySmall)
@@ -91,7 +94,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
         var read by remember(selected.peerId,selected.grantedRead){mutableStateOf(if(selected.authorized)selected.grantedRead else true)}
         var serve by remember(selected.peerId,selected.grantedServe){mutableStateOf(if(selected.authorized)selected.grantedServe else true)}
         AlertDialog(onDismissRequest={managed=null},title={Text(if(selected.authorized)"Manage history device" else "New history device")},text={Column(verticalArrangement=Arrangement.spacedBy(6.dp)){
-            Text(if(selected.local)"This device" else "Device "+selected.peerId.take(12)+"…")
+            Text(deviceLabel(selected.peerId,selected.local))
             Text(selected.authorizationState)
             Text("Receive and Provide let this device exchange eligible encrypted history. Existing custom permissions are preserved.",style=MaterialTheme.typography.bodySmall)
             TextButton({custom=!custom}){Text("Advanced")}
@@ -109,7 +112,7 @@ private data class PendingArchiveConsent(val context:ArchiveEnrollmentSnapshot,v
     }
     pending?.let {p->
         AlertDialog(onDismissRequest={pending=null},title={Text("Confirm history authorization")},text={
-            Text("Account "+p.context.accountId+"\nDevice Peer ID:\n"+p.device+"\n\n"+when(p.action){
+            Text("Account "+p.context.accountId+deviceName(p.device)?.let{"\nDevice name: $it"}.orEmpty()+"\nDevice Peer ID:\n"+p.device+"\n\n"+when(p.action){
                 ArchiveDeviceAction.TrustAuthorizer->"Trust this device to sign history grants?"
                 ArchiveDeviceAction.Authorize->"Authorize selected permissions: receive="+p.read+", provide="+p.serve+"?"
                 ArchiveDeviceAction.Revoke->"Revoke this device's access granted by the local authorizer?"

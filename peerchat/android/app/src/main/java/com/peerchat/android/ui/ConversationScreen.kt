@@ -190,7 +190,7 @@ import kotlinx.coroutines.delay
         if(expanded)SelectionContainer {
             Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 delivery.targets.forEach{target->
-                    Text("${target.status.name}\n${target.deviceId}",style=MaterialTheme.typography.bodySmall)
+                    Text((target.displayName.takeIf{it.isNotEmpty()}?.let{"$it · "}?:"")+"${target.status.name}\n${target.deviceId}",style=MaterialTheme.typography.bodySmall)
                 }
             }
         }

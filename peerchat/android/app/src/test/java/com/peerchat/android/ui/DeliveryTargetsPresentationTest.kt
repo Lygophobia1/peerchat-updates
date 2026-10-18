@@ -14,11 +14,11 @@ import org.robolectric.annotation.Config
 class DeliveryTargetsPresentationTest {
     private val local="a".repeat(64)
     private val remote="b".repeat(64)
-    private fun project(targets:DeliveryTargetsSnapshot?=null,outgoing:Boolean=true,delivery:Long=2):MessageUi {
+    private fun project(targets:DeliveryTargetsSnapshot?=null,outgoing:Boolean=true,delivery:Long=2,names:Map<String,String>?=null):MessageUi {
         val message=MessageSnapshot("c".repeat(32),if(outgoing)local else remote,if(outgoing)remote else local,
             100,5,7,delivery,"fixture",targets)
         val snapshot=MessagingSnapshot(localPeerId=local,conversations=listOf(
-            ConversationSnapshot(FriendIdentity(2,"Contact",remote,false),ConnectionSnapshot(),listOf(message))))
+            ConversationSnapshot(FriendIdentity(2,"Contact",remote,false,deviceNames=names),ConnectionSnapshot(),listOf(message))))
         return projectMessaging(snapshot,PeerChatUiState()).conversations.single().messages.single()
     }
     @Test fun legacyDeliveryDoesNotInventADeviceManifest() {
@@ -52,6 +52,17 @@ class DeliveryTargetsPresentationTest {
         val inbound=project(DeliveryTargetsSnapshot(false,listOf(DeliveryTargetSnapshot(remote,DeliveryTargetStatus.Acknowledged))),outgoing=false)
         assertEquals(MessageStatus.Received,inbound.status)
         assertNull(inbound.deliveryTargets)
+    }
+    @Test fun recipientNamesAreExactDisplayLabelsWithoutChangingReceiptsOrIdentifiers(){
+        val other="d".repeat(64)
+        val targets=DeliveryTargetsSnapshot(false,listOf(DeliveryTargetSnapshot(remote,DeliveryTargetStatus.Acknowledged),DeliveryTargetSnapshot(other,DeliveryTargetStatus.Pending)))
+        val baseline=project(targets,delivery=3)
+        val named=project(targets,delivery=3,names=mapOf(remote to "Phone","e".repeat(64) to "Unrelated device"))
+        assertEquals(baseline.status,named.status);assertEquals(baseline.timestamp,named.timestamp)
+        assertEquals(baseline.deliveryTargets!!.summary,named.deliveryTargets!!.summary)
+        assertEquals(listOf(remote,other),named.deliveryTargets!!.targets.map{it.deviceId})
+        assertEquals(listOf("Phone",""),named.deliveryTargets!!.targets.map{it.displayName})
+        assertEquals("",project(targets,names=mapOf(remote to "bad\nlabel")).deliveryTargets!!.targets.first().displayName)
     }
 }
 
@@ -94,7 +105,10 @@ class DeliveryTargetsInteractionTest {
         compose.onNodeWithText("Received\n$device").assertExists()
         compose.onNodeWithText("Device selection unresolved").assertDoesNotExist()
         compose.onNodeWithText("Devices: 1 received · 0 pending · 0 unavailable").assertExists()
+        compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(
+            deliveryTargets=DeliveryTargetsUi(false,listOf(DeliveryTargetUi(device,DeliveryTargetStatusUi.Received,"Renamed phone"))))))}
+        compose.onNodeWithText("Renamed phone · Received\n$device").assertExists()
         compose.onNodeWithText("Hide device details").performClick()
-        compose.onNodeWithText("Received\n$device").assertDoesNotExist()
+        compose.onNodeWithText("Renamed phone · Received\n$device").assertDoesNotExist()
     }
 }

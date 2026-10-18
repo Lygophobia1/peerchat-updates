@@ -771,8 +771,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val revoked=item.optJSONArray("revokedPublicIdentities")
             require(revoked==null||revoked.length()<=64)
             FriendIdentity(item.getLong("accountId"),item.getString("username"),item.getString("publicIdentity"),item.getBoolean("online"),
-                revokedPeerIds=if(revoked==null)emptyList()else List(revoked.length()){revoked.getString(it)})
-        };require(projected.none {it.accountId==active.accountId})
+                revokedPeerIds=if(revoked==null)emptyList()else List(revoked.length()){revoked.getString(it)},deviceNames=deviceDisplayNames(item.opt("deviceNames")))
+        }.map{row->row.copy(deviceNames=row.deviceNames?:friends.firstOrNull{it.accountId==row.accountId}?.deviceNames)}
+        require(projected.none {it.accountId==active.accountId})
         val authoritative=if(projected.map{it.copy(knownPeerIds=emptyList())}==friends.map{it.copy(knownPeerIds=emptyList())})friends else checkNotNull(index).reconcile(projected)
         android.util.Log.i("PeerChatWake","stage=friend_devices_restored contacts=${authoritative.size} devices=${authoritative.sumOf{it.knownPeerIds.size}}")
         val writer=NativeRecordWriter(1);writer.number(authoritative.size.toLong())
@@ -781,7 +782,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // identities remain intact; native authority keeps a separate deny set.
         writer.text("PeerChat/RevokedFriendDevices/v1");writer.number(authoritative.size.toLong())
         authoritative.forEach{friend->writer.number(friend.accountId);writer.number(friend.revokedPeerIds.size.toLong());friend.revokedPeerIds.forEach{writer.text(it)}}
-        val identityChanged=!authorizationSnapshotInstalled||authoritative.map{it.copy(online=false)}!=friends.map{it.copy(online=false)}
+        val identityChanged=!authorizationSnapshotInstalled||!sameFriendAuthority(authoritative,friends)
         if(identityChanged){
             invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
             generation++;groupRefreshAt=0L;groupProjectionAt=0L
@@ -806,6 +807,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // later UI collector/tick or optional vendor registration side effect.
         publish()
         android.util.Log.i("PeerChatWake","stage=conversations_projected contacts=${mutable.value.conversations.size}")
+        // Bootstrap intentionally omits optional labels. Reuse the ordinary
+        // friend refresh once, without delaying first local/online projection.
+        if(bootstrap)contactsDirty=true
     }
     /** One optional, bounded metadata request at a time. It borrows the exact
      * login/session/profile epoch, never holds gate during TLS, and uses no

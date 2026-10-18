@@ -82,7 +82,7 @@ internal static class DeviceManagementServerTest {
         string wire=(string)serialize.Invoke(server,new object[]{"friend_state",response});Check(wire.Contains("deviceNames"),"Wire serializer dropped names");
         var expanded=new Dictionary<string,object>{{"deviceNamesVersion",1},{"padding",new string('x',17000)}};
         Check(((string)serialize.Invoke(server,new object[]{"friend_state",expanded})).Length>16384,"Negotiated response retained old small-frame bound");
-        bool legacyBound=false;try{serialize.Invoke(server,new object[]{"friend_state",new Dictionary<string,object>{{"padding",new string('x',17000)}}});}catch(TargetInvocationException e){legacyBound=e.InnerException is InvalidOperationException;}Check(legacyBound,"Legacy frame bound changed");
+        bool legacyBound=false;try{serialize.Invoke(server,new object[]{"friend_state",new Dictionary<string,object>{{"padding",new string('x',17000)}}});}catch(TargetInvocationException e){legacyBound=e.InnerException is InvalidOperationException||e.InnerException is ArgumentException;}Check(legacyBound,"Legacy frame bound changed");
         db.Execute("UPDATE device_authority SET name='not-base64' WHERE public_identity='"+target+"';");
         var damaged=Call(server,request);Check((bool)damaged["ok"]&&((Dictionary<string,string>)((List<Dictionary<string,object>>)damaged["friends"]).Single()["deviceNames"]).Count==0,"Corrupt cosmetic label blocked contact state");
         db.Execute("UPDATE device_authority SET name='"+Convert.ToBase64String(Encoding.UTF8.GetBytes("Phone \u00e9"))+"' WHERE public_identity='"+target+"';");

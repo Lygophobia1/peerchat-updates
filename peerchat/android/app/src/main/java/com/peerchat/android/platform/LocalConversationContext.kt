@@ -3,6 +3,7 @@ package com.peerchat.android.platform
 import android.content.Context
 import com.peerchat.android.application.FriendIdentity
 import com.peerchat.android.application.reconcileFriends
+import com.peerchat.android.application.deviceDisplayNames
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -24,7 +25,7 @@ internal class ProtectedLocalConversationContextStore(private val read:()->ByteA
         require(account>0&&name.length<=64&&device.matches(Regex("[0-9a-f]{64}")))
         val list=value.getJSONArray("friends");require(list.length()<=128)
         val friends=List(list.length()){i->val item=list.getJSONObject(i);val ids=item.getJSONArray("devices");require(ids.length() in 1..32)
-            FriendIdentity(item.getLong("account"),item.getString("username"),item.getString("peer"),false,List(ids.length()){ids.getString(it)})}
+            FriendIdentity(item.getLong("account"),item.getString("username"),item.getString("peer"),false,List(ids.length()){ids.getString(it)},deviceNames=deviceDisplayNames(item.opt("deviceNames")))}
         return LocalConversationContext(account,name,device,reconcileFriends(friends,friends))
     }
     fun save(endpoint:ServerEndpoint,value:LocalConversationContext) {
@@ -32,7 +33,7 @@ internal class ProtectedLocalConversationContextStore(private val read:()->ByteA
         require(value.friends.size<=128);reconcileFriends(value.friends,value.friends)
         val list=JSONArray()
         value.friends.forEach{friend->list.put(JSONObject().put("account",friend.accountId).put("username",friend.username)
-            .put("peer",friend.peerId).put("devices",JSONArray(friend.knownPeerIds)))}
+            .put("peer",friend.peerId).put("devices",JSONArray(friend.knownPeerIds)).put("deviceNames",JSONObject(friend.deviceNames?:emptyMap<String,String>())))}
         val plain=JSONObject().put("version",1).put("host",endpoint.host).put("port",endpoint.port).put("pin",endpoint.certificatePin)
             .put("account",value.account).put("username",value.username).put("device",value.device).put("friends",list).toString().toByteArray(Charsets.UTF_8)
         require(plain.size<=1048000)

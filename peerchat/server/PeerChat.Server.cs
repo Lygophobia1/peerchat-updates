@@ -944,6 +944,7 @@ namespace PeerChat.Server {
                 object namesVersion;bool names=request.TryGetValue("deviceNamesVersion",out namesVersion)&&namesVersion is int&&(int)namesVersion==1;
                 try{var state=Ok(accounts.FriendState(accountId,names));if(names){state["deviceNamesVersion"]=1;var serialized=new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(state);if(Encoding.UTF8.GetByteCount(serialized)>65536)return Error("device_names_response_too_large");}return state;}
                 catch(InvalidOperationException){return Error("device_names_unavailable");}
+                catch(ArgumentException){return Error("device_names_unavailable");} // Portable serializer uses ArgumentException for its identical bound.
             }
             if(type=="group_register"){
                 GroupRosterProof proof;try{proof=GroupRosterProof.Parse(Text(request,"createProof"));}catch{return Error("invalid_group_proof");}

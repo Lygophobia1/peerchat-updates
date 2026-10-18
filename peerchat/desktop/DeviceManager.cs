@@ -6,12 +6,22 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Web.Script.Serialization;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 
 namespace PeerChatDesktop {
+// This optional DPAPI cache contains labels only, never authorization state.
+// It does not overwrite or migrate the older profile-local history nicknames.
+public sealed class OwnDeviceNameCache {
+    readonly string path;readonly JavaScriptSerializer json=new JavaScriptSerializer();Dictionary<string,string> labels=new Dictionary<string,string>(StringComparer.Ordinal);
+    public OwnDeviceNameCache(string profile){path=Path.Combine(profile,"shared-device-names.dat");try{if(File.Exists(path)&&new FileInfo(path).Length<=262144){var bytes=ProtectedData.Unprotect(File.ReadAllBytes(path),Encoding.UTF8.GetBytes("PeerChat/SharedDeviceNames/v1"),DataProtectionScope.CurrentUser);try{var loaded=json.Deserialize<Dictionary<string,string>>(Encoding.UTF8.GetString(bytes));if(loaded!=null&&loaded.Count<=4096)foreach(var pair in loaded){var parts=pair.Key.Split(':');long account;string name=CosmeticDeviceNames.Clean(pair.Value);if(parts.Length==2&&Int64.TryParse(parts[0],out account)&&account>0&&CosmeticDeviceNames.Identity(parts[1])&&name!=null)labels[pair.Key]=name;}}finally{Array.Clear(bytes,0,bytes.Length);}}}catch{/* Corrupt optional labels never block profile loading. */}}
+    static string Key(long account,string peer){return account.ToString(CultureInfo.InvariantCulture)+":"+peer;}
+    public string Get(long account,string peer){string value;return account>0&&CosmeticDeviceNames.Identity(peer)&&labels.TryGetValue(Key(account,peer),out value)?value:null;}
+    public void Update(AccountDeviceSnapshot snapshot){if(snapshot==null||snapshot.Account<=0)return;var next=new Dictionary<string,string>(labels,StringComparer.Ordinal);foreach(string key in next.Keys.Where(k=>k.StartsWith(snapshot.Account.ToString(CultureInfo.InvariantCulture)+":",StringComparison.Ordinal)).ToArray())next.Remove(key);foreach(var device in snapshot.Devices){string name=CosmeticDeviceNames.Clean(device.Name);if(name!=null)next[Key(snapshot.Account,device.Identity)]=name;}if(next.Count>4096)return;bool changed=next.Count!=labels.Count||next.Any(p=>!labels.ContainsKey(p.Key)||labels[p.Key]!=p.Value);labels=next;if(!changed)return;string temp=path+"."+Guid.NewGuid().ToString("N")+".tmp";byte[] plain=Encoding.UTF8.GetBytes(json.Serialize(next));try{Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllBytes(temp,ProtectedData.Protect(plain,Encoding.UTF8.GetBytes("PeerChat/SharedDeviceNames/v1"),DataProtectionScope.CurrentUser));if(File.Exists(path))File.Replace(temp,path,null);else File.Move(temp,path);}catch{/* Labels remain available in memory; durable messages are unaffected. */}finally{Array.Clear(plain,0,plain.Length);try{if(File.Exists(temp))File.Delete(temp);}catch{}}}
+}
 // Only authenticated own-account metadata belongs here. Contact pins and history
 // grants remain separate; names are never an identity or an authorization input.
 public sealed class ManagedAccountDevice {
@@ -95,6 +105,10 @@ public sealed class DeviceManagementClient {
 }
 
 public partial class DesktopApplication {
+    OwnDeviceNameCache sharedOwnNames;OwnDeviceNameCache SharedOwnNames {get{return sharedOwnNames??(sharedOwnNames=new OwnDeviceNameCache(directory));}}
+    string SharedDeviceName(long account,string peer){if(account<=0||!CosmeticDeviceNames.Identity(peer))return null;if(managedDevices!=null&&managedDevices.Account==account){var device=managedDevices.Devices.FirstOrDefault(d=>d.Identity==peer);if(device!=null)return CosmeticDeviceNames.Clean(device.Name);}string own=SharedOwnNames.Get(account,peer);if(own!=null)return own;var friend=conversationIndex==null?null:conversationIndex.Records.FirstOrDefault(d=>d.AccountId==account);string label;return friend!=null&&friend.DeviceNames!=null&&friend.DeviceNames.TryGetValue(peer,out label)?CosmeticDeviceNames.Clean(label):null;}
+    long sharedDeviceNameRevision;
+    void RefreshSharedDeviceNames(){sharedDeviceNameRevision++;if(model!=null)model.RefreshDeviceNames();var changed=HistoryPresentationChanged;if(changed!=null)changed(this,EventArgs.Empty);}
     AccountDeviceSnapshot managedDevices;DiscoveryClient managedDeviceOwner,managedDeviceSession;ulong managedDeviceGeneration;string managedDeviceToken;bool managedDeviceBusy;DateTime managedDeviceNextUtc=DateTime.MinValue;string managedDeviceStatus="Connect and verify this device to view your account's devices.";event EventHandler ManagedDevicesChanged;
     void PublishManagedDevices(){var handler=ManagedDevicesChanged;if(handler!=null)handler(this,EventArgs.Empty);}
     bool ManagedContext(DiscoveryClient owner,ulong generation,string token,string actor){return !closing&&discovery==owner&&discoverySessionGeneration==generation&&owner.SessionToken==token&&model.OwnId==actor;}
@@ -119,7 +133,7 @@ public partial class DesktopApplication {
             });
             if(!ManagedContext(owner,generation,token,actor))return false;
             if(!AccountDeviceSnapshot.CanApply(managedDevices,result))throw new InvalidDataException("A stale device snapshot was rejected. Refresh after reconnecting.");
-            if(opened!=null){managedDeviceSession=opened;opened=null;}managedDeviceOwner=owner;managedDeviceGeneration=generation;managedDeviceToken=token;managedDevices=result;managedDeviceStatus="Verified account "+account+" · revision "+result.Revision+" · updated "+DateTime.Now.ToString("t");managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);return true;
+            if(opened!=null){managedDeviceSession=opened;opened=null;}managedDeviceOwner=owner;managedDeviceGeneration=generation;managedDeviceToken=token;managedDevices=result;SharedOwnNames.Update(result);RefreshSharedDeviceNames();managedDeviceStatus="Verified account "+account+" · revision "+result.Revision+" · updated "+DateTime.Now.ToString("t");managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);return true;
         }catch(Exception error){if(ManagedContext(owner,generation,token,actor)){managedDeviceStatus=DeviceManagementClient.Failure(error);var stale=managedDeviceSession;managedDeviceSession=null;if(stale!=null)_=Task.Run(()=>stale.CloseRpc());managedDeviceNextUtc=DateTime.UtcNow.AddSeconds(60);}return false;}
         finally{if(opened!=null){var unused=opened;_=Task.Run(()=>unused.CloseRpc());}managedDeviceBusy=false;PublishManagedDevices();}
     }
