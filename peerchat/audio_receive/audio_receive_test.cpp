@@ -1,6 +1,11 @@
+#if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
 #include <psapi.h>
+#else
+#include <time.h>
+#include <unistd.h>
+#endif
 #include "peerchat_audio_receive.h"
 #include <opus/opus.h>
 #include <algorithm>
@@ -15,6 +20,7 @@
 #include <vector>
 #define CHECK(x) do{if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 struct Api {
+#if defined(_WIN32)
  HMODULE dll;
 #define LOAD(name) decltype(&name) name=nullptr;
  LOAD(pc_rx_create) LOAD(pc_rx_destroy) LOAD(pc_rx_source_add) LOAD(pc_rx_source_remove) LOAD(pc_rx_source_reset) LOAD(pc_rx_insert) LOAD(pc_rx_pull_10ms) LOAD(pc_rx_get_source_stats) LOAD(pc_rx_get_mixer_stats)
@@ -25,6 +31,13 @@ struct Api {
 #undef LOAD
  }
  ~Api(){FreeLibrary(dll);}
+#else
+ // Link the same proof scenarios directly to the genuine receive adapter on
+ // Linux/Android. Missing adapter symbols must fail the executable link.
+#define LOAD(name) decltype(&::name) name=&::name;
+ LOAD(pc_rx_create) LOAD(pc_rx_destroy) LOAD(pc_rx_source_add) LOAD(pc_rx_source_remove) LOAD(pc_rx_source_reset) LOAD(pc_rx_insert) LOAD(pc_rx_pull_10ms) LOAD(pc_rx_get_source_stats) LOAD(pc_rx_get_mixer_stats)
+#undef LOAD
+#endif
 };
 struct Packet {std::vector<uint8_t> bytes;uint32_t timestamp;uint16_t seq;uint64_t arrival;};
 std::vector<Packet> fixture(int count,uint32_t seed=0,bool fec=true,bool silence=false){
@@ -85,8 +98,22 @@ void lifecycle(Api& a){
  }
  std::printf("PASS 100 create/add/process/reset/remove/re-add/destroy lifetimes\n");
 }
+#if defined(_WIN32)
+constexpr const char* memoryMetric="private_bytes";
 uint64_t memory(){PROCESS_MEMORY_COUNTERS_EX p{};p.cb=sizeof(p);CHECK(GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&p),sizeof(p)));return p.PrivateUsage;}
 uint64_t cpu100ns(){FILETIME created,exited,kernel,user;CHECK(GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user));ULARGE_INTEGER k{},u{};k.LowPart=kernel.dwLowDateTime;k.HighPart=kernel.dwHighDateTime;u.LowPart=user.dwLowDateTime;u.HighPart=user.dwHighDateTime;return k.QuadPart+u.QuadPart;}
+#else
+// Current resident pages, not the process high-water mark. This metric differs
+// from Windows private commitment, so identify it explicitly in measurements.
+constexpr const char* memoryMetric="resident_bytes";
+uint64_t memory(){
+ auto* f=std::fopen("/proc/self/statm","r");CHECK(f);
+ unsigned long long total=0,resident=0;int fields=std::fscanf(f,"%llu %llu",&total,&resident);
+ CHECK(std::fclose(f)==0);CHECK(fields==2);long pageSize=sysconf(_SC_PAGESIZE);CHECK(pageSize>0);
+ return uint64_t(resident)*uint64_t(pageSize);
+}
+uint64_t cpu100ns(){timespec t{};CHECK(clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&t)==0);return uint64_t(t.tv_sec)*10000000ull+uint64_t(t.tv_nsec)/100;}
+#endif
 void boundariesAndConcurrency(Api& a){
  auto cfg=config();cfg.max_sources=2;pc_rx_engine e=0;CHECK(a.pc_rx_create(&cfg,&e)==0);auto c=source(0);pc_rx_source s=0,b=0;
  CHECK(a.pc_rx_source_add(e,&c,&s)==0);CHECK(a.pc_rx_source_add(e,&c,&b)==0);pc_rx_source extra=0;CHECK(a.pc_rx_source_add(e,&c,&extra)==PC_RX_LIMIT);
@@ -113,7 +140,7 @@ void mix(Api& a,int count){
  }
  CHECK(energy>1000000);for(int i=0;i<count;++i){auto v=stats(a,e,handles[i]);CHECK(v.pulled_blocks==3000&&v.pull_failures==0);if(i>0)CHECK(v.packets_inserted==1500);}
  if(count>1){auto beforeB=stats(a,e,handles[1]);configs[0].endpoint_generation=2;CHECK(a.pc_rx_source_reset(e,handles[0],&configs[0])==0);std::array<int16_t,160> out{};CHECK(a.pc_rx_pull_10ms(e,30000,out.data(),160)==0);CHECK(stats(a,e,handles[1]).pulled_blocks==beforeB.pulled_blocks+1);CHECK(a.pc_rx_source_remove(e,handles[0])==0);CHECK(a.pc_rx_pull_10ms(e,30010,out.data(),160)==0);CHECK(stats(a,e,handles[1]).pulled_blocks==beforeB.pulled_blocks+2);}
- std::printf("MEASURE sources=%d simulated_s=30 average_pull_us=%.2f worst_pull_us=%.2f cpu_ms=%.2f private_bytes_warm=%llu end=%llu\n",count,total/pulls,worst,(cpu100ns()-cpuStart)/10000.,(unsigned long long)before,(unsigned long long)after);CHECK(after<=before+32*1024*1024);CHECK(a.pc_rx_destroy(e)==0);
+ std::printf("MEASURE sources=%d simulated_s=30 average_pull_us=%.2f worst_pull_us=%.2f cpu_ms=%.2f %s_warm=%llu end=%llu\n",count,total/pulls,worst,(cpu100ns()-cpuStart)/10000.,memoryMetric,(unsigned long long)before,(unsigned long long)after);CHECK(after<=before+32*1024*1024);CHECK(a.pc_rx_destroy(e)==0);
 }
 void devicePaced(Api& a){
  auto cfg=config();cfg.version=PC_RX_DEVICE_PACED;pc_rx_engine e=0;CHECK(a.pc_rx_create(&cfg,&e)==PC_RX_OK);
@@ -134,7 +161,13 @@ void devicePaced(Api& a){
  CHECK(a.pc_rx_destroy(e)==PC_RX_OK);
  std::puts("PASS: real-clock receive, irregular device-paced 20 ms pairs, independent packet arrival, fixed buffers");
 }
-int main(int argc,char** argv){CHECK(argc==2);Api a(argv[1]);lifecycle(a);boundariesAndConcurrency(a);devicePaced(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
+int main(int argc,char** argv){
+#if defined(_WIN32)
+ CHECK(argc==2);Api a(argv[1]);
+#else
+ CHECK(argc==1);(void)argv;Api a;
+#endif
+ lifecycle(a);boundariesAndConcurrency(a);devicePaced(a);auto clean=scenario(a,"in-order / seq wrap / 48k RTP to 16k PCM",0);auto repeat=scenario(a,"repeat deterministic",0);CHECK(clean.hash==repeat.hash);
  scenario(a,"moderate reorder",1);auto fec=scenario(a,"single loss/FEC",2);CHECK(fec.fec_decode_rate>0);auto plc=scenario(a,"burst loss/PLC",3,false);CHECK(plc.stats.concealed_samples>clean.stats.concealed_samples);scenario(a,"late packet",4);scenario(a,"timestamp wrap",5);scenario(a,"jitter variation",6);scenario(a,"increasing delay",7);scenario(a,"decreasing delay",8);scenario(a,"timestamp discontinuity",9);auto duplicate=scenario(a,"duplicate",10);CHECK(duplicate.hash==clean.hash);scenario(a,"source becomes silent",11);
  for(int n:{1,2,3,4,8})mix(a,n);
  std::puts("PASS: standalone receive/mix proof tests completed");}
