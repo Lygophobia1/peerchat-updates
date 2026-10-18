@@ -211,7 +211,10 @@ inline void Application::tick(){
   try{if(j.sealer)prepare(j);else if(j.state=="verifying")finalize(j);else if(j.verified&&!j.outputNotified&&io_.verified){io_.verified(j.body->manifest,j.outputToken);j.outputNotified=true;}}
   catch(...){j.sealer.reset();j.finalizer.reset();j.sink.reset();j.input.reset();j.plain.reset();if(!j.verified){j.state="failed";j.error="Attachment encryption, integrity or protected storage failed";}else if(!terminalCacheError(j))j.error="Verified internal copy retained; output action failed";save();}
  }
- for(auto& item:jobs_){auto& j=*item.second;if(requests_.size()>=24)break;if(j.server!=server_||now<j.retry||busy(j.id)||j.state=="failed"||j.state=="canceled"||terminalCacheError(j)||j.sealer)continue;if((j.sending?j.account:j.recipient)!=account_)continue;
+  for(auto& item:jobs_){auto& j=*item.second;if(requests_.size()>=24)break;if(j.server!=server_||now<j.retry||busy(j.id)||j.state=="failed"||j.state=="canceled"||terminalCacheError(j)||j.sealer)continue;if((j.sending?j.account:j.recipient)!=account_)continue;
+   // Retained terminal rows have no network work. Output notification is
+   // handled separately above, and queued release replies remain independent.
+   if((j.sending&&j.state=="complete"&&!j.recipients.empty()&&std::all_of(j.recipients.begin(),j.recipients.end(),[](const auto& recipient){return recipient.verified;}))||(!j.sending&&j.verified&&j.published))continue;
   try{
    if(!j.body){if(j.sending&&j.input)enqueue(&j,"cache_dm_prepare");continue;}
    auto evidence=evidence_();if(j.sending){auto a=parseAudience(j.audience,j.account,identity_.peerId,j.recipient);protocol::check(evidence.identity&&evidence.current);verifyAudience(a,evidence.identity);protocol::check(evidence.current(a.source,a.relationship,j.recipient));}else {if(j.contextUntil<=now){enqueue(&j,"cache_dm_context");continue;}auto authorized=authorizedEvidence(j);validateBody(*j.body,header(j),&authorized);}

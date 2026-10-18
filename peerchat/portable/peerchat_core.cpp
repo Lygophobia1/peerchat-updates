@@ -993,8 +993,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         auto now=runtimeNow();
         if(instance->voice)instance->voice->tick(now);
         if(instance->archiveExecution){try{instance->prepareAttachments(now);instance->archiveTransfers->maintain(now);}catch(const std::exception&){}instance->archiveExecution->tick(now,instance->relayRequests->network());}
+        std::optional<std::vector<peerchat::Contact>> contactSnapshot;
+        auto contacts=[&]() -> const std::vector<peerchat::Contact>& {
+            if(!contactSnapshot)contactSnapshot=instance->storage->contacts();
+            return *contactSnapshot;
+        };
         if(!instance->outboxDemandLoaded){
-            for(const auto& contact:instance->storage->contacts())if(!instance->deliveries->pendingMessages(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
+            for(const auto& contact:contacts())if(!instance->deliveries->pendingMessages(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
             instance->outboxDemandLoaded=true;
         }
         if(now>=instance->demandCheckAt){
@@ -1002,8 +1007,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             for(auto it=instance->liveOutboxPeers.begin();it!=instance->liveOutboxPeers.end();){
                 auto pending=instance->deliveries->pendingMessages(*it,1000);
                 if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=peerchat::Delivery::Stored;})){it=instance->liveOutboxPeers.erase(it);continue;}
-                auto contacts=instance->storage->contacts();
-                if(std::none_of(contacts.begin(),contacts.end(),[&](const auto& contact){return contact.peerId==*it&&contact.verified;})){++it;continue;}
+                const auto& current=contacts();
+                if(std::none_of(current.begin(),current.end(),[&](const auto& contact){return contact.peerId==*it&&contact.verified;})){++it;continue;}
                 instance->sessions.demandLiveRoute(*it,now+2000,now);++it;
             }
             instance->sessions.retireIdleRoutes(now);

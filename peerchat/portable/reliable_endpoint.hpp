@@ -298,7 +298,9 @@ public:
             if(group_->historyOutgoing)for(auto& frame:group_->historyOutgoing(tls_->remotePublicKey(),now_,runtime_.remoteCapabilities))sendGroupControl(frame);
             return;
         }
-        if(archive_||!ready()||!friends_.contains(runtime_.expected))return;
+        // A full ACK window cannot admit another message; avoid rereading the
+        // protected outbox until an ACK or transport retirement frees a slot.
+        if(archive_||!ready()||!friends_.contains(runtime_.expected)||deliveries_.inFlightCount(id_)>=16)return;
         for(const auto& message:deliveries_.pendingMessages(runtime_.peerId,100)){
             if(deliveries_.wasSubmittedMessage(runtime_.peerId,message.id,id_))continue;
             if(deliveries_.inFlightCount(id_)>=16||output_.size()>MaxOutput/2)break;

@@ -1,10 +1,18 @@
 #include "../portable/reliable_endpoint.hpp"
 #include "../windows_transfer_io.hpp"
+#include "../platform/windows_sql_database.hpp"
+#include "../platform/windows_record_protection.hpp"
 #include <filesystem>
 #include <iostream>
 #include <chrono>
 
 namespace {
+struct CountingProtector final:peerchat::platform::RecordProtector {
+    peerchat::platform::WindowsRecordProtector delegate;
+    std::size_t reads=0;
+    peerchat::Blob protect(const peerchat::Blob& value,const std::string& label) override{return delegate.protect(value,label);}
+    peerchat::Blob unprotect(const peerchat::Blob& value,const std::string& label) override{++reads;return delegate.unprotect(value,label);}
+};
 struct MemoryFile final:peerchat::transfer::Source {
     peerchat::Blob bytes;std::string label;
     MemoryFile(peerchat::Blob value,std::string name):bytes(std::move(value)),label(std::move(name)){}
@@ -26,7 +34,8 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         require(scheduling::admitsTransfer(frame.data,scheduling::BulkOutputHighWater)==(kind!=static_cast<unsigned>(transfer::Kind::Chunk)),"Only bulk payload should consume the local output reserve");
     }
     auto id=Storage::newMessageId();auto root=std::filesystem::current_path()/L"build"/L"tests"/L"runtime"/std::wstring(id.begin(),id.end());
-    Storage a((root/L"a").wstring()),b((root/L"b").wstring());auto alice=a.profile(),bob=b.profile();
+    auto protectedReads=std::make_shared<CountingProtector>();
+    Storage a(platform::openWindowsSqlDatabase((root/L"a").wstring()),protectedReads),b((root/L"b").wstring());auto alice=a.profile(),bob=b.profile();
     TlsCredentials ac(alice),bc(bob);
     delivery::DeliveryManager ad(a,alice.peerId),bd(b,bob.peerId);
     session::SessionTransportManager as(alice.peerId,alice.peerId,{1}),bs(bob.peerId,bob.peerId,{1});
@@ -95,6 +104,23 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         require(unauthorized,"Logged-out friendship continued accepting transport bytes");left.close(false);right.close(false);
     }
     af.replace(10,3,{{20,bob.peerId,{bob.peerId}}});
+    {
+        ReliableEndpoint sender(alice,a,as,ad,af,{1},{205},std::make_unique<TlsSession>(ac,false),bob.peerId,route(205,false),++now);
+        ReliableEndpoint receiver(bob,b,bs,bd,bf,{1},{206},std::make_unique<TlsSession>(bc,true),alice.peerId,route(206,true),++now);
+        sender.receive({},++now);receiver.receive({},++now);exchange(sender,receiver);
+        require(sender.ready()&&receiver.ready(),"Full message window fixture did not authenticate");
+        auto beforeReceived=received,beforeDelivered=delivered;
+        for(unsigned n=0;n<17;++n){StoredMessage message{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",43,Delivery::Queued,0,a.nextLogicalOrder()};require(a.append(bob.peerId,message),"Full message window queue failed");}
+        sender.pump();require(ad.inFlightCount({205})==16,"Full message window did not fill");
+        auto beforeReads=protectedReads->reads;
+        for(unsigned n=0;n<8;++n)sender.pump();
+        auto afterReads=protectedReads->reads;
+        std::cout<<"HOST FULL WINDOW: redundant_protected_reads="<<(afterReads-beforeReads)<<"\n";
+        require(afterReads==beforeReads,"Full message window reread protected outbox records");
+        auto forward=sender.takeOutput();require(!forward.empty(),"Full window produced no TLS output");receiver.receive(forward,++now);exchange(sender,receiver);
+        require(a.pending(bob.peerId).empty()&&received==beforeReceived+17&&delivered==beforeDelivered+17,"Full window ACK did not resume final message");
+        sender.close(false);receiver.close(false);
+    }
     transfer::TransferManager uploads([]{return std::make_unique<transfer::windows::Sha256>();});
     transfer::TransferManager downloads([]{return std::make_unique<transfer::windows::Sha256>();});
     unsigned fileFrames=0;Blob capturedBulk;
