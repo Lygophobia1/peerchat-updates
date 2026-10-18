@@ -11,6 +11,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Deterministic>true</Deterministic>
     <DebugType>none</DebugType>
+    <VersionInfoSource Condition="'$(VersionInfoSource)' == ''">../../shared/VersionInfo.cs</VersionInfoSource>
   </PropertyGroup>
   <PropertyGroup Condition="'$(AttachmentCacheCandidate)' == 'true'">
     <DefineConstants>$(DefineConstants);PEERCHAT_CACHE_CANDIDATE</DefineConstants>
@@ -22,6 +23,6 @@
     <Compile Include="../DeviceIdentityEndorsement.cs" />
     <Compile Include="../DeviceIdentityEnrollment.cs" />
     <Compile Include="../AttachmentCache*.cs" />
-    <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../ArchiveAuthorization.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;../../shared/VersionInfo.cs;PortableJson.cs;PortablePlatform.cs" />
+    <Compile Include="../PeerChat.Server.cs;../ServerConfiguration.cs;../ServerPresence.cs;../ServerRpc.cs;../GroupRosterProof.cs;../ArchiveAuthorization.cs;../GroupCiphertextFanout.cs;../GroupMediaRooms.cs;../MailboxProtocol.cs;../EncryptedMailbox.cs;../EncryptedMailboxChannel.cs;$(VersionInfoSource);PortableJson.cs;PortablePlatform.cs" />
   </ItemGroup>
 </Project>

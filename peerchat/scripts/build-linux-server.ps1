@@ -1,17 +1,20 @@
-param([string]$DotNet='C:\Program Files\dotnet\dotnet.exe',[switch]$CacheCandidate,[switch]$DirectCacheCandidate)
+param([string]$DotNet='C:\Program Files\dotnet\dotnet.exe',[switch]$CacheCandidate,[switch]$DirectCacheCandidate,[string]$BuildVersion)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if((& $DotNet --version) -ne '10.0.401'){throw 'Pinned SDK 10.0.401 required'}
 $source=Get-Content -Raw -LiteralPath (Join-Path $root 'shared/VersionInfo.cs')
 if($source -notmatch 'Display="([^"]+)"'){throw 'Authoritative version unavailable'}
 $version=$Matches[1]
+if($BuildVersion){if($BuildVersion -notmatch '^4\.0\.2-dev\.[0-9]+$'){throw 'Invalid explicit build version'};$version=$BuildVersion}
 $destination=Join-Path $root "build/linux/$version"
 if(Test-Path -LiteralPath $destination){throw 'Linux candidate exists; never overwrite an immutable candidate'}
 New-Item -ItemType Directory -Path $destination | Out-Null
+$versionSource=Join-Path $destination 'VersionInfo.cs'
+[IO.File]::WriteAllText($versionSource,"namespace PeerChat { public static class VersionInfo { public const string Display=`"$version`"; public const string ReleaseFolder=`"v$version`"; } }",[Text.UTF8Encoding]::new($false))
 foreach($rid in @('linux-x64','linux-arm64','linux-arm')){
     $output=Join-Path $destination $rid
     $selfContained=$rid -eq 'linux-arm'
-    & $DotNet publish (Join-Path $root 'server/portable/PeerChat.Server.csproj') -c Release -r $rid --self-contained $selfContained "-p:UseAppHost=$selfContained" "-p:AttachmentCacheCandidate=$($CacheCandidate.IsPresent.ToString().ToLowerInvariant())" "-p:DirectAttachmentCacheCandidate=$($DirectCacheCandidate.IsPresent.ToString().ToLowerInvariant())" -o $output
+    & $DotNet publish (Join-Path $root 'server/portable/PeerChat.Server.csproj') -c Release -r $rid --self-contained $selfContained "-p:VersionInfoSource=$versionSource" "-p:UseAppHost=$selfContained" "-p:AttachmentCacheCandidate=$($CacheCandidate.IsPresent.ToString().ToLowerInvariant())" "-p:DirectAttachmentCacheCandidate=$($DirectCacheCandidate.IsPresent.ToString().ToLowerInvariant())" -o $output
     if($LASTEXITCODE){throw "Publish failed: $rid"}
     $files=@(Get-ChildItem -LiteralPath $output -File)
     $allowed=@('PeerChat.Server.dll','PeerChat.Server.deps.json','PeerChat.Server.runtimeconfig.json')
