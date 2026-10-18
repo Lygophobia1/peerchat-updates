@@ -123,7 +123,18 @@ public final class ReliableProfileProof {
         String request=read.str(),exchange=read.str();read.end();
         PeerTlsProof.check(request.contains("operation=1 stage=jni_input reason=native_operation_rejected input_bytes=4097"));
         PeerTlsProof.check(exchange.contains("operation=0 stage=jni_input reason=input_bound_rejected input_bytes=65537"));
-        PeerTlsProof.check(request.length()<512&&exchange.length()<512&&!request.contains(side.id)&&!exchange.contains(side.other));
+        // Five fixed aggregate timing domains now accompany the bounded failure.
+        // Keep the original failure bound and reject free text/identity leakage;
+        // do not mistake additional numeric instrumentation for an unbounded log.
+        int timings=exchange.indexOf(" native_receive_samples=");
+        PeerTlsProof.check(timings>0&&timings<512&&request.length()<512&&exchange.length()<2048&&!request.contains(side.id)&&!exchange.contains(side.other));
+        String[] counters=exchange.substring(timings).trim().split(" ");
+        PeerTlsProof.check(counters.length==25);
+        java.util.Set<String> keys=new java.util.HashSet<>();
+        for(String counter:counters){
+            PeerTlsProof.check(counter.matches("native_(receive|output|requests|route_demand|group_demand)_(samples|gate_wait_us|gate_wait_max_us|processing_us|processing_max_us)=[0-9]{1,20}"));
+            PeerTlsProof.check(keys.add(counter.substring(0,counter.indexOf('='))));
+        }
         PeerTlsProof.check(side.operation(2).length==2&&side.ready());
     }
     static Record friends(Side side){Record value=new Record(1);value.num(1);value.num(20);value.str(side.other);value.num(1);value.str(side.other);return value;}
