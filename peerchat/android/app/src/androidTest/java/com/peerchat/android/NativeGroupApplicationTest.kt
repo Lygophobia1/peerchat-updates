@@ -66,7 +66,8 @@ class NativeGroupApplicationTest {
                     roster(handle,group,legacy,peer,proof)
                     val meta=command(handle,2);assertEquals(1L,meta.number());assertEquals(group,meta.text());assertEquals(legacy,meta.text())
                     assertEquals(1L,meta.number());assertEquals("Native group 🚀",meta.text());assertEquals(1L,meta.number());assertEquals(1L,meta.number())
-                    assertEquals(account,meta.number());assertEquals(peer,meta.text());assertEquals(3L,meta.number());assertEquals(0L,meta.number());meta.end()
+                    assertEquals(account,meta.number());assertEquals(peer,meta.text());assertEquals(3L,meta.number());assertEquals(0L,meta.number())
+                    assertEquals("PeerChat/GroupHistoryRevision/v1",meta.text());assertTrue(meta.number()>=0);meta.end()
                     if(cycle==0){
                         val sent=command(handle,5){it.text(group);it.text(text)};assertEquals("accepted",sent.text())
                         message=sent.text();assertEquals(1L,sent.number());wire=sent.bytes();sent.end()
@@ -82,7 +83,10 @@ class NativeGroupApplicationTest {
                     assertNull(request(handle,6){it.text("0".repeat(32));it.text(message);it.blob(wire)})
                     val history=command(handle,3){it.text(group);it.number(Long.MAX_VALUE)}
                     assertEquals(1L,history.number());assertEquals(message,history.text());assertEquals(peer,history.text());assertEquals(account,history.number())
-                    assertTrue(history.number()>0);assertTrue(history.number()>0);assertTrue(history.number()>0);history.text();assertEquals(text,history.text());history.end()
+                    assertTrue(history.number()>0);assertTrue(history.number()>0);assertTrue(history.number()>0);history.text();assertEquals(text,history.text())
+                    assertEquals("PeerChat/GroupHistoryPage/v1",history.text());assertEquals(1L,history.number())
+                    assertEquals("PeerChat/GroupReferencePage/v1",history.text());assertEquals(0L,history.number())
+                    assertEquals(0L,history.number());assertEquals(0L,history.number());history.end()
                     assertNull(request(handle,2,generation=2))
                     // A truncated complete snapshot must revoke old authority.
                     assertNull(request(handle,1){it.number(1)})
