@@ -67,6 +67,9 @@ class LiveWindowsDmTest {
             await("windows_device_ack"){conversation().messages.any{it.id==reply&&it.deliveryTargets?.targets?.any{t->t.deviceId==expected&&t.status==DeliveryTargetStatus.Acknowledged}==true}}
             val targets=conversation().messages.single{it.id==reply}.deliveryTargets!!
             evidence("LIVE_DM_ACK selection_unresolved=${targets.selectionUnresolved} acknowledged=${targets.targets.count{it.status==DeliveryTargetStatus.Acknowledged}} pending=${targets.targets.count{it.status==DeliveryTargetStatus.Pending}} unavailable=${targets.targets.count{it.status==DeliveryTargetStatus.Unavailable}}")
+            // Let the Windows probe finish its five-second post-ACK observation
+            // before deliberately quiescing this device. Not transport latency.
+            delay(7000)
             backend.setInUse(false);check(backend.awaitQuiescence(30000));backend.setInUse(true)
             check(backend.restoreRemembered(endpoint))
             await("history_after_resume"){backend.state.value.conversations.any{it.friend.username=="codex"&&it.messages.any{m->m.id==received}&&it.messages.any{m->m.id==reply}}}

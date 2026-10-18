@@ -265,3 +265,105 @@ either prerequisite by silently omitting a device, removing a friendship,
 revoking a registration, or trusting a key without verification. Existing tests,
 profiles, source files, pending messages and candidate packages are retained.
 Physical packages remain candidates rather than a completed release handoff.
+
+## Follow-up: unrelated contacts and older device cache scope
+
+This follow-up supersedes the earlier claim that the DM probe requires an account
+without unrelated friends. The full live cached-delivery matrix remains incomplete.
+
+The earlier unrelated-friend restriction was a **test-harness mistake**, not a
+production cache rule. `windows_live_probe.cs` required every friend to equal the
+selected disposable recipient before starting the mailbox service. Removed that
+check; the helper still installs only the selected authenticated friend binding,
+verifies the exact expected fingerprint, and requests eligibility for that account.
+Production native mailbox receive rejects unmapped senders before durable import
+or ACK. Server responses are not filtered, fabricated or rewritten by the test.
+No friendship or registration was deleted. The initial coordinated repeat
+delivered and ACKed both directions, but its Android restart raced the Windows
+five-second final observation. The fixture now waits seven seconds after its
+verified ACK before deliberately quiescing; this delay is not a product change
+or a delivery-latency measurement.
+
+### Actual older codex1 device
+
+Authenticated `device_inventory` and read-only SQLite inspection agree:
+
+- Account: `codex1`, ID 14.
+- Fingerprint: `a4cf39bd208f304a31d5a17f3715b8dafefb00d2d068a0597dbe0390706d13b3`.
+- Authenticated self-reported platform/version: Windows, `4.0.2-dev.183`.
+- Registered: `2026-10-18 19:33:54 UTC` (not a last-activity timestamp).
+- Account authority: active, unrevoked; currently offline in inventory.
+- Recipient key: generation 1, active, storage allowed.
+- Cache capability: matching device/key/generation registration present;
+  inventory says `supported`, not upgrade-required.
+- Last activity: **not retained in the inspected data**. There is no presence row
+  for either test device, and remembered/device-session tables have no last-used
+  column. Do not infer last activity from registration, expiry, or offline status.
+
+Evidence: `live-disposable-500018f68b89411b98f076c0a14d3a4e` and
+`live-disposable-8fc8ca968f7c41dfba06b8f71a07a797`. Pi queries used `mode=ro` and
+`query_only=ON`, scoped to public metadata for account 14. No key/proof blobs,
+passwords, credentials or session tokens were retrieved.
+
+### Proven cache failure boundary
+
+`PrepareDirectCache` selects `EligibilityBindings(recipientAccount)` only: active,
+storage-enabled keys owned by that account, excluding revoked device authority.
+It then requires matching cache capability for every selected device. Both
+codex1 devices satisfy those checks. Unrelated friends are not part of this query.
+An offline device with an active authorized key is intentionally included in
+account-wide offline delivery; age or current connectivity does not revoke it.
+
+The Android sender's authenticated friend index knows both device IDs. However,
+read-only inspection shows **no protected contact record at all** for the older
+Windows fingerprint, while the current Android recipient has one. Therefore
+`mailboxContact` cannot supply a locally verified identity key to `verifyAudience`.
+The retained job stops at `prepare_recipient_identity`, before HPKE body sealing,
+cache admission/upload, recipient decryption, or a completed-file ACK. This is a
+missing sender-side identity-verification prerequisite, not an observed stale
+capability, wrong-account mapping, unsupported older client, or upload failure.
+
+| Boundary | Windows | Android |
+| --- | --- | --- |
+| Audience/capability | Same Pi recipient-account query and frozen audience | Same |
+| Trusted identity | Verified contact key required; historical mapping may resolve identity, current authorization still checked separately | Verified contact key plus current authenticated account mapping required |
+| Signed HPKE binding | Shared `verifyAudience` and binding-signature checks | Same |
+| Encryption/body | Existing shared DM attachment application/body engine | Same, platform storage/crypto providers |
+| Server admission | Exact audience, relationship, revocation and source checks | Same |
+| Completion/ACK | Existing ciphertext integrity, authenticated private metadata and verified recipient completion | Same; live failed job has not reached this stage |
+
+Do not resolve missing identity trust by importing a server-provided key as a
+verified pin or omitting the older device. The compatible recovery is to use the
+existing explicit device-verification flow with that identity when available.
+Seamless verification while it is offline would require an authenticated identity
+evidence path accepted by the current trust policy (for example an already
+trusted device's verifiable authorization), not merely a capability flag. No such
+new trust path or production security-policy change was implemented in this audit.
+
+### Regression evidence
+
+Added a production server fixture: create an unrelated friendship to an account
+without cache keys and assert the selected DM's prepared audience is byte-for-byte
+unchanged. `PeerChat.DirectCacheTests` passed, including two offline recipients,
+signed capability/binding rejection, independent offsets, restart, revocation and
+cross-account denial. Fixture: `F:/PeerChat-isolated-cache-tests/recipient-scope-20261018-01`.
+The broader cache runtime suite also passed on the existing isolated F: test
+drive. Its initial C: run correctly failed `cache_startup_space_protected`; the
+free-space safety check was not weakened. These are host regressions, not a claim
+that the live cached attachment has completed.
+
+The corrected Windows/Android DM repeat passed with the unrelated friendship
+retained: Windows recorded selected-device ACK and reply received; Android recorded
+durable receipt, its reply's Windows-device ACK, and retained history after resume.
+Probe: `2c85cd838ed5418eab3b99a6f8a22046`.
+Evidence: `windows-live-runtime-07707e635cb042c4a73d7d493143c97b` and
+`live-disposable-c283f7c8f426432c8a417858d1d938e3` under `build/tests`.
+Android's reply-to-selected-Windows-ACK observation was 811 ms. Its initial receive
+stage took 21,468 ms including coordinated peer startup; this is not an isolated
+send-to-delivery latency benchmark. Android still reported selection unresolved,
+so this proves selected-device confirmation, **not account-wide completion**.
+The test-only seven-second teardown delay is excluded from these stage timings.
+
+No production code, authorization policy, Pi deployment, account registration or
+contact trust was changed in this follow-up. Existing dev.184 packages remain
+candidates; the live cache identity prerequisite is not declared repaired.

@@ -90,6 +90,9 @@ partial class AttachmentCacheRuntimeTest {
     Reject(()=>admission.RegisterDirect(2,reader,()=>true,capability),"cache_dm_capability_binding_invalid");
     admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,firstKey));admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey));
     var prepared=Rpc(rpc,1,source,"cache_dm_prepare","accepted","recipientAccountId",2L);
+    var beforeUnrelatedFriend=admission.PrepareDirect(1,source,()=>true,2);
+    Check(db.SendFriendRequest(1,3)=="pending"&&db.RespondToRequest(3,1,true)=="friends","Unrelated fixture friendship");
+    Check(admission.PrepareDirect(1,source,()=>true,2).SequenceEqual(beforeUnrelatedFriend),"Unrelated friend without cache keys changed the selected recipient audience");
     audience=DirectCacheAudience.Parse(AttachmentCacheRequests.Decode((string)prepared["audience"],32768),1,source,2);Check(audience.Recipients.Count==2,"Offline devices omitted from frozen audience");descriptor=DirectDescriptor(sender,1,2,audience,payload);
     Reject(()=>admission.Admit(1,source,()=>true,descriptor.Wire),"cache_scope_mismatch");Reject(()=>admission.AdmitDirect(1,source,()=>false,descriptor.Wire,audience.Wire),"cache_dm_authority_stale");
     var tampered=(byte[])descriptor.Wire.Clone();tampered[tampered.Length-1]^=1;Reject(()=>AttachmentCacheDescriptor.Parse(tampered),"*");

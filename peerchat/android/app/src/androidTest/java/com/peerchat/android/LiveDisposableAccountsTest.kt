@@ -81,6 +81,36 @@ class LiveDisposableAccountsTest {
                 input.remove("firstPassword");input.remove("secondPassword")
                 check(first.restoreRemembered(endpoint)&&second.restoreRemembered(endpoint))
                 await("inspect_presence"){first.state.value.serverPresenceLive&&second.state.value.serverPresenceLive}
+                await("inspect_own_inventory"){second.state.value.ownDevices!=null}
+                // Read the authenticated own-account inventory, not another
+                // account's registration or any secrets. No network under gate.
+                val accountsField=MessagingBackend::class.java.getDeclaredField("accounts").apply{isAccessible=true}
+                val owner=accountsField.get(second) as com.peerchat.android.platform.ServerAccounts
+                val active=owner.session
+                val inventory=owner.ownDevices()
+                check(owner.session===active&&inventory.getLong("accountId")==second.state.value.accountId)
+                val rows=inventory.getJSONArray("devices")
+                for(i in 0 until rows.length()) {
+                    val row=rows.getJSONObject(i);val identity=row.getString("publicIdentity")
+                    require(identity.matches(Regex("[0-9a-f]{64}")))
+                    fun safe(key:String)=row.optString(key,"unavailable").take(128).replace(Regex("[^A-Za-z0-9_. -]"),"_")
+                    evidence("LIVE_OWN_DEVICE second identity=$identity state=${safe("state")} current=${row.getBoolean("currentDevice")} online=${row.getBoolean("online")} created_utc=${row.getLong("createdUtc")} platform=${safe("platform")} version=${safe("version")} cache=${safe("cacheCapability")}")
+                }
+                // Presence of a protected contact record only; never decrypt,
+                // export, or alter identity/key material for this inspection.
+                val gate=MessagingBackend::class.java.getDeclaredField("gate").apply{isAccessible=true}.get(first)
+                synchronized(gate) {
+                    val profile=MessagingBackend::class.java.getDeclaredField("profile").apply{isAccessible=true}.get(first)
+                    val platform=NativeProfile::class.java.getDeclaredField("platform").apply{isAccessible=true}.get(profile)
+                    val db=platform.javaClass.getDeclaredField("database").apply{isAccessible=true}.get(platform) as android.database.sqlite.SQLiteDatabase
+                    for(i in 0 until rows.length()) {
+                        val identity=rows.getJSONObject(i).getString("publicIdentity")
+                        db.rawQuery("SELECT count(*) FROM objects WHERE k=?",arrayOf("contact/$identity")).use { cursor->
+                            check(cursor.moveToFirst())
+                            evidence("LIVE_CONTACT_RECORD first device=$identity exists=${cursor.getLong(0)>0}")
+                        }
+                    }
+                }
                 delay(5000)
                 retained("first",first);retained("second",second)
                 return@runBlocking
