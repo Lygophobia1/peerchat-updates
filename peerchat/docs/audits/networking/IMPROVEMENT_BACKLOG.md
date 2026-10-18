@@ -9,6 +9,7 @@ See the [audit](2026-10-17-dev176-independent-audit.md). The user subsequently a
 | P1 | Attachment import/preflight waits moved outside gate in dev.177; independent control scheduling remains proposed | Delayed import/preflight permits local work; replacement login protected |
 | P1 | Passive 60-second grace implemented in dev.177; physical power/latency measurements pending | No new wakelock/permanent service; reuse, expiry and security invalidation tests |
 | P1 | Correlate failed request with generation/time and current readiness | No secrets/content in diagnostics; observed auth not mislabeled pure TLS time |
+| P1 | Own-account Device Manager and cross-device authorization — security approval required; not implemented | [Audit and proposed contract](../2026-10-17-device-manager-authorization.md): scoped management proof, non-destructive revocation, legacy-session and re-enrollment policy; preserve frozen targets/history and enforce current authorization separately from historical mappings |
 | P2 | Fair event-driven cache continuations | Integrity/resume/replay and concurrent text latency; bounded memory/work |
 | P2 | Server disk operations outside global account locks with authority fences | Revocation/relationship fencing, fixed lock order, crash/quota tests and separate Pi approval |
 | P2 | Reproduce generation-superseded mailbox rescheduling with retained executor | Demonstrate persistent loss before fixing; in-flight sentinel alone is insufficient |

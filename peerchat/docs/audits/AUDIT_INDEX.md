@@ -1,5 +1,9 @@
 # PeerChat audit index
 
+## Device authorization
+
+- [Windows Device Manager authorization audit](2026-10-17-device-manager-authorization.md) — existing authority and isolated test evidence; full-device management requires approval for a scoped administrative proof and durable revocation policy. Documentation only; dev.178 preserved.
+
 ## Networking
 
 - [Independent dev.176 networking and Android lifecycle audit](networking/2026-10-17-dev176-independent-audit.md) — audit only; cache readiness reproductions, reconnect interpretation, lifecycle comparison and repair plan. Production changes await approval.
