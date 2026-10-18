@@ -68,6 +68,10 @@ target_link_libraries(peerchat_android_media_probe PRIVATE datachannel-static op
 # Production voice may only link the unchanged receive engine when the actual
 # pinned NetEq adapter is supplied. No replacement jitter buffer or fake receive.
 set(PEERCHAT_ANDROID_RECEIVE_LIBRARY "" CACHE FILEPATH "ARM64 pinned WebRTC pc_rx static library")
+option(PEERCHAT_ANDROID_VOICE_ENABLED "Enable validated Android application voice integration" OFF)
+if(PEERCHAT_ANDROID_VOICE_ENABLED AND NOT PEERCHAT_ANDROID_RECEIVE_LIBRARY)
+    message(FATAL_ERROR "Android voice requires the genuine receive library")
+endif()
 add_library(peerchat_android_voice STATIC ../../voice_media.cpp ../../voice_receive_engine.cpp ../../group_voice_session.cpp ../../voice_media_topology.cpp media_capabilities.cpp)
 target_compile_features(peerchat_android_voice PUBLIC cxx_std_17)
 target_compile_options(peerchat_android_voice PRIVATE -Wall -Wextra -Werror)
@@ -76,5 +80,8 @@ target_link_libraries(peerchat_android_voice PUBLIC datachannel-static opus peer
 if(PEERCHAT_ANDROID_RECEIVE_LIBRARY)
     target_compile_definitions(peerchat_android_voice PRIVATE PEERCHAT_ANDROID_STATIC_RECEIVE)
     target_link_libraries(peerchat_android_voice PUBLIC "${PEERCHAT_ANDROID_RECEIVE_LIBRARY}")
+endif()
+if(PEERCHAT_ANDROID_VOICE_ENABLED)
+    target_compile_definitions(peerchat_android_voice PRIVATE PEERCHAT_ANDROID_VOICE_ENABLED)
 endif()
 target_link_libraries(peerchat_android_media_probe PRIVATE peerchat_android_voice)
