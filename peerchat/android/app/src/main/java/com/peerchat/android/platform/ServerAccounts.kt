@@ -153,6 +153,11 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         return result
     }
     fun friends(): JSONObject = friendStateWithOptionalNames{fields->request("friend_state",fields)}
+    // The call owner must fence the captured session/generation before and after
+    // this network wait. Never put media setup behind mailbox/ACK RPC work.
+    fun mediaTurnCredentials():MediaTurnCredentials = parseMediaTurnCredentials(
+        request("media_turn_credentials",JSONObject().put("publicIdentity",device),allowRpc=false),
+        System.currentTimeMillis()/1000)
     // A bounded independent connection: optional inventory may not queue text
     // delivery or ACK work behind the shared persistent RPC owner's lock.
     fun ownDevices():JSONObject {
