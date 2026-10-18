@@ -478,10 +478,10 @@ public partial class DesktopApplication {
     }
     async Task RefreshGroupAttachments(){
         if(closing||groupAttachmentRefreshing||groupAttachmentOperating||!model.Listening)return;groupAttachmentRefreshing=true;
-        var owner=discovery;ulong generation=profileSessionGeneration;
+        var owner=discovery;ulong generation=profileSessionGeneration,session=discoverySessionGeneration;
         try{
             string selected=model.Groups&&model.SelectedGroup!=null?model.SelectedGroup.Id:"";
-            var snapshot=await Task.Run(()=>core.GroupAttachments(selected));if(closing||generation!=profileSessionGeneration||owner!=discovery)return;
+            var snapshot=await Task.Run(()=>core.GroupAttachments(selected));if(closing||generation!=profileSessionGeneration||session!=discoverySessionGeneration||owner!=discovery)return;
             RecordAttachmentCapability(snapshot);
             if(!String.IsNullOrEmpty(selected)){
                 var history=AttachmentHistoryState(selected);

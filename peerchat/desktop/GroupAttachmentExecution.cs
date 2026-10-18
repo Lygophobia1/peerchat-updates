@@ -128,6 +128,19 @@ public partial class DesktopApplication {
     void RecordAttachmentCapability(CoreAdapter.GroupAttachmentSnapshot value){
         Func<string,string> safe=text=>text!=null&&text.Length<=64&&text.All(ch=>Char.IsLetterOrDigit(ch)||ch=='_')?text:"unavailable";
         groupAttachmentCapabilityDiagnostic="\ngroup_attachment_capability_stage="+safe(value.capabilityStage)+"\ngroup_attachment_capability_code="+safe(value.capabilityCode)+"\ngroup_attachment_capability_generation="+value.capabilityGeneration+"\ngroup_attachment_capability_ready="+value.supported;
+        // Normal signed-in refresh drives setup, not an attachment click. Only
+        // an exact current server rejection permits first enrollment; never
+        // turn revocation, corrupt saved state, or a network error into enrollment.
+        if(!value.supported&&value.capabilityCode=="cache_device_session_required"&&
+            value.capabilityGeneration==groupAttachmentNetworkGeneration&&
+            groupAttachmentExecution!=null&&!groupAttachmentDeviceAttempted&&
+            groupAttachmentDeviceClient==null&&groupAttachmentDeviceTask==null){
+            var owner=discovery;
+            if(owner!=null&&AttachmentOwnerCurrent(owner,groupAttachmentNetworkProfile,groupAttachmentNetworkSession,groupAttachmentNetworkToken,groupAttachmentNetworkPeer)){
+                bool saved=HasSavedAttachmentSession(owner);
+                if(String.IsNullOrEmpty(groupAttachmentDeviceError)){var ignored=VerifyAttachmentDevice(!saved);}
+            }
+        }
     }
     bool HasSavedAttachmentSession(DiscoveryClient owner){try{return AttachmentDeviceSession.HasCredential(owner,owner.AccountId,model.OwnId,directory);}catch(Exception error){groupAttachmentDeviceError=AttachmentDeviceSession.SafeFailure(error);return false;}}
     bool AttachmentOwnerCurrent(DiscoveryClient owner,ulong profile,ulong session,string token,string device){return !closing&&discovery==owner&&profileSessionGeneration==profile&&discoverySessionGeneration==session&&owner.AccountId==mailboxContextAccount&&owner.SessionToken==token&&model.OwnId==device;}
@@ -177,7 +190,7 @@ public partial class DesktopApplication {
             if(!verificationRequired)return false;
         }
         if(groupAttachmentDeviceClient==null){
-            if(!existing&&groupAttachmentDeviceTask==null&&MessageBox.Show(window,"Verify this Windows device for encrypted group attachments using its existing identity? This registers a remembered credential for this device and may replace an older remembered sign-in for the same device. Messages, keys, grants and other device identities are unchanged.","Verify device",MessageBoxButton.OKCancel,MessageBoxImage.Information)!=MessageBoxResult.OK){groupAttachmentDeviceError="Device verification canceled. Your draft and existing data are unchanged; retry Attach when ready.";return false;}
+            if(!String.IsNullOrEmpty(groupAttachmentDeviceError))return false;
             if(!await VerifyAttachmentDevice(!existing))return false;
         }
         var wait=System.Diagnostics.Stopwatch.StartNew();
