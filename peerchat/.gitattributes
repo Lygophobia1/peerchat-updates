@@ -1,0 +1,5 @@
+# Reproducible Linux dependency scripts and patches from Windows checkouts.
+scripts/*android-neteq* text eol=lf
+scripts/*.sh text eol=lf
+audio_receive/*.gn text eol=lf
+audio_receive/*.patch text eol=lf whitespace=-blank-at-eol
