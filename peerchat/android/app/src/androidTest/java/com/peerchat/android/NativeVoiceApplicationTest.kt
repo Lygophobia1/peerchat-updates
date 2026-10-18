@@ -47,7 +47,20 @@ class NativeVoiceApplicationTest {
                     authorize(handle,1)
                     assertUnavailable(request(handle,0),0,true)
                     assertUnavailable(request(handle,1){it.text(peer);it.text(call)},1,false)
-                    assertUnavailable(request(handle,2){it.text(call)},2,false)
+                    // No active lifetime may be targeted, even with otherwise
+                    // valid fields. Legacy id-only / Boolean-only records fail
+                    // closed after the private JNI record shape changes.
+                    for(op in 2..6){
+                        assertNull(request(handle,op){it.text(peer);it.text(call);it.number(1);if(op>=5)it.number(1)})
+                        assertNull(request(handle,op){it.text(call)})
+                        assertNull(request(handle,op){it.number(1)})
+                        assertNull(request(handle,op){it.text("bad");it.text(call);it.number(1);if(op>=5)it.number(1)})
+                        assertNull(request(handle,op){it.text(peer);it.text("bad");it.number(1);if(op>=5)it.number(1)})
+                        assertNull(request(handle,op){it.text(peer);it.text(call);it.number(0);if(op>=5)it.number(1)})
+                        assertNull(request(handle,op){it.text(peer);it.text(call)})
+                        assertNull(request(handle,op){it.text(peer);it.text(call);it.number(1);it.number(2)})
+                        assertUnavailable(request(handle,0),0,true)
+                    }
                     assertUnavailable(request(handle,0),0,true)
                     assertNull(request(handle,0,generation=2));assertNull(request(handle,0,accountId=72))
                     authorize(handle,2)

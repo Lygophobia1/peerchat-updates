@@ -840,10 +840,20 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_VoiceBridge_re
         auto& voice=*instance->voice;bool accepted=true;const auto now=runtimeNow();
         if(operation==0){r.end();}
         else if(operation==1){auto peer=r.string(),id=r.string();r.end();accepted=voice.app.start(peer,id,now);}
-        else if(operation==2){auto id=r.string();r.end();accepted=voice.app.answer(id,now);}
-        else if(operation==3){auto id=r.string();r.end();accepted=voice.app.decline(id);}
-        else if(operation==4){auto id=r.string();r.end();accepted=voice.app.end(id);}
-        else if(operation==5||operation==6){auto value=r.number();r.end();protocol::check(value<=1);accepted=operation==5?voice.app.setMuted(value!=0):voice.app.setDeafened(value!=0);}
+        else if(operation>=2&&operation<=6){
+            // Private Java/native command record only, not peer signaling. Bind
+            // every local action to the call observed before asynchronous work.
+            auto peer=r.string(),id=r.string();auto lifetime=r.number();
+            auto value=(operation==5||operation==6)?r.number():0;r.end();
+            protocol::check(protocol::id(peer)&&protocol::id(id,32)&&lifetime>0&&lifetime<=INT64_MAX&&value<=1);
+            // Reject before any app action or tick: a stale command must not
+            // mutate or release a replacement call, even via timeout servicing.
+            protocol::check(instance->calls.matches(lifetime,id,peer));
+            if(operation==2)accepted=voice.app.answer(id,now);
+            else if(operation==3)accepted=voice.app.decline(id);
+            else if(operation==4)accepted=voice.app.end(id);
+            else accepted=operation==5?voice.app.setMuted(value!=0):voice.app.setDeafened(value!=0);
+        }
         else if(operation==7){
             MediaIceConfiguration ice;ice.host=r.string();auto port=r.number();ice.username=r.string();ice.password=r.string();auto expires=r.number();ice.generation=r.number();r.end();
             protocol::check(ice.host.size()<=253&&port>0&&port<=65535&&ice.username.size()<=1024&&ice.password.size()<=4096&&expires<=INT64_MAX);

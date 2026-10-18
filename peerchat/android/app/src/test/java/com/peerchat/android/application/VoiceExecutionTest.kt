@@ -7,6 +7,7 @@ import org.junit.Test
 class VoiceExecutionTest {
     private val id="1".repeat(32)
     private val peer="a".repeat(64)
+    private val target=CallTarget(peer,id,23)
     private fun response(op:Int=0,accepted:Long=1,available:Long=0,active:Long=0,diagnostic:String="Pinned media unavailable",
                          domain:String="PeerChat/AndroidVoice/v1",state:Long=5,direction:Long=0,lifetime:Long=1,muted:Long=0,
                          mediaState:Long=2,mediaRoute:Long=3,call:String=id,device:String=peer):ByteArray {
@@ -30,15 +31,56 @@ class VoiceExecutionTest {
         val result=execution.start(17,71,4,peer)
         assertEquals(1,calls);assertFalse(result.accepted);assertFalse(result.available);assertFalse(result.active)
     }
-    @Test fun actionOperationsPreserveCurrentNativeScopeAndCallId(){
+    @Test fun startPreservesCallerProvidedCallIntent(){
+        val execution=VoiceExecution{_,op,input->
+            val r=NativeRecord(input,7);r.text();r.number();r.number();r.number()
+            assertEquals(peer,r.text());assertEquals(id,r.text());r.end();response(op=op,accepted=0)
+        }
+        assertFalse(execution.start(17,71,4,peer,id).accepted)
+    }
+    @Test fun actionOperationsPreserveCurrentNativeScopeAndCompleteCallTarget(){
         val seen=mutableListOf<Int>()
         val execution=VoiceExecution{h,op,input->
             assertEquals(9L,h);val r=NativeRecord(input,7);r.text();assertEquals(op.toLong(),r.number());assertEquals(8L,r.number());assertEquals(12L,r.number())
-            if(op in 2..4)assertEquals(id,r.text())else if(op in 5..6)assertEquals(1L,r.number());r.end();seen.add(op);response(op=op,accepted=0)
+            if(op in 2..6){assertEquals(peer,r.text());assertEquals(id,r.text());assertEquals(23L,r.number())}
+            if(op in 5..6)assertEquals(1L,r.number());r.end();seen.add(op);response(op=op,accepted=0)
         }
-        execution.snapshot(9,8,12);execution.answer(9,8,12,id);execution.decline(9,8,12,id);execution.end(9,8,12,id)
-        execution.mute(9,8,12,true);execution.deafen(9,8,12,true)
+        execution.snapshot(9,8,12);execution.answer(9,8,12,target);execution.decline(9,8,12,target);execution.end(9,8,12,target)
+        execution.mute(9,8,12,target,true);execution.deafen(9,8,12,target,true)
         assertEquals(listOf(0,2,3,4,5,6),seen)
+    }
+    @Test fun staleCallTargetsRemainExactAndNativeRejectionIsNotRetried(){
+        // Fake JNI port checks transport scope only; native enforcement is
+        // covered by the JNI gate. Each stale component must reach it unchanged.
+        val stale=listOf(target.copy(peer="b".repeat(64)),target.copy(id="2".repeat(32)),target.copy(lifetime=22))
+        for(expected in stale)for(op in 2..6){
+            var calls=0
+            val execution=VoiceExecution{_,operation,input->
+                ++calls;assertEquals(op,operation);val r=NativeRecord(input,7);r.text();r.number();r.number();r.number()
+                assertEquals(expected.peer,r.text());assertEquals(expected.id,r.text());assertEquals(expected.lifetime,r.number())
+                if(op in 5..6)assertEquals(0L,r.number());r.end();null
+            }
+            assertThrows(IllegalStateException::class.java){when(op){
+                2->execution.answer(9,8,12,expected)
+                3->execution.decline(9,8,12,expected)
+                4->execution.end(9,8,12,expected)
+                5->execution.mute(9,8,12,expected,false)
+                else->execution.deafen(9,8,12,expected,false)
+            }}
+            assertEquals(1,calls)
+        }
+    }
+    @Test fun malformedCallTargetsAndStartIntentsAreRejectedBeforeNative(){
+        for(bad in listOf("", "bad", "A".repeat(64), "a".repeat(63),"a".repeat(65)))
+            assertThrows(IllegalArgumentException::class.java){CallTarget(bad,id,23)}
+        for(bad in listOf("", "bad", "A".repeat(32), "1".repeat(31),"1".repeat(33)))
+            assertThrows(IllegalArgumentException::class.java){CallTarget(peer,bad,23)}
+        for(bad in listOf(0L,-1L,Long.MIN_VALUE))
+            assertThrows(IllegalArgumentException::class.java){CallTarget(peer,id,bad)}
+        var calls=0;val execution=VoiceExecution{_,_,_->++calls;response()}
+        assertThrows(IllegalArgumentException::class.java){execution.start(17,71,4,"bad",id)}
+        assertThrows(IllegalArgumentException::class.java){execution.start(17,71,4,peer,"bad")}
+        assertEquals(0,calls)
     }
     @Test fun authenticatedIceUsesSameAccountGenerationAndExactFields(){
         var called=false
