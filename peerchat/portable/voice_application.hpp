@@ -125,7 +125,12 @@ private:
                 calls_.transition(binding.callId,calls::State::Connected);calls_.transitionMedia(generation,calls::MediaState::Connected,mapped);
                 if(active->muted&&!media_->setMuted(true)){notifyEnd();finish("Microphone control failed",true);return;}
                 media_->setDeafened(active->deafened);diagnostic_="Connected";signal(binding.remotePeerId,protocol::CallConnected,binding.callId);
-            }else if(event.kind==VoiceMedia::EventKind::AudioError)diagnostic_="Audio device unavailable";
+            }else if(event.kind==VoiceMedia::EventKind::AudioError){
+                // Device open/control/worker or essential receive failure leaves
+                // audio unusable. End this matched lifetime instead of retaining
+                // a Connected call or retrying a transport-only recovery.
+                notifyEnd();finish("Audio device unavailable",true);return;
+            }
             else if(event.kind==VoiceMedia::EventKind::AudioProcessingError)diagnostic_="Audio processing unavailable";
             else {interrupt(now);return;}
         }

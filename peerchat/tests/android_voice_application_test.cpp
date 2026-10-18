@@ -62,8 +62,9 @@ static void deliver(Harness& from,Harness& to,std::uint64_t now){
 }
 static void exchange(Harness& a,Harness& b,std::uint64_t now){a.app.tick(now);b.app.tick(now);deliver(a,b,now);deliver(b,a,now);}
 static void connect(Harness& a,Harness& b,const std::string& id,std::uint64_t now){
+    const auto previousIncomingMedia=b.created;
     check(a.app.start(a.peer,id,now),"Outgoing start rejected");exchange(a,b,now+1);
-    check(b.calls.state()==calls::State::Incoming&&b.created==0,"Incoming signaling opened media before answer");
+    check(b.calls.state()==calls::State::Incoming&&b.created==previousIncomingMedia,"Incoming signaling opened media before answer");
     check(b.app.answer(id,now+2),"Answer rejected");exchange(a,b,now+3);
     check(a.calls.state()==calls::State::ConnectingMedia&&b.calls.state()==calls::State::ConnectingMedia,"Signaling falsely claimed media connected");
     a.event(VoiceMedia::EventKind::Connected);b.event(VoiceMedia::EventKind::Connected);exchange(a,b,now+4);
@@ -129,6 +130,56 @@ int main(){try{
               "Failed mute preparation did not stop media before device start");
     }
     {
+        // Real poll can return Connected followed by an AudioError when device
+        // open fails, or a later worker error after a call already connected.
+        for(unsigned order=0;order<3;++order){
+            Harness a('a','b'),b('b','a');connect(a,b,one,100);
+            auto media=a.states.back();const auto created=a.created;
+            if(order==1)a.event(VoiceMedia::EventKind::Connected);
+            a.event(VoiceMedia::EventKind::AudioError);
+            if(order==2)a.event(VoiceMedia::EventKind::Connected);
+            a.app.tick(110);
+            check(a.calls.idle()&&a.calls.finished(one)&&media->stopped==1,"Fatal audio error retained connected call or media");
+            check(std::string(a.app.diagnostic())=="Audio device unavailable","Fatal audio diagnostic was overwritten by a later event");
+            unsigned ends=0;
+            for(const auto& signal:a.signals){protocol::Reader r(signal.wire);if(r.type()==protocol::CallEnd){check(signal.peer==a.peer&&r.string()==one,"Audio failure ended wrong call or peer");r.end();++ends;}}
+            check(ends==1,"Fatal audio error did not notify peer exactly once");
+            deliver(a,b,111);check(b.calls.idle()&&b.states.back()->stopped==1,"Peer retained failed audio call");
+            a.app.tick(112);check(a.created==created&&a.signals.empty()&&media->stopped==1,"Fatal device error retried media or repeated teardown");
+        }
+    }
+    {
+        Harness a('a','b'),b('b','a');connect(a,b,one,100);
+        auto media=a.states.back();const auto lifetime=a.calls.lifetime(),generation=a.calls.active()->mediaGeneration;
+        a.event(VoiceMedia::EventKind::AudioProcessingError);a.app.tick(110);
+        check(a.calls.matchesMedia(lifetime,one,a.peer,generation)&&a.calls.state()==calls::State::Connected&&media->stopped==0,
+              "Optional processing warning ended working audio");
+        check(a.signals.empty()&&std::string(a.app.diagnostic())=="Audio processing unavailable","Processing warning changed signaling or lost diagnostic");
+        check(a.app.setMuted(true),"Mute intent fixture failed");media->muteFails=true;
+        a.event(VoiceMedia::EventKind::Connected);a.app.tick(111);
+        check(a.calls.idle()&&media->stopped==1&&std::string(a.app.diagnostic())=="Microphone control failed",
+              "Failed device control restoration retained connected call");
+        deliver(a,b,112);check(b.calls.idle(),"Device control failure did not notify peer");
+    }
+    {
+        Harness a('a','b'),b('b','a');connect(a,b,one,100);
+        auto old=a.states.back();const auto lifetime=a.calls.lifetime();
+        old->events.push_back({VoiceMedia::EventKind::AudioError,{},{}});
+        // The authoritative owner has already retired this media generation.
+        check(a.calls.acceptMediaGeneration(2,30110),"New generation fixture failed");a.calls.deferMediaRetry(110,1000);
+        a.app.tick(110);
+        check(a.calls.matchesMedia(lifetime,one,a.peer,2)&&old->stopped==1&&a.signals.empty(),"Stale audio error ended current generation");
+        check(std::string(a.app.diagnostic())!="Audio device unavailable","Stale audio error changed current diagnostic");
+    }
+    {
+        Harness a('a','b'),b('b','a');connect(a,b,one,100);auto old=a.states.back();
+        check(a.app.end(one),"Replacement audio fixture could not end old call");deliver(a,b,110);
+        connect(a,b,two,120);const auto lifetime=a.calls.lifetime();auto current=a.states.back();
+        old->events.push_back({VoiceMedia::EventKind::AudioError,{},{}});exchange(a,b,130);
+        check(a.calls.matchesMedia(lifetime,two,a.peer,1)&&a.calls.state()==calls::State::Connected&&current->stopped==0&&a.signals.empty(),
+              "Retired lifetime audio error ended replacement call");
+    }
+    {
         Harness a('a','b'),b('b','a');connect(a,b,one,100);
         check(a.app.setMuted(true)&&b.app.setMuted(true)&&b.app.setDeafened(true),"Voice controls failed");
         const auto lifetime=a.calls.lifetime();auto old=a.states.back();
@@ -164,6 +215,6 @@ int main(){try{
         check(a.calls.active()->id.value==one&&a.created==0,"Malformed offer mutated current call");
         a.app.invalidate();check(a.calls.idle(),"Profile invalidation retained call");
     }
-    std::cout<<"PASS: voice application UNIT controller semantics with explicit deterministic fake media; availability/auth gates, unchanged signaling, bounded candidates, consent, glare/replay, lifetime/generation fencing, recovery, mute/deafen, timeouts and teardown. NOT AUDIO OR E2E VALIDATION\n";
+    std::cout<<"PASS: voice application UNIT controller semantics with explicit deterministic fake media; availability/auth gates, unchanged signaling, bounded candidates, consent, glare/replay, lifetime/generation fencing, recovery, mute/deafen, fatal audio/control failure teardown, nonfatal optional processing, timeouts and teardown. NOT AUDIO OR E2E VALIDATION\n";
     return 0;
 }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}}
