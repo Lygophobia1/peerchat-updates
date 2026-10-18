@@ -16,18 +16,47 @@ The pinned `build/config/BUILDCONFIG.gn` asserts `host_os == "linux"` for `targe
 
 This Windows host has Android SDK and NDK `27.0.12077973`, but `wsl.exe --status` returned exit 50 with no status text, `wsl.exe --list --quiet` returned usage text and exit 1, and HKCU Lxss had no distribution entries. No `docker`, `podman`, `vagrant`, or Ubuntu command was found. Windows optional-feature state could not be read without elevation, so it is not claimed disabled. There is no runnable Linux environment demonstrated here. A Linux root filesystem alone does not provide a Linux execution environment on Windows. No configured remote Linux build host was found in the project Android handoff/checkpoint documentation; the Raspberry Pi was not queried.
 
-The WebRTC tree occupies approximately 9.15 GB across 442,392 files. Its Android NDK directory is absent because `.gclient` disabled Android checkout. Pinned `DEPS` requests Android NDK package version `2@30.0.16248370`; the app uses NDK 27, `arm64-v8a`, and minSdk/API 26. WebRTC GN defaults `default_min_sdk_version` to 29 at this pin. These are explicit integration checks, not reasons to change the app's supported API level without testing.
+The WebRTC tree occupies approximately 9.15 GB across 442,392 files. Its Android NDK directory is absent because `.gclient` disabled Android checkout. Pinned `DEPS` requests Android NDK package version `2@30.0.16248370`; the app uses NDK `27.0.12077973`, `arm64-v8a`, and minSdk/API 26. **Correction from the 2026-10-17 source review:** Chromium's `build/config/android/config.gni` declares a minimum-SDK default of 29, but this WebRTC checkout's root `.gn` overrides **both** `default_min_sdk_version` and `android_ndk_api_level` to **23**. Set both explicitly to 26; changing only the first does not override the independent native-API default. These are integration checks, not reasons to raise the app's supported API level.
+
+The Android compiler is also not simply the compiler bundled with the NDK. `build/toolchain/android/BUILD.gn` uses the Chromium Clang toolchain; `tools/clang/scripts/update.py` pins `llvmorg-24-init-7747-g62397f8b`, subrevision `31`. The NDK supplies the Android sysroot. Record both toolchain identities separately. The app's NDK 27 linker/runtime must not be assumed compatible with newer LLVM bitcode or every NDK 30 libc++ symbol.
 
 ## Supported build sequence — **UNVALIDATED**
 
 On an appropriate Linux build host, use a separate pinned WebRTC checkout so the existing Windows dependency checkout remains intact:
 
 1. Check out WebRTC `6cf6bcb585b31414aac02377df2bc8fec770d0e8`, configure `.gclient` to fetch Android dependencies, and run `gclient sync` and the pinned hooks. Confirm the full source and dependency revisions and the installed Android toolchain. This sync may download substantial data; its size was not measured.
-2. Copy the existing `audio_receive` adapter files into that checkout as a dedicated GN target. Change only its target type to `static_library("peerchat_audio_receive")` and set `complete_static_lib = true`, keeping the existing dependency list and exception configuration. `gn help complete_static_lib` confirms that this form incorporates non-complete static libraries and source sets into a distributable archive. The exact archive contents still require inspection.
-3. Generate an Android ARM64 release output with GN arguments including `target_os="android"`, `target_cpu="arm64"`, `is_debug=false`, `is_component_build=false`, `rtc_include_tests=false`, `rtc_build_examples=false`, `default_min_sdk_version=26`, and `use_custom_libcxx=false`. Confirm all remaining generated arguments against the pinned checkout, then run `gn gen out/peerchat-android-arm64`, `gn desc out/peerchat-android-arm64 //peerchat_audio_receive:peerchat_audio_receive deps --all`, and `ninja -C out/peerchat-android-arm64 peerchat_audio_receive` (or the checkout's pinned Ninja wrapper).
+2. Copy the existing `audio_receive` adapter files into that checkout as a dedicated GN target. For Android, use `static_library("peerchat_audio_receive")`, set `complete_static_lib = true`, and remove `//build/config/compiler:thin_archive` from its configs. Keep the existing dependency list and adapter exception configuration. These two archive settings are both required by the pinned `build/config/compiler/BUILD.gn`: a complete thin archive can still reference objects in the build directory and is not a portable deliverable. Do not alter the Windows shared-library target. Inspect the resulting archive and its dependency closure; complete static libraries and shared/system dependencies are not automatically flattened indiscriminately.
+3. Generate an Android ARM64 release output with the baseline arguments below. Confirm the effective arguments and compilation commands against the pinned checkout. Register the dedicated adapter target in the isolated checkout's root build graph, as the Windows helper already does for its own checkout. Run `gn gen out/peerchat-android-arm64`, `gn desc out/peerchat-android-arm64 //peerchat_audio_receive:peerchat_audio_receive deps --all`, and build that target through the pinned `autoninja` wrapper. Root `.gn` defaults `use_siso=true`; do not assume a plain system Ninja invocation is equivalent. If deliberately selecting Ninja, set and record `use_siso=false` and validate that path.
 4. Supply only the resulting Android ARM64 complete static archive to `PEERCHAT_ANDROID_RECEIVE_LIBRARY`; build the actual app JNI library and APK. A successful GN archive alone does not establish Android runtime compatibility or a working receive pipeline.
 
 This sequence is an implementation plan, **not a build result**. A reproducible script could be drafted on Windows, but its GN generation, dependency sync, compilation, and link behavior cannot be validated until Linux is available.
+
+```gn
+target_os = "android"
+target_cpu = "arm64"
+is_debug = false
+is_official_build = false
+is_component_build = false
+rtc_include_tests = false
+rtc_build_examples = false
+rtc_build_tools = false
+default_min_sdk_version = 26
+android_ndk_api_level = 26
+use_custom_libcxx = false
+use_custom_libcxx_for_host = true
+use_thin_lto = false
+```
+
+`use_thin_lto=false` intentionally produces ordinary objects for the downstream app link, avoiding a newer Chromium LLVM bitcode dependency on the app's NDK 27 linker. Verify the archive members are AArch64 ELF objects rather than LLVM bitcode; do not infer this solely from the argument. `use_custom_libcxx=false` selects the target toolchain's libc++ headers instead of Chromium's in-tree C++ runtime; it does **not** make NDK 30 headers/runtime ABI identical to NDK 27. The host retains its normal in-tree libc++ through `use_custom_libcxx_for_host=true`. Keep exceptions enabled on the adapter because its C ABI catches failures and its source explicitly throws on decoder setup errors; this does not require enabling exceptions throughout WebRTC.
+
+## Link integration hazards verified in the source review
+
+- The existing app produces both `libpeerchat_messaging.so` and `libpeerchat_jni.so`. No explicit `ANDROID_STL` setting was found in the checked Gradle/CMake sources; the NDK CMake default is static libc++. Existing targets hide archive symbols and communicate through a C ABI. Preserve that boundary, verify actual generated link commands, and do not accidentally embed Chromium's separate C++ runtime in the receive archive. A coherent runtime choice is required for all participating libraries. Android recommends one shared libc++ runtime for applications with multiple native shared libraries and matching NDK versions where possible; a successful link alone is insufficient ABI evidence. See [Android C++ runtime guidance](https://developer.android.com/ndk/guides/cpp-support).
+- WebRTC's `third_party/opus/README.chromium` records vendored Opus revision `55513e81d8f606bd75d0ff773d2144e5f2a732f5`, whereas PeerChat's separate encoder build pins `ddbe48383984d56acd9e1ab6a090c54ca6b735a6`. `//modules/audio_coding:webrtc_opus` directly depends on `//third_party/opus`, so simply setting `rtc_build_opus=false` does not remove every bundled Opus dependency. Two static Opus implementations in one final shared object risk duplicate definitions or link-order-dependent selection. Inspect a final link map and symbol providers, then explicitly choose and validate one implementation or deliberate symbol isolation. Do not suppress duplicate-symbol errors or silently substitute the encoder pin merely to complete the link.
+- A static archive does not carry GN system-link requirements into CMake. Inspect effective `libs`, `lib_dirs`, propagated flags, undefined symbols, and the final link, including any Android logging dependencies. Express required system libraries on the imported CMake target instead of relying on an unrelated dependency to supply them accidentally.
+- The GN Android configuration sets a 16 KiB maximum page size on its final ARM64 links, but those linker flags do not travel inside a static archive. The final CMake-built shared libraries and APK alignment must independently pass 16 KiB checks. The current app uses NDK 27, so do not assume the newer GN configuration fixes downstream ELF or APK alignment. See [Android page-size guidance](https://developer.android.com/guide/practices/page-sizes).
+
+Smallest implementation remains the unchanged `pc_rx` C ABI and genuine NetEq adapter as a complete Android archive, with explicit runtime/Opus/system-library integration in the existing native owner. First compile with the pinned Linux toolchain, then perform the real app link and ABI/runtime checks. If the NDK 30-to-27 runtime combination fails, align the Android build toolchain deliberately and retest the existing messaging/JNI components; do not patch out the host assertion, replace NetEq, or claim compatibility from archive creation alone.
 
 ## Acceptance gates for the dependency
 
