@@ -2,7 +2,8 @@
 
 ## Device authorization
 
-- [Windows Device Manager authorization audit](2026-10-17-device-manager-authorization.md) — existing authority and isolated test evidence; full-device management requires approval for a scoped administrative proof and durable revocation policy. Documentation only; dev.178 preserved.
+- [Windows Device Manager authorization audit](2026-10-17-device-manager-authorization.md) — preserved pre-implementation authority analysis and approval boundary.
+- [Device Manager dev.179 implementation and validation](2026-10-17-device-manager-implementation.md) — approved scoped proof, non-destructive revocation, Windows Settings, Android reconciliation, cache/history preservation and deployment safety. Dev.178 remains available.
 
 ## Networking
 
