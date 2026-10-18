@@ -2,6 +2,7 @@
 
 ## Device authorization
 
+- [Persistent shared device names, dev.180](2026-10-17-device-display-names.md) — display-only labels across Device Manager, History Sync and receipt rows; explicitly approved sharing with accepted contacts, privacy/compatibility tests and packages.
 - [Windows Device Manager authorization audit](2026-10-17-device-manager-authorization.md) — preserved pre-implementation authority analysis and approval boundary.
 - [Device Manager dev.179 implementation and validation](2026-10-17-device-manager-implementation.md) — approved scoped proof, non-destructive revocation, Windows Settings, Android reconciliation, cache/history preservation and deployment safety. Dev.178 remains available.
 
