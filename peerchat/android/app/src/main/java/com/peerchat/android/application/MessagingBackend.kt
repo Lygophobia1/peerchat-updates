@@ -624,7 +624,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             val native=profile ?: NativeProfile(context,profileName).also {profile=it}
             val key=checkNotNull(ProfileBridge.publicKey(native.handle))
             val device=PeerIdentityFormat.peerId(key)
-            if(remember)require(endpoint.certificatePin.matches(Regex("[0-9a-f]{64}")))
+            require(endpoint.certificatePin.matches(Regex("[0-9a-f]{64}")))
             // Explicit login replaces a previous remembered account only after
             // durable revocation. Network failure leaves a non-login tombstone.
             revokeSaved(native,key)
@@ -633,27 +633,42 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // Server registration rejects an identity already owned by another account.
             val authenticated=if(creating)connection.register(username,password) else connection.login(username,password)
             if(mutable.value.accountId!=authenticated.accountId){groupExecution.reset();mutable.value=mutable.value.copy(groups=emptyList(),groupInvitations=emptyList())}
+            var transientCredential:RememberedLogin?=null
             try {
                 val metadata=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId)
                 accounts=connection;index=metadata;pushRegisteredToken=null;network++
-                mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,device,true,"Authenticated; refreshing contacts")
+                mutable.value=MessagingSnapshot(authenticated.accountId,authenticated.username,device,false,"Verifying device")
                 // Password authentication does not register this device. Use the
                 // established authenticated presence path before the combined
                 // bootstrap, which correctly requires prior account ownership.
                 // A device owned by another account still fails closed here.
                 connection.presence()
-                refresh();refreshAt=System.nanoTime()/1_000_000+900000
-                if(remember){val value=connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))};
-                    try{remembered.save(value)}catch(failure:Exception){try{connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}}catch(_:Exception){};throw failure}
-                    OpaquePushWake.refreshPeriodic(context)
-                    // Enrollment leaves the password-login bearer unbound. Push
-                    // registration requires the signed device-bound resume token
-                    // immediately, not only after the next process restart.
-                    generation++;clearAuthorization();accounts=null;index=null;friends=emptyList()
-                    connection.logout();check(restoreRememberedLocked(endpoint))
-                }
+                // Enrollment leaves the password-login bearer unbound. Resume
+                // with the signed device challenge for this login even when the
+                // credential is not saved for a future automatic login.
+                val bound=establishDeviceBoundLogin(remember,
+                    enroll={connection.remember(key){checkNotNull(ProfileBridge.sign(native.handle,it))}},
+                    save={remembered.save(it)},
+                    retirePasswordSession={generation++;clearAuthorization();accounts=null;index=null;friends=emptyList();connection.logout()},
+                    resume={value->
+                        if(remember){check(restoreRememberedLocked(endpoint));checkNotNull(accounts?.session)} else {
+                            val resumedConnection=ServerAccounts(endpoint,device,operations)
+                            val resumed=resumedConnection.resume(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}
+                            check(resumed.accountId==authenticated.accountId)
+                            accounts=resumedConnection;index=FriendIdentityIndex(context,profileName,endpoint,resumed.accountId);pushRegisteredToken=null;network++
+                            mutable.value=MessagingSnapshot(resumed.accountId,resumed.username,device,true,"Authenticated; refreshing contacts")
+                            refresh();refreshAt=System.nanoTime()/1_000_000+900000
+                            resumed
+                        }
+                    },
+                    revoke={value->connection.revoke(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}})
+                transientCredential=bound.transientCredential
+                if(remember)OpaquePushWake.refreshPeriodic(context)
                 checkNotNull(accounts?.session)
             } catch(failure: Exception){
+                if(!remember){try{accounts?.logout()}catch(_:Exception){}
+                    transientCredential?.let{try{ServerAccounts(endpoint,device,operations).revoke(it,key){input->checkNotNull(ProfileBridge.sign(native.handle,input))}}catch(_:Exception){}}
+                }
                 accounts?.closeRpc();accounts=null;index=null;friends=emptyList();generation++
                 clearAuthorization();try {connection.logout()}catch(_: Exception){}
                 mutable.value=MessagingSnapshot(localPeerId=device,status="Login setup failed closed")
