@@ -26,7 +26,7 @@ sealed partial class AccountDatabase {
     void PurgeMailbox(){long now=MailboxNow();Execute("DELETE FROM encrypted_mailbox WHERE expires<="+now+" OR NOT EXISTS(SELECT 1 FROM devices d WHERE d.account_id=encrypted_mailbox.recipient_account AND d.public_identity=encrypted_mailbox.recipient_device) OR NOT EXISTS(SELECT 1 FROM devices d WHERE d.account_id=encrypted_mailbox.sender_account AND d.public_identity=encrypted_mailbox.sender_device);");}
     internal string RegisterMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var binding=MailboxProtocol.Binding.Parse(wire);
-        if(binding.Account!=account||binding.Device!=device||!OwnsDevice(account,device)||!MailboxProtocol.Verify(binding.Original,binding.Signature,identity,device))return "not_authorized";
+        if(binding.Account!=account||binding.Device!=device||!ActiveDevice(account,device)||!MailboxProtocol.Verify(binding.Original,binding.Signature,identity,device))return "not_authorized";
         if(binding.Created>MailboxNow()+300000)return "invalid_timestamp";
         Execute("BEGIN IMMEDIATE;");try {
             string predicate="device="+Quote(device)+" AND key_id="+Quote(binding.Key);
@@ -41,8 +41,8 @@ sealed partial class AccountDatabase {
         }catch{try{Execute("ROLLBACK;");}catch{}throw;}
     }}
     internal List<Dictionary<string,object>> MailboxKeys(long account,string device,long recipient){lock(gate){
-        if(!OwnsDevice(account,device)||recipient==account||!Friends(account,recipient)||Blocked(account,recipient))throw new InvalidOperationException("Mailbox access not authorized.");
-        return MailboxRows("SELECT device,proof FROM mailbox_recipient_keys k WHERE account_id="+recipient+" AND state='active' AND allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) ORDER BY device LIMIT 32",32,"device","binding");
+        if(!ActiveDevice(account,device)||recipient==account||!Friends(account,recipient)||Blocked(account,recipient))throw new InvalidOperationException("Mailbox access not authorized.");
+        return MailboxRows("SELECT device,proof FROM mailbox_recipient_keys k WHERE account_id="+recipient+" AND state='active' AND allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=k.device AND a.revoked=1) ORDER BY device LIMIT 32",32,"device","binding");
     }}
     const long EligibilityFreshMilliseconds=120000;
     const long EligibilityValidationMilliseconds=600000;
@@ -62,14 +62,14 @@ sealed partial class AccountDatabase {
         }catch{try{Execute("ROLLBACK;");}catch{}throw;}
     }
     bool MailboxFriendScope(long account,string device,long recipient){
-        return account>0&&recipient>0&&recipient!=account&&OwnsDevice(account,device)&&Friends(account,recipient)&&!Blocked(account,recipient);
+        return account>0&&recipient>0&&recipient!=account&&ActiveDevice(account,device)&&Friends(account,recipient)&&!Blocked(account,recipient);
     }
     HashSet<string> AuthenticatedRecipientPresence(long recipient){
         var result=new HashSet<string>(StringComparer.Ordinal);
         foreach(var lease in Live.Snapshot(recipient)){
             // A bare remembered presence row or an expired/revoked session is not
             // an authenticated recipient device eligibility claim.
-            if(lease.Account==recipient&&MailboxProtocol.Id(lease.Identity,64)&&OwnsDevice(recipient,lease.Identity)&&
+            if(lease.Account==recipient&&MailboxProtocol.Id(lease.Identity,64)&&ActiveDevice(recipient,lease.Identity)&&
                !String.IsNullOrEmpty(lease.Session)&&Authenticate(lease.Session)==recipient&&SessionAllowsDevice(lease.Session,lease.Identity))result.Add(lease.Identity);
         }
         return result;
@@ -78,7 +78,7 @@ sealed partial class AccountDatabase {
         var result=new List<EligibilityMember>();IntPtr statement=IntPtr.Zero;
         try{
             string sql="SELECT k.device,k.proof FROM mailbox_recipient_keys k WHERE k.account_id="+recipient+
-                " AND k.state='active' AND k.allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) ORDER BY k.device LIMIT 33";
+                " AND k.state='active' AND k.allowed=1 AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=k.account_id AND d.public_identity=k.device) AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=k.device AND a.revoked=1) ORDER BY k.device LIMIT 33";
             if(SqliteNative.prepare(database,sql,out statement)!=0)throw new InvalidOperationException("Eligibility read failed.");
             int step;while((step=SqliteNative.step(statement))==100){
                 byte[] proof=SqliteNative.columnBlob(statement,1);
@@ -179,7 +179,7 @@ sealed partial class AccountDatabase {
         if(originalDigest!=EligibilityDigest(originally))return new Dictionary<string,object>{{"state","snapshot_unavailable"}};
         var live=AuthenticatedRecipientPresence(recipient);
         var current=new List<EligibilityMember>();foreach(var original in originally){
-            bool owned=OwnsDevice(recipient,original.Device);
+            bool owned=ActiveDevice(recipient,original.Device);
             byte[] binding=null;
             if(owned&&original.Binding!=null){
                 if(ScalarLong(database,"SELECT count(*) FROM mailbox_recipient_keys WHERE account_id="+recipient+" AND device="+Quote(original.Device)+" AND state='active' AND allowed=1 AND proof="+MailboxData(original.Binding))==1)binding=original.Binding;
@@ -194,7 +194,7 @@ sealed partial class AccountDatabase {
     }}
     internal string RevokeMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var revoke=MailboxProtocol.Revocation.Parse(wire);
-        if(revoke.Account!=account||revoke.Device!=device||!OwnsDevice(account,device)||!MailboxProtocol.Verify(revoke.Original,revoke.Signature,identity,device))return "not_authorized";
+        if(revoke.Account!=account||revoke.Device!=device||!ActiveDevice(account,device)||!MailboxProtocol.Verify(revoke.Original,revoke.Signature,identity,device))return "not_authorized";
         string predicate="account_id="+account+" AND device="+Quote(device)+" AND key_id="+Quote(revoke.Key)+" AND generation="+revoke.Generation;
         if(ScalarLong(database,"SELECT count(*) FROM mailbox_recipient_keys WHERE "+predicate)!=1)return "unknown_key";
         Execute("BEGIN IMMEDIATE;");try {
@@ -207,7 +207,7 @@ sealed partial class AccountDatabase {
     // A server-session credential alone cannot substitute the recipient key.
     internal string StoreMailbox(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var e=MailboxProtocol.Envelope.Parse(wire);long now=MailboxNow();PurgeMailbox();
-        if(e.Sender!=account||e.SenderDevice!=device||!OwnsDevice(account,device)||!OwnsDevice(e.Recipient,e.RecipientDevice)||!Friends(account,e.Recipient)||Blocked(account,e.Recipient)||!MailboxProtocol.Verify(e.Original,e.Signature,identity,device))return "not_authorized";
+        if(e.Sender!=account||e.SenderDevice!=device||!ActiveDevice(account,device)||!ActiveDevice(e.Recipient,e.RecipientDevice)||!Friends(account,e.Recipient)||Blocked(account,e.Recipient)||!MailboxProtocol.Verify(e.Original,e.Signature,identity,device))return "not_authorized";
         if(e.Created>now+300000||e.Expires<=now)return "expired_or_invalid_timestamp";
         string destination="device="+Quote(e.RecipientDevice)+" AND key_id="+Quote(e.Key)+" AND account_id="+e.Recipient+" AND generation="+e.Generation;
         string keyState=ScalarText(database,"SELECT state FROM mailbox_recipient_keys WHERE "+destination+" AND allowed=1");
@@ -242,7 +242,7 @@ sealed partial class AccountDatabase {
     // The cursor is scoped by the authenticated account and destination device in
     // the query. It names a position, never an authorization grant or ACK.
     internal List<Dictionary<string,object>> FetchMailbox(long account,string device,string cursor=""){lock(gate){
-        if(!OwnsDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
+        if(!ActiveDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
         string after="";
         if(cursor.Length>0){var parts=cursor.Split(':');long created;
             if(parts.Length!=5||parts[0]!=account.ToString()||parts[1]!=device||!Int64.TryParse(parts[2],out created)||created<=0||parts[2]!=created.ToString()||!MailboxProtocol.Id(parts[3],32)||!MailboxProtocol.Id(parts[4],64))throw new InvalidOperationException("Invalid mailbox cursor.");
@@ -252,7 +252,7 @@ sealed partial class AccountDatabase {
     }}
     internal string AckMailbox(long account,string device,byte[] identity,byte[] wire){lock(gate){
         var ack=MailboxProtocol.Receipt.Parse(wire);PurgeMailbox();
-        if(ack.Recipient!=account||ack.Device!=device||!OwnsDevice(account,device)||!MailboxProtocol.Verify(ack.Original,ack.Signature,identity,device))return "not_authorized";
+        if(ack.Recipient!=account||ack.Device!=device||!ActiveDevice(account,device)||!MailboxProtocol.Verify(ack.Original,ack.Signature,identity,device))return "not_authorized";
         string predicate="recipient_account="+account+" AND recipient_device="+Quote(device)+" AND sender_device="+Quote(ack.SenderDevice)+" AND message_id="+Quote(ack.Message)+" AND digest="+Quote(ack.DigestHex);
         if(ScalarLong(database,"SELECT count(*) FROM encrypted_mailbox WHERE "+predicate)!=1)return "unknown_envelope";
         var prior=MailboxBlob("SELECT receipt FROM encrypted_mailbox WHERE "+predicate);
@@ -262,7 +262,7 @@ sealed partial class AccountDatabase {
         Execute("UPDATE encrypted_mailbox SET receipt="+MailboxData(wire)+",envelope=NULL,expires="+(MailboxNow()+MailboxProtocol.MaxTtl)+" WHERE "+predicate+";");return "acknowledged";
     }}
     internal List<Dictionary<string,object>> MailboxReceipts(long account,string device,string afterMessage="",string cursor=null){lock(gate){
-        if(!OwnsDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
+        if(!ActiveDevice(account,device))throw new InvalidOperationException("Mailbox access not authorized.");PurgeMailbox();
         string after;
         if(cursor!=null){after="";if(cursor.Length>0){var parts=cursor.Split(':');
             if(parts.Length!=4||parts[0]!=account.ToString()||parts[1]!=device||!MailboxProtocol.Id(parts[2],32)||!MailboxProtocol.Id(parts[3],64))throw new InvalidOperationException("Invalid receipt cursor.");

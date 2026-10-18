@@ -22,11 +22,11 @@ sealed partial class AccountDatabase {
  // Called only inside cache group/original-member admission, not friendship
  // lookup. Never registers a key or changes ordinary mailbox authorization.
  internal byte[] AttachmentRecipientKey(long account,string device){lock(gate){
-  if(!OwnsDevice(account,device))return null;
+  if(!ActiveDevice(account,device))return null;
   return MailboxBlob("SELECT proof FROM mailbox_recipient_keys WHERE account_id="+account+" AND device="+Quote(device)+" AND state='active' AND allowed=1");
  }}
  internal bool AttachmentKeyAvailable(MailboxProtocol.Binding binding,bool allowRetired){lock(gate){
-  if(!OwnsDevice(binding.Account,binding.Device))return false;
+  if(!ActiveDevice(binding.Account,binding.Device))return false;
   var proof=MailboxBlob("SELECT proof FROM mailbox_recipient_keys WHERE account_id="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation+" AND allowed=1 AND state "+(allowRetired?"IN ('active','retired')":"='active'"));
   return proof!=null&&proof.SequenceEqual(binding.Wire);
  }}

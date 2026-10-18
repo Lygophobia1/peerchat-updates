@@ -13,6 +13,7 @@ class PortableServerTests {
         if(args.Length==2&&args[0]=="--friend-relay-revoke")return FriendRelayRevocationServerTest.Main(new[]{args[1]});
         if(args.Length==4&&args[0]=="--archive-relay")return ArchiveRelayLifecycleTest.Main(new[]{args[1],args[2],args[3]});
         if(args.Length==4&&args[0]=="--group-fanout")return GroupCiphertextFanoutTest.Main(new[]{args[1],args[2],args[3]});
+        if(args.Length==5&&args[0]=="--device-management")return DeviceManagementServerTest.Main(new[]{args[1],args[2],args[3],args[4]});
         string root=args[0];ServerLifecycleTests.Run(root);var json=new JavaScriptSerializer();
         string fixture=File.ReadAllText(Path.Combine(root,"framework.json"));ServerJsonFixtures.Validate(fixture);
         var value=json.Deserialize<System.Collections.Generic.Dictionary<string,object>>(fixture);
@@ -45,6 +46,7 @@ class PortableServerTests {
         ServerJsonFixtures.Check(!json.Serialize(config).Contains("\"TurnRestSharedSecret\":"),"secret serialized");
         ServerJsonFixtures.Check(ServerPresenceTest.Main(new[]{Path.Combine(root,"presence")})==0,"presence");
         if(args.Length>1)ServerJsonFixtures.Check(EncryptedMailboxServerTest.Main(new[]{args[1],Path.Combine(root,"lifecycle-test.pfx"),"test-only"})==0,"mailbox");
+        if(args.Length>1)ServerJsonFixtures.Check(DeviceManagementServerTest.Main(new[]{Path.Combine(root,"device-management"),Path.Combine(root,"lifecycle-test.pfx"),"test-only",args[1]})==0,"device management authorization and retained history");
         Console.WriteLine("PASS: shared server JSON, identity/signatures, configuration, presence, groups and durable mailbox compatibility on "+System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier);return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
     // Explicit operator-invoked validation only. Never included in server/client

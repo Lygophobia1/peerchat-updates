@@ -85,6 +85,7 @@ namespace PeerChat.Server {
             try { Execute("ALTER TABLE group_rosters ADD COLUMN distributor_identity TEXT NOT NULL DEFAULT '';"); }
             catch(InvalidOperationException error) { if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw; }
             Execute("UPDATE group_rosters SET distributor_identity=owner_identity WHERE distributor_identity='';");
+            InitializeDeviceManagement();
             }catch{Sqlite.sqlite3_close(database);throw;}
         }
         public void Execute(string sql) { lock (gate) { IntPtr error; if (Sqlite.sqlite3_exec(database, sql, IntPtr.Zero, IntPtr.Zero, out error) != 0) { string message=error==IntPtr.Zero?"SQLite error":Marshal.PtrToStringAnsi(error); if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error); throw new InvalidOperationException(message); } } }
@@ -101,18 +102,56 @@ namespace PeerChat.Server {
         public bool DeviceIdentityExists(string publicIdentity) { lock(gate) return ScalarLong(database,"SELECT count(*) FROM devices WHERE public_identity="+Quote(publicIdentity))>0; }
         public string PrimaryDeviceIdentity(long accountId) { lock(gate) return ScalarText(database,"SELECT public_identity FROM devices WHERE account_id="+accountId+" ORDER BY id LIMIT 1")??""; }
         public bool PasswordMatches(string username, Func<byte[], byte[], bool> verifier, out long accountId) { lock(gate) { IntPtr s=IntPtr.Zero; accountId=0; try { if(SqliteNative.prepare(database,"SELECT id,password_salt,password_hash FROM accounts WHERE username="+Quote(username),out s)!=0||SqliteNative.step(s)!=100)return false; accountId=SqliteNative.columnLong(s,0); return verifier(SqliteNative.columnBlob(s,1),SqliteNative.columnBlob(s,2)); } finally { if(s!=IntPtr.Zero)SqliteNative.finalize(s); } } }
-        public bool AddDevice(long accountId,string publicIdentity) { lock(gate){long owner=ScalarLong(database,"SELECT account_id FROM devices WHERE public_identity="+Quote(publicIdentity));if(owner!=0)return owner==accountId;Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+accountId+","+Quote(publicIdentity)+","+UnixNow()+");");return true;} }
+        public bool AddDevice(long accountId,string publicIdentity) { lock(gate){long owner=ScalarLong(database,"SELECT account_id FROM devices WHERE public_identity="+Quote(publicIdentity));if(owner!=0)return owner==accountId&&ActiveDevice(accountId,publicIdentity);Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+accountId+","+Quote(publicIdentity)+","+UnixNow()+");");AdvanceDeviceAuthority(accountId);return true;} }
         public bool OwnsDevice(long accountId,string publicIdentity){lock(gate)return ScalarLong(database,"SELECT count(*) FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity))>0;}
+        // Provenance ownership survives revocation. All current authorization gates use ActiveDevice.
+        public bool ActiveDevice(long account,string device){lock(gate)return OwnsDevice(account,device)&&ScalarLong(database,"SELECT count(*) FROM device_authority WHERE public_identity="+Quote(device)+" AND revoked=1")==0;}
+        void InitializeDeviceManagement(){Execute("CREATE TABLE IF NOT EXISTS device_authority(public_identity TEXT PRIMARY KEY REFERENCES devices(public_identity) ON DELETE CASCADE,name TEXT NOT NULL DEFAULT '',revoked INTEGER NOT NULL DEFAULT 0,revoked_utc INTEGER NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS device_authority_revisions(account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,revision INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS device_management_outcomes(challenge_id TEXT PRIMARY KEY,account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,actor TEXT NOT NULL,target TEXT NOT NULL,request_hash TEXT NOT NULL,revision INTEGER NOT NULL,created_utc INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS device_reported_metadata(public_identity TEXT PRIMARY KEY REFERENCES devices(public_identity) ON DELETE CASCADE,platform TEXT NOT NULL,version TEXT NOT NULL);");}
+        internal long DeviceAuthorityRevision(long account){lock(gate)return ScalarLong(database,"SELECT revision FROM device_authority_revisions WHERE account_id="+account);}
+        void AdvanceDeviceAuthority(long account){Execute("INSERT INTO device_authority_revisions(account_id,revision) VALUES("+account+",1) ON CONFLICT(account_id) DO UPDATE SET revision=revision+1;");}
+        internal bool ManagementActor(long account,string actor,string token){lock(gate)return Authenticate(token)==account&&SessionDevice(token)==actor&&ActiveDevice(account,actor);}
+        internal Dictionary<string,object> DeviceInventory(long account,string actor,string token){lock(gate){
+            if(!ManagementActor(account,actor,token))throw new InvalidOperationException("device_management_session_required");
+            var devices=new List<Dictionary<string,object>>();IntPtr s=IntPtr.Zero;
+            try{if(SqliteNative.prepare(database,"SELECT d.public_identity,d.created_utc,COALESCE(m.name,''),COALESCE(m.revoked,0),COALESCE(m.revoked_utc,0) FROM devices d LEFT JOIN device_authority m ON m.public_identity=d.public_identity WHERE d.account_id="+account+" ORDER BY d.created_utc,d.public_identity LIMIT 65",out s)!=0)throw new InvalidOperationException("device_management_unavailable");
+                while(SqliteNative.step(s)==100){if(devices.Count==64)throw new InvalidOperationException("device_management_inventory_limit");string device=SqliteNative.columnText(s,0);bool revoked=SqliteNative.columnLong(s,3)!=0;var live=Live.Get(device);bool online=!revoked&&live!=null&&live.Account==account&&Authenticate(live.Session)==account;
+                    devices.Add(new Dictionary<string,object>{{"publicIdentity",device},{"name",Encoding.UTF8.GetString(Convert.FromBase64String(SqliteNative.columnText(s,2)??""))},{"state",revoked?"revoked":"active"},{"createdUtc",SqliteNative.columnLong(s,1)},{"revokedUtc",SqliteNative.columnLong(s,4)},{"currentDevice",actor==device},{"online",online},{"platform",ScalarText(database,"SELECT platform FROM device_reported_metadata WHERE public_identity="+Quote(device))??"unavailable"},{"version",ScalarText(database,"SELECT version FROM device_reported_metadata WHERE public_identity="+Quote(device))??"unavailable"},{"metadataSource","authenticated self-report; not hardware attestation"},{"cacheCapability",DeviceCacheCapability(account,device,revoked)}});
+                }
+            }finally{if(s!=IntPtr.Zero)SqliteNative.finalize(s);}
+            return new Dictionary<string,object>{{"deviceManagementVersion",1},{"accountId",account},{"serverEpoch",Live.Epoch},{"authorityRevision",DeviceAuthorityRevision(account)},{"devices",devices}};
+        }}
+        string DeviceCacheCapability(long account,string device,bool revoked){if(revoked)return "revoked";if(ScalarLong(database,"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='attachment_dm_capabilities'")==0)return "not_registered";return ScalarLong(database,"SELECT count(*) FROM attachment_dm_capabilities c JOIN mailbox_recipient_keys k ON k.account_id=c.account AND k.device=c.device AND k.key_id=c.key_id AND k.generation=c.generation WHERE c.account="+account+" AND c.device="+Quote(device)+" AND k.state='active' AND k.allowed=1")>0?"supported":"not_registered";}
+        internal string RenameManagedDevice(long account,string actor,string token,string target,long expected,string name){lock(gate){
+            Execute("BEGIN IMMEDIATE;");try{if(!ManagementActor(account,actor,token)||!ActiveDevice(account,target))throw new InvalidOperationException("device_management_not_authorized");if(DeviceAuthorityRevision(account)!=expected)throw new InvalidOperationException("device_management_revision_conflict");
+                // ASCII envelope avoids legacy Windows ANSI SQL marshaling and database UTF-16 encoding differences.
+                string encoded=Convert.ToBase64String(Encoding.UTF8.GetBytes(name));
+                if((ScalarText(database,"SELECT name FROM device_authority WHERE public_identity="+Quote(target))??"")!=encoded){Execute("INSERT INTO device_authority(public_identity,name) VALUES("+Quote(target)+","+Quote(encoded)+") ON CONFLICT(public_identity) DO UPDATE SET name=excluded.name;");AdvanceDeviceAuthority(account);}Execute("COMMIT;");return null;
+            }catch(InvalidOperationException e){Execute("ROLLBACK;");return e.Message;}
+        }}
+        internal string RevokeManagedDevice(long account,string actor,string token,string target,long expected,string challenge,string requestHash){lock(gate){
+            Execute("BEGIN IMMEDIATE;");try{if(!ManagementActor(account,actor,token)||!ActiveDevice(account,target))throw new InvalidOperationException("device_management_not_authorized");if(actor==target)throw new InvalidOperationException("device_management_self_revoke_denied");if(DeviceAuthorityRevision(account)!=expected)throw new InvalidOperationException("device_management_revision_conflict");
+                if(ScalarLong(database,"SELECT count(*) FROM devices d WHERE d.account_id="+account+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=d.public_identity AND a.revoked=1)")<=1)throw new InvalidOperationException("device_management_last_device_denied");
+                Execute("INSERT INTO device_authority(public_identity,revoked,revoked_utc) VALUES("+Quote(target)+",1,"+UnixNow()+") ON CONFLICT(public_identity) DO UPDATE SET revoked=1,revoked_utc=excluded.revoked_utc;");
+                RevokeRememberedDevice(account,target);
+                Execute("DELETE FROM sessions WHERE account_id="+account+" AND NOT EXISTS(SELECT 1 FROM device_sessions d WHERE d.token_hash=sessions.token_hash);");
+                AdvanceDeviceAuthority(account);
+                Execute("INSERT INTO device_management_outcomes(challenge_id,account_id,actor,target,request_hash,revision,created_utc) VALUES("+Quote(challenge)+","+account+","+Quote(actor)+","+Quote(target)+","+Quote(requestHash)+","+DeviceAuthorityRevision(account)+","+UnixNow()+");COMMIT;");return null;
+            }catch(InvalidOperationException e){Execute("ROLLBACK;");return e.Message;}
+        }}
+        internal bool ManagedOutcome(long account,string actor,string token,string target,string challenge,string requestHash){lock(gate)return ManagementActor(account,actor,token)&&ScalarLong(database,"SELECT count(*) FROM device_management_outcomes WHERE challenge_id="+Quote(challenge)+" AND account_id="+account+" AND actor="+Quote(actor)+" AND target="+Quote(target)+" AND request_hash="+Quote(requestHash))==1;}
+        internal bool ReportManagedMetadata(long account,string actor,string token,string platform,string version){lock(gate){Execute("BEGIN IMMEDIATE;");try{if(!ManagementActor(account,actor,token))throw new InvalidOperationException("device_management_session_required");bool changed=ScalarLong(database,"SELECT count(*) FROM device_reported_metadata WHERE public_identity="+Quote(actor)+" AND platform="+Quote(platform)+" AND version="+Quote(version))==0;if(changed){Execute("INSERT INTO device_reported_metadata(public_identity,platform,version) VALUES("+Quote(actor)+","+Quote(platform)+","+Quote(version)+") ON CONFLICT(public_identity) DO UPDATE SET platform=excluded.platform,version=excluded.version;");AdvanceDeviceAuthority(account);}Execute("COMMIT;");return changed;}catch{Execute("ROLLBACK;");throw;}}}
+        internal List<long> ManagedDeviceContacts(long account){lock(gate){var result=new List<long>();IntPtr s=IntPtr.Zero;try{if(SqliteNative.prepare(database,"SELECT CASE WHEN account_low="+account+" THEN account_high ELSE account_low END FROM friendships WHERE account_low="+account+" OR account_high="+account,out s)!=0)throw new InvalidOperationException("device_management_unavailable");while(SqliteNative.step(s)==100)result.Add(SqliteNative.columnLong(s,0));return result;}finally{if(s!=IntPtr.Zero)SqliteNative.finalize(s);}}}
+        List<string> RevokedContactIdentities(long account){var result=new List<string>();IntPtr s=IntPtr.Zero;try{if(SqliteNative.prepare(database,"SELECT d.public_identity FROM devices d JOIN device_authority a ON a.public_identity=d.public_identity WHERE d.account_id="+account+" AND a.revoked=1 ORDER BY d.public_identity LIMIT 65",out s)!=0)throw new InvalidOperationException("device_management_unavailable");while(SqliteNative.step(s)==100){if(result.Count==64)throw new InvalidOperationException("device_management_inventory_limit");result.Add(SqliteNative.columnText(s,0));}return result;}finally{if(s!=IntPtr.Zero)SqliteNative.finalize(s);}}
         public void CreateSession(string tokenHash,long accountId,long expires) { lock(gate) Execute("DELETE FROM sessions WHERE expires_utc<"+UnixNow()+"; INSERT INTO sessions(token_hash,account_id,expires_utc) VALUES("+Quote(tokenHash)+","+accountId+","+expires+");"); }
-        public long Authenticate(string tokenHash) { lock(gate)return ScalarLong(database,"SELECT s.account_id FROM sessions s WHERE s.token_hash="+Quote(tokenHash)+" AND s.expires_utc>="+UnixNow()+" AND (NOT EXISTS(SELECT 1 FROM device_sessions b WHERE b.token_hash=s.token_hash) OR EXISTS(SELECT 1 FROM device_sessions b JOIN remembered_devices r ON r.account_id=s.account_id AND r.public_identity=b.public_identity WHERE b.token_hash=s.token_hash))"); }
+        public long Authenticate(string tokenHash) { lock(gate)return ScalarLong(database,"SELECT s.account_id FROM sessions s WHERE s.token_hash="+Quote(tokenHash)+" AND s.expires_utc>="+UnixNow()+" AND (NOT EXISTS(SELECT 1 FROM device_sessions b WHERE b.token_hash=s.token_hash) OR EXISTS(SELECT 1 FROM device_sessions b JOIN remembered_devices r ON r.account_id=s.account_id AND r.public_identity=b.public_identity WHERE b.token_hash=s.token_hash AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=b.public_identity AND a.revoked=1)))"); }
         public void RevokeSession(string tokenHash) { lock(gate) Execute("DELETE FROM sessions WHERE token_hash="+Quote(tokenHash)+";"); }
         public string SessionDevice(string tokenHash) { lock(gate)return ScalarText(database,"SELECT public_identity FROM device_sessions WHERE token_hash="+Quote(tokenHash))??""; }
-        public bool SessionAllowsDevice(string tokenHash,string device) { var bound=SessionDevice(tokenHash);return bound.Length==0||bound==device; }
-        public long RememberedAccount(string hash,string device) { lock(gate)return ScalarLong(database,"SELECT r.account_id FROM remembered_devices r JOIN devices d ON d.account_id=r.account_id AND d.public_identity=r.public_identity WHERE r.credential_hash="+Quote(hash)+" AND r.public_identity="+Quote(device)); }
+        public bool SessionAllowsDevice(string tokenHash,string device) { lock(gate){var bound=SessionDevice(tokenHash);return (bound.Length==0||bound==device)&&ScalarLong(database,"SELECT count(*) FROM device_authority WHERE public_identity="+Quote(device)+" AND revoked=1")==0;} }
+        public long RememberedAccount(string hash,string device) { lock(gate)return ScalarLong(database,"SELECT r.account_id FROM remembered_devices r JOIN devices d ON d.account_id=r.account_id AND d.public_identity=r.public_identity WHERE r.credential_hash="+Quote(hash)+" AND r.public_identity="+Quote(device)+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=r.public_identity AND a.revoked=1)"); }
         // Replace/revoke atomically; no raw credential is stored. Device-bound
         // sessions cannot survive credential revocation or device/account deletion.
         public void RememberDevice(long account,string device,string hash) { lock(gate){
-            if(!OwnsDevice(account,device))throw new InvalidOperationException("Device is not owned by account.");
+            if(!ActiveDevice(account,device))throw new InvalidOperationException("Device is not active for account.");
             Execute("BEGIN IMMEDIATE;");try {
                 RevokeRememberedDevice(account,device);
                 Execute("INSERT INTO remembered_devices(account_id,public_identity,credential_hash) VALUES("+account+","+Quote(device)+","+Quote(hash)+");COMMIT;");
@@ -130,7 +169,7 @@ namespace PeerChat.Server {
             Execute("BEGIN IMMEDIATE;");try {CreateSession(tokenHash,account,expires);Execute("INSERT INTO device_sessions(token_hash,public_identity) VALUES("+Quote(tokenHash)+","+Quote(device)+");COMMIT;");}catch{try{Execute("ROLLBACK;");}catch{}throw;}
         }}
         public ServerPresence.Device TouchPresence(long accountId,string publicIdentity,string endpointHost,int endpointPort,string publicHost,int publicPort,string publicSource,string observedClassification,string owner="",bool replace=false,string session="") {
-            lock(gate){if(!OwnsDevice(accountId,publicIdentity))return null;
+            lock(gate){if(!ActiveDevice(accountId,publicIdentity))return null;
                 var current=Live.Get(publicIdentity);
                 if(owner.Length==0){owner=current==null?"presence-rpc":current.Owner;replace=current==null;}
                 return Live.Observe(accountId,publicIdentity,owner,replace,endpointHost,endpointPort,publicHost,publicPort,publicSource,observedClassification,session);
@@ -170,7 +209,7 @@ namespace PeerChat.Server {
         static bool GroupId(string value){return value!=null&&value.Length==32&&value.All(c=>(c>='0'&&c<='9')||(c>='a'&&c<='f'));}
         static bool GroupPeerId(string value){return value!=null&&value.Length==64&&value.All(c=>(c>='0'&&c<='9')||(c>='a'&&c<='f'));}
         string GroupRole(string group,long account,string device,string state="member"){
-            if(String.IsNullOrEmpty(device))return null;
+            if(String.IsNullOrEmpty(device)||!ActiveDevice(account,device))return null;
             return ScalarText(database,"SELECT role FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+account+" AND public_identity="+Quote(device)+" AND state="+Quote(state));
         }
         public bool GroupRelayAuthorized(string group,long a,string aDevice,long b,string bDevice,long generation=0){lock(gate){
@@ -185,7 +224,7 @@ namespace PeerChat.Server {
             action(GroupRoster(group,account,device));return true;
         }}
         public Dictionary<string,object> RegisterGroup(long account,string device,GroupRosterProof proof){lock(gate){
-            if(proof==null||proof.OwnerAccountId!=account||proof.OwnerIdentity!=device||!OwnsDevice(account,device))return null;
+            if(proof==null||proof.OwnerAccountId!=account||proof.OwnerIdentity!=device||!ActiveDevice(account,device))return null;
             string group=proof.ServerGroupId;long existing=ScalarLong(database,"SELECT owner_account_id FROM group_rosters WHERE group_id="+Quote(group));
             if(existing!=0){if(existing!=account||ScalarText(database,"SELECT owner_identity FROM group_rosters WHERE group_id="+Quote(group))!=device||ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.LegacyGroupId||ScalarText(database,"SELECT creation_event_id FROM group_rosters WHERE group_id="+Quote(group))!=proof.CreateEventId)return null;// Backfill only an exact verified registration retry; never invent a root for legacy history.
                 string stored=GroupCreationProof(group);
@@ -268,12 +307,12 @@ namespace PeerChat.Server {
             return new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(snapshot);
         }
         public bool PublishGroupDeviceIdentity(long account,string device,GroupDeviceIdentityProof proof){lock(gate){
-            if(proof==null||proof.Account!=account||proof.Device!=device||!OwnsDevice(account,device))return false;
+            if(proof==null||proof.Account!=account||proof.Device!=device||!ActiveDevice(account,device))return false;
             Execute("INSERT INTO group_device_identity_proofs(public_identity,account_id,signed_proof) VALUES("+Quote(device)+","+account+","+Quote(proof.Encoded)+") ON CONFLICT(public_identity) DO NOTHING;");
             return ReadGroupDeviceIdentity(account,device,device)!=null;
         }}
         public string ReadGroupDeviceIdentity(long account,string requestingDevice,string targetDevice){lock(gate){
-            if(!OwnsDevice(account,requestingDevice)||!OwnsDevice(account,targetDevice))return null;
+            if(!ActiveDevice(account,requestingDevice)||!OwnsDevice(account,targetDevice))return null;
             string encoded=ScalarText(database,"SELECT signed_proof FROM group_device_identity_proofs WHERE account_id="+account+" AND public_identity="+Quote(targetDevice));
             if(encoded==null)return null;
             var proof=GroupDeviceIdentityProof.Parse(encoded);
@@ -283,8 +322,8 @@ namespace PeerChat.Server {
         // Internal production boundary: RPC/UI activation waits for signed replica
         // reconciliation and current-key provisioning. Never admits account login alone.
         public Dictionary<string,object> ApplyGroupDeviceProof(long account,string device,GroupDeviceProof proof){lock(gate){
-            if(proof==null||proof.Account!=account||proof.Actor!=device||!OwnsDevice(account,device)||
-               !OwnsDevice(account,proof.Target)||GroupRole(proof.GroupId,account,device)==null||
+            if(proof==null||proof.Account!=account||proof.Actor!=device||!ActiveDevice(account,device)||
+               !OwnsDevice(account,proof.Target)||(!proof.Revoke&&!ActiveDevice(account,proof.Target))||GroupRole(proof.GroupId,account,device)==null||
                ScalarText(database,"SELECT legacy_group_id FROM group_rosters WHERE group_id="+Quote(proof.GroupId))!=proof.LegacyGroupId)return null;
             long current=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(proof.GroupId));
             long applied=ScalarLong(database,"SELECT applied_generation FROM group_device_proofs WHERE proof_id="+Quote(proof.Id));
@@ -354,7 +393,7 @@ namespace PeerChat.Server {
             return new Dictionary<string,object>{{"groupId",group},{"legacyGroupId",legacy},{"rosterGeneration",generation},{"distributorIdentity",ScalarText(database,"SELECT distributor_identity FROM group_rosters WHERE group_id="+Quote(group))},{"members",members},{"creationProof",GroupCreationProof(group)},{"deviceApprovalsIncluded",included},{"deviceApprovalsTruncated",truncated},{"deviceApprovals",approvals}};
         }}
         public List<Dictionary<string,object>> GroupRostersForDevice(long account,string device){lock(gate){
-            var result=new List<Dictionary<string,object>>();if(!OwnsDevice(account,device))return result;
+            var result=new List<Dictionary<string,object>>();if(!ActiveDevice(account,device))return result;
             var ids=new List<string>();IntPtr statement=IntPtr.Zero;
             try{if(SqliteNative.prepare(database,"SELECT group_id FROM group_roster_devices WHERE account_id="+account+" AND public_identity="+Quote(device)+" AND state='member' ORDER BY group_id LIMIT 200",out statement)!=0)throw new InvalidOperationException("Cannot list group rosters.");
                 while(SqliteNative.step(statement)==100)ids.Add(SqliteNative.columnText(statement,0));
@@ -368,7 +407,7 @@ namespace PeerChat.Server {
             }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
         }}
         public Dictionary<string,object> GroupInvite(string group,long actor,string actorDevice,long target,string targetDevice,long expectedGeneration){lock(gate){
-            if(!GroupId(group)||!GroupPeerId(actorDevice)||!GroupPeerId(targetDevice)||actor==target||!OwnsDevice(actor,actorDevice)||!OwnsDevice(target,targetDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
+            if(!GroupId(group)||!GroupPeerId(actorDevice)||!GroupPeerId(targetDevice)||actor==target||!ActiveDevice(actor,actorDevice)||!ActiveDevice(target,targetDevice)||expectedGeneration!=ScalarLong(database,"SELECT roster_generation FROM group_rosters WHERE group_id="+Quote(group)))return null;
             string role=GroupRole(group,actor,actorDevice);if(role!="owner"&&role!="admin")return null;
             if(ScalarLong(database,"SELECT count(*) FROM group_roster_devices WHERE group_id="+Quote(group)+" AND account_id="+target+" AND public_identity="+Quote(targetDevice))!=0)return null;
             Execute("BEGIN IMMEDIATE;");try{
@@ -399,7 +438,7 @@ namespace PeerChat.Server {
             }finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
         }}
         public Dictionary<string,object> GroupRespondAccount(string inviteId,long account,string device,bool accept){lock(gate){
-            if(!GroupId(inviteId)||!GroupPeerId(device)||!OwnsDevice(account,device))return null;
+            if(!GroupId(inviteId)||!GroupPeerId(device)||!ActiveDevice(account,device))return null;
             string group=ScalarText(database,"SELECT group_id FROM group_invites WHERE invite_id="+Quote(inviteId)+" AND recipient_account_id="+account+" AND state='pending'");if(group==null)return null;
             long inviter=ScalarLong(database,"SELECT inviter_account_id FROM group_invites WHERE invite_id="+Quote(inviteId));
             string inviterDevice=ScalarText(database,"SELECT inviter_identity FROM group_invites WHERE invite_id="+Quote(inviteId));
@@ -459,12 +498,15 @@ namespace PeerChat.Server {
         public Dictionary<string,object> AdminLookup(string username){lock(gate){if(String.IsNullOrWhiteSpace(username))return null;var page=AdminAccounts(username,0,2);var rows=(List<Dictionary<string,object>>)page["accounts"];return rows.Count==1&&String.Equals((string)rows[0]["username"],username,StringComparison.OrdinalIgnoreCase)?rows[0]:null;}}
         List<long> RelatedAccounts(long accountId){var result=new List<long>();IntPtr statement=IntPtr.Zero;try{string sql="SELECT DISTINCT related FROM (SELECT CASE WHEN account_low="+accountId+" THEN account_high ELSE account_low END AS related FROM friendships WHERE account_low="+accountId+" OR account_high="+accountId+" UNION SELECT CASE WHEN sender_id="+accountId+" THEN recipient_id ELSE sender_id END AS related FROM friend_requests WHERE sender_id="+accountId+" OR recipient_id="+accountId+" UNION SELECT CASE WHEN blocker_id="+accountId+" THEN blocked_id ELSE blocker_id END AS related FROM account_blocks WHERE blocker_id="+accountId+" OR blocked_id="+accountId+")";if(SqliteNative.prepare(database,sql,out statement)!=0)return result;while(SqliteNative.step(statement)==100)result.Add(SqliteNative.columnLong(statement,0));return result;}finally{if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}}
         public Dictionary<string,object> AdminDeleteAccount(long accountId){lock(gate){string username=Username(accountId);if(String.IsNullOrEmpty(username))return null;var related=RelatedAccounts(accountId);Execute("BEGIN IMMEDIATE;");try{Execute("DELETE FROM sessions WHERE account_id="+accountId+"; DELETE FROM presence WHERE device_id IN (SELECT id FROM devices WHERE account_id="+accountId+"); DELETE FROM group_invites WHERE recipient_account_id="+accountId+" OR inviter_account_id="+accountId+"; DELETE FROM friend_requests WHERE sender_id="+accountId+" OR recipient_id="+accountId+"; DELETE FROM friendships WHERE account_low="+accountId+" OR account_high="+accountId+"; DELETE FROM account_blocks WHERE blocker_id="+accountId+" OR blocked_id="+accountId+"; DELETE FROM devices WHERE account_id="+accountId+"; DELETE FROM accounts WHERE id="+accountId+";");Execute("COMMIT;");return new Dictionary<string,object>{{"accountId",accountId},{"username",username},{"relatedAccounts",related}};}catch{try{Execute("ROLLBACK;");}catch{}throw;}}}
-        public bool IsPresent(long accountId){lock(gate)return Live.Snapshot(accountId).Any(d=>OwnsDevice(accountId,d.Identity));}
+        public bool IsPresent(long accountId){lock(gate)return Live.Snapshot(accountId).Any(d=>ActiveDevice(accountId,d.Identity));}
         Dictionary<string,object> LiveProfile(Dictionary<string,object> profile,bool endpoints=false){
-            long account=Convert.ToInt64(profile["accountId"]);var devices=Live.Snapshot(account).Where(d=>OwnsDevice(account,d.Identity)).ToList();
+            long account=Convert.ToInt64(profile["accountId"]);var devices=Live.Snapshot(account).Where(d=>ActiveDevice(account,d.Identity)).ToList();
+            // Only the existing authorized friend projection (endpoints=true) gets deny identities.
+            // No private inventory, names, credentials, platform or keys are exposed to contacts.
+            if(endpoints){profile["revokedPublicIdentities"]=RevokedContactIdentities(account);profile["deviceAuthorityRevision"]=DeviceAuthorityRevision(account);}
             var selected=devices.FirstOrDefault();profile["online"]=selected!=null;profile["serverEpoch"]=Live.Epoch;profile["presenceRevision"]=Live.Revision;
             profile["devicesOnline"]=devices.Select(d=>(object)new Dictionary<string,object>{{"publicIdentity",d.Identity},{"generation",d.Generation},{"revision",d.Revision}}).ToArray();
-            if(selected!=null&&profile.ContainsKey("publicIdentity"))profile["publicIdentity"]=selected.Identity;
+            if(profile.ContainsKey("publicIdentity"))profile["publicIdentity"]=selected!=null?selected.Identity:ScalarText(database,"SELECT d.public_identity FROM devices d WHERE d.account_id="+account+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=d.public_identity AND a.revoked=1) ORDER BY d.id LIMIT 1")??"";
             if(endpoints){profile["endpointHost"]=selected==null?"":selected.Host;profile["endpointPort"]=selected==null?0:selected.Port;profile["publicEndpointHost"]=selected==null?"":selected.PublicHost;profile["publicEndpointPort"]=selected==null?0:selected.PublicPort;profile["candidateSeenUtc"]=selected==null?0:UnixNow();profile["publicCandidateSource"]=selected==null?"":selected.Source;profile["observedAddressClassification"]=selected==null?"":selected.Classification;}
             return profile;
         }
@@ -800,7 +842,7 @@ namespace PeerChat.Server {
         bool AdmitTurnCredentialIssue(long accountId,string device){long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();string key=accountId+":"+DeviceHint(device);lock(turnCredentialGate){foreach(var expired in turnCredentialRates.Where(x=>now-x.Value.WindowUtc>=TurnCredentialRateWindowSeconds).Select(x=>x.Key).ToArray())turnCredentialRates.Remove(expired);TurnCredentialRate rate;if(!turnCredentialRates.TryGetValue(key,out rate)){turnCredentialRates[key]=new TurnCredentialRate{WindowUtc=now,Count=1};return true;}if(rate.Count>=TurnCredentialRateLimit)return false;++rate.Count;return true;}}
         Dictionary<string,object> MediaTurnCredentials(long accountId,string device){
             if(!config.TurnEnabled)return Error("turn_unavailable");
-            if(!ValidIdentity(device)||!accounts.OwnsDevice(accountId,device))return Error("media_identity_invalid");
+            if(!ValidIdentity(device)||!accounts.ActiveDevice(accountId,device))return Error("media_identity_invalid");
             if(!AdmitTurnCredentialIssue(accountId,device))return Error("turn_credential_rate_limited");
             long expiry=DateTimeOffset.UtcNow.AddSeconds(config.TurnCredentialTtlSeconds).ToUnixTimeSeconds();
             string username=expiry+":"+accountId+":"+DeviceHint(device)+":"+RandomToken();
@@ -846,7 +888,9 @@ namespace PeerChat.Server {
             if(type=="login") { if(!ValidUsername(username)||String.IsNullOrEmpty(password)||password.Length>256)return Error("login_failed");long id;bool ok=accounts.PasswordMatches(username,(salt,hash)=>ConstantTimeEquals(PasswordHash(password,salt),hash),out id);Log(ok?"INFO":"WARNING",ok?"Account authentication succeeded.":"Account authentication failed.");return ok?Session(id):Error("login_failed"); }
             if(type=="remember_challenge"||type=="remember_resume"||type=="remember_revoke")return RememberedRequest(request,type,identity);
             long accountId=accounts.Authenticate(TokenHash(token)); if(accountId==0)return Error("session_invalid");
+            if(!String.IsNullOrEmpty(identity)&&accounts.OwnsDevice(accountId,identity)&&!accounts.ActiveDevice(accountId,identity))return Error("device_revoked");
             if(!String.IsNullOrEmpty(identity)&&!accounts.SessionAllowsDevice(TokenHash(token),identity))return Error("device_session_mismatch");
+            if(type=="device_inventory"||type=="device_metadata"||type=="device_rename"||type=="device_revoke_challenge"||type=="device_revoke")return DeviceManagementRequest(accountId,identity,TokenHash(token),type,request);
             if(type=="archive_descriptor_register"||type=="archive_grant_register"||type=="archive_authorization_state")return ArchiveAuthorizationRequest(accountId,identity,type,request);
             if(type=="remember_enroll_challenge"||type=="remember_enroll")return EnrollRemembered(request,type,accountId,identity,TokenHash(token));
             if(type=="messaging_bootstrap"){
@@ -954,6 +998,71 @@ namespace PeerChat.Server {
             return Error("unsupported_request");
         }
         Dictionary<string,object> Session(long accountId){string token=RandomToken();accounts.CreateSession(TokenHash(token),accountId,DateTimeOffset.UtcNow.AddHours(config.SessionHours).ToUnixTimeSeconds());return Ok(new Dictionary<string,object>{{"sessionToken",token},{"accountId",accountId},{"username",accounts.Username(accountId)??""},{"expiresInSeconds",config.SessionHours*3600},{"relayOnlyPresence",true},{"messagingBootstrapVersion",1}});}
+        sealed class DeviceManagementChallenge {
+            internal string Id,Actor,Target,Session,Fingerprint,Epoch;internal long Account,Revision,Issued,Expires;
+            internal byte[] Input {get{return Encoding.ASCII.GetBytes("PeerChat device management v1|revoke|"+Account.ToString(CultureInfo.InvariantCulture)+"|"+Actor+"|"+Target+"|"+Revision.ToString(CultureInfo.InvariantCulture)+"|"+Fingerprint+"|"+Epoch+"|"+Issued.ToString(CultureInfo.InvariantCulture)+"|"+Expires.ToString(CultureInfo.InvariantCulture)+"|"+Id+"|"+Session);}}
+        }
+        readonly object deviceManagementGate=new object();
+        readonly Dictionary<string,DeviceManagementChallenge> deviceManagementChallenges=new Dictionary<string,DeviceManagementChallenge>();
+        readonly Dictionary<long,long> deviceManagementStepUps=new Dictionary<long,long>();
+        string SerializeOrdinaryResponse(string type,Dictionary<string,object> response){return type!=null&&type.StartsWith("device_",StringComparison.Ordinal)?new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(response):json.Serialize(response);}
+        static string DeviceProofDigest(string target,string revision,string id,string key,string signature){return TokenHash(target+"|"+revision+"|"+id+"|"+key+"|"+signature);}
+        Dictionary<string,object> DeviceManagementRequest(long account,string actor,string session,string type,Dictionary<string,object> request){
+            if(!accounts.ManagementActor(account,actor,session))return Error("device_management_session_required");
+            if(type=="device_inventory")try{return Ok(accounts.DeviceInventory(account,actor,session));}catch(InvalidOperationException e){return Error(e.Message);}
+            if(type=="device_metadata"){
+                string platform=Text(request,"platform"),version=Text(request,"appVersion");
+                if((platform!="Windows"&&platform!="Android")||String.IsNullOrEmpty(version)||version.Length>64||version.Any(c=>c<33||c>126)||request.ContainsKey("targetPublicIdentity"))return Error("device_management_invalid_metadata");
+                try{if(accounts.ReportManagedMetadata(account,actor,session,platform,version))NotifyDeviceManagement(account);return Ok(accounts.DeviceInventory(account,actor,session));}catch(InvalidOperationException e){return Error(e.Message);}
+            }
+            string target=Text(request,"targetPublicIdentity");long expected;
+            if(!ValidIdentity(target)||!Int64.TryParse(Text(request,"expectedRevision"),NumberStyles.None,CultureInfo.InvariantCulture,out expected)||expected<0)return Error("device_management_invalid_request");
+            if(type=="device_rename"){
+                string name=Text(request,"name");try{if(name==null)return Error("device_management_invalid_name");name=name.Trim().Normalize(NormalizationForm.FormC);}catch(ArgumentException){return Error("device_management_invalid_name");}
+                if(name.Length<1||name.Length>64||Encoding.UTF8.GetByteCount(name)>256||name.Any(c=>Char.IsControl(c)||Char.GetUnicodeCategory(c)==UnicodeCategory.Format)||String.IsNullOrWhiteSpace(name))return Error("device_management_invalid_name");
+                string error=accounts.RenameManagedDevice(account,actor,session,target,expected,name);if(error!=null)return Error(error);NotifyDeviceManagement(account);return Ok(accounts.DeviceInventory(account,actor,session));
+            }
+            if(type=="device_revoke_challenge"){
+                if(target==actor)return Error("device_management_self_revoke_denied");
+                if(!accounts.ActiveDevice(account,target))return Error("device_management_not_authorized");
+                if(accounts.DeviceAuthorityRevision(account)!=expected)return Error("device_management_revision_conflict");
+                long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                lock(deviceManagementGate){long previous;if(deviceManagementStepUps.TryGetValue(account,out previous)&&now-previous<2)return Error("device_management_rate_limited");foreach(var stale in deviceManagementStepUps.Where(p=>now-p.Value>60).Select(p=>p.Key).ToArray())deviceManagementStepUps.Remove(stale);if(deviceManagementStepUps.Count>=1024)return Error("device_management_rate_limited");deviceManagementStepUps[account]=now;}
+                string password=Text(request,"password");long verified;
+                if(String.IsNullOrEmpty(password)||password.Length>256||!accounts.PasswordMatches(accounts.Username(account),(salt,hash)=>ConstantTimeEquals(PasswordHash(password,salt),hash),out verified)||verified!=account)return Error("device_management_step_up_failed");
+                var challenge=new DeviceManagementChallenge{Account=account,Actor=actor,Target=target,Revision=expected,Session=session,Epoch=accounts.Live.Epoch,Issued=now,Expires=now+60};
+                using(var sha=SHA256.Create())challenge.Fingerprint=BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-","").ToLowerInvariant();
+                byte[] nonce=new byte[32];using(var rng=RandomNumberGenerator.Create())rng.GetBytes(nonce);challenge.Id=BitConverter.ToString(nonce).Replace("-","").ToLowerInvariant();
+                lock(deviceManagementGate){foreach(var stale in deviceManagementChallenges.Where(p=>p.Value.Expires<now).Select(p=>p.Key).ToArray())deviceManagementChallenges.Remove(stale);if(deviceManagementChallenges.Count>=1024||deviceManagementChallenges.Values.Count(c=>c.Account==account)>=4)return Error("device_management_rate_limited");deviceManagementChallenges.Add(challenge.Id,challenge);}
+                return Ok(new Dictionary<string,object>{{"deviceManagementVersion",1},{"accountId",account},{"publicIdentity",actor},{"targetPublicIdentity",target},{"purpose","revoke"},{"expectedRevision",expected},{"serverFingerprint",challenge.Fingerprint},{"serverEpoch",challenge.Epoch},{"issuedUtc",challenge.Issued},{"expiresUtc",challenge.Expires},{"challengeId",challenge.Id},{"sessionBinding",session},{"signatureInput",Convert.ToBase64String(challenge.Input)}});
+            }
+            if(type!="device_revoke")return Error("unsupported_request");
+            string id=Text(request,"challengeId"),publicKey=Text(request,"publicKey"),signature=Text(request,"signature");
+            if(!ValidIdentity(id)||publicKey==null||publicKey.Length>100||signature==null||signature.Length>90)return Error("device_management_proof_invalid");
+            string digest=DeviceProofDigest(target,expected.ToString(CultureInfo.InvariantCulture),id,publicKey,signature+"|"+session);
+            // Exact accepted retry is idempotent, even after a process restart. Changed payloads never inherit success.
+            if(accounts.ManagedOutcome(account,actor,session,target,id,digest))return Ok(accounts.DeviceInventory(account,actor,session));
+            DeviceManagementChallenge proof;lock(deviceManagementGate){if(!deviceManagementChallenges.TryGetValue(id,out proof))return Error("device_management_proof_invalid");deviceManagementChallenges.Remove(id);}
+            if(proof.Account!=account||proof.Actor!=actor||proof.Target!=target||proof.Revision!=expected||proof.Session!=session||proof.Epoch!=accounts.Live.Epoch||proof.Expires<=DateTimeOffset.UtcNow.ToUnixTimeSeconds())return Error("device_management_proof_invalid");
+            try{byte[] key=Convert.FromBase64String(publicKey),sig=Convert.FromBase64String(signature);if(key.Length!=72||sig.Length!=64)return Error("device_management_proof_invalid");using(var sha=SHA256.Create()){
+                if(BitConverter.ToString(sha.ComputeHash(key)).Replace("-","").ToLowerInvariant()!=actor)return Error("device_management_proof_invalid");
+#if PEERCHAT_PORTABLE
+                if(!PortablePlatform.VerifyHash(key,sha.ComputeHash(proof.Input),sig))return Error("device_management_proof_invalid");
+#else
+                using(var cng=CngKey.Import(key,CngKeyBlobFormat.EccPublicBlob))using(var verifier=new ECDsaCng(cng))if(!verifier.VerifyHash(sha.ComputeHash(proof.Input),sig))return Error("device_management_proof_invalid");
+#endif
+            }}catch(CryptographicException){return Error("device_management_proof_invalid");}catch(FormatException){return Error("device_management_proof_invalid");}
+            string revokeError=accounts.RevokeManagedDevice(account,actor,session,target,expected,id,digest);if(revokeError!=null)return Error(revokeError);
+            foreach(var lease in accounts.Live.Snapshot(account).Where(d=>accounts.Authenticate(d.Session)==0).ToArray()){accounts.ClearPresence(account,lease.Identity,lease.Owner);BroadcastPresence(account,lease.Identity,"",0,"",0,false);}
+            RetireManagedAccountRoutes(account);InvalidateDirectProbes(account);NotifyDeviceManagement(account);
+            foreach(long friend in accounts.ManagedDeviceContacts(account))Notify(friend,new Dictionary<string,object>{{"event","friendship_changed"},{"accountId",account}});
+            return Ok(accounts.DeviceInventory(account,actor,session));
+        }
+        void NotifyDeviceManagement(long account){Notify(account,new Dictionary<string,object>{{"event","device_management_changed"},{"accountId",account},{"serverEpoch",accounts.Live.Epoch},{"authorityRevision",accounts.DeviceAuthorityRevision(account)}});}
+        void RetireManagedAccountRoutes(long account){
+            List<RelayEndpoint> relays;lock(relayGate)relays=relayEndpoints.Where(e=>e.AccountId==account&&accounts.Authenticate(e.SessionTokenHash)==0).ToList();foreach(var endpoint in relays)try{endpoint.Client.Close();}catch{}
+            List<EventClient> events;lock(eventGate)events=eventClients.Where(e=>e.AccountId==account&&accounts.Authenticate(e.SessionTokenHash)==0).ToList();foreach(var subscription in events)EndEventSubscription(subscription);
+        }
         static bool ValidCredential(string value){return value!=null&&value.Length==43&&value.All(c=>Char.IsLetterOrDigit(c)||c=='-'||c=='_');}
         Dictionary<string,object> ProofChallenge(long account,string device,string action,string binding){
             try{var proof=rememberedProofs.Issue(account,device,action,binding);return Ok(new Dictionary<string,object>{{"challengeId",proof.Id},{"signatureInput",Convert.ToBase64String(proof.Input)},{"accountId",account},{"publicIdentity",device},{"purpose",action}});}
@@ -1041,7 +1150,7 @@ namespace PeerChat.Server {
             string scope=Text(request,"purpose")??"friend",groupId=Text(request,"groupId")??"";long rosterGeneration=0;
             if(!Int64.TryParse(Text(request,"targetAccountId"),out targetAccountId)||targetAccountId<1||
                (scope=="archive_history"?accountId!=targetAccountId:accountId==targetAccountId)||
-               device==targetDevice||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.SessionAllowsDevice(tokenHash,device)||!accounts.OwnsDevice(accountId,device)||!accounts.OwnsDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
+               device==targetDevice||!ValidIdentity(device)||!ValidIdentity(targetDevice)||!accounts.SessionAllowsDevice(tokenHash,device)||!accounts.ActiveDevice(accountId,device)||!accounts.ActiveDevice(targetAccountId,targetDevice)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("relay_identity_invalid"))));return;}
             if(scope=="group_key"&&(!Int64.TryParse(Text(request,"rosterGeneration"),out rosterGeneration)||rosterGeneration<1)){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("group_roster_generation_invalid"))));return;}
             var archive=scope=="archive_history"?ReadArchiveRelay(request):null;
             string requestedRoster=Text(request,"rosterGeneration");
@@ -1105,7 +1214,7 @@ Task<byte[]> pendingEventRead=null;try{long nextLegacyLease=leaseClock.ElapsedMi
                     finally{EndEventSubscription(subscription);if(pendingEventRead!=null)pendingEventRead.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted);Log("DEBUG","Discovery event channel closed.");}
                     return;
                 }
-                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}stage="request_handle";var response=Encoding.UTF8.GetBytes(json.Serialize(Handle(request,observedHost,0)));stage="response_write";WriteFrame(tls,response);}catch(Exception error){bool expected=stopping||ReliableIoDiagnostics.ExpectedDisconnect(error,kind);Log(expected?"DEBUG":"WARNING",(expected?"Reliable channel disconnected":"Client request failed")+": "+error.GetType().Name+" request_id="+correlation+" request="+kind+" stage="+stage+" authenticated_account="+diagnosticAccount);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected request_id="+correlation+".");}}}
+                string observedHost="";try{var remote=client.Client.RemoteEndPoint as IPEndPoint;if(remote!=null)observedHost=remote.Address.ToString();}catch{}stage="request_handle";var response=Encoding.UTF8.GetBytes(SerializeOrdinaryResponse(requestType,Handle(request,observedHost,0)));stage="response_write";WriteFrame(tls,response);}catch(Exception error){bool expected=stopping||ReliableIoDiagnostics.ExpectedDisconnect(error,kind);Log(expected?"DEBUG":"WARNING",(expected?"Reliable channel disconnected":"Client request failed")+": "+error.GetType().Name+" request_id="+correlation+" request="+kind+" stage="+stage+" authenticated_account="+diagnosticAccount);}finally{Interlocked.Decrement(ref connectedClients);Log("DEBUG","Discovery client disconnected request_id="+correlation+".");}}}
         public static int Main(string[] args){try{if(args.Length==1&&args[0]=="--version"){Console.WriteLine(VersionInfo.Display);return 0;}string configPath=ServerConfiguration.DefaultConfigPath;for(int i=0;i+1<args.Length;i++)if(args[i]=="--config")configPath=args[++i];
 #if PEERCHAT_PORTABLE
             if(!OperatingSystem.IsWindows()&&(!Array.Exists(args,x=>x=="--config")||!Path.IsPathRooted(configPath)||!File.Exists(configPath)))throw new InvalidOperationException("Linux requires --config with an existing absolute configuration path.");

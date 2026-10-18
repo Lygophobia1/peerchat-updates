@@ -16,7 +16,7 @@ sealed partial class DiscoveryServer {
         string token=Text(hello,"sessionToken"),hash=TokenHash(token),device=Text(hello,"publicIdentity");
         long account=accounts.Authenticate(hash);
         Func<bool> current=()=>account>0&&accounts.Authenticate(hash)==account&&
-            accounts.SessionAllowsDevice(hash,device)&&accounts.OwnsDevice(account,device);
+            accounts.SessionAllowsDevice(hash,device)&&accounts.ActiveDevice(account,device);
         if(!ValidIdentity(device)||!current()){WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Error("session_invalid"))));return;}
         tls.ReadTimeout=15000;tls.WriteTimeout=10000;
         WriteFrame(tls,Encoding.UTF8.GetBytes(json.Serialize(Ok(new Dictionary<string,object>{{"type","rpc_ready"},{"rpcVersion",1}}))));

@@ -57,6 +57,27 @@ class CacheBackupTests(unittest.TestCase):
 
 
 class StartupHealthTests(unittest.TestCase):
+    def test_rollback_cannot_resurrect_revoked_device(self):
+        with tempfile.TemporaryDirectory(prefix='peerchat-revocation-rollback-') as tmp:
+            path=pathlib.Path(tmp)/'isolated.sqlite'
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('create table messages(id text)')
+                db.execute("insert into messages values('retained')")
+                db.commit()
+            update.require_legacy_rollback_safe(path)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('create table device_authority(public_identity text,revoked integer)')
+                db.execute("insert into device_authority values('test-device',0)")
+                db.commit()
+            update.require_legacy_rollback_safe(path)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('update device_authority set revoked=1')
+                db.commit()
+            before=update.digest(path)
+            with self.assertRaisesRegex(RuntimeError,'revocation-aware'):
+                update.require_legacy_rollback_safe(path)
+            self.assertEqual(before,update.digest(path))
+
     def test_transient_tls_timeout_retries_full_health(self):
         with patch.object(update,'health',side_effect=[TimeoutError('startup'),{'tls_pin':'unchanged','existing_test_auth':'passed','discovery':'passed'}]) as check:
             with patch.object(update.time,'sleep'):

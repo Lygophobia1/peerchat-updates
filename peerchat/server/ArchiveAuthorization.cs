@@ -75,7 +75,7 @@ sealed partial class AccountDatabase {
     string ArchivePredicate(long account,string device){return "account_id="+account+" AND device="+Quote(device);}
     internal string RegisterArchiveDescriptor(long account,string device,byte[] wire){lock(gate){
         var d=ArchiveAuthorizationProof.Descriptor.Parse(wire);
-        if(d.Account!=account||d.Device!=device||!OwnsDevice(account,device))return "not_authorized";
+        if(d.Account!=account||d.Device!=device||!ActiveDevice(account,device))return "not_authorized";
         if(d.Issued>MailboxNow()+300000)return "invalid_timestamp";
         InitializeArchiveAuthorization();
         Execute("BEGIN IMMEDIATE;");try {
@@ -98,14 +98,14 @@ sealed partial class AccountDatabase {
         return wire==null?null:ArchiveAuthorizationProof.Descriptor.Parse(wire);
     }
     internal string RegisterArchiveGrant(long account,string issuer,byte[] wire){lock(gate){
-        if(!OwnsDevice(account,issuer))return "not_authorized";
+        if(!ActiveDevice(account,issuer))return "not_authorized";
         InitializeArchiveAuthorization();var authority=ArchiveDescriptor(account,issuer);
         if(authority==null)return "issuer_descriptor_required";
         var grant=ArchiveAuthorizationProof.Grant.Parse(wire,authority.Public);
         if(grant.Account!=account||grant.Issuer!=issuer)return "not_authorized";
         if(grant.Issued>MailboxNow()+300000)return "invalid_timestamp";
         var target=ArchiveDescriptor(account,grant.Device);
-        if(target==null||!target.Public.SequenceEqual(grant.Public)||(!grant.Revoked&&!OwnsDevice(account,grant.Device)))return "target_not_authorized";
+        if(target==null||!target.Public.SequenceEqual(grant.Public)||(!grant.Revoked&&!ActiveDevice(account,grant.Device)))return "target_not_authorized";
         // Server admission proves device/account/signature, NOT client consent
         // to this authority. Every endpoint independently pins the authorizer.
         Execute("BEGIN IMMEDIATE;");try {
@@ -124,22 +124,22 @@ sealed partial class AccountDatabase {
         }catch{try{Execute("ROLLBACK;");}catch{}throw;}
     }}
     internal List<Dictionary<string,object>> ArchiveDescriptors(long account,string device){lock(gate){
-        ArchiveAuthorizationProof.Check(OwnsDevice(account,device));InitializeArchiveAuthorization();
+        ArchiveAuthorizationProof.Check(ActiveDevice(account,device));InitializeArchiveAuthorization();
         return MailboxRows("SELECT device,proof FROM archive_device_descriptors a WHERE account_id="+account+
             " AND EXISTS(SELECT 1 FROM devices d WHERE d.account_id=a.account_id AND d.public_identity=a.device) ORDER BY device LIMIT 32",32,"device","descriptor");
     }}
     internal List<Dictionary<string,object>> ArchiveGrants(long account,string device){lock(gate){
-        ArchiveAuthorizationProof.Check(OwnsDevice(account,device));InitializeArchiveAuthorization();
+        ArchiveAuthorizationProof.Check(ActiveDevice(account,device));InitializeArchiveAuthorization();
         // Tombstones remain visible and durable. Never delete a revoked grant
         // and then allow its old generation to become 'first use' again.
         var rows=MailboxRows("SELECT issuer||':'||device,proof FROM archive_device_grants WHERE account_id="+account+
             " ORDER BY issuer,device LIMIT 64",64,"grantId","grant");
         foreach(var row in rows){string id=Convert.ToString(row["grantId"]);string issuer=id.Substring(0,64),subject=id.Substring(65);
-            row["currentlyEligible"]=OwnsDevice(account,issuer)&&OwnsDevice(account,subject)&&ScalarLong(database,"SELECT count(*) FROM archive_device_grants WHERE account_id="+account+" AND issuer="+Quote(issuer)+" AND device="+Quote(subject)+" AND disabled=0 AND revoked=0")==1;}
+            row["currentlyEligible"]=ActiveDevice(account,issuer)&&ActiveDevice(account,subject)&&ScalarLong(database,"SELECT count(*) FROM archive_device_grants WHERE account_id="+account+" AND issuer="+Quote(issuer)+" AND device="+Quote(subject)+" AND disabled=0 AND revoked=0")==1;}
         return rows;
     }}
     internal bool ArchiveAuthorized(long account,string issuer,string device,long generation,long capability){lock(gate){
-        if(account<=0||generation<=0||capability<1||capability>3||!OwnsDevice(account,issuer)||!OwnsDevice(account,device))return false;
+        if(account<=0||generation<=0||capability<1||capability>3||!ActiveDevice(account,issuer)||!ActiveDevice(account,device))return false;
         InitializeArchiveAuthorization();
         return ScalarLong(database,"SELECT count(*) FROM archive_device_grants WHERE account_id="+account+" AND issuer="+Quote(issuer)+" AND device="+Quote(device)+
             " AND generation="+generation+" AND revoked=0 AND disabled=0 AND (capabilities & "+capability+")="+capability)==1;

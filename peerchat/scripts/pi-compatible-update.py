@@ -44,6 +44,14 @@ def identities(database, reference=None):
 def tree_hashes(directory):
     return {str(p.relative_to(directory)):digest(p) for p in sorted(directory.rglob('*')) if p.is_file()}
 
+def require_legacy_rollback_safe(database):
+    # Older binaries do not enforce Device Manager tombstones. A database restore
+    # would also erase newer messages; neither is a safe automatic rollback.
+    with closing(sqlite3.connect('file:'+str(database)+'?mode=ro', uri=True)) as db:
+        exists=db.execute("select count(*) from sqlite_master where type='table' and name='device_authority'").fetchone()[0]
+        if exists and db.execute('select count(*) from device_authority where revoked=1').fetchone()[0]:
+            raise RuntimeError('Automatic legacy rollback blocked: durable device revocations require a validated revocation-aware binary; preserve current database and cache')
+
 def backup_cache(directory, destination):
     # Called only after the checked server has stopped. Preserve ciphertext,
     # partials, index and ownership marker together; never restore this over
@@ -199,6 +207,12 @@ def main():
         # Binary rollback only; NEVER overwrite newer durable user writes.
         newpid=ROOT/'data'/args.new/'server.pid'
         if newpid.exists(): run(['python3',helper,'stop','--version',args.new,'--port','7443'])
+        try:
+            require_legacy_rollback_safe(database)
+        except RuntimeError:
+            report['result']='rollback_blocked_preserve_revocation_authority'
+            (backup/'manifest.json').write_text(json.dumps(report,indent=2))
+            raise
         run(['python3',helper,'start','--version',args.old,'--port','7443'])
         report['rollback_health']=wait_for_health(config,args.pin.upper());report['result']='rolled_back_current_database_preserved'
         (backup/'manifest.json').write_text(json.dumps(report,indent=2))

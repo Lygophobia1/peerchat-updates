@@ -68,11 +68,23 @@ sealed partial class AccountDatabase {
   if(recipients.Any(x=>!DirectCacheCapable(MailboxProtocol.Binding.Parse(x.Binding))))throw new InvalidOperationException("cache_dm_recipient_upgrade_required");
   var bytes=DirectCacheAudience.Encode(relationship,source,recipients.Select(x=>x.Binding));DirectCacheAudience.Parse(bytes,account,device,recipient);return bytes;
  }}
- internal T WithDirectCacheAuthority<T>(AttachmentCacheDescriptor descriptor,DirectCacheAudience audience,long account,string device,Func<bool> current,bool admission,Func<T> action){lock(gate){
+ // Historical uploader proof is not current request authority. Only a completed,
+ // already stored object may use it, and only for its still-active original recipient.
+ // An explicitly revoked key remains denied; exact signed binding bytes must match.
+ bool RetainedDirectSourceProof(MailboxProtocol.Binding binding){
+  if(!OwnsDevice(binding.Account,binding.Device))return false;
+  var proof=MailboxBlob("SELECT proof FROM mailbox_recipient_keys WHERE account_id="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation+" AND allowed=1 AND state IN ('active','retired')");
+  return proof!=null&&proof.SequenceEqual(binding.Wire);
+ }
+ internal T WithDirectCacheAuthority<T>(AttachmentCacheDescriptor descriptor,DirectCacheAudience audience,long account,string device,Func<bool> current,bool admission,Func<T> action,bool retainedComplete=false){lock(gate){
+  bool historicalSource=!admission&&retainedComplete&&account==descriptor.RecipientAccount&&device!=descriptor.Sender;
+  bool sourceAuthorized=historicalSource?
+   OwnsDevice(descriptor.Account,descriptor.Sender)&&Friends(descriptor.Account,descriptor.RecipientAccount)&&!Blocked(descriptor.Account,descriptor.RecipientAccount)&&RetainedDirectSourceProof(audience.Source):
+   MailboxFriendScope(descriptor.Account,descriptor.Sender,descriptor.RecipientAccount)&&DirectCacheKeyAvailable(audience.Source,!admission);
   if(!descriptor.Direct||descriptor.Relationship!=audience.Relationship||descriptor.AudienceDigest!=audience.Digest||
-     !current()||!MailboxFriendScope(descriptor.Account,descriptor.Sender,descriptor.RecipientAccount)||
+     !current()||!ActiveDevice(account,device)||!sourceAuthorized||
      DirectCacheRelationship(descriptor.Account,descriptor.RecipientAccount)!=audience.Relationship||
-     !DirectCacheKeyAvailable(audience.Source,!admission))throw new InvalidOperationException("cache_dm_authority_stale");
+     audience.Source.Account!=descriptor.Account||audience.Source.Device!=descriptor.Sender)throw new InvalidOperationException("cache_dm_authority_stale");
   if(account==descriptor.Account&&device==descriptor.Sender){
    if(admission&&!PrepareDirectCache(account,device,descriptor.RecipientAccount,current).SequenceEqual(audience.Wire))throw new InvalidOperationException("cache_dm_audience_changed");
   }else{
@@ -110,7 +122,7 @@ internal sealed partial class AttachmentCacheAdmission {
   return accounts.WithDirectCacheAuthority(d,audience,account,device,current,false,()=>{
    var local=account==d.Account&&device==d.Sender?audience.Source:audience.Recipients.FirstOrDefault(x=>x.Account==account&&x.Device==device);
    Require(local!=null&&cache.OriginalMembership(id,account,device)==DirectCacheAudience.DeviceBinding(local),"cache_dm_original_recipient_required");if(!allowExpiredRelease)cache.DirectNotExpired(id);return action(d);
-  });
+  },cache.Inspect(id).Complete);
  }
  internal Dictionary<string,object> DirectContext(long account,string device,Func<bool> current,string id){return AuthorizedDirect(account,device,current,id,d=>{
   var status=cache.Inspect(id);return new Dictionary<string,object>{{"id",id},{"descriptor",AttachmentCacheRequests.Encode(d.Wire)},{"audience",AttachmentCacheRequests.Encode(cache.DirectAudience(id).Wire)},{"expiresUtc",cache.ContextExpires(id)},{"ciphertextSize",status.Size},{"durableOffset",status.Offset},{"ciphertextComplete",status.Complete},{"dataEncoding","base64url"}};
