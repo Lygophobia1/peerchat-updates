@@ -26,8 +26,24 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
     private val protector:()->RecordProtector,domain:String="android-qol-v1",
     private val keyPattern:Regex=Regex("[0-9a-f]{64}:account:[1-9][0-9]{0,18}")):AndroidQolRepository {
     private val label=domain.toByteArray(Charsets.US_ASCII)
-    override fun load():AndroidQolState {
-        val blob=read() ?: return AndroidQolState();require(blob.size in 1..1048576)
+    private var cachedBlob:ByteArray?=null
+    private var cachedValue:AndroidQolState?=null
+
+    override fun load():AndroidQolState = synchronized(this) {
+        val blob=read() ?: return@synchronized AndroidQolState()
+        require(blob.size in 1..1048576)
+        val observed=blob.copyOf()
+        val cached=cachedBlob
+        val value=cachedValue
+        if(cached!=null&&value!=null&&cached.contentEquals(observed))return@synchronized detachedCopy(value)
+        val decoded=decode(observed)
+        // Only a fully validated record can replace the single-entry cache.
+        cachedBlob=observed
+        cachedValue=detachedCopy(decoded)
+        detachedCopy(decoded)
+    }
+
+    private fun decode(blob:ByteArray):AndroidQolState {
         val json=JSONObject(protector().unprotect(blob,label).toString(Charsets.UTF_8));require(json.getInt("version")==1)
         val rows=json.getJSONObject("conversations");require(rows.length()<=128)
         val values=rows.keys().asSequence().associateWith {key->
@@ -39,19 +55,26 @@ internal class ProtectedAndroidQolStore(private val read:()->ByteArray?,private 
             if(json.has("mailboxStorageAllowed"))json.getBoolean("mailboxStorageAllowed") else true,
             if(json.has("attachmentSendMode"))AttachmentSendMode.valueOf(json.getString("attachmentSendMode")) else AttachmentSendMode.Direct)
     }
-    override fun save(value:AndroidQolState) {
-        require(value.conversations.size<=128)
-        val rows=JSONObject();value.conversations.forEach {key,r->
+
+    override fun save(value:AndroidQolState):Unit = synchronized(this) {
+        val snapshot=detachedCopy(value)
+        require(snapshot.conversations.size<=128)
+        val rows=JSONObject();snapshot.conversations.forEach {key,r->
             require(key.matches(keyPattern)&&r.draft.length<=4096&&r.readSequence>=0&&r.notifiedSequence>=0)
             val row=JSONObject().put("draft",r.draft).put("read",r.readSequence).put("notified",r.notifiedSequence)
             if(r.baselinePending)row.put("baselinePending",true)
             rows.put(key,row)
         }
-        val plain=JSONObject().put("version",1).put("preview",value.preview.name).put("notifications",value.notifications)
-            .put("mailboxStorageAllowed",value.mailboxStorageAllowed).put("attachmentSendMode",value.attachmentSendMode.name)
+        val plain=JSONObject().put("version",1).put("preview",snapshot.preview.name).put("notifications",snapshot.notifications)
+            .put("mailboxStorageAllowed",snapshot.mailboxStorageAllowed).put("attachmentSendMode",snapshot.attachmentSendMode.name)
             .put("conversations",rows).toString().toByteArray(Charsets.UTF_8)
-        require(plain.size<=1000000);write(protector().protect(plain,label))
+        require(plain.size<=1000000)
+        val protected=protector().protect(plain,label)
+        write(protected)
+        cachedBlob=protected.copyOf();cachedValue=detachedCopy(snapshot)
     }
+
+    private fun detachedCopy(value:AndroidQolState)=value.copy(conversations=LinkedHashMap(value.conversations))
 }
 fun groupPreferenceKey(accountKey:String,group:String):String {
     require(accountKey.matches(Regex("[0-9a-f]{64}"))&&group.matches(Regex("[0-9a-f]{32}")));return "$accountKey:group:$group"

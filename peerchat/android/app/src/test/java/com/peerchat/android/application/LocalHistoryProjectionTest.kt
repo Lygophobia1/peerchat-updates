@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalHistoryProjectionTest {
+    @Test fun idleSnapshotsAreReusedButEventsNeverWaitForReconciliation(){
+        val projection=LocalHistoryProjection();val f=friend(1);var reads=0
+        repeat(60){projection.refreshOne(listOf(f),it*1000L){reads++;emptyList()}}
+        assertEquals(1,reads)
+        projection.invalidateUrgent(f);projection.refreshOne(listOf(f),59_001){reads++;emptyList()}
+        assertEquals(2,reads)
+        projection.refreshOne(listOf(f),119_001){reads++;emptyList()};assertEquals(3,reads)
+    }
     private fun friend(id:Long)=FriendIdentity(id,"contact","a".repeat(64),false)
     @Test fun readsOneBoundedPageAndReusesItUntilInvalidated(){
         val cache=LocalHistoryProjection();val friends=listOf(friend(1),friend(2));val reads=mutableListOf<Long>()

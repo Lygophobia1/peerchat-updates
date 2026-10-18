@@ -112,6 +112,89 @@ class GroupVoiceRoomsTest {
         assertEquals(1, sends)
     }
 
+    @Test fun nativeRosterChangeRetiresRoomStateAndRejectsLateOldRoster() {
+        val rooms=GroupVoiceRooms()
+        fun authorized(roster:Long)=listOf(GroupConversationSnapshot(group,"d".repeat(32),roster,"Group",true,2))
+        assertTrue(rooms.reconcileAuthorized(authorized(2)))
+        rooms.trackAndLoad()
+        val join=rooms.request(group,"join_voice",room){true}!!
+        assertNotNull(rooms.snapshot(group))
+
+        assertTrue(rooms.reconcileAuthorized(authorized(3)))
+        assertNull(rooms.snapshot(group))
+        assertEquals("unavailable",rooms.result(join))
+        val refresh=rooms.request(group,"snapshot"){true}
+        assertNotNull(refresh)
+        rooms.event(snapshotEvent(snapshot(roster=2)),7,localDevice)
+        assertNull(rooms.snapshot(group))
+        rooms.event(snapshotEvent(snapshot(roster=3)),7,localDevice)
+        assertEquals(3L,rooms.snapshot(group)?.roster)
+        assertFalse(rooms.reconcileAuthorized(authorized(3)))
+    }
+
+    @Test fun snapshotPollingPrioritizesActiveGroupAndBoundsIdleCadence() {
+        var clock=100L
+        val rooms=GroupVoiceRooms { clock }
+        val other="e".repeat(32)
+        rooms.reconcileAuthorized(listOf(
+            GroupConversationSnapshot(group,"d".repeat(32),2,"Group",true,2),
+            GroupConversationSnapshot(other,"f".repeat(32),2,"Other",true,2)))
+        assertEquals(group,rooms.dueSnapshotGroup(group))
+        val first=rooms.request(group,"snapshot"){true}!!
+        assertEquals(other,rooms.dueSnapshotGroup(group))
+        rooms.request(other,"snapshot"){true}
+        assertNull(rooms.dueSnapshotGroup(group))
+        assertEquals(first,rooms.request(group,"snapshot"){fail("duplicate request");true})
+        clock+=15_000
+        assertEquals(group,rooms.dueSnapshotGroup(group))
+        rooms.request(group,"snapshot"){true}
+        assertNull(rooms.dueSnapshotGroup(group))
+        clock+=45_000
+        assertEquals(group,rooms.dueSnapshotGroup(group))
+    }
+
+    @Test fun newerAuthenticatedRosterRetiresOldRoomWithoutGrantingNewAuthority() {
+        val rooms=GroupVoiceRooms()
+        fun authorized(roster:Long)=listOf(GroupConversationSnapshot(group,"d".repeat(32),roster,"Group",true,2))
+        rooms.reconcileAuthorized(authorized(2))
+        rooms.trackAndLoad()
+        val join=rooms.request(group,"join_voice",room){true}!!
+        rooms.event(signal(),7,localDevice)
+
+        rooms.event(snapshotEvent(snapshot(roster=3,revision=2)),7,localDevice)
+        assertNull(rooms.snapshot(group))
+        assertEquals("unavailable",rooms.result(join))
+        assertTrue(rooms.take(group,room,7,localDevice).isEmpty())
+        assertNull(rooms.request(group,"join_voice",room){fail("old roster joined");true})
+
+        rooms.event(snapshotEvent(snapshot(roster=2,revision=3)),7,localDevice)
+        assertFalse(rooms.reconcileAuthorized(authorized(2)))
+        assertNull(rooms.snapshot(group))
+        assertTrue(rooms.reconcileAuthorized(authorized(3)))
+        assertNotNull(rooms.request(group,"snapshot"){true})
+        rooms.event(snapshotEvent(snapshot(roster=3,revision=2)),7,localDevice)
+        assertEquals(3L,rooms.snapshot(group)?.roster)
+    }
+
+    @Test fun oldRoomSnapshotStopsGrantingJoinAuthorityAndResetClearsPollClock() {
+        var clock=100L
+        val rooms=GroupVoiceRooms { clock }
+        val authorized=listOf(GroupConversationSnapshot(group,"d".repeat(32),2,"Group",true,2))
+        rooms.reconcileAuthorized(authorized)
+        rooms.trackAndLoad()
+        assertTrue(rooms.isFresh(group))
+        assertNotNull(rooms.request(group,"join_voice",room){true})
+        rooms.dueSnapshotGroup(group)
+        clock+=45_000
+        assertFalse(rooms.isFresh(group))
+        assertNull(rooms.snapshot(group))
+        assertNull(rooms.request(group,"join_voice",room){fail("stale room joined");true})
+        rooms.reset()
+        rooms.reconcileAuthorized(authorized)
+        assertEquals(group,rooms.dueSnapshotGroup())
+        assertNull(rooms.snapshot(group))
+    }
+
     @Test fun futureSignalWaitsForSnapshotAndCannotOutliveItsParticipation() {
         val rooms = GroupVoiceRooms()
         rooms.trackAndLoad()

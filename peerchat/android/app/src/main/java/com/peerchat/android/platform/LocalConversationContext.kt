@@ -15,6 +15,12 @@ internal data class LocalConversationContext(val account:Long,val username:Strin
 internal class ProtectedLocalConversationContextStore(private val read:()->ByteArray?,
     private val write:(ByteArray)->Unit,private val records:RecordProtector) {
     private val label="local-conversation-context-v1".toByteArray(Charsets.US_ASCII)
+    private data class PersistedFriend(val account:Long,val username:String,val peer:String,
+        val devices:List<String>,val deviceNames:Map<String,String>)
+    private data class PersistedContext(val host:String,val port:Int,val pin:String,val account:Long,
+        val username:String,val device:String,val friends:List<PersistedFriend>)
+    private var previous:PersistedContext?=null
+
     fun load(endpoint:ServerEndpoint):LocalConversationContext? {
         val blob=read() ?: return null
         require(blob.size in 1..1048576)
@@ -26,18 +32,28 @@ internal class ProtectedLocalConversationContextStore(private val read:()->ByteA
         val list=value.getJSONArray("friends");require(list.length()<=128)
         val friends=List(list.length()){i->val item=list.getJSONObject(i);val ids=item.getJSONArray("devices");require(ids.length() in 1..32)
             FriendIdentity(item.getLong("account"),item.getString("username"),item.getString("peer"),false,List(ids.length()){ids.getString(it)},deviceNames=deviceDisplayNames(item.opt("deviceNames")))}
-        return LocalConversationContext(account,name,device,reconcileFriends(friends,friends))
+        val saved=PersistedContext(endpoint.host,endpoint.port,endpoint.certificatePin,account,name,device,persistedFriends(friends))
+        val result=LocalConversationContext(account,name,device,reconcileFriends(friends,friends))
+        previous=saved
+        return result
     }
     fun save(endpoint:ServerEndpoint,value:LocalConversationContext) {
         require(validStoredServer(endpoint)&&value.account>0&&value.username.length<=64&&value.device.matches(Regex("[0-9a-f]{64}")))
         require(value.friends.size<=128);reconcileFriends(value.friends,value.friends)
+        val saved=PersistedContext(endpoint.host,endpoint.port,endpoint.certificatePin,value.account,value.username,
+            value.device,persistedFriends(value.friends))
+        if(previous==saved)return
         val list=JSONArray()
         value.friends.forEach{friend->list.put(JSONObject().put("account",friend.accountId).put("username",friend.username)
             .put("peer",friend.peerId).put("devices",JSONArray(friend.knownPeerIds)).put("deviceNames",JSONObject(friend.deviceNames?:emptyMap<String,String>())))}
         val plain=JSONObject().put("version",1).put("host",endpoint.host).put("port",endpoint.port).put("pin",endpoint.certificatePin)
             .put("account",value.account).put("username",value.username).put("device",value.device).put("friends",list).toString().toByteArray(Charsets.UTF_8)
         require(plain.size<=1048000)
-        write(records.protect(plain,label))
+        write(records.protect(plain,label));previous=saved
+    }
+
+    private fun persistedFriends(values:List<FriendIdentity>)=values.map { friend ->
+        PersistedFriend(friend.accountId,friend.username,friend.peerId,friend.knownPeerIds.toList(),friend.deviceNames?:emptyMap())
     }
 }
 internal class LocalConversationContextStore(context:Context,profile:String) {

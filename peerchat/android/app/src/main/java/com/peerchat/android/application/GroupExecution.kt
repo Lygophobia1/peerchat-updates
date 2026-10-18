@@ -2,6 +2,7 @@ package com.peerchat.android.application
 
 import com.peerchat.android.GroupBridge
 import com.peerchat.android.platform.ServerAccounts
+import com.peerchat.android.platform.AccountSession
 import org.json.JSONObject
 import java.util.Base64
 
@@ -16,6 +17,14 @@ data class GroupInvitationSnapshot(val id:String,val group:String,val inviter:St
 /** Execution of existing server RPCs and opaque native group commands. No
  * membership persistence, cryptography, key custody or peer routing lives here. */
 internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray?={h,o,b->GroupBridge.request(h,o,b)}) {
+    internal var server:(ServerAccounts,String,JSONObject)->JSONObject={owner,operation,body->owner.request(operation,body)}
+    internal class PreparedState internal constructor(
+        val owner:ServerAccounts,val session:AccountSession,val handle:Long,val account:Long,val generation:Long,
+        val groups:List<PreparedGroup>,val invitations:List<GroupInvitationSnapshot>
+    )
+    internal class PreparedGroup internal constructor(val id:String,val legacy:String,val roster:Long,val distributor:String,
+        val proof:ByteArray,val approvals:List<Pair<Long,ByteArray>>,val members:List<PreparedMember>)
+    internal class PreparedMember internal constructor(val account:Long,val device:String,val role:Long,val invited:Long)
     var diagnostic="Group authorization not loaded";private set
     var invitations=emptyList<GroupInvitationSnapshot>();private set
     private val history=mutableMapOf<String,List<GroupMessageSnapshot>>()
@@ -29,19 +38,37 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
         val r=NativeRecord(checkNotNull(native(handle,op,w.bytes())),27);require(r.text()=="PeerChat/AndroidGroups/v1"&&r.number()==op.toLong());return r
     }
     private fun decode(text:String,max:Int):ByteArray {require(text.length<=((max+2)/3)*4);return Base64.getDecoder().decode(text).also{require(it.size<=max)}}
-    fun refresh(owner:ServerAccounts,handle:Long,account:Long,generation:Long){
-        val reply=owner.request("group_state",JSONObject().put("publicIdentity",owner.device));val rows=reply.getJSONArray("groups");require(rows.length()<=128)
-        command(handle,1,account,generation){w->w.number(rows.length().toLong());repeat(rows.length()){i->
-            val row=rows.getJSONObject(i);w.text(row.getString("groupId"));w.text(row.getString("legacyGroupId"));w.number(row.getLong("rosterGeneration"));w.text(row.getString("distributorIdentity"))
-            val evidence=NativeRecordWriter(5);evidence.text("PeerChat/group-roster-evidence/v1");evidence.blob(decode(row.optString("creationProof"),2048))
-            val approvals=row.optJSONArray("deviceApprovals");require((approvals?.length()?:0)<=32);evidence.number((approvals?.length()?:0).toLong())
-            if(approvals!=null)repeat(approvals.length()){n->val approval=approvals.getJSONObject(n);evidence.number(approval.getLong("appliedGeneration"));evidence.blob(decode(approval.getString("proof"),4096))};w.blob(evidence.bytes())
-            val members=row.getJSONArray("members");require(members.length()<=256);w.number(members.length().toLong())
-            repeat(members.length()){n->val d=members.getJSONObject(n);w.number(d.getLong("accountId"));w.text(d.getString("publicIdentity"));w.number(when(d.getString("role")){"owner"->3;"admin"->2;"member"->1;else->error("Invalid group role")});w.number(when(d.getString("state")){"member"->0;"invited"->1;else->error("Invalid group membership")})}
+    fun fetch(owner:ServerAccounts,handle:Long,account:Long,generation:Long):PreparedState {
+        val session=checkNotNull(owner.session);require(account==session.accountId&&generation>0)
+        val reply=server(owner,"group_state",JSONObject().put("publicIdentity",owner.device));val rows=reply.getJSONArray("groups");require(rows.length()<=128)
+        val groups=List(rows.length()){i->val row=rows.getJSONObject(i)
+            val approvals=row.optJSONArray("deviceApprovals");require((approvals?.length()?:0)<=32)
+            val preparedApprovals=if(approvals==null)emptyList()else List(approvals.length()){n->val a=approvals.getJSONObject(n);a.getLong("appliedGeneration") to decode(a.getString("proof"),4096)}
+            val members=row.getJSONArray("members");require(members.length()<=256)
+            val preparedMembers=List(members.length()){n->val d=members.getJSONObject(n)
+                PreparedMember(d.getLong("accountId"),d.getString("publicIdentity"),when(d.getString("role")){"owner"->3;"admin"->2;"member"->1;else->error("Invalid group role")},
+                    when(d.getString("state")){"member"->0;"invited"->1;else->error("Invalid group membership")})}
+            PreparedGroup(row.getString("groupId"),row.getString("legacyGroupId"),row.getLong("rosterGeneration"),row.getString("distributorIdentity"),
+                decode(row.optString("creationProof"),2048),preparedApprovals,preparedMembers)
+        }
+        val invites=server(owner,"group_invite_state",JSONObject()).getJSONArray("invites");require(invites.length()<=128)
+        val preparedInvites=List(invites.length()){i->val row=invites.getJSONObject(i);GroupInvitationSnapshot(row.getString("inviteId"),row.getString("groupId"),row.getString("inviterUsername")).also{require(it.id.matches(Regex("[0-9a-f]{32}"))&&it.group.matches(Regex("[0-9a-f]{32}"))&&it.inviter.length<=64)}}
+        check(owner.session===session){"Group fetch session changed"}
+        return PreparedState(owner,session,handle,account,generation,groups,preparedInvites)
+    }
+    fun apply(handle:Long,account:Long,generation:Long,state:PreparedState){
+        check(handle==state.handle&&account==state.account&&generation==state.generation&&state.owner.session===state.session){"Group fetch scope changed"}
+        command(handle,1,account,generation){w->w.number(state.groups.size.toLong());state.groups.forEach{row->
+            w.text(row.id);w.text(row.legacy);w.number(row.roster);w.text(row.distributor)
+            val evidence=NativeRecordWriter(5);evidence.text("PeerChat/group-roster-evidence/v1");evidence.blob(row.proof)
+            evidence.number(row.approvals.size.toLong());row.approvals.forEach{(epoch,proof)->evidence.number(epoch);evidence.blob(proof)};w.blob(evidence.bytes())
+            w.number(row.members.size.toLong());row.members.forEach{d->w.number(d.account);w.text(d.device);w.number(d.role);w.number(d.invited)}
         }}.end()
-        val invites=owner.request("group_invite_state").getJSONArray("invites");require(invites.length()<=128)
-        invitations=List(invites.length()){i->val row=invites.getJSONObject(i);GroupInvitationSnapshot(row.getString("inviteId"),row.getString("groupId"),row.getString("inviterUsername")).also{require(it.id.matches(Regex("[0-9a-f]{32}"))&&it.group.matches(Regex("[0-9a-f]{32}"))&&it.inviter.length<=64)}}
-        diagnostic="Authenticated group snapshots=${rows.length()} invitations=${invitations.size}; native membership/key checks active"
+        invitations=state.invitations
+        diagnostic="Authenticated group snapshots=${state.groups.size} invitations=${invitations.size}; native membership/key checks active"
+    }
+    fun refresh(owner:ServerAccounts,handle:Long,account:Long,generation:Long){
+        apply(handle,account,generation,fetch(owner,handle,account,generation))
     }
     fun snapshot(handle:Long,account:Long,generation:Long):List<GroupConversationSnapshot>{
         val r=command(handle,2,account,generation);val count=r.number();require(count<=128)
@@ -56,9 +83,9 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
             }
             r.end();history.keys.retainAll(ids);unread.keys.retainAll(ids);older.keys.retainAll(ids);referenceCursors.keys.retainAll(ids);historyRefresh.retainAll(ids)
         }
-        // Bounded preview/history readout from native storage, four new groups
+        // Bounded preview/history readout from native storage, one group
         // per pass. No unbounded eager history load and no membership cache DB.
-        groups.filter{!history.containsKey(it.id)||it.id in historyRefresh}.take(4).forEach{load(handle,account,generation,it.id);historyRefresh.remove(it.id)}
+        groups.filter{!history.containsKey(it.id)||it.id in historyRefresh}.take(1).forEach{load(handle,account,generation,it.id);historyRefresh.remove(it.id)}
         return groups.map{it.copy(messages=history[it.id]?:emptyList(),hasOlder=older[it.id]?:true)}
     }
     fun load(handle:Long,account:Long,generation:Long,id:String,before:Long=Long.MAX_VALUE,markRead:Boolean=false):List<GroupMessageSnapshot>{

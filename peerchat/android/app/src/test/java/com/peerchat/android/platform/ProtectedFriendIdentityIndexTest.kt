@@ -57,4 +57,34 @@ class ProtectedFriendIdentityIndexTest {
         assertEquals(listOf(peer),refreshed.single().knownPeerIds)
         assertTrue(refreshed.single().deviceNames!!.isEmpty())
     }
+
+    @Test fun persistsOnlySerializedChangesAndRetriesAfterFailedWrite(){
+        var disk:ByteArray?=null;var writes=0;var failWrite=false
+        val index=ProtectedFriendIdentityIndex(19,label,{disk},{
+            writes++
+            if(failWrite)throw IllegalStateException("write failed")
+            disk=it.copyOf()
+        },records)
+        val friend=FriendIdentity(8,"Other",peer,true,deviceNames=mapOf(peer to "Phone"))
+        index.reconcile(listOf(friend));assertEquals(1,writes)
+        index.reconcile(listOf(friend.copy(online=false)));assertEquals(1,writes)
+        val reopened=ProtectedFriendIdentityIndex(19,label,{disk},{
+            writes++;disk=it.copyOf()
+        },records)
+        reopened.reconcile(listOf(friend.copy(online=false)));assertEquals(1,writes)
+        index.reconcile(listOf(friend.copy(deviceNames=mapOf(peer to "Renamed phone"))))
+        assertEquals(2,writes)
+        assertEquals("Renamed phone",index.localHistoryBindings().single().deviceNames!![peer])
+
+        val newDevice="c".repeat(64)
+        index.reconcile(listOf(friend.copy(peerId=newDevice,knownPeerIds=listOf(peer,newDevice),deviceNames=mapOf(peer to "Renamed phone"))))
+        assertEquals(3,writes)
+        failWrite=true
+        val renamed=friend.copy(username="New name",deviceNames=mapOf(peer to "Renamed phone"))
+        assertThrows(IllegalStateException::class.java){index.reconcile(listOf(renamed))}
+        assertEquals(4,writes)
+        failWrite=false
+        index.reconcile(listOf(renamed));assertEquals(5,writes)
+        assertEquals("New name",index.localHistoryBindings().single().username)
+    }
 }

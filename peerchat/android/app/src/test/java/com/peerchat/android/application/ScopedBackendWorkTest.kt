@@ -6,6 +6,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ScopedBackendWorkTest {
+    @Test fun backgroundResumeCannotReuseAnOldScopeEvenWithTheSameAuthentication(){
+        val profile=Any();val owner=Any();val session=Any();var lifetime=1L
+        val identity=ScopedBackendWork.Identity(profile,owner,session,7,11,lifetime)
+        val scope=ScopedBackendWork(Any()){identity.matches(profile,owner,session,7,11,lifetime)}
+        assertThrows(ScopedBackendWork.Superseded::class.java){scope.network{
+            lifetime++ // background
+            lifetime++ // foreground, same retained connection
+            "late authenticated response"
+        }}
+        assertFalse(scope.finish{fail("Old foreground lease must not publish")})
+        val replacement=ScopedBackendWork.Identity(profile,owner,session,7,11,lifetime)
+        assertTrue(replacement.matches(profile,owner,session,7,11,lifetime))
+    }
     @Test fun lateOuterTickAuthFailureCannotInvalidateReplacementScope(){
         val gate=Any();var current=true;var invalidated=0
         val scope=ScopedBackendWork(gate){current};val caught=java.util.concurrent.CountDownLatch(1);val resume=java.util.concurrent.CountDownLatch(1)

@@ -1,11 +1,26 @@
 package com.peerchat.android.platform
 
 import com.peerchat.android.platform.tls.ServerChannel
+import com.peerchat.android.platform.tls.BoundedRpc
 import org.json.JSONObject
 
 data class ServerEndpoint(val host: String, val port: Int, val certificatePin: String = "")
 data class AccountSession(val accountId: Long, val username: String, internal val token: String, val relayOnly: Boolean,val bootstrapVersion:Int=0) {
     override fun toString() = "AccountSession(accountId=$accountId, username=$username, relayOnly=$relayOnly)"
+}
+
+private val deliveryRpcOperations=setOf("mailbox_register","mailbox_revoke","mailbox_keys",
+    "mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts")
+internal fun deliveryRpcOperation(type:String)=type in deliveryRpcOperations
+
+internal class RpcChannelPair<T:AutoCloseable>(ordinaryFactory:()->T,deliveryFactory:()->T,
+    available:(T)->Boolean):AutoCloseable {
+    private val ordinary=BoundedRpc<T>({ordinaryFactory()},{available(it)})
+    private val delivery=BoundedRpc<T>({deliveryFactory()},{available(it)})
+    private fun owner(type:String)=if(deliveryRpcOperation(type))delivery else ordinary
+    fun <R> run(type:String,binding:String,operation:(T)->R):R=owner(type).run(binding){operation(it)}
+    fun closeSelected(type:String)=owner(type).close()
+    override fun close(){delivery.close();ordinary.close()}
 }
 
 // Counterpart of Desktop DiscoveryClient, not a native session/delivery owner.
@@ -21,8 +36,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     @Volatile private var ownMetadataPublished=false
     private val stages=ConnectionStageHistory()
     fun diagnostics():String=stages.snapshot()
-    private val rpcOwner=com.peerchat.android.platform.tls.BoundedRpc<ServerChannel>({
-        val connection=channel("rpc")
+    private fun openRpcChannel(label:String):ServerChannel {
+        val connection=channel(label)
         try {
             val hello=JSONObject().put("version",1).put("type","rpc_open")
                 .put("sessionToken",checkNotNull(session).token).put("publicIdentity",device)
@@ -30,15 +45,18 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             val ready=JSONObject(connection.read(16384).toString(Charsets.UTF_8))
             if(!ready.optBoolean("ok"))throw ServerRejected(ready.optString("error","session_invalid"))
             check(ready.getString("type")=="rpc_ready"&&ready.getInt("rpcVersion")==1)
-            connection
+            return connection
         }catch(error:Exception){connection.close();throw error}
-    },{it.isOpen})
-    fun closeRpc(){rpcOwner.close()}
+    }
+    private val rpcOwners=RpcChannelPair({openRpcChannel("rpc")},{openRpcChannel("delivery_rpc")},{it.isOpen})
+    fun closeRpc(){rpcOwners.close()}
     private fun rpc(type:String,fields:JSONObject):JSONObject {
         operations.check()
-        val token=checkNotNull(session).token
+        val active=checkNotNull(session)
+        val token=active.token
         val began=System.nanoTime()
-        return rpcOwner.run(token){connection->
+        return rpcOwners.run(type,token){connection->
+            check(session===active)
             connection.readTimeout(10000)
             val id=java.util.UUID.randomUUID().toString().replace("-","")
             try{
@@ -50,7 +68,8 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
             val body=reply.getJSONObject("body")
             if(type.startsWith("cache_dm_"))require(body.getString("requestId")==id)
-            if(!reply.optBoolean("more"))rpcOwner.close() else connection.readTimeout(10000)
+            check(session===active)
+            if(!reply.optBoolean("more"))rpcOwners.closeSelected(type) else connection.readTimeout(10000)
             body
             }finally{stages.rpcCorrelation(type,fields.optString("requestId"),id,(System.nanoTime()-began)/1_000_000)}
         }

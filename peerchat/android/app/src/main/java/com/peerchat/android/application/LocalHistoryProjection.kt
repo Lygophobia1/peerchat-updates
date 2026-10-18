@@ -39,7 +39,10 @@ internal class LocalHistoryProjection {
         val next=synchronized(this){
             val active=friends.map{it.accountId}.toSet();pages.keys.retainAll(active);dirty.retainAll(active);urgent.retainAll(active)
             friends.firstOrNull{it.accountId in urgent} ?: friends.firstOrNull{val page=pages[it.accountId];page==null||page.devices!=it.knownPeerIds||it.accountId in dirty}
-                ?: friends.filter{now-(pages[it.accountId]?.at?:now)>=10_000}.minByOrNull{pages[it.accountId]?.at?:0}
+                // Live receive/receipt/history events invalidate immediately.
+                // The idle reconciliation is a safety net, not a 10-second
+                // full protected-history scan for every unchanging contact.
+                ?: friends.filter{now-(pages[it.accountId]?.at?:now)>=60_000}.minByOrNull{pages[it.accountId]?.at?:0}
         } ?: return
         put(next,read(next),now)
     }

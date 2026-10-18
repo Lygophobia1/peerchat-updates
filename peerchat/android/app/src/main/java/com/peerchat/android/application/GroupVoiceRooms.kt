@@ -18,29 +18,68 @@ internal class GroupVoiceRooms(private val now:()->Long={System.nanoTime()/1_000
     private val states=linkedMapOf<String,GroupVoiceRoomsSnapshot>()
     private val requests=linkedMapOf<String,Request>()
     private val signals=ArrayDeque<Incoming>()
-    private val results=linkedMapOf<String,String>()
+    private val results=linkedMapOf<String,Pair<String,String>>()
     private val tracked=linkedSetOf<String>()
-    fun reset(){states.clear();requests.clear();signals.clear();results.clear();tracked.clear()}
-    fun snapshot(group:String)=states[group]
-    fun snapshots()=states.values.toList()
-    fun result(id:String)=results[id]?:if(requests.containsKey(id))"pending" else "unavailable"
+    private val authorizedRoster=mutableMapOf<String,Long>()
+    private val newerRosterSeen=mutableMapOf<String,Long>()
+    private val acceptedAt=mutableMapOf<String,Long>()
+    private val snapshotRequestedAt=mutableMapOf<String,Long>()
+    private var activeGroup:String?=null
+    fun reset(){states.clear();requests.clear();signals.clear();results.clear();tracked.clear();authorizedRoster.clear();newerRosterSeen.clear();acceptedAt.clear();snapshotRequestedAt.clear();activeGroup=null}
+    fun isFresh(group:String):Boolean=states.containsKey(group)&&acceptedAt[group]?.let{now()-it<(if(group==activeGroup)45_000 else 120_000)}==true
+    fun snapshot(group:String)=states[group]?.takeIf{isFresh(group)}
+    fun snapshots()=states.keys.mapNotNull(::snapshot)
+    fun result(id:String)=results[id]?.second?:if(requests.containsKey(id))"pending" else "unavailable"
     fun retain(groups:Set<String>){
-        tracked.retainAll(groups);states.keys.retainAll(groups)
+        tracked.retainAll(groups);states.keys.retainAll(groups);authorizedRoster.keys.retainAll(groups)
+        acceptedAt.keys.retainAll(groups);snapshotRequestedAt.keys.retainAll(groups);newerRosterSeen.keys.retainAll(groups)
+        if(activeGroup !in groups)activeGroup=null
         requests.entries.removeAll{it.value.group !in groups}
+        results.entries.removeAll{it.value.first !in groups}
         signals.removeAll{it.value.optString("groupId") !in groups}
+    }
+    /** Native ready roster is the admission boundary for cached room state.
+     * A changed roster retires its pending wire requests before a new snapshot. */
+    fun reconcileAuthorized(groups:List<GroupConversationSnapshot>):Boolean {
+        val ready=groups.filter{it.ready}.associate{it.id to it.epoch}
+        val changed=authorizedRoster.any{(id,roster)->ready[id]!=roster}||
+            ready.any{(id,roster)->authorizedRoster[id]!=roster}
+        if(changed){
+            val affected=(authorizedRoster.keys+ready.keys).filter{authorizedRoster[it]!=ready[it]}.toSet()
+            states.keys.removeAll(affected);tracked.removeAll(affected);acceptedAt.keys.removeAll(affected)
+            snapshotRequestedAt.keys.removeAll(affected)
+            requests.entries.removeAll{it.value.group in affected}
+            signals.removeAll{it.value.optString("groupId") in affected}
+            results.entries.removeAll{it.value.first in affected}
+        }
+        retain(ready.keys)
+        authorizedRoster.clear();authorizedRoster.putAll(ready)
+        newerRosterSeen.entries.removeAll{(id,roster)->(ready[id]?:0)>=roster}
+        return changed
+    }
+    /** One bounded refresh per owner pass. A live call gets first chance; all
+     * other authorized groups are refreshed at a slower cadence. */
+    fun dueSnapshotGroup(active:String?=null):String? {
+        prune();activeGroup=active?.takeIf{it in authorizedRoster}
+        fun due(group:String,interval:Long):Boolean =
+            requests.values.none{it.group==group&&it.operation=="snapshot"}&&
+                (snapshotRequestedAt[group]?.let{now()-it>=interval}?:true)
+        activeGroup?.let{if(due(it,15_000))return it}
+        return authorizedRoster.keys.firstOrNull{it!=activeGroup&&due(it,60_000)}
     }
     fun request(group:String,operation:String,room:String="",send:(JSONObject)->Boolean):String? {
         prune();require(id(group,32)&&operation in setOf("snapshot","join_voice","leave_voice"))
         require(operation=="snapshot"||id(room,32))
         if(requests.size>=64||tracked.size>=128&&group !in tracked)return null
         if(operation=="snapshot")requests.entries.firstOrNull{it.value.group==group&&it.value.operation==operation}?.let{return it.key}
-        val state=states[group]
+        val state=if(operation=="snapshot")states[group] else snapshot(group)
         if(operation!="snapshot"&&state==null)return null
         val request=JSONObject().put("type","group_room").put("requestId",uuid()).put("groupId",group)
             .put("operation",operation).put("roomId",room).put("kind","").put("name","")
         state?.let{request.put("epoch",it.epoch).put("revision",it.revision).put("rosterGeneration",it.roster)}
         if(!send(request))return null
         tracked.add(group)
+        if(operation=="snapshot")snapshotRequestedAt[group]=now()
         return request.getString("requestId").also{requests[it]=Request(group,operation,now()+15_000)}
     }
     fun event(event:JSONObject,account:Long,device:String) {
@@ -58,19 +97,34 @@ internal class GroupVoiceRooms(private val now:()->Long={System.nanoTime()/1_000
         val state=event.optJSONObject("snapshot")?.let(::parse)
         val group=state?.group?:event.optString("groupId")
         if(group !in tracked||request!=null&&request.group!=group)return
+        if(state!=null){
+            val authorized=authorizedRoster[group]
+            if(authorized!=null&&state.roster>authorized){
+                // The authenticated event channel has seen a newer roster, but
+                // only native may install group/key authority. Retire old room
+                // participation immediately while native catches up.
+                newerRosterSeen[group]=maxOf(newerRosterSeen[group]?:0,state.roster)
+                states.remove(group);acceptedAt.remove(group)
+                requests.entries.removeAll{it.value.group==group}
+                results.entries.removeAll{it.value.first==group}
+                signals.removeAll{it.value.optString("groupId")==group}
+                return
+            }
+            if(authorized!=null&&state.roster!=authorized||state.roster<(newerRosterSeen[group]?:0))return
+        }
         if(request!=null){
             val result=event.getString("state");require(result.matches(Regex("[a-z_]{1,80}")))
             if(results.size>=128)results.remove(results.keys.first())
-            results[event.getString("requestId")]=result
-            if(result=="group_not_authorized"){states.remove(group);signals.removeAll{it.value.optString("groupId")==group};return}
+            results[event.getString("requestId")]=group to result
+            if(result=="group_not_authorized"){states.remove(group);acceptedAt.remove(group);signals.removeAll{it.value.optString("groupId")==group};return}
         }
         if(state!=null){
             val old=states[group]
-            if(old==null||state.epoch==old.epoch&&state.revision>=old.revision&&state.roster>=old.roster)states[group]=state
+            if(old==null||state.epoch==old.epoch&&state.revision>=old.revision&&state.roster>=old.roster){states[group]=state;acceptedAt[group]=now()}
         }
     }
     fun take(group:String,room:String,account:Long,device:String):List<JSONObject> {
-        prune();val state=states[group]?:return emptyList();val current=state.rooms.singleOrNull{it.id==room}?:return emptyList()
+        prune();val state=snapshot(group)?:return emptyList();val current=state.rooms.singleOrNull{it.id==room}?:return emptyList()
         val output=mutableListOf<JSONObject>()
         repeat(signals.size){
             val row=signals.removeFirst();val s=row.value
@@ -85,7 +139,7 @@ internal class GroupVoiceRooms(private val now:()->Long={System.nanoTime()/1_000
     }
     fun send(group:String,room:String,account:Long,device:String,targetKey:String,route:String,generation:Long,kind:String,data:String,mid:String,send:(JSONObject)->Boolean):String? {
         prune();if(requests.size>=64)return null
-        val state=states[group]?:return null;val current=state.rooms.singleOrNull{it.id==room}?:return null
+        val state=snapshot(group)?:return null;val current=state.rooms.singleOrNull{it.id==room}?:return null
         val local=current.members.singleOrNull{it.account==account&&it.device==device}?:return null
         val target=current.members.singleOrNull{it.key==targetKey&&it.device!=device}?:return null
         val value=JSONObject().put("type","group_media").put("requestId",uuid()).put("groupId",group).put("roomId",room)
@@ -99,7 +153,7 @@ internal class GroupVoiceRooms(private val now:()->Long={System.nanoTime()/1_000
     }
     private fun prune(){
         val at=now();requests.entries.removeAll{entry->if(at>=entry.value.expires){
-            if(results.size>=128)results.remove(results.keys.first());results[entry.key]="timeout";true
+            if(results.size>=128)results.remove(results.keys.first());results[entry.key]=entry.value.group to "timeout";true
         }else false}
         signals.removeAll{at>=it.expires}
     }

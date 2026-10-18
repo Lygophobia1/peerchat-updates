@@ -27,7 +27,7 @@ import androidx.compose.ui.tooling.preview.Preview
                     }
                     Text("Voice rooms",style=MaterialTheme.typography.titleMedium)
                     Text("Joining is voluntary. Your microphone starts only after permission and a successful room join.",style=MaterialTheme.typography.bodySmall)
-                    if(c.voiceRooms.isEmpty())Text("No voice rooms are available for this group.")
+                    if(c.voiceRooms.isEmpty())Text("Voice rooms and occupancy are not currently verified. Waiting for an authenticated update.")
                     c.voiceRooms.forEach{room->
                         Text(room.name,style=MaterialTheme.typography.titleSmall)
                         Text("${room.participants.size} in voice · ${room.participants.joinToString().ifEmpty{"Empty room"}}")

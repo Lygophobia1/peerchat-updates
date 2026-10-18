@@ -23,7 +23,7 @@ internal class EligibilitySnapshotExecution(
     // Authenticated response bytes only, NOT eligibility authority. Native must
     // still validate the original snapshot after the local clock reaches issuance.
     private val deferred=linkedMapOf<Long,Deferred>()
-    var diagnostic = "eligibility=waiting_for_authenticated_snapshot"
+    @Volatile var diagnostic = "eligibility=waiting_for_authenticated_snapshot"
         private set
 
     fun reset() { nextAt=0; offset=0; context=""; refreshAfter.clear();deferred.clear();diagnostic="eligibility=waiting_for_authenticated_snapshot" }
@@ -84,6 +84,7 @@ internal class EligibilitySnapshotExecution(
                 diagnostic="eligibility=authenticated_snapshot_cached"
                 refreshAfter[recipient]=now+refreshDelay(fresh,utc);installed=true
             } catch(failure:Exception) {
+                if(failure is ScopedBackendWork.Superseded)throw failure
                 if(expiredServerSession(failure))throw failure
                 diagnostic="eligibility=unavailable_primary_delivery_independent stage=$stage reason=$reason exception=${failure.javaClass.simpleName}"
                 refreshAfter[recipient]=now+if(reason=="snapshot_quota_exceeded")60_000 else 15_000

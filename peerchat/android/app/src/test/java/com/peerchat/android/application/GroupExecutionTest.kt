@@ -1,6 +1,10 @@
 package com.peerchat.android.application
 
 import org.json.JSONObject
+import org.json.JSONArray
+import com.peerchat.android.platform.AccountSession
+import com.peerchat.android.platform.ServerAccounts
+import com.peerchat.android.platform.ServerEndpoint
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -35,6 +39,31 @@ class GroupExecutionTest {
         val ui=com.peerchat.android.ui.projectMessaging(MessagingSnapshot(localPeerId=device,groups=e.snapshot(1,7,1)),com.peerchat.android.ui.PeerChatUiState())
         assertEquals(com.peerchat.android.ui.MessageStatus.Sent,ui.conversations.single().messages.single().status)
         assertNotEquals(com.peerchat.android.ui.MessageStatus.Delivered,ui.conversations.single().messages.single().status)
+    }
+    @Test fun stagedGroupFetchDoesNotMutateNativeAndRejectsChangedScope(){
+        val n=Native();val owner=ServerAccounts(ServerEndpoint("localhost",1),device)
+        val sessionField=ServerAccounts::class.java.getDeclaredField("session").apply{isAccessible=true}
+        val session=AccountSession(7,"owner","test-token",true)
+        sessionField.set(owner,session)
+        val calls=mutableListOf<String>()
+        val e=GroupExecution(n::request).apply{server={_,operation,_->
+            calls+=operation
+            when(operation){
+                "group_state"->JSONObject().put("groups",JSONArray())
+                "group_invite_state"->JSONObject().put("invites",JSONArray())
+                else->error("Unexpected request $operation")
+            }
+        }}
+        val prepared=e.fetch(owner,1,7,1)
+        assertEquals(listOf("group_state","group_invite_state"),calls)
+        assertTrue(n.operations.isEmpty())
+        assertThrows(IllegalStateException::class.java){e.apply(1,7,2,prepared)}
+        assertTrue(n.operations.isEmpty())
+        e.apply(1,7,1,prepared)
+        assertEquals(listOf(1),n.operations)
+        sessionField.set(owner,AccountSession(7,"owner","replacement-token",true))
+        assertThrows(IllegalStateException::class.java){e.apply(1,7,1,prepared)}
+        assertEquals(listOf(1),n.operations)
     }
     @Test fun committedMessageRemainsSuccessfulIfTransportOrReadoutFails(){
         val n=Native().apply{failAfterCommit=true};val e=GroupExecution(n::request)

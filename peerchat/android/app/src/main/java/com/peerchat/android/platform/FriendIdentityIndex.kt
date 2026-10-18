@@ -12,6 +12,8 @@ import java.security.MessageDigest
 // historical public device bindings only, not a message DB or trust owner.
 internal class ProtectedFriendIdentityIndex(private val localAccount:Long,private val label:ByteArray,
     private val read:()->ByteArray?,private val write:(ByteArray)->Unit,private val records:RecordProtector) {
+    private data class PersistedBinding(val account:Long,val username:String,val current:String,
+        val devices:List<String>,val deviceNames:Map<String,String>)
     private var previous: List<FriendIdentity>
     init {
         val stored=read()
@@ -35,6 +37,12 @@ internal class ProtectedFriendIdentityIndex(private val localAccount:Long,privat
         // Retain removed account public bindings so re-adding it cannot bypass
         // historical-device verification. They do not grant active friendship.
         val all=(previous.filter {old->active.none {it.accountId==old.accountId}}+active).also {require(it.size<=1024)}
+        // Presence, revocations, and other runtime-only fields are not in this
+        // file. Compare exactly its persisted projection before protecting it.
+        if(persistedBindings(previous)==persistedBindings(all)) {
+            previous=all
+            return active
+        }
         val entries=JSONArray()
         all.forEach {friend->entries.put(JSONObject().put("account",friend.accountId).put("username",friend.username)
             .put("current",friend.peerId).put("devices",JSONArray(friend.knownPeerIds)).put("deviceNames",JSONObject(friend.deviceNames?:emptyMap<String,String>())))}
@@ -42,6 +50,11 @@ internal class ProtectedFriendIdentityIndex(private val localAccount:Long,privat
         val protected=records.protect(plain,label)
         write(protected);previous=all
         return active
+    }
+
+    private fun persistedBindings(values:List<FriendIdentity>)=values.map { friend ->
+        PersistedBinding(friend.accountId,friend.username,friend.peerId,friend.knownPeerIds.toList(),
+            friend.deviceNames?:emptyMap())
     }
 }
 internal class FriendIdentityIndex(context:Context,profile:String,endpoint:ServerEndpoint,localAccount:Long) {

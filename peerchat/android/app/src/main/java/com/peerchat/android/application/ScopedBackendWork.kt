@@ -5,9 +5,9 @@ package com.peerchat.android.application
  * are still serialized and checked against the captured authenticated scope. */
 internal class ScopedBackendWork(private val gate:Any,private val current:()->Boolean) {
     internal class Identity(private val profile:Any,private val owner:Any,private val session:Any,
-                            private val account:Long,private val generation:Long){
-        fun matches(profile:Any?,owner:Any?,session:Any?,account:Long,generation:Long):Boolean=
-            profile===this.profile&&owner===this.owner&&session===this.session&&account==this.account&&generation==this.generation
+                            private val account:Long,private val generation:Long,private val lifetime:Long=0){
+        fun matches(profile:Any?,owner:Any?,session:Any?,account:Long,generation:Long,lifetime:Long=0):Boolean=
+            profile===this.profile&&owner===this.owner&&session===this.session&&account==this.account&&generation==this.generation&&lifetime==this.lifetime
     }
     internal class Superseded:IllegalStateException("Backend operation scope changed")
     fun <T> local(operation:()->T):T=synchronized(gate){

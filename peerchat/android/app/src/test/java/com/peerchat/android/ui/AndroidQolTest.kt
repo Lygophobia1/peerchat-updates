@@ -57,6 +57,66 @@ class AndroidQolTest {
         first=records.protect(old.toString().toByteArray(Charsets.UTF_8),label)
         assertThrows(Exception::class.java){primary().load()}
     }
+
+    @Test fun loadCachesOnlyTheExactValidatedBlobAndRecoversAfterCorruption(){
+        var disk:ByteArray?=null;var decrypts=0
+        val counting=object:RecordProtector {
+            override fun protect(plain:ByteArray,context:ByteArray)=records.protect(plain,context)
+            override fun unprotect(blob:ByteArray,context:ByteArray):ByteArray {
+                decrypts++;return records.unprotect(blob,context)
+            }
+        }
+        val store=ProtectedAndroidQolStore({disk?.copyOf()},{disk=it.copyOf()},{counting})
+        val key=conversationPreferenceKey("a".repeat(64),8)
+        val initial=AndroidQolState(conversations=mapOf(key to ConversationPreference("draft",3,4)))
+        store.save(initial)
+        repeat(8){assertEquals(initial,store.load())}
+        assertEquals(0,decrypts)
+
+        var replacement:ByteArray?=null
+        ProtectedAndroidQolStore({replacement},{replacement=it.copyOf()},{records})
+            .save(AndroidQolState(NotificationPreview.HideContent,conversations=mapOf(key to ConversationPreference("changed",5,6))))
+        disk=replacement!!.copyOf()
+        val loaded=store.load()
+        assertEquals("changed",loaded.conversations[key]!!.draft);assertEquals(1,decrypts)
+        @Suppress("UNCHECKED_CAST")
+        (loaded.conversations as MutableMap<String,ConversationPreference>).clear()
+        assertEquals("changed",store.load().conversations[key]!!.draft)
+        assertEquals(1,decrypts)
+
+        val validReplacement=disk!!.copyOf()
+        disk=validReplacement.copyOf().also{it[it.lastIndex]=(it.last().toInt() xor 1).toByte()}
+        assertThrows(Exception::class.java){store.load()}
+        assertEquals(2,decrypts)
+        disk=validReplacement
+        assertEquals("changed",store.load().conversations[key]!!.draft)
+        assertEquals(2,decrypts)
+    }
+
+    @Test fun failedSaveDoesNotCacheTheUnwrittenSnapshot(){
+        var disk:ByteArray?=null;var failWrite=false;var protects=0;var decrypts=0
+        val counting=object:RecordProtector {
+            override fun protect(plain:ByteArray,context:ByteArray):ByteArray {
+                protects++;return records.protect(plain,context)
+            }
+            override fun unprotect(blob:ByteArray,context:ByteArray):ByteArray {
+                decrypts++;return records.unprotect(blob,context)
+            }
+        }
+        val store=ProtectedAndroidQolStore({disk?.copyOf()},{
+            if(failWrite)throw IllegalStateException("write failed")
+            disk=it.copyOf()
+        },{counting})
+        val wanted=AndroidQolState(preview=NotificationPreview.HideContent)
+        failWrite=true
+        assertThrows(IllegalStateException::class.java){store.save(wanted)}
+        assertEquals(1,protects);assertNull(disk)
+        failWrite=false
+        store.save(wanted)
+        assertEquals(2,protects);assertEquals(wanted,store.load())
+        assertEquals(0,decrypts)
+    }
+
     private fun conversation()=ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),listOf(
         MessageSnapshot("c".repeat(32),"b".repeat(64),"a".repeat(64),100,1,9,2,"PRIVATE received text"),
         MessageSnapshot("d".repeat(32),"a".repeat(64),"b".repeat(64),101,2,10,2,"outgoing")))

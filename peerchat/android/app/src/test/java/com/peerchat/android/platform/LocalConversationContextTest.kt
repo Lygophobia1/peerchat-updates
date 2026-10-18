@@ -50,4 +50,35 @@ class LocalConversationContextTest {
         disk=original;assertEquals("a".repeat(64),open().load(endpoint)!!.device)
         assertThrows(Exception::class.java){open().save(endpoint,LocalConversationContext(0,"Other","a".repeat(64),emptyList()))}
     }
+
+    @Test fun saveSkipsPresenceOnlyRefreshesAndRetriesFailedWrites(){
+        var disk:ByteArray?=null;var writes=0;var failWrite=false
+        val store=ProtectedLocalConversationContextStore({disk},{
+            writes++
+            if(failWrite)throw IllegalStateException("write failed")
+            disk=it.copyOf()
+        },records)
+        val peer="b".repeat(64)
+        val friend=FriendIdentity(8,"Other",peer,true,deviceNames=mapOf(peer to "Phone"))
+        val original=LocalConversationContext(19,"Jonah","a".repeat(64),listOf(friend))
+        store.save(endpoint,original);assertEquals(1,writes)
+        store.save(endpoint,original.copy(friends=listOf(friend.copy(online=false))))
+        assertEquals(1,writes)
+        val reopened=ProtectedLocalConversationContextStore({disk},{
+            writes++;disk=it.copyOf()
+        },records)
+        assertNotNull(reopened.load(endpoint))
+        reopened.save(endpoint,original.copy(friends=listOf(friend.copy(online=false))))
+        assertEquals(1,writes)
+
+        val renamed=original.copy(device="c".repeat(64),friends=listOf(friend.copy(deviceNames=mapOf(peer to "Renamed phone"))))
+        store.save(endpoint,renamed);assertEquals(2,writes)
+        failWrite=true
+        val changed=renamed.copy(username="New name")
+        assertThrows(IllegalStateException::class.java){store.save(endpoint,changed)}
+        assertEquals(3,writes)
+        failWrite=false
+        store.save(endpoint,changed);assertEquals(4,writes)
+        assertEquals("New name",store.load(endpoint)!!.username)
+    }
 }
