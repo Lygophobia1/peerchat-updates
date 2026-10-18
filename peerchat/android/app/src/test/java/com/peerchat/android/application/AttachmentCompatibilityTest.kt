@@ -10,6 +10,26 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[34])
 class AttachmentCompatibilityTest {
+    @Test fun newSelectionReplacesOnlyAValidatedUncommittedChoice(){
+        val owner=AttachmentSelectionOwner<Any>()
+        val old=Any();val next=Any()
+        owner.pending=old
+        assertThrows(IllegalStateException::class.java){owner.begin {error("Invalid recipient")}}
+        assertSame(old,owner.pending)
+        val (preparing,_)=owner.begin {"validated"}
+        assertNull(owner.pending)
+        owner.pending=next
+        assertThrows(IllegalStateException::class.java){owner.begin {"duplicate"}}
+        assertSame(next,owner.pending)
+        owner.clearIfCurrent(old)
+        assertSame(next,owner.pending)
+        owner.finish(Any())
+        assertTrue(owner.isPreparing(preparing))
+        owner.finish(preparing)
+        assertFalse(owner.isPreparing(preparing))
+        owner.clearIfCurrent(next)
+        assertNull(owner.pending)
+    }
     @Test fun onlineDirectDemandIsBoundedAndNeverStartsForUnverifiedOrStaleScope()=kotlinx.coroutines.test.runTest {
         var demands=0;var waits=0;var probes=0
         assertTrue(awaitAttachmentDirectRoute({++probes>1},{demands++;true},{waits++}));assertEquals(1,demands);assertEquals(1,waits)

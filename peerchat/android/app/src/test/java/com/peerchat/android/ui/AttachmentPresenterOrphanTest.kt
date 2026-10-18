@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import com.peerchat.android.application.AttachmentCompatibilityChoice
 import com.peerchat.android.application.AttachmentCompatibilityRequired
+import com.peerchat.android.application.AttachmentSelectionOwner
 import com.peerchat.android.application.ConnectionSnapshot
 import com.peerchat.android.application.ConversationSnapshot
 import com.peerchat.android.application.FriendIdentity
@@ -38,18 +39,20 @@ class AttachmentPresenterOrphanTest {
         override val state=MutableStateFlow(MessagingSnapshot(19,"Jonah","a".repeat(64),true,"Authenticated",
             listOf(ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())),
             serverPresenceLive=true,localHistoryReady=true))
-        val choice=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",true,"b".repeat(64))
-        var pending:AttachmentCompatibilityChoice?=null
+        private val selection=AttachmentSelectionOwner<AttachmentCompatibilityChoice>()
+        val pending get()=selection.pending
         var attempts=0
         var cancellations=0
         override suspend fun sendAttachment(peerId:String,uri:Uri):String {
+            val (intent,_)=selection.begin {check(peerId=="b".repeat(64))}
             attempts++
-            check(pending==null){"Another attachment selection is pending"}
-            pending=choice
+            val choice=AttachmentCompatibilityChoice(attempts.toString().padStart(32,'f'),"selected.bin",true,peerId)
+            selection.pending=choice
+            selection.finish(intent)
             throw AttachmentCompatibilityRequired(choice)
         }
         override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String? {
-            if(!direct&&pending?.token==token){pending=null;cancellations++}
+            if(!direct&&pending?.token==token){selection.clearIfCurrent(checkNotNull(pending));cancellations++}
             return null
         }
         override suspend fun signIn(endpoint:ServerEndpoint,username:String,password:String)=AccountSession(19,"Jonah","fixture",true)
@@ -69,7 +72,7 @@ class AttachmentPresenterOrphanTest {
         override fun load()=saved
         override fun save(value:AndroidQolState){saved=value}
     }
-    @Test fun replacingPresenterOrphansACompatibilityChoiceInRetainedBackend(){
+    @Test fun replacingPresenterCanSupersedeOrphanedCompatibilityChoice(){
         val dispatcher=StandardTestDispatcher()
         Dispatchers.setMain(dispatcher)
         val backend=RetainedBackend()
@@ -84,7 +87,7 @@ class AttachmentPresenterOrphanTest {
             first.dispatch(UiAction.Select("account:8"))
             first.dispatch(UiAction.SendAttachment(Uri.parse("content://fixture/selected")))
             dispatcher.scheduler.runCurrent()
-            assertEquals(backend.choice,first.state.value.attachmentCompatibility)
+            val firstChoice=checkNotNull(first.state.value.attachmentCompatibility)
             assertNotNull(backend.pending)
 
             firstStore.clear() // A replacement UI has no token from the old dialog.
@@ -99,8 +102,12 @@ class AttachmentPresenterOrphanTest {
             second.dispatch(UiAction.SendAttachment(Uri.parse("content://fixture/next")))
             dispatcher.scheduler.runCurrent()
             assertEquals(2,backend.attempts)
-            assertNotNull(backend.pending)
-            assertTrue(second.state.value.notice.orEmpty().contains("could not be offered"))
+            val secondChoice=checkNotNull(second.state.value.attachmentCompatibility)
+            assertEquals(secondChoice,backend.pending)
+            assertNotEquals(firstChoice.token,secondChoice.token)
+            kotlinx.coroutines.runBlocking{backend.resolveAttachmentCompatibility(firstChoice.token,false)}
+            assertEquals(secondChoice,backend.pending)
+            assertEquals(0,backend.cancellations)
         }finally{firstStore.clear();secondStore.clear();Dispatchers.resetMain()}
     }
 }

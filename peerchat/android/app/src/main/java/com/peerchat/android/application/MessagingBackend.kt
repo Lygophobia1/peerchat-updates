@@ -16,6 +16,22 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
 
+/** Accessed under the backend gate; a completed choice may outlive its presenter. */
+internal class AttachmentSelectionOwner<T> {
+    var pending:T?=null
+    private var preparation:Any?=null
+
+    fun <R> begin(validate:()->R):Pair<Any,R> {
+        check(preparation==null){"Another attachment selection is pending"}
+        val selected=validate()
+        pending=null // The validated new selection supersedes an uncommitted choice.
+        return Any().also{preparation=it} to selected
+    }
+    fun isPreparing(intent:Any)=preparation===intent
+    fun finish(intent:Any){if(preparation===intent)preparation=null}
+    fun clearIfCurrent(choice:T){if(pending===choice)pending=null}
+}
+
 /** Application coordinator/platform execution only. Native owns profile,
  * messages/outbox/order/ACK/dedupe, trust and session/retry state. Immutable UI
  * snapshots are read from those owners, not a Kotlin messaging engine. */
@@ -550,8 +566,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private data class PendingAttachmentCompatibility(val token:String,val owner:ServerAccounts,val session:com.peerchat.android.platform.AccountSession,
         val generation:Long,val peer:String,val recipient:Long,val path:String,val name:String,
         val preflightTransportUnavailable:Boolean=false)
-    private var pendingAttachmentCompatibility:PendingAttachmentCompatibility?=null
-    private var attachmentPreparation:Any?=null
+    private val attachmentSelection=AttachmentSelectionOwner<PendingAttachmentCompatibility>()
     private fun compatibilityScope(p:PendingAttachmentCompatibility)=!stopped&&authorizationSnapshotInstalled&&accounts===p.owner&&
         p.owner.session===p.session&&generation==p.generation&&friends.any{it.peerId==p.peer&&it.accountId==p.recipient}
     private fun directCompatibility(p:PendingAttachmentCompatibility,commit:Boolean):ByteArray=transfer(16){w->
@@ -562,27 +577,27 @@ class MessagingBackend(context: Context,private val profileName: String="default
         check(compatibilityScope(p));val r=NativeRecord(directCompatibility(p,false),30);val ready=r.number();r.end();require(ready in 0..1);ready==1L
     }catch(_:Exception){null}
     override suspend fun sendAttachment(peerId:String,uri:android.net.Uri):String=withContext(Dispatchers.IO){
-        val intent=Any()
-        val selected=synchronized(gate){
-            check(!stopped&&!resetting&&pendingAttachmentCompatibility==null&&attachmentPreparation==null){"Another attachment selection is pending"}
-            val local=checkNotNull(localReadContext){"Open the intended conversation before selecting an attachment"}
-            check(local.friends.any{it.peerId==peerId}){"The selected recipient is unavailable"}
-            val opened=checkNotNull(profile)
-            attachmentPreparation=intent
-            opened to local
+        val (intent, selected)=synchronized(gate){
+            attachmentSelection.begin {
+                check(!stopped&&!resetting){"Attachment selection is unavailable"}
+                val local=checkNotNull(localReadContext){"Open the intended conversation before selecting an attachment"}
+                check(local.friends.any{it.peerId==peerId}){"The selected recipient is unavailable"}
+                checkNotNull(profile) to local
+            }
         }
+        val (selectedProfile, selectedLocal)=selected
         try{
         // A picker may return before remembered authentication. Wait outside
         // the owner gate, bound to the original local profile/account/server.
         val pending=awaitAttachmentReadiness(probe={synchronized(gate){
-            check(!stopped&&!resetting&&attachmentPreparation===intent&&profile===selected.first&&
-                localReadContext?.account==selected.second.account&&localReadContext?.endpoint==selected.second.endpoint){"Attachment profile changed; nothing was sent"}
+            check(!stopped&&!resetting&&attachmentSelection.isPreparing(intent)&&profile===selectedProfile&&
+                localReadContext?.account==selectedLocal.account&&localReadContext?.endpoint==selectedLocal.endpoint){"Attachment profile changed; nothing was sent"}
             if(!inUse||!authorizationSnapshotInstalled||!mutable.value.authenticated)return@synchronized null
             val owner=accounts?:return@synchronized null
             val session=owner.session?:return@synchronized null
-            check(session.accountId==selected.second.account&&owner.endpoint==selected.second.endpoint)
+            check(session.accountId==selectedLocal.account&&owner.endpoint==selectedLocal.endpoint)
             check(friends.any{it.peerId==peerId}){"Recipient authorization changed"}
-            configureMailboxEnrollment(owner,selected.first.handle)
+            configureMailboxEnrollment(owner,selectedProfile.handle)
             if(!mailboxExecution.registrationAccepted){if(mailboxInFlight==null)mailboxAt=0L;return@synchronized null}
             val r=NativeRecord(transfer(11){it.number(session.accountId);it.number(generation)},30)
             val ready=r.number();r.end()
@@ -591,7 +606,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             PendingAttachmentCompatibility(java.util.UUID.randomUUID().toString().replace("-",""),owner,session,generation,
                 peerId,friends.single{it.peerId==peerId}.accountId,"","")
         }})
-        val work=ScopedBackendWork(gate){attachmentPreparation===intent&&profile===selected.first&&inUse&&compatibilityScope(pending)}
+        val work=ScopedBackendWork(gate){attachmentSelection.isPreparing(intent)&&profile===selectedProfile&&inUse&&compatibilityScope(pending)}
         val directory=work.local{val r=NativeRecord(transfer(0),30);java.io.File(r.text()).also{r.end()}}
         // Slow SAF providers, copying and fsync must not hold the messaging gate.
         // The private source is retained on ambiguous offer/auth failure.
@@ -599,11 +614,11 @@ class MessagingBackend(context: Context,private val profileName: String="default
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         val bound=pending.copy(path=imported.first,name=imported.second)
         val preflight=work.network{attachmentSendPreflight(bound.recipient,
-            {synchronized(gate){attachmentPreparation===intent&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
+            {synchronized(gate){attachmentSelection.isPreparing(intent)&&compatibilityScope(bound)}},bound.owner::directAttachmentCache)}
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         val prepared:Any=work.local{
             if(preflight!=AttachmentSendPreflight.Cached){
-                bound.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice).also{pendingAttachmentCompatibility=it}
+                bound.copy(preflightTransportUnavailable=preflight==AttachmentSendPreflight.TransportChoice).also{attachmentSelection.pending=it}
             }else{
                 val response=NativeRecord(transfer(10){it.text(peerId);it.text(bound.path);it.text(bound.name)},30)
                 val id=response.text();response.end();publish();id
@@ -611,25 +626,25 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         if(prepared is PendingAttachmentCompatibility){
             val ready=try{awaitAttachmentDirectRoute(
-                {synchronized(gate){if(pendingAttachmentCompatibility!==prepared)null else directCompatibilityStatus(prepared)}},
-                {synchronized(gate){compatibilityScope(prepared)&&pendingAttachmentCompatibility===prepared&&
+                {synchronized(gate){if(attachmentSelection.pending!==prepared)null else directCompatibilityStatus(prepared)}},
+                {synchronized(gate){compatibilityScope(prepared)&&attachmentSelection.pending===prepared&&
                     ReliableBridge.demand(checkNotNull(profile).handle,prepared.peer.toByteArray(Charsets.US_ASCII))==0}})
-            }catch(cancelled:kotlinx.coroutines.CancellationException){synchronized(gate){if(pendingAttachmentCompatibility===prepared)pendingAttachmentCompatibility=null};throw cancelled}
-            synchronized(gate){if(!compatibilityScope(prepared)||pendingAttachmentCompatibility!==prepared){
-                if(pendingAttachmentCompatibility===prepared)pendingAttachmentCompatibility=null
+            }catch(failure:Throwable){synchronized(gate){attachmentSelection.clearIfCurrent(prepared)};throw failure}
+            synchronized(gate){if(!compatibilityScope(prepared)||attachmentSelection.pending!==prepared){
+                attachmentSelection.clearIfCurrent(prepared)
                 error("Attachment authorization changed; private source retained")
             }}
             throw AttachmentCompatibilityRequired(AttachmentCompatibilityChoice(prepared.token,prepared.name,ready,prepared.peer,prepared.preflightTransportUnavailable))
         }
         prepared as String
-        }finally{synchronized(gate){if(attachmentPreparation===intent)attachmentPreparation=null}}
+        }finally{synchronized(gate){attachmentSelection.finish(intent)}}
     }
     override suspend fun resolveAttachmentCompatibility(token:String,direct:Boolean):String?=withContext(Dispatchers.IO){synchronized(gate){
-        val pending=pendingAttachmentCompatibility
-        if(!direct){if(pending?.token==token)pendingAttachmentCompatibility=null;return@synchronized null}
+        val pending=attachmentSelection.pending
+        if(!direct){if(pending?.token==token)attachmentSelection.clearIfCurrent(pending);return@synchronized null}
         check(pending!=null&&pending.token==token&&compatibilityScope(pending)){"Attachment authorization changed; private source retained"}
         val response=NativeRecord(directCompatibility(pending,true),30);val id=response.text();response.end()
-        pendingAttachmentCompatibility=null;publish();id
+        attachmentSelection.clearIfCurrent(pending);publish();id
     }}
     override suspend fun attachmentAction(id:String,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){
         check(!stopped&&authorizationSnapshotInstalled);transfer(if(accept)2 else 3){it.text(id)};publish();Unit
@@ -679,7 +694,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
-        pendingAttachmentCompatibility=null // Private source bytes are retained.
+        attachmentSelection.pending=null // Private source bytes are retained.
         invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
         retentionUntil=0L
         if(!inUse)operations.configure(false,Long.MAX_VALUE)
