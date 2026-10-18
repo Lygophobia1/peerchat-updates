@@ -8,6 +8,7 @@ using PeerChat.ServerShared;
 class PortableServerTests {
     public static int Main(string[] args){try{
         if(args.Length>0&&args[0]=="--discovery")return PeerChat.ServerTests.DiscoveryIntegrationTest.Main(args[1..]);
+        if(args.Length==2&&args[0]=="--device-identity")return DeviceIdentityEnrollmentServerTest.Main(new[]{args[1]});
         if(args.Length==2&&args[0]=="--fcm-live-config")return LiveFcmConfiguration(args[1]);
         if(args.Length==2&&args[0]=="--group-device")return GroupDeviceServerTest.Main(new[]{args[1]});
         if(args.Length==2&&args[0]=="--friend-relay-revoke")return FriendRelayRevocationServerTest.Main(new[]{args[1]});

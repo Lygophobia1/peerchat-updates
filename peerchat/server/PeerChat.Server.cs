@@ -86,6 +86,7 @@ namespace PeerChat.Server {
             catch(InvalidOperationException error) { if(error.Message.IndexOf("duplicate column name",StringComparison.OrdinalIgnoreCase)<0)throw; }
             Execute("UPDATE group_rosters SET distributor_identity=owner_identity WHERE distributor_identity='';");
             InitializeDeviceManagement();
+            InitializeDeviceIdentity();
             }catch{Sqlite.sqlite3_close(database);throw;}
         }
         public void Execute(string sql) { lock (gate) { IntPtr error; if (Sqlite.sqlite3_exec(database, sql, IntPtr.Zero, IntPtr.Zero, out error) != 0) { string message=error==IntPtr.Zero?"SQLite error":Marshal.PtrToStringAnsi(error); if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error); throw new InvalidOperationException(message); } } }
@@ -906,6 +907,7 @@ namespace PeerChat.Server {
             long accountId=accounts.Authenticate(TokenHash(token)); if(accountId==0)return Error("session_invalid");
             if(!String.IsNullOrEmpty(identity)&&accounts.OwnsDevice(accountId,identity)&&!accounts.ActiveDevice(accountId,identity))return Error("device_revoked");
             if(!String.IsNullOrEmpty(identity)&&!accounts.SessionAllowsDevice(TokenHash(token),identity))return Error("device_session_mismatch");
+            if(type!=null&&type.StartsWith("device_identity_",StringComparison.Ordinal))return DeviceIdentityRequest(accountId,identity,TokenHash(token),type,request);
             if(type=="device_inventory"||type=="device_metadata"||type=="device_rename"||type=="device_revoke_challenge"||type=="device_revoke")return DeviceManagementRequest(accountId,identity,TokenHash(token),type,request);
             if(type=="archive_descriptor_register"||type=="archive_grant_register"||type=="archive_authorization_state")return ArchiveAuthorizationRequest(accountId,identity,type,request);
             if(type=="remember_enroll_challenge"||type=="remember_enroll")return EnrollRemembered(request,type,accountId,identity,TokenHash(token));
@@ -1026,7 +1028,7 @@ namespace PeerChat.Server {
         readonly object deviceManagementGate=new object();
         readonly Dictionary<string,DeviceManagementChallenge> deviceManagementChallenges=new Dictionary<string,DeviceManagementChallenge>();
         readonly Dictionary<long,long> deviceManagementStepUps=new Dictionary<long,long>();
-        string SerializeOrdinaryResponse(string type,Dictionary<string,object> response){return type!=null&&(type.StartsWith("device_",StringComparison.Ordinal)||(type=="friend_state"&&response.ContainsKey("deviceNamesVersion")))?new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(response):json.Serialize(response);}
+        string SerializeOrdinaryResponse(string type,Dictionary<string,object> response){return type!=null&&type.StartsWith("device_identity_",StringComparison.Ordinal)?new JavaScriptSerializer{MaxJsonLength=131072}.Serialize(response):type!=null&&(type.StartsWith("device_",StringComparison.Ordinal)||(type=="friend_state"&&response.ContainsKey("deviceNamesVersion")))?new JavaScriptSerializer{MaxJsonLength=65536}.Serialize(response):json.Serialize(response);}
         static string DeviceProofDigest(string target,string revision,string id,string key,string signature){return TokenHash(target+"|"+revision+"|"+id+"|"+key+"|"+signature);}
         Dictionary<string,object> DeviceManagementRequest(long account,string actor,string session,string type,Dictionary<string,object> request){
             if(!accounts.ManagementActor(account,actor,session))return Error("device_management_session_required");

@@ -44,7 +44,7 @@ try {
     if($ServerMetadata){
         if($Provenance){throw 'Server metadata fixtures require authorization test'}
         $fx=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-        $sources=@('shared/VersionInfo.cs','server/ServerConfiguration.cs','server/GroupRosterProof.cs','server/ArchiveAuthorization.cs','server/GroupCiphertextFanout.cs','server/GroupMediaRooms.cs','server/ServerPresence.cs','server/ServerRpc.cs','server/PeerChat.Server.cs','server/MailboxProtocol.cs','server/EncryptedMailbox.cs','server/EncryptedMailboxChannel.cs','tests/archive_authorization_server_test.cs')
+        $sources=@('shared/VersionInfo.cs','server/ServerConfiguration.cs','server/GroupRosterProof.cs','server/ArchiveAuthorization.cs','server/GroupCiphertextFanout.cs','server/GroupMediaRooms.cs','server/ServerPresence.cs','server/ServerRpc.cs','server/PeerChat.Server.cs','server/DeviceIdentityEndorsement.cs','server/DeviceIdentityEnrollment.cs','server/MailboxProtocol.cs','server/EncryptedMailbox.cs','server/EncryptedMailboxChannel.cs','tests/archive_authorization_server_test.cs')
         $sources=@($sources | ForEach-Object {Join-Path $root $_})
         & "$fx\csc.exe" /nologo /target:exe /platform:x64 /optimize+ /main:ArchiveAuthorizationServerTest "/out:$out\archive-server-test.exe" "/reference:$fx\System.Web.Extensions.dll" $sources
         if($LASTEXITCODE -ne 0){throw 'Archive server metadata compilation failed'}

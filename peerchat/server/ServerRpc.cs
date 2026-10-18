@@ -42,8 +42,9 @@ sealed partial class DiscoveryServer {
             else {if(bytes.Length>4096)throw new InvalidDataException("Ordinary RPC exceeds bound");body=Handle(request,observedHost,0);}
             bool more=count<63&&age.ElapsedMilliseconds<110000&&type!="logout"&&current();
             var reply=new Dictionary<string,object>{{"type","rpc_result"},{"rpcRequestId",id},{"operation",type},{"body",body},{"more",more}};
-            var output=Encoding.UTF8.GetBytes(groupJson.Serialize(reply));
-            if(output.Length>100000)throw new InvalidDataException("RPC response exceeds bound");
+            bool identityReply=type.StartsWith("device_identity_",StringComparison.Ordinal);
+            var output=Encoding.UTF8.GetBytes(identityReply?new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=150000}.Serialize(reply):groupJson.Serialize(reply));
+            if(output.Length>(identityReply?150000:100000))throw new InvalidDataException("RPC response exceeds bound");
             RecordTiming("rpc_processing",type,id,processingStarted);
             long writeStarted=Stopwatch.GetTimestamp();
             try{WriteFrame(tls,output);}finally{RecordTiming("rpc_response_write",type,id,writeStarted);}

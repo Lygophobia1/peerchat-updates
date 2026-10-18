@@ -30,12 +30,13 @@ internal sealed class DeviceIdentityEndorsement {
         var r=new MailboxProtocol.Reader(payload,"PeerChat/account-device-endorsement/v1");
         var e=new DeviceIdentityEndorsement{Target=DeviceIdentityPossession.Parse(r.Field(1024)),
             Authority=r.Text(64),AuthorityKey=r.Field(72),AuthorityGeneration=r.Positive(),
-            TargetGeneration=r.Positive(),Revision=r.Positive(),Issuance=r.Text(64),Session=r.Text(64),
+            TargetGeneration=r.Positive(),Revision=RevisionNumber(r),Issuance=r.Text(64),Session=r.Text(64),
             Issued=r.Positive(),Expires=r.Positive(),Wire=(byte[])wire.Clone()};r.End();
         MailboxProtocol.Require(MailboxProtocol.Id(e.Authority,64)&&e.Authority!=e.Target.Device&&
             MailboxProtocol.Id(e.Issuance,64)&&MailboxProtocol.Id(e.Session,64)&&e.Expires>e.Issued&&
             e.Expires-e.Issued<=60000&&MailboxProtocol.Verify(payload,signature,e.AuthorityKey,e.Authority));return e;
     }
+    internal static long RevisionNumber(MailboxProtocol.Reader r){ulong value=r.Number(8);MailboxProtocol.Require(value<=long.MaxValue);return (long)value;}
     // Only for enrollment commit, never durable certificate expiry. Caller must
     // atomically consume the challenge and recheck ownership/revocation/revision.
     internal bool MatchesChallenge(string server,long account,string authority,byte[] authorityKey,
@@ -45,6 +46,22 @@ internal sealed class DeviceIdentityEndorsement {
             AuthorityKey.SequenceEqual(authorityKey)&&Target.Device==target&&Target.Public.SequenceEqual(targetKey)&&
             AuthorityGeneration==authorityGeneration&&TargetGeneration==targetGeneration&&Revision==revision&&
             Issuance==issuance&&Session==session&&Issued==issued&&Expires==expires;
+    }
+}
+internal sealed class DeviceIdentityAuthority {
+    internal DeviceIdentityPossession Possession;
+    internal string Issuance,Session;
+    internal long Generation,Revision,Issued,Expires;
+    internal byte[] Wire;
+    internal static DeviceIdentityAuthority Parse(byte[] wire) {
+        MailboxProtocol.Require(wire!=null&&wire.Length<=2048);
+        var outer=new MailboxProtocol.Reader(wire,"PeerChat/account-device-authority-signed/v1");
+        var payload=outer.Field(1792);var signature=outer.Field(64);outer.End();
+        var r=new MailboxProtocol.Reader(payload,"PeerChat/account-device-authority/v1");
+        var a=new DeviceIdentityAuthority{Possession=DeviceIdentityPossession.Parse(r.Field(1024)),Generation=r.Positive(),Revision=DeviceIdentityEndorsement.RevisionNumber(r),Issuance=r.Text(64),Session=r.Text(64),Issued=r.Positive(),Expires=r.Positive(),Wire=(byte[])wire.Clone()};r.End();
+        MailboxProtocol.Require(a.Generation==1&&MailboxProtocol.Id(a.Issuance,64)&&MailboxProtocol.Id(a.Session,64)&&
+            a.Expires>a.Issued&&a.Expires-a.Issued<=60000&&MailboxProtocol.Verify(payload,signature,a.Possession.Public,a.Possession.Device));
+        return a;
     }
 }
 }
