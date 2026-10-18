@@ -192,10 +192,12 @@ public sealed class AttachmentActionEventArgs:RoutedEventArgs {
 public sealed class AttachmentCard:StackPanel {
     public static readonly RoutedEvent ActionEvent=EventManager.RegisterRoutedEvent("Action",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(AttachmentCard));
     public static readonly DependencyProperty TransferProperty=DependencyProperty.Register("Transfer",typeof(CoreAdapter.FileTransferData),typeof(AttachmentCard),new PropertyMetadata(null,(sender,args)=>((AttachmentCard)sender).TransferChanged()));
-    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(AttachmentCard),new PropertyMetadata(false,(sender,args)=>((AttachmentCard)sender).Render()));
+    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(AttachmentCard),new PropertyMetadata(false,(sender,args)=>((AttachmentCard)sender).UpdateDetailsVisibility()));
     public CoreAdapter.FileTransferData Transfer{get{return (CoreAdapter.FileTransferData)GetValue(TransferProperty);}set{SetValue(TransferProperty,value);}}
     public bool DetailsExpanded{get{return (bool)GetValue(DetailsExpandedProperty);}set{SetValue(DetailsExpandedProperty,value);}}
     string previewPath="",previewId="";AttachmentPreview preview;bool autoPreviewAttempted;
+    StackPanel detailsPanel;
+    void UpdateDetailsVisibility(){if(detailsPanel!=null)detailsPanel.Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed;}
     static readonly Queue<WeakReference> residentCards=new Queue<WeakReference>();
     public AttachmentCard(){MaxWidth=360;Loaded+=(s,e)=>{Render();TryAutomaticPreview();};}
     Button ActionButton(string label,Action action){var button=new Button{Content=label,Margin=new Thickness(0,4,6,0),Padding=new Thickness(8,4,8,4)};button.Click+=(s,e)=>action();return button;}
@@ -223,7 +225,7 @@ public sealed class AttachmentCard:StackPanel {
             if(row.saveState=="complete"&&!String.IsNullOrWhiteSpace(row.savePath)&&File.Exists(row.savePath)){actions.Children.Add(ActionButton("Open File",()=>Signal(row,"open-saved")));actions.Children.Add(ActionButton("Open Folder",()=>Signal(row,"folder-saved")));}
             else if(row.saveState!="copying"&&row.saveState!="pending")actions.Children.Add(ActionButton("Retry Save…",()=>Signal(row,"retry-save")));
         }
-        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};Children.Add(details);
+        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};detailsPanel=details;Children.Add(details);
         details.Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         details.Children.Add(new TextBlock{Text=row.dmCache?"Cached transfer · encrypted attachment":row.isArchive?"Archive transfer · source availability is not proven":row.sending?"Direct transfer · selected device only":"Direct transfer · this device only",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         details.Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});

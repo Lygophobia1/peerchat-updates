@@ -78,7 +78,8 @@ class GroupAttachmentUiTest {
             if(state=="uploading"||state=="downloading"){
                 Check(card.Children.OfType<ProgressBar>().Single().Maximum==200,"progress used plaintext size for ciphertext ACKs");
                 var details=card.Children.OfType<StackPanel>().Single();Check(details.Visibility==Visibility.Collapsed,"ciphertext ACK diagnostics were exposed in the collapsed attachment bubble");
-                card.DetailsExpanded=true;details=card.Children.OfType<StackPanel>().Single();
+                card.DetailsExpanded=true;
+                Check(Object.ReferenceEquals(details,card.Children.OfType<StackPanel>().Single()),"expansion repeated group attachment projection or filesystem work");
                 Check(details.Visibility==Visibility.Visible&&details.Children.OfType<TextBlock>().Any(text=>text.Text.Contains("confirmed encrypted bytes")),"expanded ciphertext ACK units missing");
             }
             if(state=="complete")Check(!GroupAttachmentProjection.Status(row).Contains("Complete — plaintext verified"),"ciphertext completion mislabeled verified");

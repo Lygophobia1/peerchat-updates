@@ -10,6 +10,15 @@ using System.Windows.Media.Imaging;
 using PeerChatDesktop;
 class ChatAttachmentTest {
     static void Check(bool result,string reason){if(!result)throw new Exception(reason);}
+    static string ClipboardText(){
+        // Windows clipboard managers may briefly own the desktop-wide clipboard.
+        // Retry only that OS contention; preserve the exact content assertions.
+        for(int attempt=0;;++attempt)try{return Clipboard.GetText();}
+        catch(System.Runtime.InteropServices.COMException error){
+            if(error.ErrorCode!=unchecked((int)0x800401D0)||attempt>=40)throw;
+            System.Threading.Thread.Sleep(50);
+        }
+    }
     static string Put(string root,string name,byte[] bytes){string path=Path.Combine(root,name);File.WriteAllBytes(path,bytes);return path;}
     [STAThread] static int Main(string[] args){try{
         var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};string root=args[0];Directory.CreateDirectory(root);
@@ -88,7 +97,8 @@ class ChatAttachmentTest {
         var compactCard=new AttachmentCard{Transfer=completed};
         var cardDetails=compactCard.Children.OfType<StackPanel>().Single();
         Check(cardDetails.Visibility==Visibility.Collapsed,"attachment diagnostics were exposed in the collapsed bubble");
-        compactCard.DetailsExpanded=true;cardDetails=compactCard.Children.OfType<StackPanel>().Single();
+        compactCard.DetailsExpanded=true;
+        Check(Object.ReferenceEquals(cardDetails,compactCard.Children.OfType<StackPanel>().Single()),"expansion rebuilt attachment controls and repeated filesystem/preview work");
         Check(cardDetails.Visibility==Visibility.Visible&&cardDetails.Children.OfType<Button>().Any(button=>Convert.ToString(button.Content)=="Open Diagnostics"),"expanded attachment details lost existing diagnostics action");
         var chat=new ChatViewModel();var typed=chat.Get("peer" );ChatAttachmentProjection.Apply(typed,new CoreAdapter.FileTransferData{id="same-id",peer="peer",senderPeer="peer",state=2});
         chat.Apply(new CoreEvent{kind=5,peer="peer",messages=new[]{new MessageData{id="same-id",sender="peer",text="separate text identity",time=1}}});Check(typed.Messages.Count==2,"attachment suppressed a text message with the same ID" );
@@ -122,7 +132,7 @@ class ChatAttachmentTest {
         var host=new Window{Content=longChat,Width=360,Height=400,ShowInTaskbar=false,ShowActivated=false,WindowStartupLocation=WindowStartupLocation.Manual,Left=-20000};host.Show();host.UpdateLayout();var frame=new System.Windows.Threading.DispatcherFrame();view.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,new Action(()=>frame.Continue=false));System.Windows.Threading.Dispatcher.PushFrame(frame);view.Viewer.ScrollToEnd();frame=new System.Windows.Threading.DispatcherFrame();view.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle,new Action(()=>frame.Continue=false));System.Windows.Threading.Dispatcher.PushFrame(frame);Console.WriteLine("scroll height="+view.Viewer.ActualHeight+" extent="+view.Viewer.ExtentHeight+" viewport="+view.Viewer.ViewportHeight+" offset="+view.Viewer.VerticalOffset);Check(view.Viewer.VerticalOffset>0,"inline vertical scrolling does not reach later content");host.Close();app.MainWindow=null;
         view.Expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(view.Viewer.MaxHeight==320,"expand did not preserve bounded height");
         view.Expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(view.Viewer.MaxHeight==160&&view.Viewer.Text==prose,"collapse changed text");
-        view.Copy.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(Clipboard.GetText()==prose,"copy is not exact full content");
+        view.Copy.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(ClipboardText()==prose,"copy is not exact full content");
         view.OpenFull.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));var full=app.Windows.Cast<Window>().Single(w=>w.Title=="Long message — read-only");
         Check(((TextBox)full.Content).Text==prose&&((TextBox)full.Content).IsReadOnly,"open full altered content or allows edits");full.Close();
         string code=String.Concat(Enumerable.Repeat("public class Sample {\n  int value = 1;\n}\n",70));
@@ -134,7 +144,7 @@ class ChatAttachmentTest {
         var longModel=new MessageModel{Data=new MessageData{time=100}};longModel.SetAttachment(longRow);Check(longModel.Text=="Long message"&&!longModel.Stamp.Contains("File attachment"),"typed text presented as a file");
         longRow.isArchive=true;longRow.logicalId="typed-logical";var reload=new ConversationModel{Contact=conversation.Contact};ChatAttachmentProjection.Apply(reload,longRow);Check(reload.Messages.Single().Text=="Long message","archive/reload loses long text presentation");
         protectedCard.ProtectedPreview("protected",prose,"");var protectedView=protectedCard.Children.OfType<BoundedTextView>().Single();Check(protectedView.Viewer.Text==prose,"protected long text truncated by preview");
-        protectedView.Copy.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(Clipboard.GetText()==prose,"protected copy truncated");
+        protectedView.Copy.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Check(ClipboardText()==prose,"protected copy truncated");
         protectedCard.Transfer=new CoreAdapter.FileTransferData{id="different",state=4,protectedSource=true,name=ChatAttachmentProjection.LongMessageName,size=code.Length};protectedCard.ProtectedPreview("protected",prose,"");Check(!protectedCard.Children.OfType<BoundedTextView>().Any(),"reused bubble retained another message's text");protectedCard.ProtectedPreview("different",code,"");Check(protectedCard.Children.OfType<BoundedTextView>().Single().Viewer.Text==code,"stale preview overwrote current content");
         Check(SafeAttachmentPreview.FromText(String.Join("\n",Enumerable.Repeat(text,400)),100000).Text.Split('\n').Length<=200,"native snippet preview line limit");
         Check(!ChatAttachmentProjection.RequiresSnippet(new string('x',4096))&&ChatAttachmentProjection.RequiresSnippet(new string('x',4097)),"inline limit boundary");

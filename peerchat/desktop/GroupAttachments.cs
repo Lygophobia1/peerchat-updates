@@ -173,9 +173,11 @@ public sealed class GroupAttachmentActionEventArgs:RoutedEventArgs {
 public sealed class GroupAttachmentCard:StackPanel {
     public static readonly RoutedEvent ActionEvent=EventManager.RegisterRoutedEvent("Action",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(GroupAttachmentCard));
     public static readonly DependencyProperty AttachmentProperty=DependencyProperty.Register("Attachment",typeof(CoreAdapter.GroupAttachmentData),typeof(GroupAttachmentCard),new PropertyMetadata(null,(sender,args)=>((GroupAttachmentCard)sender).Render()));
-    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(GroupAttachmentCard),new PropertyMetadata(false,(sender,args)=>((GroupAttachmentCard)sender).Render()));
+    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(GroupAttachmentCard),new PropertyMetadata(false,(sender,args)=>((GroupAttachmentCard)sender).UpdateDetailsVisibility()));
     public CoreAdapter.GroupAttachmentData Attachment{get{return (CoreAdapter.GroupAttachmentData)GetValue(AttachmentProperty);}set{SetValue(AttachmentProperty,value);}}
     public bool DetailsExpanded{get{return (bool)GetValue(DetailsExpandedProperty);}set{SetValue(DetailsExpandedProperty,value);}}
+    StackPanel detailsPanel;
+    void UpdateDetailsVisibility(){if(detailsPanel!=null)detailsPanel.Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed;}
     public GroupAttachmentCard(){MaxWidth=360;Visibility=Visibility.Collapsed;}
     void AddAction(WrapPanel actions,string title,string action){var button=new Button{Content=title,Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,4,6,0)};button.Click+=(s,e)=>RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,Attachment,action));actions.Children.Add(button);}
     void Render(){
@@ -185,7 +187,7 @@ public sealed class GroupAttachmentCard:StackPanel {
         if(row.state=="uploading"||row.state=="downloading"){
             if(row.transferSize>0)Children.Add(new ProgressBar{Height=4,Maximum=row.transferSize,Value=Math.Min(row.done,row.transferSize),Margin=new Thickness(0,6,0,2)});
         }
-        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};Children.Add(details);
+        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};detailsPanel=details;Children.Add(details);
         details.Children.Add(new TextBlock{Text=row.size.ToString("N0")+" file bytes · "+GroupAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.state=="uploading"||row.state=="downloading")details.Children.Add(new TextBlock{Text=Math.Max(0,row.done).ToString("N0")+" confirmed encrypted bytes",FontSize=12,Foreground=Brushes.LightGray});
         if(!String.IsNullOrEmpty(row.error))details.Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
