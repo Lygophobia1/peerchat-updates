@@ -78,18 +78,24 @@ private:
         return true;
     }
     bool currentMedia()const{return media_&&calls_.matchesMedia(binding_.callLifetime,binding_.callId,binding_.remotePeerId,binding_.mediaGeneration);}
+    // startOffer/startAnswer create Audio, but poll starts the device on its
+    // Connected event. Restore microphone intent before that first poll.
+    bool prepareMicrophone(){return currentMedia()&&(!calls_.active()->muted||media_->setMuted(true));}
     void interrupt(std::uint64_t now){
         auto active=calls_.active();if(!active)return;
+        // Ringing is not consent to create media, including local recovery.
+        if(active->state==calls::State::Incoming)return;
         if(!active->mediaRecoveryCapable){notifyEnd();finish("Media unavailable",true);return;}
         calls_.interruptMedia(now,now+RecoveryWindow);stopMedia();diagnostic_="Reconnecting media";
     }
     void serviceRecovery(std::uint64_t now){
         auto active=calls_.active();if(!active||!calls_.mediaRetryDue(now))return;
+        if(active->state==calls::State::Incoming)return;
         auto c=control(calls_.peer());if(!c.connected||!c.voice){calls_.deferMediaRetry(now,500);return;}
         calls_.observeControl(true);
         if(local_<calls_.peer()){
             if(!calls_.beginMediaRecovery(now,RecoveryRetry))return;
-            if(!configure()||!media_->startOffer()){stopMedia();calls_.deferMediaRetry(now,1000);}
+            if(!configure()||!media_->startOffer()||!prepareMicrophone()){stopMedia();calls_.deferMediaRetry(now,1000);}
         }else{
             protocol::Writer request(protocol::CallMediaRecoveryRequest);request.string(active->id.value);request.number(active->mediaGeneration);
             send(calls_.peer(),request);calls_.deferMediaRetry(now,2000);
@@ -135,14 +141,14 @@ public:
         if(!available()||!protocol::id(peer)||peer==local_||!protocol::id(id,32)||!authorized(peer)||!c.connected||!c.voice||calls_.finished(id))return false;
         if(!calls_.beginOutgoing({id},calls::CallType::Voice,{peer},now+RingTimeout))return false;
         calls_.setMediaRecoveryCapable(peer,c.recovery);calls_.beginInitialMedia(id);
-        if(!configure()||!media_->startOffer()){finish("Media start failed",true);return false;}
+        if(!configure()||!media_->startOffer()||!prepareMicrophone()){finish("Media start failed",true);return false;}
         diagnostic_="Outgoing";return true;
     }
     bool answer(const std::string& id,std::uint64_t now){
         auto active=calls_.active();if(!active||active->id.value!=id||active->state!=calls::State::Incoming||active->direction!=calls::Direction::Incoming||!available()||!authorized(calls_.peer()))return false;
         auto c=control(calls_.peer());if(!c.connected||!c.voice)return false;
         calls_.transition(id,calls::State::ConnectingMedia,now+ConnectTimeout);
-        if(!configure()||!media_->startAnswer(active->participants.at(calls_.peer()).remoteDescription)){notifyEnd();finish("Media answer failed",true);return false;}
+        if(!configure()||!media_->startAnswer(active->participants.at(calls_.peer()).remoteDescription)||!prepareMicrophone()){notifyEnd();finish("Media answer failed",true);return false;}
         auto& pending=active->participants.at(calls_.peer()).candidates;
         for(const auto& candidate:pending)media_->addCandidate(candidate.first,candidate.second);
         pending.clear();diagnostic_="Connecting media";return true;
@@ -182,7 +188,7 @@ public:
                 // Recovery signaling cannot stand in for the local Answer action.
                 if(active->state==calls::State::Incoming)return true;
                 if(!calls_.acceptMediaGeneration(generation,now+RecoveryWindow))return true;
-                stopMedia();if(!configure()||!media_->startAnswer(sdp)){stopMedia();calls_.deferMediaRetry(now,1000);}
+                stopMedia();if(!configure()||!media_->startAnswer(sdp)||!prepareMicrophone()){stopMedia();calls_.deferMediaRetry(now,1000);}
                 diagnostic_="Reconnecting media";
             }else if(currentMedia()&&calls_.matchesMedia(binding_.callLifetime,id,peer,generation)&&!media_->setAnswer(sdp))interrupt(now);
             return true;

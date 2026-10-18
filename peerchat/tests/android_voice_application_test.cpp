@@ -8,8 +8,8 @@ template<class F>static void rejects(F f){bool rejected=false;try{f();}catch(...
 struct FakeState {
     VoiceMedia::ReceiveBinding binding;
     std::vector<VoiceMedia::Event> events;
-    unsigned stopped=0,candidates=0,answers=0;
-    bool muted=false,deafened=false;
+    unsigned stopped=0,candidates=0,answers=0,unmutedDeviceStarts=0;
+    bool muted=false,deafened=false,muteFails=false;
 };
 // Explicit UNIT seam only. It never produces audio, ICE, DTLS, RTP or E2E proof.
 class FakeMedia final:public App::Media {
@@ -20,9 +20,14 @@ public:
     bool startAnswer(const std::string&)override{state_->events.push_back({VoiceMedia::EventKind::Description,"unit-answer","answer"});return true;}
     bool setAnswer(const std::string&)override{++state_->answers;return true;}
     bool addCandidate(const std::string&,const std::string&)override{++state_->candidates;return true;}
-    bool setMuted(bool value)override{state_->muted=value;return true;}
+    bool setMuted(bool value)override{if(state_->muteFails)return false;state_->muted=value;return true;}
     void setDeafened(bool value)override{state_->deafened=value;}
-    std::vector<VoiceMedia::Event> poll()override{auto events=std::move(state_->events);state_->events.clear();return events;}
+    // Real VoiceMedia starts its device inside poll before returning Connected.
+    std::vector<VoiceMedia::Event> poll()override{
+        auto events=std::move(state_->events);state_->events.clear();
+        for(const auto& event:events)if(event.kind==VoiceMedia::EventKind::Connected&&!state_->muted)++state_->unmutedDeviceStarts;
+        return events;
+    }
     VoiceMedia::Route route()override{return VoiceMedia::Route::TurnRelay;}
     void stop()override{++state_->stopped;}
 };
@@ -30,7 +35,7 @@ struct Signal {std::string peer;Blob wire;};
 struct Harness {
     calls::CallManager calls;
     std::string local,peer;
-    bool enabled=true,authorized=true,connected=true,recovery=true,createFails=false;
+    bool enabled=true,authorized=true,connected=true,recovery=true,createFails=false,muteFails=false;
     unsigned created=0;
     std::vector<std::shared_ptr<FakeState>> states;
     std::deque<Signal> signals;
@@ -41,7 +46,7 @@ struct Harness {
         [this](const std::string& id,const Blob& bytes){signals.push_back({id,bytes});return connected;},
         [this](const VoiceMedia::ReceiveBinding& binding)->std::unique_ptr<App::Media>{
             ++created;if(createFails)return {};
-            auto state=std::make_shared<FakeState>();state->binding=binding;states.push_back(state);return std::make_unique<FakeMedia>(state);
+            auto state=std::make_shared<FakeState>();state->binding=binding;state->muteFails=muteFails;states.push_back(state);return std::make_unique<FakeMedia>(state);
         }}){}
     void event(VoiceMedia::EventKind kind){check(!states.empty(),"No fake media instance");states.back()->events.push_back({kind,{},{}});}
 };
@@ -87,8 +92,45 @@ int main(){try{
         b.app.receive(b.peer,packet(protocol::CallOffer,one,"old-offer"),9);check(b.calls.idle(),"Completed call replay rang again");
     }
     {
+        // A local network transition must not turn an unanswered incoming call
+        // into a recovery offer. Exercise both deterministic-offerer orderings.
+        for(const auto local:std::string("ab")){
+            Harness incoming(local,local=='a'?'b':'a');
+            incoming.app.receive(incoming.peer,packet(protocol::CallOffer,one,"offer"),100);
+            for(const auto now:{200ULL,1200ULL,2200ULL}){
+                incoming.app.networkChanged(now);incoming.app.tick(now+1);
+                check(incoming.created==0&&incoming.states.empty(),"Local network recovery bypassed incoming-call acceptance");
+                check(incoming.calls.state()==calls::State::Incoming&&incoming.calls.active()->mediaGeneration==1,
+                      "Local network recovery mutated unanswered incoming call");
+                check(incoming.signals.empty(),"Unanswered incoming call emitted recovery signaling");
+            }
+            check(incoming.app.setMuted(true),"Could not preserve mute intent while ringing");
+            check(incoming.app.answer(one,2300)&&incoming.created==1,"Explicit answer no longer creates incoming media");
+            incoming.event(VoiceMedia::EventKind::Connected);incoming.app.tick(2301);
+            check(incoming.states.back()->unmutedDeviceStarts==0,"Incoming answer started microphone before restoring mute");
+            check(incoming.app.end(one),"Answered incoming fixture did not end");
+            Harness retry(local,local=='a'?'b':'a');
+            retry.app.receive(retry.peer,packet(protocol::CallOffer,two,"offer"),100);
+            // Defense at the recovery consumer, even if a caller has already
+            // placed CallManager in retry state while consent is still pending.
+            check(retry.calls.interruptMedia(200,30200),"Retry-state fixture failed");
+            retry.app.tick(201);
+            check(retry.created==0&&retry.signals.empty()&&retry.calls.state()==calls::State::Incoming&&retry.calls.active()->mediaGeneration==1,
+                  "Existing retry state bypassed incoming-call acceptance");
+            check(retry.app.decline(two),"Incoming retry fixture did not decline");
+        }
+    }
+    {
+        Harness incoming('a','b');incoming.muteFails=true;
+        incoming.app.receive(incoming.peer,packet(protocol::CallOffer,one,"offer"),100);
+        check(incoming.app.setMuted(true),"Incoming mute intent rejected");
+        check(!incoming.app.answer(one,101)&&incoming.calls.idle(),"Failed initial mute preparation retained call");
+        check(incoming.states.back()->stopped==1&&incoming.states.back()->unmutedDeviceStarts==0,
+              "Failed mute preparation did not stop media before device start");
+    }
+    {
         Harness a('a','b'),b('b','a');connect(a,b,one,100);
-        check(a.app.setMuted(true)&&b.app.setDeafened(true),"Voice controls failed");
+        check(a.app.setMuted(true)&&b.app.setMuted(true)&&b.app.setDeafened(true),"Voice controls failed");
         const auto lifetime=a.calls.lifetime();auto old=a.states.back();
         a.app.networkChanged(200);check(old->stopped==1&&a.calls.active()->mediaState==calls::MediaState::Interrupted,"Network change did not stop old media");
         exchange(a,b,201);exchange(a,b,202);
@@ -99,6 +141,8 @@ int main(){try{
         protocol::Writer stale(protocol::CallMediaCandidate);stale.string(one);stale.number(3);stale.string("future-candidate");stale.string("0");
         auto accepted=a.states.back()->candidates;a.app.receive(a.peer,stale.data,204);check(a.states.back()->candidates==accepted,"Wrong media generation candidate accepted");
         a.event(VoiceMedia::EventKind::Connected);b.event(VoiceMedia::EventKind::Connected);exchange(a,b,205);
+        check(a.states.back()->unmutedDeviceStarts==0,"Media recovery started microphone before restoring mute");
+        check(b.states.back()->unmutedDeviceStarts==0,"Recovery answer started microphone before restoring mute");
         check(a.states.back()->muted&&b.states.back()->deafened,"Media recovery lost mute/deafen");
         a.connected=false;a.app.tick(300);a.app.tick(30400);
         check(a.calls.active()&&a.calls.active()->mediaState==calls::MediaState::Connected&&!a.calls.active()->controlAvailable,"Control loss killed healthy media");
