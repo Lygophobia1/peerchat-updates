@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="PortableTestKey.cs" />
+    <Compile Include="AccountAuthenticationConcurrencyTests.cs" />
     <Compile Include="../../server/DiscoveryIntegrationTest.cs" />
     <Compile Include="../archive_relay_lifecycle_test.cs" />
     <Compile Include="../device_management_server_test.cs" />

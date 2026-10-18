@@ -43,7 +43,7 @@ namespace PeerChat.Server {
     // SQLite owns durable account state. All writes use a process-wide lock because this starter
     // service deliberately uses one embedded database rather than introducing another service.
     sealed partial class AccountDatabase : IDisposable {
-        readonly object gate = new object(); readonly IntPtr database; internal readonly ServerPresence Live=new ServerPresence();
+        readonly object gate = new object(); readonly object passwordVerificationGate = new object(); readonly IntPtr database; internal readonly ServerPresence Live=new ServerPresence();
         public AccountDatabase(string path) {
             string fullPath=Path.GetFullPath(path);Console.WriteLine("Discovery account database: "+fullPath);
             if (Sqlite.sqlite3_open16(fullPath, out database) != 0){if(database!=IntPtr.Zero)Sqlite.sqlite3_close(database);throw new InvalidOperationException("Cannot open server database.");}
@@ -102,7 +102,25 @@ namespace PeerChat.Server {
         public long CreateAccountWithDevice(string username, byte[] salt, byte[] hash, string publicIdentity) { lock(gate) { Execute("BEGIN IMMEDIATE;"); try { Execute("INSERT INTO accounts(username,password_salt,password_hash,created_utc) VALUES("+Quote(username)+",X'"+Hex(salt)+"',X'"+Hex(hash)+"',"+UnixNow()+");"); long id=ScalarLong(database,"SELECT last_insert_rowid();"); Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+id+","+Quote(publicIdentity)+","+UnixNow()+");"); Execute("COMMIT;"); return id; } catch { try { Execute("ROLLBACK;"); } catch {} throw; } } }
         public bool DeviceIdentityExists(string publicIdentity) { lock(gate) return ScalarLong(database,"SELECT count(*) FROM devices WHERE public_identity="+Quote(publicIdentity))>0; }
         public string PrimaryDeviceIdentity(long accountId) { lock(gate) return ScalarText(database,"SELECT public_identity FROM devices WHERE account_id="+accountId+" ORDER BY id LIMIT 1")??""; }
-        public bool PasswordMatches(string username, Func<byte[], byte[], bool> verifier, out long accountId) { lock(gate) { IntPtr s=IntPtr.Zero; accountId=0; try { if(SqliteNative.prepare(database,"SELECT id,password_salt,password_hash FROM accounts WHERE username="+Quote(username),out s)!=0||SqliteNative.step(s)!=100)return false; accountId=SqliteNative.columnLong(s,0); return verifier(SqliteNative.columnBlob(s,1),SqliteNative.columnBlob(s,2)); } finally { if(s!=IntPtr.Zero)SqliteNative.finalize(s); } } }
+        public bool PasswordMatches(string username, Func<byte[], byte[], bool> verifier, out long accountId) {
+            accountId=0;long candidate;byte[] salt,hash;
+            lock(gate) {
+                IntPtr statement=IntPtr.Zero;
+                try {
+                    if(SqliteNative.prepare(database,"SELECT id,password_salt,password_hash FROM accounts WHERE username="+Quote(username),out statement)!=0||SqliteNative.step(statement)!=100)return false;
+                    candidate=SqliteNative.columnLong(statement,0);salt=SqliteNative.columnBlob(statement,1);hash=SqliteNative.columnBlob(statement,2);
+                } finally {if(statement!=IntPtr.Zero)SqliteNative.finalize(statement);}
+            }
+            // Password derivation is CPU work, not a database operation. Do not
+            // hold every account's mailbox/ACK/registration lock while it runs.
+            // Keep an immutable snapshot and revalidate it before authenticating.
+            // Retain the previous single-verifier CPU bound, on a separate gate.
+            lock(passwordVerificationGate)if(!verifier((byte[])salt.Clone(),(byte[])hash.Clone()))return false;
+            lock(gate) {
+                if(ScalarLong(database,"SELECT count(*) FROM accounts WHERE id="+candidate+" AND username="+Quote(username)+" AND password_salt=X'"+Hex(salt)+"' AND password_hash=X'"+Hex(hash)+"'")!=1)return false;
+                accountId=candidate;return true;
+            }
+        }
         public bool AddDevice(long accountId,string publicIdentity) { lock(gate){long owner=ScalarLong(database,"SELECT account_id FROM devices WHERE public_identity="+Quote(publicIdentity));if(owner!=0)return owner==accountId&&ActiveDevice(accountId,publicIdentity);Execute("INSERT INTO devices(account_id,public_identity,created_utc) VALUES("+accountId+","+Quote(publicIdentity)+","+UnixNow()+");");AdvanceDeviceAuthority(accountId);return true;} }
         public bool OwnsDevice(long accountId,string publicIdentity){lock(gate)return ScalarLong(database,"SELECT count(*) FROM devices WHERE account_id="+accountId+" AND public_identity="+Quote(publicIdentity))>0;}
         // Provenance ownership survives revocation. All current authorization gates use ActiveDevice.
