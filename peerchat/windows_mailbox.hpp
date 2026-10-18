@@ -7,6 +7,7 @@
 #include "platform/windows_record_protection.hpp"
 #include "platform/windows_recipient_key.hpp"
 #include "platform/sql_key_registry.hpp"
+#include "device_identity_application.hpp"
 #include <filesystem>
 #include <chrono>
 
@@ -30,15 +31,31 @@ class WindowsMailbox {
     KeyCoordinator coordinator_;
     std::shared_ptr<platform::HpkeProvider> hpke_;
     const Profile& profile_;
+    std::wstring directory_;
+    std::shared_ptr<platform::SqlDatabase> identityDatabase_;
+    std::unique_ptr<device_identity::Application> identities_;
+    device_identity::Application& identities(){
+        if(!identities_){identityDatabase_=platform::openWindowsSqlDatabase((std::filesystem::path(directory_)/L"identity-directory").wstring());
+            identities_=std::make_unique<device_identity::Application>(identity_,*identityDatabase_,records_,profile_.peerId);}
+        return *identities_;
+    }
     std::map<std::string,std::uint64_t> rememberedChallenges_;
     std::map<std::string,std::uint64_t> managementChallenges_;
     static std::uint64_t now(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());}
     Contact contact(Storage& storage,const reliable::AuthenticatedFriendSnapshot& friends,const std::string& device,std::uint64_t account){
         require(account>0&&friends.accountFor(device)==account);
         auto list=storage.contacts();auto found=std::find_if(list.begin(),list.end(),[&](const auto& value){return value.peerId==device;});
-        require(found!=list.end()&&found->verified&&Storage::publicKeyId(found->publicKey)==device);return *found;
+        if(found!=list.end()&&found->verified&&Storage::publicKeyId(found->publicKey)==device)return *found;
+        auto key=discoveredIdentity(friends,account,device);
+        if(found!=list.end())require(found->publicKey==key);
+        return Contact{device,L"Verified account device",key,{},true};
     }
 public:
+    Blob discoveredIdentity(const reliable::AuthenticatedFriendSnapshot& friends,std::uint64_t account,const std::string& device){
+        require(identities_&&friends.accountFor(device)==account);
+        auto steady=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        return identities_->resolve(friends.localAccount(),friends.generation(),account,device,now(),steady);
+    }
     // Sign only the server's fixed remembered-device proof after the current
     // native authenticated account has been published for this profile.
     Blob rememberedDeviceProof(const Blob& input,std::uint64_t linkedAccount,std::uint64_t authenticatedAccount){
@@ -87,7 +104,7 @@ public:
     WindowsMailbox(const std::wstring& directory,const Profile& profile):identity_(profile),
         database_(platform::openWindowsSqlDatabase((std::filesystem::path(directory)/L"device-key-registry").wstring())),
         registryStore_(database_),registry_(registryStore_,records_,profile.peerId),
-        keys_(identity_,provider_,registry_),coordinator_(keys_,identity_,verifyDevicePayload,Storage::publicKeyId),profile_(profile){
+        keys_(identity_,provider_,registry_),coordinator_(keys_,identity_,verifyDevicePayload,Storage::publicKeyId),profile_(profile),directory_(directory){
         hpke_=platform::createShippingHpke();
     }
     Blob execute(unsigned operation,const Blob& input,const std::string& id,bool allowed,
@@ -95,6 +112,9 @@ public:
                  session::SessionTransportManager& sessions){
         if(operation==9){require(id.empty()&&!allowed);return rememberedDeviceProof(input,storage.groupAccount().accountId,friends.localAccount());}
         if(operation==13){require(id.empty()&&!allowed);return deviceManagementProof(input,storage.groupAccount().accountId,friends.localAccount());}
+        if(operation==14){require(id.empty()&&!allowed&&storage.groupAccount().accountId==friends.localAccount());
+            auto steady=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            return identities().execute(input,friends.localAccount(),friends.generation(),now(),steady,storage.contacts(),[&](const std::string& device){return friends.accountFor(device);});}
         if(operation==10){require(id.empty()&&input.empty()&&!allowed);auto text=storage.mailboxDiagnostics();return Blob(text.begin(),text.end());}
         if(!friends.localAccount())throw std::runtime_error("Mailbox account context is not ready");
         require(input.size()<=MaxWire);

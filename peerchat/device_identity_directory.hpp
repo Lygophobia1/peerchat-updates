@@ -107,6 +107,7 @@ public:
             // A same-revision equivocation must not replace previously admitted evidence.
             if(next.revision==old.revision&&old.reconciled)require(next.proofs==old.proofs&&next.disabled==old.disabled);
             next.reconciled=true;
+            if(old.reconciled&&next.revision==old.revision&&next.proofs==old.proofs&&next.disabled==old.disabled)return;
             write(next);
         });
     }
@@ -115,7 +116,7 @@ public:
     void revokeAuthority(const Scope& s,std::uint64_t generation,std::uint64_t now) {
         current(s,generation,now,false);require(!s.authorityActive&&s.server==server_&&s.account==account_&&fingerprint_(s.authorityKey)==s.authority);
         store_.locked([&]{auto state=read();require(state.root==s.authorityKey&&state.generation==s.authorityGeneration&&
-            s.revision>state.revision);state.revoked=true;state.revision=s.revision;write(state);});
+            (s.revision>state.revision||(state.revoked&&s.revision==state.revision)));if(state.revoked&&s.revision==state.revision)return;state.revoked=true;state.revision=s.revision;write(state);});
     }
     Bytes resolve(const Scope& s,const std::string& device,std::uint64_t generation,std::uint64_t now) {
         scope(s,generation,now);Bytes result;

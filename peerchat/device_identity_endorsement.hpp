@@ -57,15 +57,48 @@ inline Bytes encode(const Endorsement& e) {
     require(e.signature.size()==64);mailbox::Writer w("PeerChat/account-device-endorsement-signed/v1");
     w.field(payload(e));w.field(e.signature);return w.bytes;
 }
-inline Endorsement endorsement(const Bytes& wire,const mailbox::Verify& verify,const mailbox::Fingerprint& fingerprint) {
-    require(wire.size()<=2048);mailbox::Reader r(wire,"PeerChat/account-device-endorsement-signed/v1");
-    auto input=r.field(1792);auto signature=r.field(64);r.end();
+inline Endorsement unsignedEndorsement(const Bytes& input,const mailbox::Verify& verify,const mailbox::Fingerprint& fingerprint) {
+    require(input.size()<=1792);
     mailbox::Reader p(input,"PeerChat/account-device-endorsement/v1");Endorsement e;
     e.target=possession(p.field(1024),verify,fingerprint);e.authority=p.text(64);e.authorityKey=p.field(72);
     e.authorityGeneration=p.number(8);e.targetGeneration=p.number(8);e.revision=p.number(8);
     e.issuance=p.text(64);e.session=p.text(64);e.issued=p.number(8);e.expires=p.number(8);
-    e.signature=signature;p.end();require(payload(e)==input&&encode(e)==wire&&
-        fingerprint(e.authorityKey)==e.authority&&verify(input,signature,e.authorityKey));return e;
+    p.end();require(payload(e)==input&&fingerprint(e.authorityKey)==e.authority);return e;
+}
+inline Endorsement endorsement(const Bytes& wire,const mailbox::Verify& verify,const mailbox::Fingerprint& fingerprint) {
+    require(wire.size()<=2048);mailbox::Reader r(wire,"PeerChat/account-device-endorsement-signed/v1");
+    auto input=r.field(1792);auto signature=r.field(64);r.end();
+    auto e=unsignedEndorsement(input,verify,fingerprint);e.signature=signature;
+    require(encode(e)==wire&&verify(input,signature,e.authorityKey));return e;
+}
+struct AuthoritySelection {
+    Possession identity;
+    std::uint64_t generation=0,revision=0,issued=0,expires=0;
+    std::string issuance,session;
+    Bytes signature;
+};
+inline Bytes payload(const AuthoritySelection& e) {
+    require(e.generation==1&&mailbox::account(e.revision)&&mailbox::account(e.issued)&&
+        mailbox::account(e.expires)&&e.expires>e.issued&&e.expires-e.issued<=60000&&
+        mailbox::id(e.issuance,64)&&mailbox::id(e.session,64));
+    mailbox::Writer w("PeerChat/account-device-authority/v1");w.field(encode(e.identity));
+    w.number(e.generation,8);w.number(e.revision,8);w.text(e.issuance);w.text(e.session);
+    w.number(e.issued,8);w.number(e.expires,8);return w.bytes;
+}
+inline Bytes encode(const AuthoritySelection& e) {
+    require(e.signature.size()==64);mailbox::Writer w("PeerChat/account-device-authority-signed/v1");
+    w.field(payload(e));w.field(e.signature);return w.bytes;
+}
+inline AuthoritySelection unsignedAuthority(const Bytes& input,const mailbox::Verify& verify,const mailbox::Fingerprint& fingerprint) {
+    require(input.size()<=1792);mailbox::Reader r(input,"PeerChat/account-device-authority/v1");AuthoritySelection e;
+    e.identity=possession(r.field(1024),verify,fingerprint);e.generation=r.number(8);e.revision=r.number(8);
+    e.issuance=r.text(64);e.session=r.text(64);e.issued=r.number(8);e.expires=r.number(8);r.end();
+    require(payload(e)==input);return e;
+}
+inline AuthoritySelection authority(const Bytes& wire,const mailbox::Verify& verify,const mailbox::Fingerprint& fingerprint) {
+    require(wire.size()<=2048);mailbox::Reader r(wire,"PeerChat/account-device-authority-signed/v1");
+    auto input=r.field(1792);auto sig=r.field(64);r.end();auto e=unsignedAuthority(input,verify,fingerprint);e.signature=sig;
+    require(encode(e)==wire&&verify(input,sig,e.identity.key));return e;
 }
 
 // Supplied by an authenticated adapter, not decoded from untrusted endorsement
