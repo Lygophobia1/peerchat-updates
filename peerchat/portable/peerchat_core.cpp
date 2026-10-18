@@ -7,6 +7,7 @@
 #include "group_application.hpp"
 #include "group_pending_projection.hpp"
 #include "../delivery_manager.hpp"
+#include "../delivery_status.hpp"
 #include "../archive_application.hpp"
 #include "../protocol.hpp"
 #include "reliable_endpoint.hpp"
@@ -1292,6 +1293,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         auto history=instance->storage->history(peer,8,static_cast<std::int64_t>(before));
         peerchat::protocol::Writer record(peerchat::protocol::Text);record.number(history.size());
         for(const auto& message:history){record.string(message.id);messageRecord(record,message);}
+        peerchat::delivery_status::append(record,peerchat::delivery_status::read(*instance->storage,instance->profile.peerId,history));
         return peerchat::platform::android::Context::input(env,record.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }

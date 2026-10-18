@@ -25,8 +25,17 @@ data class MessageUi(
     val id: String, val senderId: String, val senderName: String, val text: String,
     val outgoing: Boolean, val time: String, val date: String = "Today",
     val status: MessageStatus = MessageStatus.Received,
-    val timestamp:Long=0,val logicalOrder:Long=0,val retryAvailable:Boolean=false,val deliveryDetail:String=""
+    val timestamp:Long=0,val logicalOrder:Long=0,val retryAvailable:Boolean=false,val deliveryDetail:String="",
+    val deliveryTargets:DeliveryTargetsUi?=null
 )
+enum class DeliveryTargetStatusUi { Received, Pending, Unavailable }
+data class DeliveryTargetUi(val deviceId:String,val status:DeliveryTargetStatusUi)
+data class DeliveryTargetsUi(val selectionUnresolved:Boolean,val targets:List<DeliveryTargetUi>) {
+    val received:Int get()=targets.count{it.status==DeliveryTargetStatusUi.Received}
+    val pending:Int get()=targets.count{it.status==DeliveryTargetStatusUi.Pending}
+    val unavailable:Int get()=targets.count{it.status==DeliveryTargetStatusUi.Unavailable}
+    val summary:String get()="Devices: $received received · $pending pending · $unavailable unavailable"
+}
 data class VoiceRoomUi(val id: String, val name: String, val participants: List<String>, val joined: Boolean = false,
     val muted: Boolean = false, val deafened: Boolean = false)
 data class ShareRoomUi(val id: String, val name: String, val sharer: String, val viewers: Int, val watching: Boolean = false)

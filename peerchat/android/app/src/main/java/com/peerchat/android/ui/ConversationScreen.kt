@@ -162,7 +162,9 @@ import kotlinx.coroutines.delay
                 }
                 if(needsCompactMessage(m.text))CompactLongMessage(m.text)
                 else SelectionContainer { Text(linkedText(m.text)) }
-                Text("${m.time}" + if (m.outgoing) " · ${when (m.status) {
+                val showAggregateStatus=m.outgoing&&(m.deliveryTargets==null||
+                    m.status in setOf(MessageStatus.Saving,MessageStatus.Failed,MessageStatus.Preview,MessageStatus.Read))
+                Text("${m.time}" + if (showAggregateStatus) " · ${when (m.status) {
                     MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
                     MessageStatus.Saving -> "Saving locally…";
                     MessageStatus.Queued -> "Queued";
@@ -171,7 +173,25 @@ import kotlinx.coroutines.delay
                 }}" else "", style = MaterialTheme.typography.labelSmall,
                     color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 if(m.deliveryDetail.isNotEmpty())Text(m.deliveryDetail,style=MaterialTheme.typography.labelSmall)
+                if(m.outgoing)m.deliveryTargets?.let{DeliveryTargets(m.id,it)}
                 if (m.status == MessageStatus.Failed||m.retryAvailable) TextButton({ dispatch(UiAction.RetryPreview(m.id)) }) { Text(if(m.retryAvailable)"Retry encrypted message" else "Retry locally") }
+            }
+        }
+    }
+}
+@Composable private fun DeliveryTargets(messageId:String,delivery:DeliveryTargetsUi) {
+    var expanded by rememberSaveable(messageId){mutableStateOf(false)}
+    Text(delivery.summary,style=MaterialTheme.typography.labelSmall)
+    if(delivery.selectionUnresolved)Text("Device selection unresolved",style=MaterialTheme.typography.labelSmall)
+    if(delivery.targets.isNotEmpty()) {
+        TextButton({expanded=!expanded},Modifier.testTag("delivery-targets-$messageId")) {
+            Text(if(expanded)"Hide device details" else "Show device details")
+        }
+        if(expanded)SelectionContainer {
+            Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                delivery.targets.forEach{target->
+                    Text("${target.status.name}\n${target.deviceId}",style=MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }

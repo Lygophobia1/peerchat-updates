@@ -41,7 +41,13 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                 SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
                 date=SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date(m.timestamp)),
                 status=if(!outgoing)MessageStatus.Received else when(m.delivery){2L->MessageStatus.Delivered;3L->MessageStatus.Stored;1L->MessageStatus.Sent;else->MessageStatus.Queued},
-                timestamp=m.timestamp,logicalOrder=m.logicalOrder)
+                timestamp=m.timestamp,logicalOrder=m.logicalOrder,
+                deliveryTargets=if(outgoing)m.deliveryTargets?.let{manifest->DeliveryTargetsUi(manifest.selectionUnresolved,
+                    manifest.targets.map{target->DeliveryTargetUi(target.deviceId,when(target.status){
+                        DeliveryTargetStatus.Pending->DeliveryTargetStatusUi.Pending
+                        DeliveryTargetStatus.Acknowledged->DeliveryTargetStatusUi.Received
+                        DeliveryTargetStatus.Unavailable->DeliveryTargetStatusUi.Unavailable
+                    })})}else null)
         }
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8||c.attachmentsHaveOlder,attachments=c.attachments)

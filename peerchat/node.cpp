@@ -488,7 +488,10 @@ struct Node::Impl {
     std::set<std::string> directListenerLeases;
     bool startupDirectListener=false;
     ~Impl(){stop();}
-    void emit(NodeEvent e){std::lock_guard<std::mutex> lock(eventMutex);if(events.size()>=4096)events.pop_front();events.push_back(std::move(e));}
+    void emit(NodeEvent e){
+        if(store&&!e.messages.empty())e.messageDeliveryTargets=delivery_status::read(*store,profile.peerId,e.messages);
+        std::lock_guard<std::mutex> lock(eventMutex);if(events.size()>=4096)events.pop_front();events.push_back(std::move(e));
+    }
     void closeDirectListener(){
         if(listener==INVALID_SOCKET)return;
         closesocket(listener);listener=INVALID_SOCKET;
@@ -1293,7 +1296,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             // A peer can acknowledge only an ID actually sent on this connection.
             if(deliveries&&deliveries->acknowledgeMessage(c.peerId,{c.attemptId},id)){
                 auto message=store->message(id);protocol::check(message.has_value());
-                NodeEvent e;e.kind=NodeEvent::Kind::Delivered;e.peerId=message->recipient;e.messages.push_back(*message);
+                NodeEvent e;e.kind=message->delivery==Delivery::Delivered?NodeEvent::Kind::Delivered:NodeEvent::Kind::Message;e.peerId=message->recipient;e.messages.push_back(*message);
                 emit(std::move(e));outbox(c);
             }
         }else if(r.type()==protocol::GroupEvent){
@@ -1399,7 +1402,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 }else if(command.sourceKind==4){auto envelope=mailbox::parse(command.bytes);auto message=store->message(envelope.header.messageId);
                     if(message){NodeEvent event;event.kind=NodeEvent::Kind::Message;event.peerId=message->recipient;event.messages.push_back(*message);emit(std::move(event));}
                 }else if(command.sourceKind==6){auto receipt=mailbox::parseReceipt(command.bytes);auto message=store->message(receipt.messageId);
-                    if(message&&message->delivery==Delivery::Delivered){NodeEvent event;event.kind=NodeEvent::Kind::Delivered;event.peerId=message->recipient;event.messages.push_back(*message);emit(std::move(event));}
+                    if(message){NodeEvent event;event.kind=message->delivery==Delivery::Delivered?NodeEvent::Kind::Delivered:NodeEvent::Kind::Message;event.peerId=message->recipient;event.messages.push_back(*message);emit(std::move(event));}
                 }
                 if(command.bytesResponse)command.bytesResponse->set_value(std::move(output));
                 continue;

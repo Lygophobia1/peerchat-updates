@@ -1,5 +1,6 @@
 #pragma once
 #include "storage.hpp"
+#include "delivery_status.hpp"
 #include "group.hpp"
 #include "media_telemetry.hpp"
 #include "media_ice_configuration.hpp"
@@ -64,6 +65,7 @@ struct NodeEvent {
     std::uint32_t retryDelayMilliseconds=0;
     std::vector<Contact> contacts;
     std::vector<StoredMessage> messages;
+    delivery_status::Snapshots messageDeliveryTargets;
     // Native-verified account projection only. Original sender IDs stay intact.
     std::set<std::string> localMessageAuthors;
     std::vector<GroupState> groups;

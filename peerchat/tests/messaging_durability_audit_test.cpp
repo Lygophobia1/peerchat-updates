@@ -4,6 +4,7 @@
 #include "mailbox_protocol_test.cpp"
 #undef main
 #include "../platform/windows_sql_database.hpp"
+#include "../delivery_status.hpp"
 
 static void auditNeed(bool ok,const char* reason){if(!ok)throw std::runtime_error(reason);}
 template<class F>static void auditReject(F operation,const char* reason){bool failed=false;try{operation();}catch(const std::exception&){failed=true;}auditNeed(failed,reason);}
@@ -148,7 +149,21 @@ int main(int argc,char** argv){try{
         "first target ACK incorrectly settled sibling or aggregate");
     {Storage reopened((root/L"sender").wstring());auto retained=reopened.deliveryTargets(targeted.id);
         auditNeed(retained&&retained->targets.size()==2&&reopened.message(targeted.id)->delivery!=Delivery::Delivered,
-            "target manifest or partial state did not survive restart");}
+            "target manifest or partial state did not survive restart");
+        auto projection=delivery_status::read(reopened,sender.profile.peerId,{*reopened.message(targeted.id)});
+        auditNeed(projection.size()==1&&!projection.at(targeted.id).selectionUnresolved&&
+            std::count_if(projection.at(targeted.id).targets.begin(),projection.at(targeted.id).targets.end(),
+                [](const auto& row){return row.status==DeliveryTargetStatus::Acknowledged;})==1,
+            "restarted partial delivery projection lost authenticated per-device ACK");
+        auditNeed(delivery_status::read(reopened,target.peerId,{*reopened.message(targeted.id)}).empty(),
+            "other-device history import invented local receipt authority");
+        protocol::Writer page(protocol::Text);delivery_status::append(page,projection);protocol::Reader parsed(page.data);
+        auditNeed(parsed.string()=="PeerChat/DeliveryTargetsSnapshot/v1"&&parsed.number()==1&&
+            parsed.string()==targeted.id&&parsed.number()==0&&parsed.number()==2,"JNI delivery extension header mismatch");
+        for(const auto& row:projection.at(targeted.id).targets)auditNeed(parsed.string()==row.device&&
+            parsed.number()==static_cast<unsigned>(row.status),"JNI delivery extension target mismatch");
+        parsed.end();
+    }
     outgoing.invalidateEligibility(7,2);
     auditNeed(outgoing.pendingMessages(other.peerId).empty()&&
         !senderStore.pending(other.peerId).empty()&&
@@ -194,6 +209,9 @@ int main(int argc,char** argv){try{
     auditNeed(outgoing.acknowledgeMessage(other.peerId,{903},targeted.id)&&
         senderStore.message(targeted.id)->delivery==Delivery::Delivered&&
         senderStore.pending(other.peerId).empty(),"all exact ACKs did not settle aggregate and outbox");
+    auto completeProjection=delivery_status::read(senderStore,sender.profile.peerId,{*senderStore.message(targeted.id)});
+    auditNeed(std::all_of(completeProjection.at(targeted.id).targets.begin(),completeProjection.at(targeted.id).targets.end(),
+        [](const auto& row){return row.status==DeliveryTargetStatus::Acknowledged;}),"complete projection lost device ACKs");
     auto targetedHistory=senderStore.history(target.peerId,1000);
     auditNeed(std::count_if(targetedHistory.begin(),targetedHistory.end(),[&](const auto& row){return row.id==targeted.id;})==1,
         "independent copies duplicated canonical logical history");
@@ -212,6 +230,10 @@ int main(int argc,char** argv){try{
             [&](const auto& row){return row.id==unresolved.id;})&&
         senderStore.mailboxDiagnostics().find("selection=unresolved")!=std::string::npos,
         "unresolved primary ACK falsely claimed all-device delivery or repeated live route");
+    auto unresolvedProjection=delivery_status::read(senderStore,sender.profile.peerId,{*senderStore.message(unresolved.id)});
+    auditNeed(unresolvedProjection.at(unresolved.id).selectionUnresolved&&
+        unresolvedProjection.at(unresolved.id).targets.front().status==DeliveryTargetStatus::Acknowledged,
+        "unresolved selection was hidden by a received canonical copy");
     StoredMessage unresolvedOffline{Storage::newMessageId(),sender.profile.peerId,target.peerId,L"unresolved offline fallback",now,
         Delivery::Queued,0,senderStore.nextLogicalOrder()};
     auditNeed(outgoing.queueMessageWithCachedSnapshot(unresolvedOffline,7,8,5,now,steady),"unresolved offline queue failed");

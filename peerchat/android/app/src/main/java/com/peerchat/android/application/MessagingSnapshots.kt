@@ -6,7 +6,13 @@ class MessagingStartupFailure(cause:Exception):Exception("Messaging startup fail
 data class FriendIdentity(val accountId: Long,val username: String,val peerId: String,val online: Boolean,
     val knownPeerIds: List<String> = listOf(peerId))
 data class MessageSnapshot(val id: String,val senderDevice: String,val recipientDevice: String,
-    val timestamp: Long,val logicalOrder: Long,val sequence: Long,val delivery: Long,val text: String)
+    val timestamp: Long,val logicalOrder: Long,val sequence: Long,val delivery: Long,val text: String,
+    val deliveryTargets:DeliveryTargetsSnapshot?=null)
+
+enum class DeliveryTargetStatus { Pending, Acknowledged, Unavailable }
+data class DeliveryTargetSnapshot(val deviceId:String,val status:DeliveryTargetStatus)
+/** Null on MessageSnapshot means no authoritative native target projection. */
+data class DeliveryTargetsSnapshot(val selectionUnresolved:Boolean,val targets:List<DeliveryTargetSnapshot>)
 data class ConnectionSnapshot(val ready: Boolean=false,val pending: Boolean=false,val retrying: Boolean=false,
     val retryDelayMs: Long=0,val networkRevision: Long=0,val failure: String="none")
 data class ConversationSnapshot(val friend: FriendIdentity,val connection: ConnectionSnapshot,
@@ -108,7 +114,31 @@ internal fun messageSnapshots(bytes: ByteArray): List<MessageSnapshot> {
         val timestamp=record.number();val order=record.number();val sequence=record.number();val delivery=record.number()
         require(sequence>0&&delivery in 0..3)
         MessageSnapshot(id,sender,recipient,timestamp,order,sequence,delivery,record.text())
-    };record.end();return result
+    }
+    if(!record.hasRemaining())return result
+    require(record.text()=="PeerChat/DeliveryTargetsSnapshot/v1")
+    val manifestCount=record.number();require(manifestCount<=count)
+    val messageIds=result.map{it.id}.toSet()
+    val manifests=mutableMapOf<String,DeliveryTargetsSnapshot>()
+    repeat(manifestCount.toInt()) {
+        val id=record.text();require(id in messageIds&&id !in manifests)
+        val unresolved=record.number();require(unresolved in 0..1)
+        val targetCount=record.number();require(targetCount<=32)
+        val targets=List(targetCount.toInt()) {
+            val device=record.text();require(device.matches(Regex("[0-9a-f]{64}")))
+            val status=when(record.number()) {
+                0L->DeliveryTargetStatus.Pending
+                1L->DeliveryTargetStatus.Acknowledged
+                2L->DeliveryTargetStatus.Unavailable
+                else->throw IllegalArgumentException("Invalid delivery target status")
+            }
+            DeliveryTargetSnapshot(device,status)
+        }
+        require(targets.map{it.deviceId}.distinct().size==targets.size)
+        manifests[id]=DeliveryTargetsSnapshot(unresolved==1L,targets)
+    }
+    record.end()
+    return result.map{it.copy(deliveryTargets=manifests[it.id])}
 }
 // Public display metadata/history-of-device-bindings only. Server friendship is
 // still authoritative; the native trust guard decides whether a key may be pinned.

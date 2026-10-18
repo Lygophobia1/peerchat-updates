@@ -79,6 +79,11 @@ public class GroupModel : ObservableModel {
     public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","UnreadLabel","MemberCount","PendingInviteCount"})Changed(name);}
 }
 public class MessageModel : ObservableModel {
+    public sealed class DeliveryDeviceRow {
+        public string Label {get;set;}
+        public string FullIdentity {get;set;}
+        public string State {get;set;}
+    }
     public CoreAdapter.FileTransferData Attachment {get;private set;}
     public CoreAdapter.GroupAttachmentData GroupAttachment {get;private set;}
     public string GroupAttachmentRevision {get;private set;}
@@ -86,6 +91,33 @@ public class MessageModel : ObservableModel {
     public Visibility TextVisibility {get{return Attachment==null&&GroupAttachment==null?Visibility.Visible:Visibility.Collapsed;}}
     public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");}
     public MessageData Data;
+    // Null means that this row has no authoritative recipient manifest (legacy
+    // history and imported messages retain their original aggregate stamp).
+    DeliveryTargetsData deliveryTargets;
+    public Visibility DeliveryVisibility {get{return Outgoing&&!IsGroupMessage&&deliveryTargets!=null?Visibility.Visible:Visibility.Collapsed;}}
+    public DeliveryDeviceRow[] DeliveryRows {get{
+        if(deliveryTargets==null)return new DeliveryDeviceRow[0];
+        return ValidTargets(deliveryTargets).Select(target=>new DeliveryDeviceRow{
+            Label="Device "+target.device.Substring(0,12)+"…",
+            FullIdentity="Device identity: "+target.device,
+            State=target.status==1?"Received":target.status==2?"Unavailable":"Pending"
+        }).ToArray();
+    }}
+    public string DeliverySummary {get{
+        if(deliveryTargets==null)return "";
+        var targets=ValidTargets(deliveryTargets).ToArray();
+        int received=targets.Count(target=>target.status==1),pending=targets.Count(target=>target.status==0),unavailable=targets.Count(target=>target.status==2);
+        string summary=targets.Length==0?"No recipient devices selected":"Received by "+received+" of "+targets.Length+" "+(targets.Length==1?"device":"devices");
+        if(pending>0)summary+=" · "+pending+" pending";
+        if(unavailable>0)summary+=" · "+unavailable+" unavailable";
+        if(deliveryTargets.selectionUnresolved)summary+=" · recipient selection unresolved";
+        return summary;
+    }}
+    static IEnumerable<DeliveryTargetData> ValidTargets(DeliveryTargetsData data){
+        var seen=new HashSet<string>(StringComparer.Ordinal);
+        return (data.targets??new DeliveryTargetData[0]).Where(target=>target!=null&&target.device!=null&&target.device.Length==64&&
+            target.device.All(Uri.IsHexDigit)&&target.status>=0&&target.status<=2&&seen.Add(target.device));
+    }
     public bool Outgoing;
     public long GroupSenderAccountId;
     public bool IsGroupMessage;
@@ -99,9 +131,14 @@ public class MessageModel : ObservableModel {
     public Brush Bubble {get{return new SolidColorBrush(Outgoing?Color.FromRgb(27,73,125):Color.FromRgb(31,42,52));}}
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return Data.status=="attachment_reference"?"Time unavailable":LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
-    public string Stamp {get{return GroupAttachment!=null?LocalTime.ToString("MMM d · h:mm tt")+" · Group attachment":Data.status=="attachment_reference"?"Authenticated reference · original time/order unavailable":Attachment!=null?(ChatAttachmentProjection.IsLongMessage(Attachment)?LocalTime.ToString("MMM d · h:mm tt"):"File attachment"):LocalTime.ToString("MMM d · h:mm tt")+(Outgoing?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":Data.delivery==1?"  ◷ Sent · delivery not fully confirmed":"  ◷ Queued"):"");}}
+    public string Stamp {get{return GroupAttachment!=null?LocalTime.ToString("MMM d · h:mm tt")+" · Group attachment":Data.status=="attachment_reference"?"Authenticated reference · original time/order unavailable":Attachment!=null?(ChatAttachmentProjection.IsLongMessage(Attachment)?LocalTime.ToString("MMM d · h:mm tt"):"File attachment"):LocalTime.ToString("MMM d · h:mm tt")+(Outgoing&&deliveryTargets==null?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":Data.delivery==1?"  ◷ Sent · delivery not fully confirmed":"  ◷ Queued"):"");}}
     public void Delivered(){Data.delivery=2;Changed("Stamp");}
-    public void ProjectNativeDelivery(int value){Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}}
+    public void ProjectNativeDelivery(int value,DeliveryTargetsData targets=null){
+        Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;
+        if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}
+        if(targets!=null){deliveryTargets=targets;Data.deliveryTargets=targets;Changed("DeliveryVisibility");Changed("DeliverySummary");Changed("DeliveryRows");Changed("Stamp");}
+    }
+    public void InitializeNativeDelivery(){if(Data!=null&&Data.deliveryTargets!=null)ProjectNativeDelivery(Data.delivery,Data.deliveryTargets);}
     public void GroupStatus(string status){Data.status=status;Changed("Stamp");}
 }
 // Dispatcher-confined presentation state. Core events, never the GUI, determine
@@ -184,7 +221,7 @@ public class ChatViewModel {
         for(int index=0;index<ordered.Count;index++){int current=messages.IndexOf(ordered[index]);if(current!=index)messages.Move(current,index);}
     }
     public void Apply(CoreEvent e){
-        if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery);}
+        if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery,value.deliveryTargets);}
         // Media-device failures do not change the authenticated text session.
         if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){Status=e.text;return;}
         if(e.kind==0){OwnId=e.peer;Name=e.text;Port=e.port;Listening=true;Status="Ready to connect";}
@@ -193,9 +230,9 @@ public class ChatViewModel {
         if(e.kind==4){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null)item=Get(e.peer);if(item.SessionRevision==0&&(!item.Online||e.attempt==0||e.attempt==item.WinningConnectionId)){item.Online=false;item.WinningConnectionId=0;item.ConnectionState=(e.text??"").IndexOf("identity mismatch",StringComparison.OrdinalIgnoreCase)>=0?"Identity verification required":"Retrying with backoff";item.Refresh();Status=e.text??"Peer disconnected. Reconnect is available.";}}
         if(e.kind==2){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&String.IsNullOrEmpty(e.expected))item=Get(e.peer);if(item!=null){if((String.IsNullOrEmpty(e.expected)||e.expected==e.peer)&&e.contacts!=null&&e.contacts.Length>0)item.Contact=e.contacts[0];if(!item.Online){item.ConnectionState="Awaiting peer verification";item.Refresh();}}}
         if(e.kind==9)Status=e.text;
-        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.ResetHistoryPaging();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}if(e.kind==6)item.ObserveHistoryPage(e.peer,e.messages);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
+        if((e.kind==5||e.kind==6)&&e.messages!=null){var item=Get(e.peer);if(e.kind==6&&e.text=="history_cleared"){item.Messages.Clear();item.ResetHistoryPaging();item.RequestedHistory=false;item.HistoryLoading=false;item.HistoryExhausted=false;item.LoadingHistoryPeer="";item.RequestedPeerHistory.Clear();item.HistoryExhaustedPeers.Clear();item.Refresh();return;}if(e.kind==6)item.ObserveHistoryPage(e.peer,e.messages);foreach(var message in e.messages){if(item.Messages.Any(m=>m.Attachment==null&&m.Data.id==message.id))continue;var model=new MessageModel{Data=message,Outgoing=message.sender==OwnId||message.localAuthor};model.InitializeNativeDelivery();item.Messages.Add(model);if(e.kind==5&&!model.Outgoing&&(Selected!=item||Groups))item.Unread++;}if(e.kind==6){item.HistoryLoading=false;item.LoadingHistoryPeer="";if(e.messages.Length<100)item.HistoryExhaustedPeers.Add(e.peer);var peers=item.KnownPeerIds.Concat(new[]{item.Contact==null?"":item.Contact.peer}).Where(peer=>!String.IsNullOrEmpty(peer)).Distinct(StringComparer.Ordinal);item.HistoryExhausted=peers.All(peer=>item.HistoryExhaustedPeers.Contains(peer));}OrderMessages(item.Messages);item.Refresh();}
         // NodeEvent::Delivered is 7 and Error is 8 (the enum is the ABI contract).
-        if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==receipt.id);if(match!=null)match.ProjectNativeDelivery(receipt.delivery);}
+        if(e.kind==7&&e.messages!=null)foreach(var item in Conversations.Values)foreach(var receipt in e.messages){var match=item.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==receipt.id&&m.Data.sender==receipt.sender);if(match!=null)match.ProjectNativeDelivery(receipt.delivery,receipt.deliveryTargets);}
         if(e.kind==8){var item=!String.IsNullOrEmpty(e.expected)?FindByPeer(e.expected):null;if(item==null&&!String.IsNullOrEmpty(e.peer)&&String.IsNullOrEmpty(e.expected))item=FindByPeer(e.peer);if(item!=null&&!item.Online&&item.SessionRevision==0){item.ConnectionState=ClassifyConnectionError(e.text);item.Refresh();}Status=e.text;}
         if(e.kind==9&&e.groups!=null){
             var visible=new HashSet<string>(e.groups.Select(group=>group.id));

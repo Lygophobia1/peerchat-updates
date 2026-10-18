@@ -188,7 +188,15 @@ UI_API const wchar_t* ui_poll(void* handle){auto& bridge=*static_cast<UiBridge*>
         bool firstContact=true;for(const auto& contact:event.contacts){if(!firstContact)out<<L',';firstContact=false;
             out<<L"{\"peer\":"<<quote(widen(contact.peerId))<<L",\"name\":"<<quote(contact.name)<<L",\"verified\":"<<(contact.verified?L"true":L"false")<<L",\"host\":"<<quote(contact.endpoints.empty()?L"":contact.endpoints.front().host)<<L",\"port\":"<<(contact.endpoints.empty()?0:contact.endpoints.front().port)<<L'}';}
         out<<L"],\"messages\":[";bool firstMessage=true;for(const auto& message:event.messages){if(!firstMessage)out<<L',';firstMessage=false;
-            out<<L"{\"id\":"<<quote(widen(message.id))<<L",\"sender\":"<<quote(widen(message.sender))<<L",\"localAuthor\":"<<(event.localMessageAuthors.count(message.sender)?L"true":L"false")<<L",\"text\":"<<quote(message.text)<<L",\"time\":"<<message.utcMilliseconds<<L",\"logical\":"<<message.logicalOrder<<L",\"delivery\":"<<int(message.delivery)<<L",\"sequence\":"<<message.sequence<<L'}';}
+            out<<L"{\"id\":"<<quote(widen(message.id))<<L",\"sender\":"<<quote(widen(message.sender))<<L",\"localAuthor\":"<<(event.localMessageAuthors.count(message.sender)?L"true":L"false")<<L",\"text\":"<<quote(message.text)<<L",\"time\":"<<message.utcMilliseconds<<L",\"logical\":"<<message.logicalOrder<<L",\"delivery\":"<<int(message.delivery)<<L",\"sequence\":"<<message.sequence;
+            auto delivery=event.messageDeliveryTargets.find(message.id);
+            if(delivery!=event.messageDeliveryTargets.end()){
+                out<<L",\"deliveryTargets\":{\"selectionUnresolved\":"<<(delivery->second.selectionUnresolved?L"true":L"false")<<L",\"targets\":[";
+                bool firstTarget=true;for(const auto& target:delivery->second.targets){if(!firstTarget)out<<L',';firstTarget=false;
+                    out<<L"{\"device\":"<<quote(widen(target.device))<<L",\"status\":"<<static_cast<unsigned>(target.status)<<L'}';}
+                out<<L"]}";
+            }
+            out<<L'}';}
         out<<L"],\"groups\":[";bool firstGroup=true;for(const auto& group:event.groups){if(!firstGroup)out<<L',';firstGroup=false;
             out<<L"{\"id\":"<<quote(widen(group.groupId))<<L",\"name\":"<<quote(group.name)<<L",\"owner\":"<<group.ownerAccountId<<L",\"members\":[";bool firstMember=true;for(const auto& member:group.members){if(!firstMember)out<<L',';firstMember=false;out<<L"{\"account\":"<<member.first<<L",\"peer\":"<<quote(widen(member.second.peerId))<<L",\"name\":"<<quote(member.second.name)<<L",\"role\":"<<int(member.second.role)<<L'}';}out<<L"],\"invites\":[";bool firstInvite=true;for(const auto& invitation:group.invitations){if(!firstInvite)out<<L',';firstInvite=false;out<<L"{\"account\":"<<invitation.first<<L",\"peer\":"<<quote(widen(invitation.second.peerId))<<L",\"name\":"<<quote(invitation.second.name)<<L",\"role\":1}";}out<<L"]}";
         }

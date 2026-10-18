@@ -4,11 +4,40 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Web.Script.Serialization;
 using PeerChatDesktop;
 class AdapterTest {
     static void Require(bool condition,string reason){if(!condition)throw new Exception(reason);}
     static void Until(Func<bool> check,Action pump,string label){var watch=Stopwatch.StartNew();while(watch.ElapsedMilliseconds<20000){pump();if(check())return;Thread.Sleep(30);}throw new Exception("Timeout: "+label);}
     static void CopyDirectory(string source,string target){Directory.CreateDirectory(target);foreach(string file in Directory.GetFiles(source))File.Copy(file,Path.Combine(target,Path.GetFileName(file)),true);foreach(string child in Directory.GetDirectories(source))CopyDirectory(child,Path.Combine(target,Path.GetFileName(child)));}
+    static void TestDeliveryProjection(){
+        string own=new string('a',64),first=new string('b',64),second=new string('c',64);
+        var parsed=new JavaScriptSerializer().Deserialize<MessageData>("{\"id\":\"m\",\"sender\":\""+own+"\",\"text\":\"hello\",\"delivery\":1,\"deliveryTargets\":{\"selectionUnresolved\":false,\"targets\":[{\"device\":\""+first+"\",\"status\":1},{\"device\":\""+second+"\",\"status\":0}]}}");
+        Require(parsed.deliveryTargets!=null&&parsed.deliveryTargets.targets.Length==2,"JSON delivery manifest was not decoded");
+        var view=new ChatViewModel{OwnId=own};
+        view.Apply(new CoreEvent{kind=6,peer=first,messages=new[]{parsed}});
+        var conversation=view.Get(first);var message=conversation.Messages.Single();
+        Require(message.DeliverySummary=="Received by 1 of 2 devices · 1 pending"&&message.DeliveryVisibility==System.Windows.Visibility.Visible,"partial receipt summary was incorrect");
+        Require(message.DeliveryRows[0].FullIdentity.Contains(first)&&message.DeliveryRows[1].State=="Pending"&&!message.DeliveryRows[0].Label.Contains("Windows"),"device identities or states were misrepresented");
+        Require(!message.Stamp.Contains("Delivered"),"aggregate delivered stamp obscured device state");
+        var allReceived=new DeliveryTargetsData{targets=new[]{new DeliveryTargetData{device=first,status=1},new DeliveryTargetData{device=second,status=1}}};
+        view.Apply(new CoreEvent{kind=7,peer=first,messages=new[]{new MessageData{id="m",sender=second,delivery=2,deliveryTargets=allReceived}}});
+        Require(message.DeliverySummary=="Received by 1 of 2 devices · 1 pending"&&message.Data.delivery==1,"wrong-sender receipt changed the message");
+        view.Apply(new CoreEvent{kind=7,peer=first,messages=new[]{new MessageData{id="m",sender=own,delivery=2,deliveryTargets=allReceived}}});
+        Require(message.DeliverySummary=="Received by 2 of 2 devices"&&message.Data.delivery==2&&message.DeliveryRows.All(row=>row.State=="Received"),"final-device receipt did not refresh immediately");
+        view.Apply(new CoreEvent{kind=5,peer=first,messages=new[]{new MessageData{id="m",sender=second,delivery=2,deliveryTargets=new DeliveryTargetsData{selectionUnresolved=true,targets=allReceived.targets}}}});
+        Require(message.DeliverySummary=="Received by 2 of 2 devices","wrong-sender message event changed the projection");
+        view.Apply(new CoreEvent{kind=5,peer=first,messages=new[]{new MessageData{id="m",sender=own,delivery=1,deliveryTargets=new DeliveryTargetsData{selectionUnresolved=true,targets=new[]{new DeliveryTargetData{device=first,status=1},new DeliveryTargetData{device=second,status=2}}}}}});
+        Require(conversation.Messages.Count==1&&message.DeliverySummary.Contains("1 unavailable")&&message.DeliverySummary.Contains("selection unresolved"),"same-aggregate event did not refresh device projection");
+        view.Apply(new CoreEvent{kind=6,peer=first,messages=new[]{new MessageData{id="m",sender=own,delivery=2}}});
+        Require(message.DeliverySummary.Contains("selection unresolved")&&!message.Stamp.Contains("Delivered"),"legacy page erased authoritative device evidence");
+        view.Apply(new CoreEvent{kind=6,peer=first,messages=new[]{new MessageData{id="legacy",sender=own,text="old",time=1,delivery=2}}});
+        var legacy=conversation.Messages.Single(row=>row.Data.id=="legacy");
+        Require(legacy.DeliveryVisibility==System.Windows.Visibility.Collapsed&&legacy.Stamp.Contains("Delivered"),"legacy delivery display changed");
+        Require(conversation.Messages.Select(row=>row.Data.id).SequenceEqual(new[]{"m","legacy"}),"delivery update changed history ordering");
+        var group=new MessageModel{Data=new MessageData{id="group",deliveryTargets=parsed.deliveryTargets},Outgoing=true,IsGroupMessage=true};group.InitializeNativeDelivery();
+        Require(group.DeliveryVisibility==System.Windows.Visibility.Collapsed,"group delivery inherited direct-message details");
+    }
     static void TestLocalSubnetTransition(){
         var subnet14=new[]{new LocalSubnetInterface{Name="Wi-Fi",Address="192.168.1.14",Mask="255.255.255.0"},new LocalSubnetInterface{Name="Broken VPN",IgnoredReason="IPv4 subnet mask unavailable"}};
         var subnet17=new[]{new LocalSubnetInterface{Name="Ethernet",Address="192.168.1.17",Mask="255.255.255.0"}};
@@ -73,6 +102,7 @@ string peerTwo=new string('c',64),wrongPeer=new string('d',64);var second=view.B
             Require(!model.CanQueueDirectText(true,true),"Busy profile can send");model.Selected=null;Require(!model.CanQueueDirectText(true,false),"Missing conversation can send");
             Console.WriteLine("PASS: offline/account composer independent of device trust; unknown direct, signed-out/revoked/unavailable/busy/invalid states blocked.");return 0;
         }
+        if(args.Contains("--delivery-projection-only")){TestDeliveryProjection();Console.WriteLine("PASS: direct-message delivery projection and legacy history.");return 0;}
         if(args.Contains("--voice-preferences-only")){TestVoicePreferences(Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","voice-preferences-"+Guid.NewGuid().ToString("N")));Console.WriteLine("PASS: profile-local Voice Audio Processing settings and defaults.");return 0;}
         TestLocalSubnetTransition();if(args.Contains("--subnet-only")){Console.WriteLine("PASS: bidirectional same-LAN classification and runtime cross-subnet invalidation.");return 0;}
         var eligibility=new ChatViewModel();bool reused;
@@ -88,6 +118,7 @@ string peerTwo=new string('c',64),wrongPeer=new string('d',64);var second=view.B
         string root=Path.Combine(Environment.CurrentDirectory,"build","tests","runtime","desktop-"+Guid.NewGuid().ToString("N"));
         string leaseA=Path.Combine(root,"lease-A"),leaseB=Path.Combine(root,"lease-B");using(var firstLease=LocalProfileLease.TryAcquire(leaseA)){Require(firstLease!=null,"First profile lease was not acquired");Require(LocalProfileLease.TryAcquire(leaseA)==null,"The same local profile acquired a second process lease");using(var otherLease=LocalProfileLease.TryAcquire(leaseB))Require(otherLease!=null,"A different local profile was incorrectly blocked by the first profile lease");}
         TestFriendConversationIdentity(root);
+        TestDeliveryProjection();
         TestProfileAccountBinding(root);
         TestVoicePreferences(root);
         if(args.Contains("--model-only")){Console.WriteLine("PASS: live winner projection, loser failure isolation, diagnostic correlation, and profile-local account state.");return 0;}
