@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
 
@@ -24,7 +25,22 @@ import androidx.compose.ui.tooling.preview.Preview
                     state.conversations.filter{it.kind==ChatKind.Direct}.forEach{friend->
                         TextButton({friend.id.removePrefix("account:").toLongOrNull()?.let{dispatch(UiAction.InviteGroup(c.id.removePrefix("group:"),it))}}){Text(friend.name)}
                     }
-                    Text("Messages use the existing native group encryption. Delivery reports describe online recipient sessions. Group attachments and calling are unavailable in this candidate.",style=MaterialTheme.typography.bodySmall)
+                    Text("Voice rooms",style=MaterialTheme.typography.titleMedium)
+                    Text("Joining is voluntary. Your microphone starts only after permission and a successful room join.",style=MaterialTheme.typography.bodySmall)
+                    if(c.voiceRooms.isEmpty())Text("No voice rooms are available for this group.")
+                    c.voiceRooms.forEach{room->
+                        Text(room.name,style=MaterialTheme.typography.titleSmall)
+                        Text("${room.participants.size} in voice · ${room.participants.joinToString().ifEmpty{"Empty room"}}")
+                        Text(if(room.joined)"In voice" else "Not joined",style=MaterialTheme.typography.labelSmall)
+                        OutlinedButton(onClick={dispatch(if(room.joined)UiAction.LeaveVoice(room.id) else UiAction.JoinVoice(room.id))},
+                            enabled=room.joined&&!state.voiceBusy||!room.joined&&c.online&&state.voiceAvailable&&!state.voice.active&&!state.voiceBusy,
+                            modifier=Modifier.testTag("voice-room-${room.id}")){
+                            Text(if(room.joined)"Leave voice" else "Join voice")
+                        }
+                    }
+                    if(state.voiceBusy)LinearProgressIndicator(Modifier.fillMaxWidth())
+                    state.voiceError?.let{Text(it,color=MaterialTheme.colorScheme.error)}
+                    Text("Messages use native group encryption. Delivery reports describe online recipient sessions. Group attachments and screen video are unavailable.",style=MaterialTheme.typography.bodySmall)
                 }else Text("Device verification, delivery and local history are owned by the native messaging engine.")
                 TextButton({dispatch(UiAction.Navigate(Route.Diagnostics))}){Text("Application diagnostics")}
             }

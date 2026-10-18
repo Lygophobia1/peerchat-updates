@@ -11,8 +11,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 
-/** Foreground call owner. prepare is invoked only after an explicit call action
- * and RECORD_AUDIO permission grant. The Activity must close on stop/logout. */
+/** Foreground-service call owner. prepare follows explicit Start/Answer and a
+ * RECORD_AUDIO grant. Activity stop does not own or terminate an active call. */
 class AndroidCallAudio(private val context: Context, private val onFocusLost: () -> Unit) : AutoCloseable {
     data class Processing(val echoCancellation: Boolean = false, val noiseSuppression: Boolean = true, val automaticGain: Boolean = true)
     private val manager = context.getSystemService(AudioManager::class.java)

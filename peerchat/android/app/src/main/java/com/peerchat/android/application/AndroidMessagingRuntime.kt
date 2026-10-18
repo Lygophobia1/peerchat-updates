@@ -49,6 +49,13 @@ object AndroidMessagingRuntime {
         if(wakeDeadlineNanos==null)cancelGrace()
         return Lease(owner,wakeDeadlineNanos,transferLease,archiveLease,context.applicationContext).also{leases.add(it);update()}
     }
+    /** Only a live, explicit consent can lease network continuity for a call.
+     * This is not a foreground UI lease and does not revive a process/session. */
+    @Synchronized internal fun acquireVoice(context:Context,token:String):MessagingApplication {
+        val owner=checkNotNull(backend){"Call owner no longer exists"}
+        check(owner.canLeaseVoice(token)){"Call action expired"}
+        return Lease(owner,Long.MAX_VALUE,true,false,context.applicationContext).also{leases.add(it);update()}
+    }
     private fun update(){
         val active=leases.filter{it.active}
         val policy=backendLeasePolicy(active.map{it.wakeDeadline to it.transferLease},active.filter{it.archiveLease}.mapNotNull{it.wakeDeadline})

@@ -32,11 +32,20 @@ import com.peerchat.android.platform.DiagnosticsSnapshot
 import com.peerchat.android.platform.DiagnosticsExport
 import com.peerchat.android.platform.DiagnosticsCreateDocument
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import android.content.Intent
 
@@ -57,6 +66,24 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 }
 @Composable fun PeerChatApp(model: PeerChatPresenter) {
     val state by model.state.collectAsState()
+    val voiceContext=LocalContext.current
+    val voiceActivity=voiceContext as? ComponentActivity
+    var launchedVoiceToken by remember{mutableStateOf<String?>(null)}
+    DisposableEffect(voiceActivity){
+        val lifecycle=voiceActivity?.lifecycle
+        val observer=LifecycleEventObserver{_,event->if(event==Lifecycle.Event.ON_STOP)launchedVoiceToken=null}
+        lifecycle?.addObserver(observer)
+        onDispose{lifecycle?.removeObserver(observer)}
+    }
+    LaunchedEffect(state.voiceConsent?.token) {
+        val consent=state.voiceConsent ?: return@LaunchedEffect
+        if(launchedVoiceToken==null)launchedVoiceToken=consent.token
+        else if(launchedVoiceToken!=consent.token&&model.claimVoicePermission(consent.token))
+            model.resolveVoicePermission(voiceContext,consent.token,false,false)
+    }
+    launchedVoiceToken?.let{token->key(token){VoicePermissionGate(model,voiceActivity,voiceContext,token){finished->
+        if(launchedVoiceToken==finished)launchedVoiceToken=null
+    }}}
     val conversation=state.selected?.takeIf{state.route==Route.Conversation}
     val ids=conversation?.messages?.map{it.id}?.toSet()?:emptySet()
     LaunchedEffect(state.account?.accountId,state.conversations.size,conversation?.id,ids){
@@ -65,6 +92,33 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
     }
     val dark = when (state.theme) { ThemeChoice.System -> isSystemInDarkTheme(); ThemeChoice.Dark -> true; ThemeChoice.Light -> false }
     PeerChatTheme(dark) { PeerChatShell(state, model::dispatch, model::login) }
+}
+
+@Composable private fun VoicePermissionGate(model:PeerChatPresenter,activity:ComponentActivity?,context:android.content.Context,
+    token:String,done:(String)->Unit) {
+    var permissionResult by remember(token){mutableStateOf<Boolean?>(null)}
+    val microphonePermission=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()){granted->
+        permissionResult=granted
+    }
+    LaunchedEffect(token,permissionResult){
+        val granted=permissionResult?:return@LaunchedEffect
+        // Android can deliver the permission result just before onResume.
+        // Wait only for this visible gesture; ON_STOP removes this keyed gate
+        // and cancels the wait, so returning later never activates a microphone.
+        val resumed=granted&&activity!=null&&withTimeoutOrNull(1500){
+            activity.lifecycle.currentStateFlow.first{it.isAtLeast(Lifecycle.State.RESUMED)}
+        }!=null
+        model.resolveVoicePermission(context,token,granted,resumed);done(token)
+    }
+    LaunchedEffect(token){
+        if(!model.claimVoicePermission(token)){done(token);return@LaunchedEffect}
+        val resumed=activity?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED)==true
+        if(!resumed){model.resolveVoicePermission(context,token,false,false);done(token)}
+        else if(ContextCompat.checkSelfPermission(context,Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED){
+            model.resolveVoicePermission(context,token,true,true);done(token)
+        }else try{microphonePermission.launch(Manifest.permission.RECORD_AUDIO)}
+        catch(_:RuntimeException){model.resolveVoicePermission(context,token,false,false);done(token)}
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -143,6 +197,9 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
                     }},confirmButton={TextButton({dismissed=true}){Text("Close")}})
             }
         }
+        Column(Modifier.fillMaxSize()) {
+        if(!state.demo&&state.voice.active)VoiceCallCard(state,dispatch)
+        Box(Modifier.weight(1f)) {
         if(state.startupStatus!=null) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
                 verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
@@ -165,6 +222,8 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             }
             Route.Details -> state.selected?.let { DetailsScreen(it, state, dispatch) }
             Route.Diagnostics -> DiagnosticsScreen(state, dispatch)
+        }
+        }
         }
     }
 }

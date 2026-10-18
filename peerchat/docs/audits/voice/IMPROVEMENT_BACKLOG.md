@@ -1,5 +1,29 @@
 # Android voice completion backlog
 
+## Current dev.181 checkpoint
+
+The original investigation table below is retained as historical context. The
+[dev.181 validation report](DEV181_VALIDATION.md) supersedes its implementation
+statuses: genuine ARM64 receive integration, scoped foreground ownership,
+explicit DM controls, group room/native integration and bounded diagnostics are
+implemented and automatically tested. Physical acceptance remains pending.
+
+Remaining gates and intentionally unimplemented features:
+
+- P0: physical Motorola two-way DM and mixed Windows/Android group acceptance;
+  ARM64 emulator translation failure is disclosed in the report, not hidden.
+- P1: physical speaker/headset/Bluetooth, focus, lock/background, Wi-Fi/cellular,
+  thermal/battery and sustained concurrent History Sync/transfer measurements.
+- P1: automatic group route recovery after event-session loss (currently safe
+  teardown and explicit rejoin), and cold-process incoming-call wake protocol.
+- P2: actual active-speaker indication, per-source group diagnostics, full route
+  picker and historical media-counter retention. Do not fabricate these fields.
+
+Resume only after physical results or further authorization; no Pi deployment
+or phone installation is part of this package handoff.
+
+## Original audit state (superseded where noted above)
+
 Authorized by the user's Android DM + group voice assignment. This is separate from the earlier networking audit's scope limits. No phone installation or Pi deployment is authorized for this milestone.
 
 | Priority | Work | Status and acceptance gate |

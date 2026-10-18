@@ -66,15 +66,16 @@ import kotlinx.coroutines.delay
             }
         }, navigationIcon = { ActionIcon(Icons.AutoMirrored.Filled.ArrowBack, "Back", { dispatch(UiAction.Back) }) }, actions = {
             ActionIcon(Icons.Default.Call, if (c.kind == ChatKind.Group) "Voice rooms" else "Voice call", {
-                dispatch(if (c.kind == ChatKind.Group) UiAction.Navigate(Route.Details) else UiAction.Notice(if(state.demo)"Calls are not connected in this preview." else state.voiceDiagnostic))
-            })
+                dispatch(if(c.kind==ChatKind.Group)UiAction.Navigate(Route.Details) else if(state.demo)UiAction.Notice("Calls are not connected in this preview.")
+                    else if(!state.voiceAvailable)UiAction.Notice(state.voiceDiagnostic.take(160)) else UiAction.StartDmVoice(c.id))
+            },enabled=c.kind==ChatKind.Group||state.demo||!state.voiceBusy)
             ActionIcon(Icons.Default.Info, "Conversation details", { dispatch(UiAction.Navigate(Route.Details)) })
         })
     }, bottomBar = {
         // The bottom bar owns its insets; Scaffold reserves this measured height.
         // Union uses the larger nav/IME inset, never adding both paddings.
         Column(Modifier.windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))) {
-            c.voiceRooms.find { it.joined }?.let { CallBar(it, dispatch) }
+            if(state.demo)c.voiceRooms.find { it.joined }?.let { CallBar(it, dispatch) }
             c.shareRooms.find { it.watching }?.let { share -> Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                 Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Watching ${share.sharer} · UI only", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
@@ -101,6 +102,8 @@ import kotlinx.coroutines.delay
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
             if(state.demo) DemoNote()
+            if(!state.demo&&state.voiceBusy)Text("Preparing call or waiting for microphone permission…",Modifier.fillMaxWidth().padding(12.dp).testTag("dm-voice-progress"),style=MaterialTheme.typography.bodySmall)
+            if(!state.demo)state.voiceError?.let{Text(it,Modifier.fillMaxWidth().padding(12.dp).testTag("dm-voice-error"),color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodySmall)}
             if (state.connection != ConnectionState.Online) Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                 Text(if(state.demo) "Offline preview · sending disabled" else "${if(state.connection==ConnectionState.Offline) "Offline" else "Reconnecting"} · messages queue locally until delivery is available",
                     Modifier.fillMaxWidth().padding(12.dp), style = MaterialTheme.typography.bodySmall)
@@ -110,7 +113,7 @@ import kotlinx.coroutines.delay
                 ActionIcon(Icons.Default.Close, "Dismiss", { dispatch(UiAction.Notice(null)) })
             } }
             if (c.kind == ChatKind.Group && c.voiceRooms.isNotEmpty()) TextButton({ dispatch(UiAction.Navigate(Route.Details)) }, Modifier.fillMaxWidth()) {
-                Text("Voice rooms · ${c.voiceRooms.sumOf { it.participants.size }} in voice (sample)")
+                Text("Voice rooms · ${c.voiceRooms.sumOf { it.participants.size }} in voice${if(state.demo)" (sample)" else ""}")
             }
             c.shareRooms.firstOrNull()?.let { share -> TextButton({ dispatch(UiAction.Navigate(Route.Details)) }, Modifier.fillMaxWidth()) {
                 Text("${share.sharer} is sharing · ${if (share.watching) "Watching" else "Watch"} (preview)")

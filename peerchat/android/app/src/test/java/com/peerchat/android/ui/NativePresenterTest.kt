@@ -37,6 +37,15 @@ class NativePresenterTest {
         val sendBlockers=mutableMapOf<String,kotlinx.coroutines.CompletableDeferred<Unit>>()
         val sendIds=mutableMapOf<String,String>()
         var signIns=0;var endpoint:ServerEndpoint?=null
+        val releasedVoice=mutableListOf<String>()
+        val preparedGroupVoice=mutableListOf<Pair<String,String>>()
+        override suspend fun prepareVoice(peerId:String,answer:VoiceCallTarget?):VoiceConsent =
+            VoiceConsent("prepared-voice-1",peerId,"c".repeat(32),answer!=null)
+        override suspend fun prepareGroupVoice(group:String,room:String):VoiceConsent {
+            preparedGroupVoice.add(group to room)
+            return VoiceConsent("prepared-group-voice-1",state.value.localPeerId,room,false,group)
+        }
+        override suspend fun releaseVoice(token:String){releasedVoice.add(token)}
         var registrations=0
         override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession {
             registrations++;return signInRemembered(endpoint,username,password,remember)
@@ -120,6 +129,46 @@ class NativePresenterTest {
         p.dispatch(UiAction.SaveServer(ServerUi("localhost","7443")))
         dispatcher.scheduler.advanceUntilIdle()
         return p
+    }
+    @Test fun permissionCallbackMustMatchPreparedToken(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle()
+        commands.state.value=commands.state.value.copy(voice=VoiceSnapshot(available=true,diagnostic="Ready"))
+        dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.StartDmVoice("account:8"));dispatcher.scheduler.runCurrent()
+        val token=p.state.value.voiceConsent!!.token
+        assertTrue(p.claimVoicePermission(token))
+        assertFalse(p.claimVoicePermission(token))
+        val context=ApplicationProvider.getApplicationContext<Application>()
+        p.resolveVoicePermission(context,"older-permission-result",false,true)
+        dispatcher.scheduler.runCurrent()
+        assertTrue(p.state.value.voiceBusy)
+        assertTrue(commands.releasedVoice.isEmpty())
+        p.resolveVoicePermission(context,token,false,true)
+        dispatcher.scheduler.runCurrent()
+        assertFalse(p.state.value.voiceBusy)
+        assertEquals(listOf(token),commands.releasedVoice)
+    }
+    @Test fun explicitRoomJoinUsesScopedPermissionAndDropsRemovedRoom() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle()
+        val group="d".repeat(32);val room="e".repeat(32);val epoch="f".repeat(32)
+        val groupRow=GroupConversationSnapshot(group,"1".repeat(32),2,"Planning",true,1)
+        val roomRow=GroupVoiceRoomsSnapshot(group,epoch,1,2,listOf(GroupVoiceRoom(room,"General",emptyList())))
+        commands.state.value=commands.state.value.copy(groups=listOf(groupRow),voiceRooms=listOf(roomRow),
+            voice=VoiceSnapshot(available=true,diagnostic="Ready"))
+        dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.Select("group:$group"));dispatcher.scheduler.runCurrent()
+        p.dispatch(UiAction.JoinVoice(room));dispatcher.scheduler.runCurrent()
+        assertEquals(listOf(group to room),commands.preparedGroupVoice)
+        val token=p.state.value.voiceConsent!!.token
+        assertTrue(p.claimVoicePermission(token))
+        commands.state.value=commands.state.value.copy(voiceRooms=emptyList());dispatcher.scheduler.runCurrent()
+        p.resolveVoicePermission(ApplicationProvider.getApplicationContext<Application>(),token,true,true)
+        dispatcher.scheduler.runCurrent()
+        assertEquals(listOf(token),commands.releasedVoice)
+        assertFalse(p.state.value.voiceBusy)
+        assertTrue(p.state.value.selected!!.voiceRooms.isEmpty())
     }
     @Test fun peopleSearchDebouncesAndDropsPreviousQueryAndOfflineResults(){
         val commands=Commands().apply{reject=false};val p=presenter(commands)

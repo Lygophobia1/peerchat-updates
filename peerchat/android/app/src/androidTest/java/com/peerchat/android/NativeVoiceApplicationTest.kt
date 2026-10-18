@@ -18,14 +18,29 @@ class NativeVoiceApplicationTest {
     private val account=71L
     private val peer="a".repeat(64)
     private val call="1".repeat(32)
+    private var compiledAvailability:Long?=null
     private fun request(h:Long,op:Int,generation:Long=1,accountId:Long=account,body:(NativeRecordWriter)->Unit={}):ByteArray? {
         val w=NativeRecordWriter(7);w.text("PeerChat/AndroidVoice/v1");w.number(op.toLong());w.number(accountId);w.number(generation);body(w)
         return VoiceBridge.request(h,op,w.bytes())
     }
     private fun assertUnavailable(bytes:ByteArray?,op:Int,accepted:Boolean){
         val r=NativeRecord(checkNotNull(bytes),7);assertEquals("PeerChat/AndroidVoice/v1",r.text());assertEquals(op.toLong(),r.number())
-        assertEquals(if(accepted)1L else 0L,r.number());assertEquals(0L,r.number())
-        assertEquals("Pinned Android WebRTC NetEq receive library has not been supplied",r.text());assertEquals(0L,r.number());r.end()
+        assertEquals(if(accepted)1L else 0L,r.number())
+        val available=r.number();assertTrue(available in 0L..1L)
+        compiledAvailability?.let{assertEquals(it,available)}?:run{compiledAvailability=available}
+        val diagnostic=r.text();assertTrue(diagnostic.isNotEmpty()&&diagnostic.length<=160)
+        // Compiled media is not authorization, a verified transport, ICE or
+        // explicit microphone consent. Both build modes must remain inactive.
+        assertEquals(0L,r.number())
+        if(r.hasRemaining()){
+            assertEquals("PeerChat/AndroidVoiceMediaDiagnostics/v1",r.text())
+            val mediaDiagnostics=r.text()
+            assertTrue(mediaDiagnostics.isNotEmpty()&&mediaDiagnostics.toByteArray(Charsets.UTF_8).size<=16384)
+            assertFalse(mediaDiagnostics.contains("selected_ice_pair"))
+            assertFalse(mediaDiagnostics.contains("latest_media_error"))
+            assertFalse(mediaDiagnostics.contains("password"))
+        }
+        r.end()
     }
     private fun authorize(h:Long,generation:Long){
         val friends=NativeRecordWriter(1).apply{number(1);number(72);text(peer);number(1);text(peer)}.bytes()

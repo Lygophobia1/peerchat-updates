@@ -23,6 +23,12 @@ interface MessagingApplication:AutoCloseable {
     suspend fun verifyDevice(value:DeviceVerification,accept:Boolean){error("Device verification unavailable")}
     suspend fun reenrollMailbox(value:MailboxReenrollment,accept:Boolean){error("Mailbox re-enrollment unavailable")}
     suspend fun send(peerId:String,text:String):String
+    suspend fun prepareVoice(peerId:String,answer:VoiceCallTarget?=null):VoiceConsent = error("Voice unavailable")
+    suspend fun prepareGroupVoice(group:String,room:String):VoiceConsent = error("Group voice unavailable")
+    suspend fun activateVoice(token:String):VoiceSnapshot = error("Voice unavailable")
+    suspend fun releaseVoice(token:String) {}
+    suspend fun controlVoice(target:VoiceCallTarget,action:VoiceControl,value:Boolean=false) { error("Voice unavailable") }
+    suspend fun voicePlatformState(token:String,diagnostic:String,speaker:Boolean=false) {}
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
     suspend fun createGroup(name:String){error("Group creation unavailable")}
     suspend fun inviteGroup(id:String,target:Long){error("Group invitation unavailable")}

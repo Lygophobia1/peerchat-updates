@@ -1,11 +1,13 @@
 # PeerChat audit index
 
-## Android voice completion (in progress)
+## Android voice completion (dev.181 physical-test candidate)
+
+- [Dev.181 implementation, validation and physical acceptance](voice/DEV181_VALIDATION.md) — current authoritative status, genuine receive/media evidence, integration manifest and remaining physical/feature limits. Earlier planning documents below retain the original investigation context.
 
 - [Architecture, security findings and completion sequence](voice/2026-10-17-architecture-and-completion-plan.md) — real shared foundation, reproduced consent/mute fixes, group boundaries and genuine receive validation gate.
 - [Android application readiness](voice/ANDROID_APPLICATION_READINESS.md) — permissions, foreground ownership, routing and safe integration order.
-- [Pinned Android receive dependency](voice/ANDROID_RECEIVE_DEPENDENCY.md) — Linux build prerequisite, exact pin, unvalidated build recipe and ABI/runtime/license gates.
-- [Voice implementation backlog](voice/IMPROVEMENT_BACKLOG.md) — remaining work and acceptance boundaries; not a completed voice package.
+- [Pinned Android receive dependency](voice/ANDROID_RECEIVE_DEPENDENCY.md) — original prerequisite/design and subsequent build context; current completed gates are recorded in the dev.181 report.
+- [Voice implementation backlog](voice/IMPROVEMENT_BACKLOG.md) — current acceptance boundaries and deferred features.
 
 ## Device authorization
 

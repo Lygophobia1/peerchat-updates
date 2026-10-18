@@ -33,6 +33,7 @@
 #include "attachment_file_io.hpp"
 #include "../protected_text_source.hpp"
 #include "android_voice_application.hpp"
+#include "android_group_voice_application.hpp"
 #endif
 
 namespace {
@@ -54,6 +55,7 @@ struct Instance {
     std::unique_ptr<peerchat::portable::GroupPendingProjection> groupPending;
     std::set<std::string> groupScopeIds;
     void invalidateGroups(){
+        if(groupVoice)groupVoice->invalidate();
         if(groups)for(const auto& id:groups->groups())groupScopeIds.insert(id);
         for(const auto& id:groupScopeIds)sessions.invalidateGroupControl({1},id,0);
         groupScopeIds.clear();if(groups)groups->invalidate();if(groupPending)groupPending->reset();
@@ -175,6 +177,7 @@ struct Instance {
     std::map<uint64_t,std::unique_ptr<peerchat::portable::ReliableEndpoint>> peers;
     peerchat::calls::CallManager calls;
     std::unique_ptr<peerchat::portable::AndroidVoiceApplication> voice;
+    std::unique_ptr<peerchat::portable::AndroidGroupVoiceApplication> groupVoice;
     std::unique_ptr<peerchat::platform::android::RecipientProvider> recipientProvider;
     std::shared_ptr<peerchat::platform::android::Context> registryContext;
     std::shared_ptr<peerchat::platform::android::Database> registryDatabase;
@@ -680,6 +683,8 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_frien
            static_cast<std::uint64_t>(generation)!=instance->friends.generation()))instance->invalidateGroups();
         if(instance->voice&&(static_cast<std::uint64_t>(account)!=instance->friends.localAccount()||
            static_cast<std::uint64_t>(generation)!=instance->friends.generation()))instance->voice->invalidate();
+        if(instance->groupVoice&&(static_cast<std::uint64_t>(account)!=instance->friends.localAccount()||
+           static_cast<std::uint64_t>(generation)!=instance->friends.generation()))instance->groupVoice->invalidate();
         auto validatedFriends=instance->friends;
         validatedFriends.replace(static_cast<std::uint64_t>(account),static_cast<std::uint64_t>(generation),values);
         if(account){
@@ -769,6 +774,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_re
                 rows.push_back(std::move(row));
             }
             r.end();auto old=instance->groupScopeIds;groups.authenticated(generation,std::move(rows));
+            if(instance->groupVoice)instance->groupVoice->current(instance->groups.get(),account,generation,instance->profile.peerId);
             for(const auto& id:old){auto current=groups.roster(id);instance->sessions.invalidateGroupControl({1},id,current?current->generation:0);}
             instance->groupScopeIds=groups.groups();
             if(instance->groupPending)instance->groupPending->changed();
@@ -838,8 +844,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_VoiceBridge_re
         protocol::check(account==instance->friends.localAccount()&&
             ((!account&&operation==0)||(account>0&&generation==instance->friends.generation())));
         auto& voice=*instance->voice;bool accepted=true;const auto now=runtimeNow();
+#if defined(__ANDROID__)
+        const bool groupAudioIdle=!instance->groupVoice||!instance->groupVoice->active();
+#else
+        const bool groupAudioIdle=true;
+#endif
         if(operation==0){r.end();}
-        else if(operation==1){auto peer=r.string(),id=r.string();r.end();accepted=voice.app.start(peer,id,now);}
+        else if(operation==1){auto peer=r.string(),id=r.string();r.end();accepted=groupAudioIdle&&voice.app.start(peer,id,now);}
         else if(operation>=2&&operation<=6){
             // Private Java/native command record only, not peer signaling. Bind
             // every local action to the call observed before asynchronous work.
@@ -849,7 +860,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_VoiceBridge_re
             // Reject before any app action or tick: a stale command must not
             // mutate or release a replacement call, even via timeout servicing.
             protocol::check(instance->calls.matches(lifetime,id,peer));
-            if(operation==2)accepted=voice.app.answer(id,now);
+            if(operation==2)accepted=groupAudioIdle&&voice.app.answer(id,now);
             else if(operation==3)accepted=voice.app.decline(id);
             else if(operation==4)accepted=voice.app.end(id);
             else accepted=operation==5?voice.app.setMuted(value!=0):voice.app.setDeafened(value!=0);
@@ -866,9 +877,88 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_VoiceBridge_re
         auto active=voice.app.active();out.number(active!=nullptr);
         if(active){out.string(active->id.value);out.string(instance->calls.peer());out.number(active->lifetime);out.number(static_cast<unsigned>(active->state));out.number(static_cast<unsigned>(active->direction));
             out.number(active->muted);out.number(active->deafened);out.number(static_cast<unsigned>(active->mediaState));out.number(active->mediaGeneration);out.number(static_cast<unsigned>(active->mediaRoute));out.number(active->controlAvailable);}
-        protocol::check(out.data.size()<=4096);return platform::android::Context::input(env,out.data);
+#if defined(__ANDROID__)
+        // Optional private tail; old fixtures remain parseable without it.
+        out.string("PeerChat/AndroidVoiceMediaDiagnostics/v1");out.string(voice.app.mediaDiagnostics());
+#endif
+        protocol::check(out.data.size()<=20480);return platform::android::Context::input(env,out.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
+// Private Kotlin/native execution record. Room snapshots and media signals
+// remain the existing authenticated server protocol, never this JNI format.
+#if defined(__ANDROID__)
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupVoiceBridge_request(JNIEnv* env,jobject,jlong handle,jint operation,jbyteArray input){
+    try{
+        using namespace peerchat;
+        auto bytes=mailboxArgument(env,input,65536);protocol::Reader r(bytes);
+        protocol::check(r.type()==protocol::CallOffer&&r.string()=="PeerChat/AndroidGroupVoice/v1"&&
+            r.number()==static_cast<unsigned>(operation)&&operation>=0&&operation<=8);
+        auto account=r.number(),authenticationGeneration=r.number();auto instance=lookup(static_cast<pc_core_handle>(handle));
+        protocol::check(bool(instance));std::lock_guard<std::mutex> lock(instance->gate);
+        protocol::check(instance->storage&&instance->groupVoice&&account>0&&account==instance->friends.localAccount()&&
+            authenticationGeneration>0&&authenticationGeneration==instance->friends.generation());
+        auto& app=*instance->groupVoice;
+        app.current(instance->groups.get(),account,authenticationGeneration,instance->profile.peerId);
+        VoiceRoomBinding binding{};binding.localAccount=account;binding.localDevice=instance->profile.peerId;
+        if(operation>0){binding.group=r.string();binding.room=r.string();binding.epoch=r.string();
+            binding.participation=r.string();binding.generation=r.number();
+            protocol::check(protocol::id(binding.group,32)&&protocol::id(binding.room,32)&&protocol::id(binding.epoch,32)&&
+                protocol::id(binding.participation,32)&&binding.generation>0);}
+        auto readIce=[&](){MediaIceConfiguration ice;ice.host=r.string();auto port=r.number();ice.username=r.string();ice.password=r.string();
+            auto expires=r.number();ice.generation=r.number();
+            protocol::check(ice.host.size()<=253&&port>0&&port<=65535&&ice.username.size()<=1024&&
+                ice.password.size()<=4096&&expires<=INT64_MAX&&ice.generation>0);
+            ice.port=static_cast<std::uint16_t>(port);ice.expiresUtc=static_cast<std::int64_t>(expires);
+            ice.profileSessionGeneration=ice.discoveryGeneration=authenticationGeneration;return ice;};
+        auto readSources=[&](){auto count=r.number();protocol::check(count<=32);std::vector<AuthorizedVoiceSource> sources;
+            for(std::uint64_t i=0;i<count;++i){AuthorizedVoiceSource source;source.account=r.number();source.device=r.string();
+                source.participation=r.string();protocol::check(source.account>0&&protocol::id(source.device)&&
+                    protocol::id(source.participation,32));sources.push_back(std::move(source));}return sources;};
+        bool accepted=true;std::vector<VoiceTransportSignal> signals;
+        if(operation==0)r.end();
+        else if(operation==1){
+            binding.revision=r.number();binding.rosterGeneration=r.number();auto sources=readSources();auto ice=readIce();r.end();
+            // Group room authority is supplied by the Android room adapter;
+            // this bridge separately enforces the current authenticated roster.
+            accepted=!instance->voice->app.active()&&app.start(binding,authenticationGeneration,instance->groups.get(),std::move(ice),sources);
+        }else{
+            // Every state-changing operation, including draining signals, is
+            // bound to the exact native media lifetime before any mutation.
+            accepted=app.matches(binding);
+            if(operation==2){auto revision=r.number(),roster=r.number();auto sources=readSources();r.end();
+                if(accepted)accepted=app.reconcile(binding,revision,roster,sources,instance->groups.get(),authenticationGeneration);
+            }else if(operation==3){auto ice=readIce();r.end();if(accepted)accepted=app.configure(binding,std::move(ice),authenticationGeneration);
+            }else if(operation==4){VoiceTransportSignal signal;signal.sourceKey=r.string();signal.routeId=r.string();signal.generation=r.number();
+                signal.kind=r.string();signal.data=r.string();signal.mid=r.string();r.end();
+                protocol::check(signal.sourceKey.size()<=130&&protocol::id(signal.routeId,32)&&signal.generation>0&&
+                    (signal.kind=="offer"||signal.kind=="answer"||signal.kind=="candidate"||signal.kind=="close")&&
+                    signal.data.size()<=(signal.kind=="candidate"?4096:32768)&&signal.mid.size()<=32);
+                if(accepted)accepted=app.signal(binding,signal);
+            }else if(operation==5){r.end();if(accepted)signals=app.takeSignals(binding);
+            }else if(operation==6||operation==7){auto enabled=r.number();r.end();protocol::check(enabled<=1);
+                if(accepted)accepted=operation==6?app.mute(binding,enabled!=0):app.deafen(binding,enabled!=0);
+            }else {r.end();if(accepted)accepted=app.stop(binding);}
+        }
+        auto state=app.snapshot();if(!app.active())signals.clear();
+        const auto current=app.binding();const auto available=androidVoiceAvailable();
+        const auto connected=std::count_if(state.routes.begin(),state.routes.end(),[](const auto& route){return route.connected;});
+        const char* diagnostic=!available?"Validated Android voice receive engine unavailable":
+            app.audioFailed()?"Audio device or media startup failed":!app.active()?"Not joined":
+            state.routes.empty()?"In voice alone":connected?"In voice connected":"In voice connecting";
+        protocol::Writer out(protocol::CallOffer);out.string("PeerChat/AndroidGroupVoice/v1");out.number(operation);
+        out.number(accepted);out.number(available);out.string(diagnostic);out.number(app.active());
+        if(app.active()){out.string(current.group);out.string(current.room);out.string(current.epoch);out.string(current.participation);
+            out.number(current.generation);out.number(current.revision);out.number(current.rosterGeneration);
+            out.number(state.muted);out.number(state.deafened);}
+        out.number(app.active()?connected:0);out.number(app.active()?state.routes.size():0);
+        out.number(app.active()?state.encodedPackets:0);out.number(app.active()?state.receive.acceptedPackets:0);
+        out.number(app.active()?state.receive.mixedBlocks:0);out.number(app.active()?state.receive.underrunBlocks:0);
+        out.number(signals.size());for(const auto& signal:signals){out.string(signal.sourceKey);out.string(signal.routeId);
+            out.number(signal.generation);out.string(signal.kind);out.string(signal.data);out.string(signal.mid);}
+        protocol::check(out.data.size()<=65536);return platform::android::Context::input(env,out.data);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+#endif
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_presence(JNIEnv* env,jobject,jlong handle,jbyteArray pin,jboolean online,jlong generation,jlong network){
     return guarded([&]()->pc_core_status{
         if(generation<=0||network<=0)return PC_CORE_INVALID_ARGUMENT;
@@ -1387,6 +1477,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_bind(J
             [owner](const peerchat::session::ReliableAuthorization& scope){return owner->groups&&owner->groups->current(scope);});
         instance->voice=std::make_unique<peerchat::portable::AndroidVoiceApplication>(instance->calls,*instance->storage,instance->profile,instance->friends,instance->sessions,instance->peers,
             [owner]{return owner->relayRequests?owner->relayRequests->network():0;});
+        instance->groupVoice=std::make_unique<peerchat::portable::AndroidGroupVoiceApplication>();
         return PC_CORE_OK;
     });
 }

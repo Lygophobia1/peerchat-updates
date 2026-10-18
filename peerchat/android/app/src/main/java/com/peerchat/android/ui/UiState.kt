@@ -11,6 +11,10 @@ import kotlinx.coroutines.launch
 import com.peerchat.android.platform.NotificationPreview
 import com.peerchat.android.application.ArchiveEnrollmentSnapshot
 import com.peerchat.android.application.ArchiveDeviceAction
+import com.peerchat.android.application.VoiceCallTarget
+import com.peerchat.android.application.VoiceConsent
+import com.peerchat.android.application.VoiceControl
+import com.peerchat.android.application.VoiceSnapshot
 
 enum class Route { Welcome, Login, Register, Server, Home, Conversation, Details, Diagnostics, Contacts, TransferSettings }
 enum class ContactPage { Menu, FindPeople, Incoming, Outgoing, Invitations, NewChat }
@@ -66,6 +70,8 @@ sealed interface LoginResult {
 data class PeerChatUiState(
     val demo: Boolean = true, val diagnostics: String = "UI demo — no live diagnostics",
     val voiceAvailable:Boolean=false,val voiceDiagnostic:String="Voice calls are unavailable in this build.",
+    val voice:VoiceSnapshot=VoiceSnapshot(),val voicePeerName:String="",val voiceBusy:Boolean=false,
+    val voiceConsent:VoiceConsent?=null,val voiceError:String?=null,
     val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,val localSendCount:Int=0,
     val incomingRequests:List<MemberUi> = emptyList(),
     val outgoingRequests:List<MemberUi> = emptyList(),
@@ -168,6 +174,10 @@ sealed interface UiAction {
     data class VerifyDevice(val value:com.peerchat.android.application.DeviceVerification,val accept:Boolean):UiAction
     data class ReenrollMailbox(val value:com.peerchat.android.application.MailboxReenrollment,val accept:Boolean):UiAction
     data object PreviewIncomingCall : UiAction
+    data class StartDmVoice(val conversationId:String):UiAction
+    data class AnswerDmVoice(val target:VoiceCallTarget):UiAction
+    data class ControlDmVoice(val target:VoiceCallTarget,val control:VoiceControl,val value:Boolean=false):UiAction
+    data class SpeakerDmVoice(val target:VoiceCallTarget,val enabled:Boolean):UiAction
     data class JoinVoice(val roomId: String) : UiAction
     data class LeaveVoice(val roomId: String) : UiAction
     data class ToggleMute(val roomId: String) : UiAction
@@ -241,6 +251,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.PreviewLoginFailure -> state.copy(loginError = "Preview only: " + loginFailureText(action.failure))
         is UiAction.VerifyDevice,is UiAction.ReenrollMailbox -> state
         UiAction.PreviewIncomingCall -> state.copy(incomingCallPreview = !state.incomingCallPreview)
+        is UiAction.StartDmVoice,is UiAction.AnswerDmVoice,is UiAction.ControlDmVoice,is UiAction.SpeakerDmVoice -> state
         // These commands exercise local UI fixtures ONLY. A real presenter delegates to application owners.
         is UiAction.JoinVoice -> updateSelected { c -> c.copy(voiceRooms = c.voiceRooms.map { room ->
             if (room.id == action.roomId) room.copy(joined = true, participants = (room.participants + "You").distinct())
@@ -276,6 +287,8 @@ interface PeerChatPresenter {
     fun dispatch(action: UiAction)
     fun login(username: String, password: String)
     fun rendered(conversation:String?,messageIds:Set<String>) {}
+    fun claimVoicePermission(token:String):Boolean = false
+    fun resolveVoicePermission(context:android.content.Context,token:String,granted:Boolean,resumed:Boolean) {}
 }
 class PeerChatUiModel(
     source: ConversationSource = DemoConversations(), private val accounts: AccountAccess = UnconnectedAccountAccess()

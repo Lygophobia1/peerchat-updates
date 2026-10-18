@@ -16,6 +16,21 @@ class VoiceExecutionTest {
         return w.bytes()
     }
     private fun parse(bytes:ByteArray)=VoiceExecution{_,_,_->bytes}.snapshot(17,71,4)
+    @Test fun optionalMeasuredDiagnosticsTailIsBoundedAndLegacyRecordsStillDecode(){
+        assertEquals("",parse(response()).mediaDiagnostics)
+        fun withTail(marker:String,details:String):ByteArray {
+            val base=response();val tail=NativeRecordWriter(7).apply{text(marker);text(details)}.bytes()
+            return base+tail.copyOfRange(4,tail.size)
+        }
+        val marker="PeerChat/AndroidVoiceMediaDiagnostics/v1"
+        val measured="neteq_packets_inserted=31\nneteq_current_delay_ms=40\nperf_receive_pull=count:3;last_us:12;max_us:17;mean_us:14;deadline_misses:0\n"
+        assertEquals(measured,parse(withTail(marker,measured)).mediaDiagnostics)
+        assertEquals("Media diagnostics unavailable",parse(withTail(marker,"Media diagnostics unavailable")).mediaDiagnostics)
+        for(details in listOf("selected_ice_pair=10.0.0.1", "latest_media_error=password", "neteq_packets_inserted=x",
+            "neteq_packets_inserted=1\nsecret=turn-password", "x".repeat(16385)))
+            assertThrows(IllegalArgumentException::class.java){parse(withTail(marker,details))}
+        assertThrows(IllegalArgumentException::class.java){parse(withTail("wrong",measured))}
+    }
     @Test fun unavailableSnapshotNeverInventsAnActiveCall(){
         val result=parse(response());assertFalse(result.available);assertFalse(result.active);assertTrue(result.accepted)
         assertEquals("Pinned media unavailable",result.diagnostic);assertEquals("",result.id);assertEquals(0L,result.mediaGeneration)

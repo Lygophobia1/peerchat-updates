@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
-$out=Join-Path $root ('build/tests/android-voice-jni-scope-'+[Guid]::NewGuid().ToString('N'))
+$out=Join-Path ([IO.Path]::GetTempPath()) ('android-voice-jni-scope-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $out | Out-Null
 # Compile the exact production entry point with boundary ports supplied by the
 # test. This is a host JNI-command unit test, not an Android or media build.

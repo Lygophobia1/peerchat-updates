@@ -2,7 +2,9 @@
 #include "../call_manager.hpp"
 #include "../protocol.hpp"
 #include "../voice_media.hpp"
+#include <array>
 #include <functional>
+#include <string_view>
 
 namespace peerchat::portable {
 // Thread-confined application adapter. CallManager remains the sole call and
@@ -21,6 +23,7 @@ public:
         virtual void setDeafened(bool)=0;
         virtual std::vector<VoiceMedia::Event> poll()=0;
         virtual VoiceMedia::Route route()=0;
+        virtual std::wstring diagnostics(){return L"Media diagnostics unavailable";}
         virtual void stop()=0;
     };
     // The production factory wraps the existing real media engine here. No
@@ -37,6 +40,7 @@ public:
         void setDeafened(bool value)override{media_->setDeafened(value);}
         std::vector<VoiceMedia::Event> poll()override{return media_->poll();}
         VoiceMedia::Route route()override{return media_->route();}
+        std::wstring diagnostics()override{return media_->diagnostics();}
         void stop()override{media_->stop();}
     };
     struct Hooks {
@@ -141,6 +145,68 @@ public:
     bool available()const{return hooks_.available&&hooks_.available();}
     const calls::CallSession* active()const noexcept{return calls_.active();}
     const char* diagnostic()const noexcept{return diagnostic_;}
+    // Only named measurements leave native media. Never forward candidate/SDP,
+    // network identifiers, credentials, or arbitrary error text to the UI.
+    static std::string safeMediaDiagnostics(const std::wstring& raw){
+        static constexpr std::array<std::wstring_view,43> numeric={
+            L"capture_frames",L"encoded_frames",L"opus_submitted",L"send_api_accepted",L"remote_track_callback_packets",
+            L"payload_delivered",L"received_packets",L"playback_frames",L"aec_render_blocks",L"aec_reference_underruns",
+            L"aec_resets",L"aec_delay_ms",L"apm_capture_10ms_calls",L"apm_processed_20ms_frames",L"apm_raw_bypass_frames",
+            L"apm_level_frames",L"opus_encode_failures",L"media_send_api_failures",L"opus_encoded_bytes",L"media_send_buffer_bytes",
+            L"receive_insert_lock_drops",L"receive_authorized_sources",L"receive_active_sources",L"receive_rtp_accepted",
+            L"receive_rtp_rejected",L"receive_insert_busy",L"receive_failure_code",L"receive_mixed_10ms_blocks",
+            L"receive_busy_or_silence_10ms_blocks",L"neteq_packets_inserted",L"neteq_insert_failures",
+            L"neteq_pulled_10ms_blocks",L"neteq_pull_failures",L"neteq_current_delay_ms",L"neteq_target_delay_ms",
+            L"neteq_concealment_events",L"neteq_concealed_samples",L"neteq_fec_packets_received",
+            L"neteq_fec_packets_discarded",L"neteq_secondary_decoded_rate_q14",L"neteq_packets_discarded",
+            L"neteq_buffer_flushes",L"media_anomaly_skipped_contention"};
+        static constexpr std::array<std::wstring_view,9> timed={L"capture_interval",L"playback_interval",L"capture_work",
+            L"apm_capture",L"apm_render",L"opus_encode",L"receive_pull",L"rtp_arrival_interval",L"screen_capture_wait"};
+        std::string out;
+        if(raw.size()>262144)return "Media diagnostics unavailable";
+        for(std::size_t at=0;at<raw.size();){
+            auto end=raw.find(L'\n',at);if(end==std::wstring::npos)end=raw.size();
+            auto eq=raw.find(L'=',at);if(eq<end&&eq-at<=64&&end-eq<=160){
+                std::wstring_view key(raw.data()+at,eq-at),value(raw.data()+eq+1,end-eq-1);
+                bool allowed=std::find(numeric.begin(),numeric.end(),key)!=numeric.end();
+                bool performance=false;
+                if(key.size()>5&&key.substr(0,5)==L"perf_"){
+                    auto name=key.substr(5);performance=std::find(timed.begin(),timed.end(),name)!=timed.end();
+                }
+                bool valid=!value.empty();
+                if(allowed&&valid){
+                    std::size_t pos=value[0]==L'-'?1:0;auto digits=pos;
+                    while(pos<value.size()&&value[pos]>=L'0'&&value[pos]<=L'9')++pos;
+                    if(pos==digits)valid=false;
+                    if(pos<value.size()&&value[pos]==L'.'){
+                        ++pos;digits=pos;while(pos<value.size()&&value[pos]>=L'0'&&value[pos]<=L'9')++pos;
+                        if(pos==digits)valid=false;
+                    }
+                    if(pos!=value.size())valid=false;
+                }
+                else if(performance&&valid){
+                    // Fixed timing grammar from MediaPerformance::text().
+                    static constexpr std::array<std::wstring_view,5> labels={L"count:",L";last_us:",L";max_us:",L";mean_us:",L";deadline_misses:"};
+                    std::size_t pos=0;
+                    for(auto label:labels){if(value.substr(pos,label.size())!=label){valid=false;break;}pos+=label.size();
+                        auto start=pos;while(pos<value.size()&&value[pos]>=L'0'&&value[pos]<=L'9')++pos;if(pos==start)valid=false;}
+                    if(pos!=value.size())valid=false;
+                }else valid=false;
+                if(valid&&out.size()+key.size()+value.size()+2<=16384){
+                    for(auto c:key)out.push_back(static_cast<char>(c));
+                    out.push_back('=');
+                    for(auto c:value)out.push_back(static_cast<char>(c));
+                    out.push_back('\n');
+                }
+            }
+            at=end==raw.size()?end:end+1;
+        }
+        return out.empty()?"Media diagnostics unavailable":out;
+    }
+    std::string mediaDiagnostics()const{
+        if(!currentMedia())return "Media diagnostics unavailable";
+        try{return safeMediaDiagnostics(media_->diagnostics());}catch(...){return "Media diagnostics unavailable";}
+    }
     bool start(const std::string& peer,const std::string& id,std::uint64_t now){
         auto c=control(peer);
         if(!available()||!protocol::id(peer)||peer==local_||!protocol::id(id,32)||!authorized(peer)||!c.connected||!c.voice||calls_.finished(id))return false;

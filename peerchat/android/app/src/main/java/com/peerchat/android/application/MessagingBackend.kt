@@ -102,6 +102,219 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val eligibilitySnapshots=EligibilitySnapshotExecution()
     private val groupExecution=GroupExecution()
     private val voiceExecution=VoiceExecution()
+    private val groupVoiceExecution=GroupVoiceExecution()
+    private val groupVoiceRooms=GroupVoiceRooms()
+    private var groupVoiceBinding:GroupNativeBinding?=null
+    private var groupVoiceGeneration=0L
+    private var groupVoiceSnapshotAt=0L
+    private data class PendingVoiceSignal(val signal:GroupNativeSignal,val expires:Long,var request:String?=null,var attempts:Int=0)
+    private val groupVoiceSignals=mutableListOf<PendingVoiceSignal>()
+    private data class VoiceBinding(val identity:ScopedBackendWork.Identity,val handle:Long,val account:Long,
+        val generation:Long,val answer:VoiceCallTarget?,val group:String="",val room:String="",val epoch:String="")
+    private val voiceConsents=VoiceConsentRegistry<VoiceBinding>()
+    private var voiceScopeIdentity:ScopedBackendWork.Identity?=null
+    private var voiceOwner=""
+    private var voiceOwnedCall:Pair<String,VoiceCallTarget>?=null
+    private var voiceCredentials:MediaTurnCredentials?=null
+    private var voiceCredentialGeneration=0L
+    private var voiceCredentialRefresh:Any?=null
+    private var voiceCredentialRetryAt=0L
+    private var voicePlatformDiagnostic=""
+    private var voiceSpeaker=false
+    private val voiceNotifications=VoiceNotifications(this.context)
+    private fun voiceIdentity():ScopedBackendWork.Identity {
+        check(!stopped&&!resetting&&inUse&&authorizationSnapshotInstalled&&mutable.value.authenticated){"Authenticated voice session unavailable"}
+        val owner=checkNotNull(accounts);val active=checkNotNull(owner.session);val opened=checkNotNull(profile)
+        if(voiceScopeIdentity?.matches(opened,owner,active,active.accountId,generation)!=true){
+            voiceConsents.reset();voiceOwnedCall=null;voiceCredentials=null;voiceCredentialGeneration=0
+            voiceCredentialRefresh=null;voiceCredentialRetryAt=0L
+            voicePlatformDiagnostic="";voiceSpeaker=false;voiceOwner=java.util.UUID.randomUUID().toString()
+            voiceScopeIdentity=ScopedBackendWork.Identity(opened,owner,active,active.accountId,generation)
+        }
+        return checkNotNull(voiceScopeIdentity)
+    }
+    private fun publishVoice():VoiceSnapshot {
+        voiceIdentity()
+        groupVoiceBinding?.let {binding->
+            val native=groupVoiceExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation)
+            if(!native.active||native.binding!=binding){stopGroupVoice("Group audio ended; join again to retry")}
+            else {
+                val status=when {
+                    native.totalRoutes==0L->"In voice room · waiting for participants"
+                    native.connectedRoutes<native.totalRoutes->"Connecting group audio (${native.connectedRoutes}/${native.totalRoutes})"
+                    else->"Connected · group voice"
+                }
+                val value=VoiceSnapshot(available=native.available,diagnostic=status,active=true,id=binding.room,
+                    peer=mutable.value.localPeerId,lifetime=binding.mediaGeneration,
+                    state=if(native.totalRoutes==0L||native.connectedRoutes==native.totalRoutes)5 else 4,
+                    muted=native.muted,deafened=native.deafened,
+                    owner=voiceOwner,platformDiagnostic=voicePlatformDiagnostic,speaker=voiceSpeaker,
+                    group=binding.group,room=binding.room,epoch=binding.epoch,participation=binding.participation,
+                    mediaDiagnostics="group_connected_routes=${native.connectedRoutes}\ngroup_total_routes=${native.totalRoutes}"+
+                        "\ngroup_encoded_packets=${native.encodedPackets}\ngroup_received_packets=${native.receivedPackets}"+
+                        "\ngroup_mixed_10ms_blocks=${native.mixedBlocks}\ngroup_underrun_10ms_blocks=${native.underrunBlocks}"+
+                        "\ngroup_per_source_jitter=not exposed\n"+com.peerchat.android.platform.audio.AndroidAudioDevice.diagnostics())
+                mutable.value=mutable.value.copy(voice=value);voiceNotifications.update(value);return value
+            }
+        }
+        val measured=voiceExecution.snapshot(checkNotNull(profile).handle,mutable.value.accountId,generation)
+        val value=measured.copy(mediaDiagnostics=measured.mediaDiagnostics+"\n"+com.peerchat.android.platform.audio.AndroidAudioDevice.diagnostics())
+            .copy(owner=voiceOwner,platformDiagnostic=voicePlatformDiagnostic,speaker=voiceSpeaker)
+        mutable.value=mutable.value.copy(voice=value)
+        voiceNotifications.update(value)
+        return value
+    }
+    internal fun canLeaseVoice(token:String):Boolean=synchronized(gate){
+        !stopped&&!resetting&&inUse&&authorizationSnapshotInstalled&&mutable.value.authenticated&&voiceConsents.valid(token)
+    }
+    override suspend fun prepareVoice(peerId:String,answer:VoiceCallTarget?):VoiceConsent=withContext(Dispatchers.IO){synchronized(gate){
+        val identity=voiceIdentity();val voice=publishVoice()
+        check(voice.available&&voiceOwnedCall==null){"Voice is unavailable or another call owns audio"}
+        check(friends.any{peerId in it.knownPeerIds&&peerId !in it.revokedPeerIds}){"Recipient is not currently authorized"}
+        if(answer==null)check(!voice.active){"Another call is active"}
+        else check(answer==voice.target&&answer.peer==peerId&&voice.state==2L&&voice.direction==1L){"Incoming call changed"}
+        voicePlatformDiagnostic="";voiceSpeaker=false
+        voiceConsents.create(peerId,answer?.id?:java.util.UUID.randomUUID().toString().replace("-",""),answer!=null,
+            VoiceBinding(identity,checkNotNull(profile).handle,mutable.value.accountId,generation,answer))
+    }}
+    override suspend fun prepareGroupVoice(group:String,room:String):VoiceConsent=withContext(Dispatchers.IO){synchronized(gate){
+        val identity=voiceIdentity();val current=publishVoice()
+        check(current.available&&!current.active&&voiceOwnedCall==null&&events?.connected==true){"Another call is active or voice is unavailable"}
+        val state=checkNotNull(groupVoiceRooms.snapshot(group)){"Waiting for authenticated voice rooms"}
+        val selected=checkNotNull(state.rooms.singleOrNull{it.id==room}){"Voice room unavailable"}
+        validateVoiceRoom(state,selected)
+        check(selected.members.size<=32){"Voice room exceeds this device's supported participant limit"}
+        voicePlatformDiagnostic="";voiceSpeaker=false
+        voiceConsents.create(mutable.value.localPeerId,room,false,
+            VoiceBinding(identity,checkNotNull(profile).handle,mutable.value.accountId,generation,null,group,room,state.epoch),group)
+    }}
+    private fun validateVoiceRoom(state:GroupVoiceRoomsSnapshot,room:GroupVoiceRoom){
+        val group=checkNotNull(mutable.value.groups.singleOrNull{it.id==state.group&&it.ready&&it.epoch==state.roster}){"Group authorization changed"}
+        check(group.memberRows.any{!it.invited&&it.account==mutable.value.accountId&&it.device==mutable.value.localPeerId})
+        check(room.members.all{member->group.memberRows.any{!it.invited&&it.account==member.account&&it.device==member.device}}){"Room participant authorization changed"}
+    }
+    private fun stopGroupVoice(reason:String=""){
+        val binding=groupVoiceBinding;groupVoiceBinding=null;groupVoiceSignals.clear()
+        if(binding!=null){
+            profile?.let{runCatching{groupVoiceExecution.stop(it.handle,mutable.value.accountId,generation,binding)}}
+            runCatching{groupVoiceRooms.request(binding.group,"leave_voice",binding.room){events?.queueGroup(it)==true}}
+        }
+        if(reason.isNotEmpty())voicePlatformDiagnostic=reason
+    }
+    override suspend fun activateVoice(token:String):VoiceSnapshot=withContext(Dispatchers.IO){
+        val prepared=synchronized(gate){
+            val (consent,binding)=voiceConsents.claim(token)
+            check(voiceIdentity()===binding.identity){"Call authorization changed"}
+            val scope=checkNotNull(backendWorkScope{voiceConsents.current(token,binding)})
+            Triple(consent,binding,scope) to checkNotNull(accounts)
+        }
+        val (consent,binding,scope)=prepared.first
+        try {
+            val cached=scope.local{voiceCredentials?.takeIf{it.usableAt(System.currentTimeMillis()/1000)}}
+            // Existing authenticated TURN request is on its independent bounded
+            // connection, never while holding the application/native gate.
+            val credentials=cached?:scope.network{prepared.second.mediaTurnCredentials()}
+            if(binding.group.isNotEmpty()){
+                val request=scope.local{
+                    check(events?.connected==true&&groupVoiceRooms.snapshot(binding.group)?.epoch==binding.epoch)
+                    checkNotNull(groupVoiceRooms.request(binding.group,"join_voice",binding.room){events?.queueGroup(it)==true})
+                }
+                kotlinx.coroutines.withTimeout(15_000){while(scope.local{groupVoiceRooms.result(request)}=="pending")kotlinx.coroutines.delay(100)}
+                return@withContext scope.local{
+                    check(groupVoiceRooms.result(request)=="accepted"&&events?.connected==true){"Group join was rejected"}
+                    val state=checkNotNull(groupVoiceRooms.snapshot(binding.group));check(state.epoch==binding.epoch)
+                    val room=checkNotNull(state.rooms.singleOrNull{it.id==binding.room});validateVoiceRoom(state,room)
+                    val member=checkNotNull(room.members.singleOrNull{it.account==binding.account&&it.device==mutable.value.localPeerId})
+                    val current=voiceExecution.snapshot(binding.handle,binding.account,binding.generation)
+                    check(!current.active&&groupVoiceBinding==null&&credentials.usableAt(System.currentTimeMillis()/1000))
+                    val target=GroupNativeBinding(binding.group,binding.room,binding.epoch,member.participation,++groupVoiceGeneration)
+                    val result=groupVoiceExecution.start(binding.handle,binding.account,binding.generation,target,state.revision,state.roster,
+                        room.members.filter{it.device!=mutable.value.localPeerId}.map{GroupNativeSource(it.account,it.device,it.participation)},credentials,++voiceCredentialGeneration)
+                    check(result.accepted&&result.active&&result.binding==target){"Group audio could not start"}
+                    groupVoiceBinding=target;voiceCredentials=credentials
+                    voiceOwnedCall=token to VoiceCallTarget(voiceOwner,mutable.value.localPeerId,target.room,target.mediaGeneration,target.group,target.room,target.epoch,target.participation)
+                    voiceConsents.clear(token);publishVoice()
+                }
+            }
+            scope.local{check(ReliableBridge.demand(binding.handle,consent.peer.toByteArray(Charsets.US_ASCII))==0){"Verified call route unavailable"}}
+            // An idle authenticated friend need not already have a live relay.
+            // Demand the existing route and await it without blocking native,
+            // mailbox or UI ownership. Native rechecks pin/capability at Start.
+            kotlinx.coroutines.withTimeout(20_000){
+                while(!scope.local{connectionSnapshot(checkNotNull(ReliableBridge.state(binding.handle,
+                        consent.peer.toByteArray(Charsets.US_ASCII)))).ready})kotlinx.coroutines.delay(125)
+            }
+            kotlin.coroutines.coroutineContext.ensureActive()
+            scope.local{
+                check(credentials.usableAt(System.currentTimeMillis()/1000)){"Media credentials expired"}
+                check(voiceIdentity()===binding.identity)
+                val before=publishVoice()
+                if(binding.answer==null)check(!before.active){"Another call became active"}
+                else check(before.target==binding.answer&&before.state==2L&&before.direction==1L){"Incoming call expired"}
+                check(voiceExecution.configureIce(binding.handle,binding.account,binding.generation,credentials.host,credentials.port,
+                    credentials.username,credentials.password,credentials.expiresUtc,++voiceCredentialGeneration).accepted){"Media configuration rejected"}
+                voiceCredentials=credentials
+                val result=if(binding.answer==null)voiceExecution.start(binding.handle,binding.account,binding.generation,consent.peer,consent.id)
+                    else voiceExecution.answer(binding.handle,binding.account,binding.generation,CallTarget(binding.answer.peer,binding.answer.id,binding.answer.lifetime))
+                check(result.accepted&&result.active&&result.id==consent.id&&result.peer==consent.peer){"Call could not start on the verified connection"}
+                voiceOwnedCall=token to VoiceCallTarget(voiceOwner,result.peer,result.id,result.lifetime)
+                voiceConsents.clear(token)
+                publishVoice()
+            }
+        }catch(failure:Exception){
+            synchronized(gate){
+                // Publish failure before consuming this consent. A delayed
+                // failure from an old profile/call must not overwrite a newer
+                // call, but the current UI must not wait for its watchdog.
+                if(voiceScopeIdentity===binding.identity&&voiceConsents.current(token,binding)){
+                    if(binding.group.isNotEmpty())runCatching{groupVoiceRooms.request(binding.group,"leave_voice",binding.room){events?.queueGroup(it)==true}}
+                    voicePlatformDiagnostic="Call preparation failed"
+                    mutable.value=mutable.value.copy(voice=mutable.value.voice.copy(platformDiagnostic=voicePlatformDiagnostic))
+                }
+                voiceConsents.clear(token)
+            }
+            throw failure
+        }
+    }
+    override suspend fun releaseVoice(token:String):Unit=withContext(Dispatchers.IO){synchronized(gate){
+        voiceConsents.clear(token)
+        val owned=voiceOwnedCall?.takeIf{it.first==token}?:return@synchronized
+        voiceOwnedCall=null
+        if(!stopped&&!resetting&&authorizationSnapshotInstalled&&mutable.value.authenticated){
+            val current=publishVoice()
+            if(current.target==owned.second){
+                if(current.group.isNotEmpty())stopGroupVoice()
+                else voiceExecution.end(checkNotNull(profile).handle,mutable.value.accountId,generation,CallTarget(current.peer,current.id,current.lifetime))
+            }
+            publishVoice()
+        }
+    }}
+    override suspend fun controlVoice(target:VoiceCallTarget,action:VoiceControl,value:Boolean):Unit=withContext(Dispatchers.IO){synchronized(gate){
+        val voice=publishVoice();check(voice.target==target){"Call changed; action ignored"}
+        if(target.group.isNotEmpty()){
+            val binding=checkNotNull(groupVoiceBinding);val native=checkNotNull(profile).handle
+            when(action){
+                VoiceControl.End,VoiceControl.Decline->stopGroupVoice()
+                VoiceControl.Mute->check(groupVoiceExecution.mute(native,mutable.value.accountId,generation,binding,value).accepted)
+                VoiceControl.Deafen->check(groupVoiceExecution.deafen(native,mutable.value.accountId,generation,binding,value).accepted)
+            }
+            publishVoice();return@synchronized
+        }
+        val native=checkNotNull(profile).handle;val call=CallTarget(target.peer,target.id,target.lifetime)
+        val result=when(action){
+            VoiceControl.Decline->voiceExecution.decline(native,mutable.value.accountId,generation,call)
+            VoiceControl.End->voiceExecution.end(native,mutable.value.accountId,generation,call)
+            VoiceControl.Mute->voiceExecution.mute(native,mutable.value.accountId,generation,call,value)
+            VoiceControl.Deafen->voiceExecution.deafen(native,mutable.value.accountId,generation,call,value)
+        }
+        check(result.accepted){"Call control rejected"};publishVoice();Unit
+    }}
+    override suspend fun voicePlatformState(token:String,diagnostic:String,speaker:Boolean):Unit=withContext(Dispatchers.IO){synchronized(gate){
+        if(!voiceConsents.valid(token)&&voiceOwnedCall?.first!=token)return@synchronized
+        require(diagnostic in setOf("","Microphone permission required","Audio focus or device unavailable","Call service unavailable","Call preparation failed","Audio route unavailable"))
+        voicePlatformDiagnostic=diagnostic;voiceSpeaker=speaker
+        if(authorizationSnapshotInstalled&&mutable.value.authenticated)publishVoice()
+    }}
     private val groupNotifications=GroupNotifications(this.context,profileName)
     private var groupRefreshAt=0L
     private var groupProjectionAt=0L
@@ -706,6 +919,12 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        stopGroupVoice();groupVoiceRooms.reset();groupVoiceSnapshotAt=0L
+        voiceConsents.reset();voiceOwnedCall=null;voiceScopeIdentity=null;voiceOwner="";voiceCredentials=null
+        voiceCredentialRefresh=null;voiceCredentialRetryAt=0L
+        voicePlatformDiagnostic="";voiceSpeaker=false
+        mutable.value=mutable.value.copy(voice=VoiceSnapshot(diagnostic="Voice authorization unavailable"),voiceRooms=emptyList())
+        voiceNotifications.update(mutable.value.voice)
         ownDeviceRequest=null;ownDeviceAt=0L;ownDeviceProjection.reset();ownDeviceStatus="not_requested"
         attachmentSelection.pending=null // Private source bytes are retained.
         invalidRetentionUntil=maxOf(invalidRetentionUntil,retentionUntil,requestedRetentionUntil)
@@ -866,6 +1085,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     android.util.Log.i("PeerChatNetwork","event=connected repair=requested")
                 }
                 if(stream.finished){
+                    stopGroupVoice("Voice event channel disconnected; join again after reconnecting")
+                    groupVoiceRooms.reset();groupVoiceSnapshotAt=0L;mutable.value=mutable.value.copy(voiceRooms=emptyList())
                     val failure=stream.failure;stream.close();events=null;eventWasConnected=false
                     mutable.value=mutable.value.copy(serverPresenceLive=false,status="Reconnecting authenticated server events; local history available")
                     eventRetryAt=now+eventRetryDelay;eventRetryDelay=(eventRetryDelay*2).coerceAtMost(30000)
@@ -876,7 +1097,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     repeat(32){stream.poll()?.let{event->handleServerEvent(event)}}
                 }
             }
-        }else {events?.close();events=null;eventWasConnected=false}
+        }else {stopGroupVoice();groupVoiceRooms.reset();groupVoiceSnapshotAt=0L;mutable.value=mutable.value.copy(voiceRooms=emptyList());events?.close();events=null;eventWasConnected=false}
         if(events?.connected==true&&authorizationSnapshotInstalled)refreshOwnDevices(now)
         // Server authorization and stored delivery precede NEW peer attempts.
         // Existing peer executions remain independent platform workers.
@@ -898,13 +1119,78 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&now>=groupProjectionAt){
             groupProjectionAt=now+1000
-            try{mutable.value=mutable.value.copy(voice=voiceExecution.snapshot(native,mutable.value.accountId,generation))}catch(_:Exception){mutable.value=mutable.value.copy(voice=VoiceSnapshot(diagnostic="Voice capability readout unavailable"))}
+            try{publishVoice()}catch(_:Exception){mutable.value=mutable.value.copy(voice=VoiceSnapshot(diagnostic="Voice capability readout unavailable"))}
             try{mutable.value=mutable.value.copy(groups=groupExecution.snapshot(native,mutable.value.accountId,generation),groupInvitations=groupExecution.invitations,groupDiagnostics=groupExecution.diagnostic)}catch(_:Exception){}
         }
         if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&events?.connected==true&&groupPendingMore&&now>=groupPendingAt){
             groupPendingAt=now+1000
             try{groupPendingMore=groupExecution.submitPending(native,mutable.value.accountId,generation){events?.queueGroup(it)==true}}
             catch(_:Exception){groupPendingAt=now+30000}
+        }
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed&&events?.connected==true)pumpGroupVoice(now)
+        if(authorizationSnapshotInstalled&&livePeerWorkAllowed)refreshVoiceCredentials(now)
+    }
+    private fun pumpGroupVoice(now:Long){
+        groupVoiceRooms.retain(mutable.value.groups.filter{it.ready}.map{it.id}.toSet())
+        val visibleRooms=groupVoiceRooms.snapshots()
+        if(mutable.value.voiceRooms!=visibleRooms)mutable.value=mutable.value.copy(voiceRooms=visibleRooms)
+        if(now>=groupVoiceSnapshotAt){
+            groupVoiceSnapshotAt=now+15_000
+            mutable.value.groups.filter{it.ready&&groupVoiceRooms.snapshot(it.id)==null}.take(8).forEach{group->
+                groupVoiceRooms.request(group.id,"snapshot"){events?.queueGroup(it)==true}
+            }
+        }
+        val binding=groupVoiceBinding?:return
+        try {
+            val state=checkNotNull(groupVoiceRooms.snapshot(binding.group));check(state.epoch==binding.epoch)
+            val room=checkNotNull(state.rooms.singleOrNull{it.id==binding.room});validateVoiceRoom(state,room)
+            check(room.members.any{it.account==mutable.value.accountId&&it.device==mutable.value.localPeerId&&it.participation==binding.participation})
+            val handle=checkNotNull(profile).handle;val account=mutable.value.accountId
+            val sources=room.members.filter{it.device!=mutable.value.localPeerId}.map{GroupNativeSource(it.account,it.device,it.participation)}
+            check(groupVoiceExecution.reconcile(handle,account,generation,binding,state.revision,state.roster,sources).accepted)
+            groupVoiceRooms.take(binding.group,binding.room,account,mutable.value.localPeerId).forEach{s->
+                groupVoiceExecution.signal(handle,account,generation,binding,GroupNativeSignal(
+                    "${s.getLong("sourceAccountId")}:${s.getString("sourceDevice")}:${s.getString("sourceGeneration")}",
+                    s.getString("routeId"),s.getLong("mediaGeneration"),s.getString("kind"),s.getString("data"),s.getString("mid")))
+            }
+            val output=groupVoiceExecution.takeSignals(handle,account,generation,binding)
+            check(output.accepted&&groupVoiceSignals.size+output.signals.size<=64)
+            output.signals.forEach{groupVoiceSignals+=PendingVoiceSignal(it,now+10_000)}
+            val iterator=groupVoiceSignals.iterator()
+            while(iterator.hasNext()){
+                val pending=iterator.next();val status=pending.request?.let(groupVoiceRooms::result)
+                if(now>=pending.expires||status=="forwarded"||status!=null&&status !in setOf("pending","stale_room_state")){
+                    iterator.remove();continue
+                }
+                if(status=="pending")continue
+                if(pending.attempts>=4){iterator.remove();continue}
+                val s=pending.signal
+                pending.request=groupVoiceRooms.send(binding.group,binding.room,account,mutable.value.localPeerId,
+                    s.sourceKey,s.routeId,s.generation,s.kind,s.data,s.mid){events?.queueGroup(it)==true}
+                pending.attempts++
+            }
+        }catch(_:Exception){stopGroupVoice("Group authorization or media changed; join again to retry");publishVoice()}
+    }
+    private fun refreshVoiceCredentials(now:Long){
+        val owned=voiceOwnedCall?:return
+        val target=mutable.value.voice.target?:return
+        if(target!=owned.second||voiceCredentialRefresh!=null||now<voiceCredentialRetryAt||
+            (voiceCredentials?.expiresUtc?:0)>System.currentTimeMillis()/1000+120)return
+        val owner=accounts?:return
+        val scope=backendWorkScope{voiceOwnedCall==owned&&mutable.value.voice.target==target}?:return
+        val request=Any();voiceCredentialRefresh=request;voiceCredentialRetryAt=now+30_000
+        metadataWork.launch {
+            try{
+                val credentials=scope.network{owner.mediaTurnCredentials()}
+                scope.finish{
+                    val handle=checkNotNull(profile).handle
+                    val accepted=if(target.group.isEmpty())voiceExecution.configureIce(handle,mutable.value.accountId,generation,
+                        credentials.host,credentials.port,credentials.username,credentials.password,credentials.expiresUtc,++voiceCredentialGeneration).accepted
+                    else groupVoiceExecution.configure(handle,mutable.value.accountId,generation,checkNotNull(groupVoiceBinding),credentials,++voiceCredentialGeneration).accepted
+                    if(accepted)voiceCredentials=credentials
+                }
+            }catch(_:Exception){/* Existing media remains live; expired credentials cannot authorize a new route. */}
+            finally{synchronized(gate){if(voiceCredentialRefresh===request)voiceCredentialRefresh=null}}
         }
     }
     // Called under gate; the existing owner invokes the returned bounded script
@@ -1132,6 +1418,14 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=localOfflineSnapshot(mutable.value,"Connection changed while backgrounded; local history retained")
     }
     private fun handleServerEvent(event:org.json.JSONObject){
+        if(event.optString("type") in setOf("group_room_snapshot","group_room_result","group_media_signal","group_media_result")){
+            try{
+                groupVoiceRooms.event(event,mutable.value.accountId,mutable.value.localPeerId)
+                mutable.value=mutable.value.copy(voiceRooms=groupVoiceRooms.snapshots())
+                pumpGroupVoice(System.nanoTime()/1_000_000)
+            }catch(_:Exception){stopGroupVoice("Group room state rejected; join again after refresh");groupVoiceRooms.reset();groupVoiceSnapshotAt=0L}
+            return
+        }
         if(event.optString("type") in setOf("group_message","group_delivery")){
             try{groupExecution.event(event,checkNotNull(profile).handle,mutable.value.accountId,generation){events?.queueGroup(it)==true};groupProjectionAt=0L
                 if(event.optString("type")=="group_message"){

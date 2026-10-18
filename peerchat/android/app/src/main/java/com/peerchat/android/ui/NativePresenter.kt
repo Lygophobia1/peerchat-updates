@@ -1,6 +1,7 @@
 package com.peerchat.android.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -31,6 +32,14 @@ import com.peerchat.android.platform.tls.ServerChannel
 
 /** Immutable presentation only. Native Profile/Storage and session/delivery owners
  * remain authoritative. This adapter never constructs peer frames or delivery ACKs. */
+internal fun voiceConsentMatchesCurrent(consent:VoiceConsent,preparedTarget:VoiceCallTarget?,voice:VoiceSnapshot,
+    rooms:List<GroupVoiceRoomsSnapshot> = emptyList(),preparedEpoch:String="",localDevice:String=""):Boolean =
+    if(consent.group.isNotEmpty())!consent.answer&&preparedTarget==null&&!voice.active&&consent.peer==localDevice&&
+        rooms.singleOrNull{it.group==consent.group&&it.epoch==preparedEpoch}?.rooms?.singleOrNull{it.id==consent.id}!=null
+    else if(consent.answer)preparedTarget!=null&&preparedTarget==voice.target&&voice.state==2L&&voice.direction==1L&&
+        consent.peer==preparedTarget.peer&&consent.id==preparedTarget.id
+    else preparedTarget==null&&!voice.active
+
 internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState): PeerChatUiState {
     fun accountName(account:Long)=if(account==snapshot.accountId)snapshot.username else snapshot.conversations.firstOrNull{it.friend.accountId==account}?.friend?.username?:"Account $account"
     val conversations=snapshot.conversations.map { c ->
@@ -59,9 +68,15 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                 if(!outgoing||m.status=="attachment_reference")MessageStatus.Received else if(m.status.startsWith("Recipients:")||m.status.startsWith("Server accepted"))MessageStatus.Sent else if(m.status.startsWith("Not submitted")||m.status.contains("unknown")||m.status.contains("rejected"))MessageStatus.Failed else MessageStatus.Queued,
                 m.timestamp,m.order,retryAvailable=outgoing&&m.status!="attachment_reference"&&!m.status.startsWith("Recipients:"),deliveryDetail=if(m.status=="attachment_reference")"Authenticated public reference; no download authorization" else if(outgoing)m.status else "")
         }
+        val roomState=snapshot.voiceRooms.singleOrNull{it.group==g.id&&g.ready&&it.roster==g.epoch}
         ConversationUi("group:${g.id}",g.name,ChatKind.Group,g.ready,messages.lastOrNull()?.text?:if(g.ready)"Encrypted group text" else "Waiting for signed membership and current group key",
             messages.lastOrNull()?.time?:"",unread=g.unread,messages=messages,hasOlder=g.hasOlder,
-            members=g.memberRows.map{MemberUi(it.device,accountName(it.account),false,if(it.invited)"Invited" else when(it.role){3L->"Owner";2L->"Admin";else->"Member"})})
+            members=g.memberRows.map{MemberUi(it.device,accountName(it.account),false,if(it.invited)"Invited" else when(it.role){3L->"Owner";2L->"Admin";else->"Member"})},
+            voiceRooms=roomState?.let{live->live.rooms.map{room->
+                val joined=snapshot.voice.active&&snapshot.voice.group==g.id&&snapshot.voice.room==room.id&&snapshot.voice.epoch==live.epoch
+                VoiceRoomUi(room.id,room.name,room.members.map{it.name.ifBlank{accountName(it.account)}},joined,
+                    muted=joined&&snapshot.voice.muted,deafened=joined&&snapshot.voice.deafened)
+            }}.orEmpty())
     }
     // Diagnostics are safe owner metadata, never messages, credentials or keys.
     val diagnostics=buildString {
@@ -74,6 +89,16 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         appendLine(snapshot.groupDiagnostics)
         appendLine("Voice execution:")
         appendLine(snapshot.voice.diagnostic)
+        snapshot.voice.let { voice ->
+            appendLine("available=${voice.available} active=${voice.active} call=${voice.id} peer=${voice.peer} lifetime=${voice.lifetime} state=${voice.state} direction=${voice.direction}")
+            appendLine("media_generation=${voice.mediaGeneration} media_state=${voice.mediaState} media_route=${voice.mediaRoute} control_available=${voice.controlAvailable}")
+            appendLine("muted=${voice.muted} deafened=${voice.deafened} speaker_requested=${voice.speaker}")
+            if(voice.group.isNotEmpty())appendLine("group=${voice.group} room=${voice.room} room_epoch=${voice.epoch} participation=${voice.participation}")
+            appendLine(voice.platformDiagnostic.take(160))
+            appendLine(voice.mediaDiagnostics.take(17000))
+            appendLine("media_route: 0=unavailable 1=LAN ICE 2=NAT ICE 3=TURN; group route counts report DTLS connections")
+            appendLine("Decoded Opus FPS and end-to-end audio latency are not separately measured; NetEq playout includes concealment.")
+        }
         appendLine("History Sync admission:")
         appendLine(snapshot.archiveAuthorizationDiagnostics)
         appendLine("File transfer measurements (native, confirmed/durable bytes):")
@@ -108,6 +133,7 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         mailboxReenrollment=if(snapshot.authenticated)snapshot.mailboxReenrollment else null,
         mailboxRecoveryError=if(snapshot.authenticated)snapshot.mailboxRecoveryError else null,
         diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
+        voice=snapshot.voice,voicePeerName=snapshot.conversations.firstOrNull{it.friend.peerId==snapshot.voice.peer||snapshot.voice.peer in it.friend.knownPeerIds}?.friend?.username.orEmpty(),
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         outgoingRequests=snapshot.outgoingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
@@ -135,6 +161,45 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val mutable=MutableStateFlow(PeerChatUiState(demo=false,connection=ConnectionState.Offline,recentCalls=emptyList(),startupStatus="Checking saved sign-in…"))
     override val state:StateFlow<PeerChatUiState> = mutable.asStateFlow()
     private var current=MessagingSnapshot()
+    private var voicePermissionInFlight:VoiceConsent?=null
+    private var voicePermissionTarget:VoiceCallTarget?=null
+    private var voicePermissionRoomEpoch:String=""
+    private var voiceStartPendingToken:String?=null
+    private var voiceStartExpected:Triple<String,String,String>?=null
+    private var voiceControlRevision=0L
+    private var voicePreparationRevision=0L
+    private fun releasePreparedVoice() {
+        val tokens=listOfNotNull(mutable.value.voiceConsent?.token,voicePermissionInFlight?.token).distinct()
+        voicePermissionInFlight=null;voicePermissionTarget=null;voicePermissionRoomEpoch=""
+        if(tokens.isNotEmpty())mutable.value=mutable.value.copy(voiceConsent=null,voiceBusy=false)
+        tokens.forEach{token->viewModelScope.launch{try{backend.releaseVoice(token)}catch(_:Exception){}}}
+    }
+    override fun claimVoicePermission(token:String):Boolean {
+        val consent=mutable.value.voiceConsent ?: return false
+        if(consent.token!=token||voicePermissionInFlight!=null)return false
+        voicePermissionInFlight=consent
+        mutable.value=mutable.value.copy(voiceConsent=null)
+        return true
+    }
+    override fun resolveVoicePermission(context:Context,token:String,granted:Boolean,resumed:Boolean) {
+        val consent=voicePermissionInFlight ?: return
+        if(consent.token!=token)return
+        val preparedTarget=voicePermissionTarget
+        val preparedEpoch=voicePermissionRoomEpoch
+        voicePermissionInFlight=null;voicePermissionTarget=null;voicePermissionRoomEpoch=""
+        val stillCurrent=voiceConsentMatchesCurrent(consent,preparedTarget,current.voice,current.voiceRooms,preparedEpoch,current.localPeerId)
+        if(!granted||!resumed||!foreground||!current.authenticated||!current.voice.available||!stillCurrent){
+            mutable.value=mutable.value.copy(voiceBusy=false,voiceError=if(!granted)"Microphone permission was denied. No voice started." else "Voice request expired. Try again.")
+            viewModelScope.launch{try{backend.releaseVoice(consent.token)}catch(_:Exception){}}
+            return
+        }
+        val started=try{com.peerchat.android.platform.PeerChatVoiceService.start(context,consent.token)}catch(_:Exception){false}
+        voiceStartPendingToken=if(started)token else null
+        voiceStartExpected=if(started)Triple(consent.peer,consent.id,consent.group) else null
+        mutable.value=mutable.value.copy(voiceBusy=started,voiceError=if(started)null else "Voice could not start. Try again.")
+        if(!started)viewModelScope.launch{try{backend.releaseVoice(consent.token)}catch(_:Exception){}}
+        else viewModelScope.launch{delay(35_000);if(voiceStartPendingToken==token){voiceStartPendingToken=null;voiceStartExpected=null;mutable.value=mutable.value.copy(voiceBusy=false,voiceError="Call setup timed out. Review the current call before retrying.")}}
+    }
     private val localSends=linkedMapOf<String,LocalSendPresentation>()
     private var navigationRestored=false
     private val uiTimings=OwnerStageTimings()
@@ -248,10 +313,11 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         retainDiagnostic("Network recovery","reason=$reason destination=$destination authenticated=${current.authenticated}")
         android.util.Log.i("PeerChatNetwork","event=login_navigation reason=$reason ui_generation=$uiGeneration authenticated=${current.authenticated}")
         recovering=true;automaticResumeSuppressed=true;uiGeneration++;localSends.clear();localSendStarted.clear()
+        voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null
         peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
         mutable.value=mutable.value.copy(route=destination,startupStatus=null,loginBusy=false,loginError=null,notice=null,serverTrust=null,archiveEnrollment=null,archiveBusy=false,connection=ConnectionState.Offline,
-            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false,localSendCount=0)
+            peopleLoading=false,peopleResults=emptyList(),peopleError=null,sendBusy=false,sendAccepted=false,localSendCount=0,voiceBusy=false)
         viewModelScope.launch {
             var completed=false
             try {backend.resetNetworkSession();current=backend.state.value;configurationReady=true;completed=true
@@ -402,6 +468,16 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     // Collect during authentication, rather than only after restore completes.
     viewModelScope.launch {backend.state.collect {snapshot ->
         if(recovering)return@collect
+        if(snapshot.accountId!=current.accountId||!snapshot.authenticated){
+            voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null
+            mutable.value=mutable.value.copy(voiceBusy=false)
+        }
+        if(voiceStartPendingToken!=null&&(snapshot.voice.active||snapshot.voice.platformDiagnostic.isNotEmpty())){
+            val expected=voiceStartExpected
+            voiceStartPendingToken=null;voiceStartExpected=null
+            val matched=snapshot.voice.active&&expected==Triple(snapshot.voice.peer,snapshot.voice.id,snapshot.voice.group)
+            mutable.value=mutable.value.copy(voiceBusy=false,voiceError=if(matched)null else snapshot.voice.platformDiagnostic.take(160).ifEmpty{"Call request changed. Review the current call before retrying."})
+        }
         if(snapshot.accountId!=current.accountId||!snapshot.authenticated||!snapshot.serverPresenceLive){
             peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
             mutable.value=mutable.value.copy(peopleResults=emptyList(),peopleLoading=false,contactBusy=false,
@@ -530,6 +606,11 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     }
     fun setForeground(active:Boolean) {
         foreground=active
+        if(!active){
+            voicePreparationRevision++
+            releasePreparedVoice()
+            if(voiceStartPendingToken==null)mutable.value=mutable.value.copy(voiceBusy=false)
+        }
         backend.setForeground(active)
         if(active)project()
         if(active&&!automaticResumeSuppressed&&!recovering&&configurationReady&&!configurationInvalid&&!mutable.value.loginBusy){
@@ -588,6 +669,76 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     }
     override fun dispatch(action:UiAction) {
         when(action) {
+            is UiAction.StartDmVoice,is UiAction.AnswerDmVoice -> {
+                if(mutable.value.demo||!current.authenticated||!current.voice.available||mutable.value.voiceBusy||mutable.value.voiceConsent!=null||voicePermissionInFlight!=null)return
+                val peer=when(action){
+                    is UiAction.StartDmVoice->current.conversations.firstOrNull{"account:${it.friend.accountId}"==action.conversationId}?.friend?.peerId
+                    is UiAction.AnswerDmVoice->action.target.takeIf{it==current.voice.target&&current.voice.direction==1L&&current.voice.state==2L}?.peer
+                    else->null
+                } ?: return
+                if(action is UiAction.StartDmVoice&&current.voice.active)return
+                val answer=(action as? UiAction.AnswerDmVoice)?.target
+                val epoch=uiGeneration;val account=current.accountId;val revision=++voicePreparationRevision
+                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null)
+                viewModelScope.launch {
+                    try {
+                        val consent=backend.prepareVoice(peer,answer)
+                        if(revision==voicePreparationRevision&&epoch==uiGeneration&&account==current.accountId&&current.authenticated&&foreground&&
+                            (answer==null||current.voice.target==answer)){
+                            voicePermissionTarget=answer
+                            voicePermissionRoomEpoch=""
+                            mutable.value=mutable.value.copy(voiceConsent=consent)
+                        }
+                        else backend.releaseVoice(consent.token)
+                    }catch(error:Exception){
+                        if(error is CancellationException)throw error
+                        if(revision==voicePreparationRevision&&epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(voiceError="Call preparation failed. Check the current connection and retry.")
+                    }finally{if(revision==voicePreparationRevision&&epoch==uiGeneration&&account==current.accountId&&mutable.value.voiceConsent==null)mutable.value=mutable.value.copy(voiceBusy=false)}
+                }
+            }
+            is UiAction.JoinVoice -> {
+                val group=mutable.value.selectedId?.takeIf{it.startsWith("group:")}?.removePrefix("group:") ?: return
+                val roomState=current.voiceRooms.singleOrNull{it.group==group} ?: return
+                if(roomState.rooms.none{it.id==action.roomId}||current.groups.none{it.id==group&&it.ready}||
+                    mutable.value.demo||!current.authenticated||!current.voice.available||current.voice.active||
+                    mutable.value.voiceBusy||mutable.value.voiceConsent!=null||voicePermissionInFlight!=null)return
+                val generation=uiGeneration;val account=current.accountId;val revision=++voicePreparationRevision
+                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null)
+                viewModelScope.launch {
+                    try {
+                        val consent=backend.prepareGroupVoice(group,action.roomId)
+                        val stillPresent=current.voiceRooms.singleOrNull{it.group==group&&it.epoch==roomState.epoch}
+                            ?.rooms?.singleOrNull{it.id==action.roomId}!=null
+                        if(revision==voicePreparationRevision&&generation==uiGeneration&&account==current.accountId&&
+                            current.authenticated&&foreground&&!current.voice.active&&stillPresent&&
+                            consent.group==group&&consent.id==action.roomId&&consent.peer==current.localPeerId&&!consent.answer){
+                            voicePermissionTarget=null
+                            voicePermissionRoomEpoch=roomState.epoch
+                            mutable.value=mutable.value.copy(voiceConsent=consent)
+                        }else backend.releaseVoice(consent.token)
+                    }catch(error:Exception){
+                        if(error is CancellationException)throw error
+                        if(revision==voicePreparationRevision&&generation==uiGeneration&&account==current.accountId)
+                            mutable.value=mutable.value.copy(voiceError="Voice room could not be joined. Check the current room and try again.")
+                    }finally{if(revision==voicePreparationRevision&&generation==uiGeneration&&account==current.accountId&&mutable.value.voiceConsent==null)
+                        mutable.value=mutable.value.copy(voiceBusy=false)}
+                }
+            }
+            is UiAction.ControlDmVoice -> {
+                if(action.target!=current.voice.target||mutable.value.voiceBusy)return
+                val revision=++voiceControlRevision;val account=current.accountId;val epoch=uiGeneration
+                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null)
+                viewModelScope.launch{try{backend.controlVoice(action.target,action.control,action.value)}
+                    catch(error:Exception){if(error is CancellationException)throw error
+                        if(revision==voiceControlRevision&&account==current.accountId&&epoch==uiGeneration&&action.target==current.voice.target)
+                            mutable.value=mutable.value.copy(voiceError="Call control could not complete. Review the current call and retry.")}
+                    finally{if(revision==voiceControlRevision)mutable.value=mutable.value.copy(voiceBusy=false)}}
+            }
+            is UiAction.SpeakerDmVoice -> {
+                if(action.target!=current.voice.target||mutable.value.voiceBusy)return
+                val changed=try{com.peerchat.android.platform.PeerChatVoiceService.route(getApplication(),action.target,action.enabled)}catch(_:Exception){false}
+                if(!changed)mutable.value=mutable.value.copy(voiceError="Speaker route could not change for this call.")
+            }
             UiAction.Back -> {
                 if(mutable.value.route==Route.Conversation)navigationState.remove<String>("conversation")
                 mutable.value=reduceUi(mutable.value,action)
@@ -832,8 +983,9 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     finally {mutable.value=mutable.value.copy(olderLoading=false)}
                 }
             }
-            UiAction.SignOut -> viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome,startupStatus=null,rememberMe=false)}
+            UiAction.SignOut -> {voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null;mutable.value=mutable.value.copy(voiceBusy=false);viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome,startupStatus=null,rememberMe=false)}
                 catch(_:Exception){mutable.value=mutable.value.copy(route=Route.Login,startupStatus=null,notice="Sign-out revocation is pending; saved sign-in will not be reused.")}}
+            }
             UiAction.ResetNetworkSession -> recoverNetwork(Route.Login)
             UiAction.DisconnectChangeServer -> recoverNetwork(Route.Server)
             UiAction.Explore -> mutable.value=mutable.value.copy(notice="Demo is available only through the explicit debug launch mode.")
@@ -849,7 +1001,20 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(selected?.startsWith("group:")==true)viewModelScope.launch{try{backend.retryGroup(selected.removePrefix("group:"),action.messageId)}catch(_:Exception){mutable.value=mutable.value.copy(notice="Exact group retry requires the current epoch and a live event channel. The saved message is retained.")}}
                 else mutable.value=mutable.value.copy(notice="This retry capability is unavailable.")
             }
-            is UiAction.JoinVoice,is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen -> mutable.value=mutable.value.copy(notice=mutable.value.voiceDiagnostic)
+            is UiAction.LeaveVoice,is UiAction.ToggleMute,is UiAction.ToggleDeafen -> {
+                val group=mutable.value.selectedId?.takeIf{it.startsWith("group:")}?.removePrefix("group:") ?: return
+                val target=current.voice.target?.takeIf{it.group==group&&it.room==when(action){
+                    is UiAction.LeaveVoice->action.roomId
+                    is UiAction.ToggleMute->action.roomId
+                    is UiAction.ToggleDeafen->action.roomId
+                    else->""
+                }} ?: return
+                dispatch(when(action){
+                    is UiAction.LeaveVoice->UiAction.ControlDmVoice(target,VoiceControl.End)
+                    is UiAction.ToggleMute->UiAction.ControlDmVoice(target,VoiceControl.Mute,!current.voice.muted)
+                    else->UiAction.ControlDmVoice(target,VoiceControl.Deafen,!current.voice.deafened)
+                })
+            }
             is UiAction.WatchShare,is UiAction.StopWatching,is UiAction.MemberAudio,UiAction.PreviewIncomingCall,
             is UiAction.PreviewLoginFailure -> mutable.value=mutable.value.copy(notice="This capability is unavailable in Android messaging.")
             UiAction.CancelServerTrust -> {
@@ -907,5 +1072,5 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             else -> mutable.value=reduceUi(mutable.value,action)
         }
     }
-    override fun onCleared() {loginAfterTrust=null;backend.close();super.onCleared()}
+    override fun onCleared() {loginAfterTrust=null;releasePreparedVoice();backend.close();super.onCleared()}
 }

@@ -37,10 +37,6 @@ internal class ForegroundEvents(accounts:ServerAccounts,private val onChange:(Fo
                 val type=event.getString("type")
                 require(type in setOf("friend_event","group_message","group_delivery","group_room_snapshot","group_room_result","group_media_signal","group_media_result"))
                 if(type=="friend_event")require(event.getInt("version")==1)
-                // Room/media notifications are existing server events. This
-                // candidate cannot join/capture without the native receive engine;
-                // unrelated room traffic must not tear down text messaging.
-                if(type in setOf("group_room_snapshot","group_room_result","group_media_signal","group_media_result"))continue
                 if(event.optString("event")=="presence_changed"&&!presenceSequence.accept(event.optString("serverEpoch"),event.optLong("accountId"),event.optLong("presenceRevision")))continue
                 check(queue.offer(event)){"Event projection gap"}
                 notifyChange()
@@ -51,7 +47,7 @@ internal class ForegroundEvents(accounts:ServerAccounts,private val onChange:(Fo
     fun poll():JSONObject?=queue.poll()
     fun hasPending():Boolean=queue.isNotEmpty()
     fun queueGroup(value:JSONObject):Boolean {
-        require(value.optString("type") in setOf("group_send","group_ack"))
+        require(value.optString("type") in setOf("group_send","group_ack","group_room","group_media"))
         return connected&&!closed&&output?.offer(value.toString().toByteArray(Charsets.UTF_8))==true
     }
     override fun close(){closed=true;connected=false;output?.close();try{channel?.close()}catch(_:Exception){}}

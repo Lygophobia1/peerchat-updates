@@ -13,6 +13,55 @@ class NativeProjectionTest {
         assertFalse(ui.voiceAvailable);assertEquals(reason,ui.voiceDiagnostic);assertTrue(ui.diagnostics.contains(reason))
         assertFalse(PeerChatUiState().voiceAvailable)
     }
+    @Test fun liveCallProjectionUsesExactNativeTargetAndPeerName(){
+        val call=VoiceSnapshot(available=true,diagnostic="Ready",active=true,id="c".repeat(32),
+            peer=remote,lifetime=23,state=2,direction=1,owner="owner-1")
+        val projected=projectMessaging(snapshot().copy(voice=call),PeerChatUiState())
+        assertEquals(call.target,projected.voice.target)
+        assertEquals("Sammy",projected.voicePeerName)
+        assertEquals("Incoming call",voiceStatus(projected.voice.state))
+        val ended=projectMessaging(snapshot().copy(voice=VoiceSnapshot(available=true,diagnostic="Call ended")),projected)
+        assertNull(ended.voice.target)
+        assertEquals("",ended.voicePeerName)
+    }
+    @Test fun permissionResultCannotAnswerReplacedIncomingCall(){
+        val call=VoiceSnapshot(available=true,active=true,id="c".repeat(32),peer=remote,
+            lifetime=23,state=2,direction=1,owner="owner-1")
+        val target=call.target!!
+        val consent=VoiceConsent("consent",remote,call.id,true)
+        assertTrue(voiceConsentMatchesCurrent(consent,target,call))
+        assertFalse(voiceConsentMatchesCurrent(consent,target,call.copy(lifetime=24)))
+        assertFalse(voiceConsentMatchesCurrent(consent,target,call.copy(state=5)))
+        assertFalse(voiceConsentMatchesCurrent(consent,target,call.copy(direction=0)))
+        assertFalse(voiceConsentMatchesCurrent(consent,target,VoiceSnapshot(available=true)))
+    }
+    @Test fun groupRoomsProjectOnlyAuthenticatedMembersAndCurrentVoiceJoin(){
+        val group="d".repeat(32);val room="e".repeat(32);val epoch="f".repeat(32)
+        val groups=listOf(GroupConversationSnapshot(group,"1".repeat(32),2,"Planning",true,2))
+        val rooms=listOf(GroupVoiceRoomsSnapshot(group,epoch,3,2,listOf(GroupVoiceRoom(room,"General",listOf(
+            GroupVoiceMember(19,local,"2".repeat(32),"Jonah"),GroupVoiceMember(8,remote,"3".repeat(32),"Sammy"))))))
+        val base=snapshot().copy(groups=groups,voiceRooms=rooms)
+        val idle=projectMessaging(base,PeerChatUiState()).conversations.last().voiceRooms.single()
+        assertEquals("General",idle.name);assertEquals(listOf("Jonah","Sammy"),idle.participants);assertFalse(idle.joined)
+        val voice=VoiceSnapshot(available=true,active=true,owner="owner",peer=local,id=room,lifetime=1,
+            state=5,group=group,room=room,epoch=epoch,participation="2".repeat(32),muted=true)
+        val joined=projectMessaging(base.copy(voice=voice),PeerChatUiState()).conversations.last().voiceRooms.single()
+        assertTrue(joined.joined);assertTrue(joined.muted)
+        assertFalse(projectMessaging(base.copy(voice=voice.copy(epoch="0".repeat(32))),PeerChatUiState())
+            .conversations.last().voiceRooms.single().joined)
+        assertTrue(projectMessaging(base.copy(voiceRooms=emptyList()),PeerChatUiState()).conversations.last().voiceRooms.isEmpty())
+    }
+    @Test fun groupPermissionResultNeedsSameRoomEpochAndIdleVoice(){
+        val group="d".repeat(32);val room="e".repeat(32);val epoch="f".repeat(32)
+        val consent=VoiceConsent("token",local,room,false,group)
+        val rooms=listOf(GroupVoiceRoomsSnapshot(group,epoch,1,2,listOf(GroupVoiceRoom(room,"General",emptyList()))))
+        val idle=VoiceSnapshot(available=true)
+        assertTrue(voiceConsentMatchesCurrent(consent,null,idle,rooms,epoch,local))
+        assertFalse(voiceConsentMatchesCurrent(consent,null,idle,rooms,"0".repeat(32),local))
+        assertFalse(voiceConsentMatchesCurrent(consent,null,idle,emptyList(),epoch,local))
+        assertFalse(voiceConsentMatchesCurrent(consent,null,idle,rooms,epoch,remote))
+        assertFalse(voiceConsentMatchesCurrent(consent,null,idle.copy(active=true),rooms,epoch,local))
+    }
     private fun snapshot(delivery:Long=0,outgoing:Boolean=true)=MessagingSnapshot(19,"Jonah",local,true,"Authenticated",listOf(
         ConversationSnapshot(FriendIdentity(8,"Sammy",remote,true),ConnectionSnapshot(ready=true),listOf(
             MessageSnapshot("c".repeat(32),if(outgoing)local else remote,if(outgoing)remote else local,1700000000000,1,1,delivery,"private message")))))

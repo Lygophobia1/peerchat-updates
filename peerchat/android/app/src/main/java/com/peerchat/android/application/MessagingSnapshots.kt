@@ -27,7 +27,7 @@ data class MessagingSnapshot(val accountId: Long=0,val username: String="",val l
     val archiveAuthorizationDiagnostics:String="No authenticated History Sync snapshot yet.",val transferDiagnostics:String="",
     val messagingDiagnostics:String="",val groups:List<GroupConversationSnapshot> = emptyList(),
     val groupInvitations:List<GroupInvitationSnapshot> = emptyList(),val groupDiagnostics:String="Group authorization not loaded",
-    val voice:VoiceSnapshot=VoiceSnapshot(),val deviceVerifications:List<DeviceVerification> = emptyList(),
+    val voice:VoiceSnapshot=VoiceSnapshot(),val voiceRooms:List<GroupVoiceRoomsSnapshot> = emptyList(),val deviceVerifications:List<DeviceVerification> = emptyList(),
     val mailboxReenrollment:MailboxReenrollment?=null,val mailboxRecoveryError:String?=null,
     val freshMailboxMessageIds:Set<String> = emptySet(),val ownDevices:OwnDeviceInventory?=null)
 

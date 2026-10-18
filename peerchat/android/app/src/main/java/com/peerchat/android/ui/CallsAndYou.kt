@@ -17,22 +17,64 @@ import android.app.Activity
 import android.os.Build
 import android.Manifest
 import com.peerchat.android.platform.NotificationPreview
+import com.peerchat.android.application.VoiceControl
+
+internal fun voiceStatus(state:Long):String=when(state){
+    1L->"Calling";2L->"Incoming call";3L->"Negotiating";4L->"Connecting audio"
+    5L->"Connected";6L->"Ending";7L->"Ended";8L->"Failed";else->"Call status unavailable"
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable internal fun VoiceCallCard(state:PeerChatUiState,dispatch:(UiAction)->Unit) {
+    val voice=state.voice
+    val target=voice.target
+    val group=voice.group.isNotEmpty()
+    val groupName=state.conversations.firstOrNull{it.id=="group:${voice.group}"}?.name.orEmpty()
+    val roomName=state.conversations.firstOrNull{it.id=="group:${voice.group}"}?.voiceRooms?.firstOrNull{it.id==voice.room}?.name.orEmpty()
+    Surface(color=MaterialTheme.colorScheme.primaryContainer,modifier=Modifier.fillMaxWidth().testTag(if(group)"group-voice-call" else "dm-voice-call")) {
+        Column(Modifier.padding(horizontal=16.dp,vertical=10.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+            Text(if(group)"${groupName.ifEmpty{"Group voice"}} · ${roomName.ifEmpty{"Voice room"}} · ${voice.diagnostic.take(160)}"
+                else "${state.voicePeerName.ifEmpty { "Direct voice call" }} · ${voiceStatus(voice.state)}",style=MaterialTheme.typography.titleSmall)
+            if(voice.platformDiagnostic.isNotBlank())Text(voice.platformDiagnostic.take(160),style=MaterialTheme.typography.bodySmall)
+            if(voice.diagnostic.isNotBlank()&&voice.state==8L)Text(voice.diagnostic.take(160),style=MaterialTheme.typography.bodySmall)
+            state.voiceError?.let{Text(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)}
+            if(target!=null)FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                if(!group&&voice.direction==1L&&voice.state==2L){
+                    Button({dispatch(UiAction.AnswerDmVoice(target))},enabled=!state.voiceBusy,modifier=Modifier.testTag("dm-voice-answer")){Text("Answer")}
+                    TextButton({dispatch(UiAction.ControlDmVoice(target,VoiceControl.Decline))},enabled=!state.voiceBusy,modifier=Modifier.testTag("dm-voice-decline")){Text("Decline")}
+                } else {
+                    if(voice.state in 3L..5L){
+                        TextButton({dispatch(UiAction.ControlDmVoice(target,VoiceControl.Mute,!voice.muted))},enabled=!state.voiceBusy,modifier=Modifier.testTag(if(group)"group-voice-mute" else "dm-voice-mute")){Text(if(voice.muted)"Unmute" else "Mute")}
+                        TextButton({dispatch(UiAction.ControlDmVoice(target,VoiceControl.Deafen,!voice.deafened))},enabled=!state.voiceBusy,modifier=Modifier.testTag(if(group)"group-voice-deafen" else "dm-voice-deafen")){Text(if(voice.deafened)"Undeafen" else "Deafen")}
+                        TextButton({dispatch(UiAction.SpeakerDmVoice(target,!voice.speaker))},enabled=!state.voiceBusy,modifier=Modifier.testTag(if(group)"group-voice-speaker" else "dm-voice-speaker")){Text(if(voice.speaker)"Speaker off" else "Speaker on")}
+                    }
+                    if(voice.state in 1L..5L)TextButton({dispatch(UiAction.ControlDmVoice(target,VoiceControl.End))},enabled=!state.voiceBusy,modifier=Modifier.testTag(if(group)"group-voice-leave" else "dm-voice-hangup")){Text(if(group)"Leave voice" else "Hang up")}
+                }
+            }
+            if(state.voiceBusy)LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+    }
+}
 
 @Composable internal fun CallsPage(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Calls", style = MaterialTheme.typography.headlineSmall)
-        Text(if(state.demo) "Local media UI previews · microphone and speakers are never opened." else "Voice and screen sharing are not implemented in Android messaging.", style = MaterialTheme.typography.bodySmall)
+        Text(if(state.demo) "Local media UI previews · microphone and speakers are never opened." else if(state.voiceAvailable)
+            "Direct calls and available group voice rooms can be joined explicitly. Screen video is unavailable."
+            else "Voice: ${state.voiceDiagnostic.take(160)} Screen video is unavailable.", style = MaterialTheme.typography.bodySmall)
+        if(!state.demo&&state.voiceBusy)Text("Preparing call or waiting for microphone permission…",modifier=Modifier.testTag("dm-voice-progress"))
+        if(!state.demo)state.voiceError?.let{Text(it,color=MaterialTheme.colorScheme.error,modifier=Modifier.testTag("dm-voice-error"))}
         Text("Voice rooms", style = MaterialTheme.typography.titleMedium)
         state.conversations.filter { it.voiceRooms.isNotEmpty() }.forEach { c ->
             OutlinedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(c.name, style = MaterialTheme.typography.titleMedium)
                     c.voiceRooms.forEach { room -> Text("${room.name} · ${room.participants.size} in voice${if (room.joined) " · In Voice" else ""}") }
-                    TextButton({ dispatch(UiAction.Select(c.id)); dispatch(UiAction.Navigate(Route.Details)) }) { Text("Open room previews") }
+                    TextButton({ dispatch(UiAction.Select(c.id)); dispatch(UiAction.Navigate(Route.Details)) }) { Text(if(state.demo)"Open room previews" else "Open voice rooms") }
                 }
             }
         }
-        Text("Recent calls · samples", style = MaterialTheme.typography.titleMedium)
+        Text(if(state.demo)"Recent calls · samples" else "Recent calls", style = MaterialTheme.typography.titleMedium)
         state.recentCalls.forEach { call -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Call, null)
             Column { Text(call.name); Text(call.detail, color = if (call.missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
