@@ -148,6 +148,8 @@ class GroupVoiceRoomsTest {
         clock+=15_000
         assertEquals(group,rooms.dueSnapshotGroup(group))
         rooms.request(group,"snapshot"){true}
+        assertEquals(other,rooms.dueSnapshotGroup(group)) // missing idle state also retries
+        rooms.request(other,"snapshot"){true}
         assertNull(rooms.dueSnapshotGroup(group))
         clock+=45_000
         assertEquals(group,rooms.dueSnapshotGroup(group))
@@ -193,6 +195,27 @@ class GroupVoiceRoomsTest {
         rooms.reconcileAuthorized(authorized)
         assertEquals(group,rooms.dueSnapshotGroup())
         assertNull(rooms.snapshot(group))
+    }
+
+    @Test fun missingInitialRoomRetriesAfterRequestTimeoutNotHealthyRefreshInterval() {
+        var clock=100L
+        val rooms=GroupVoiceRooms { clock }
+        rooms.reconcileAuthorized(listOf(GroupConversationSnapshot(group,"d".repeat(32),2,"Group",true,2)))
+        assertEquals(group,rooms.dueSnapshotGroup())
+        val request=rooms.request(group,"snapshot"){true}!!
+        clock+=5_000
+        assertNull(rooms.dueSnapshotGroup()) // one outstanding request
+        clock+=10_000
+        assertEquals(group,rooms.dueSnapshotGroup())
+        assertEquals("timeout",rooms.result(request))
+        assertNull(rooms.snapshot(group)) // retries confer no authority
+        assertNull(rooms.request(group,"join_voice",room){fail("missing state joined");true})
+        rooms.trackAndLoad()
+        clock+=5_000
+        assertNull(rooms.dueSnapshotGroup()) // healthy rooms retain slow cadence
+        rooms.reconcileAuthorized(emptyList())
+        clock+=60_000
+        assertNull(rooms.dueSnapshotGroup()) // revoked groups never retry
     }
 
     @Test fun futureSignalWaitsForSnapshotAndCannotOutliveItsParticipation() {

@@ -65,7 +65,10 @@ internal class GroupVoiceRooms(private val now:()->Long={System.nanoTime()/1_000
             requests.values.none{it.group==group&&it.operation=="snapshot"}&&
                 (snapshotRequestedAt[group]?.let{now()-it>=interval}?:true)
         activeGroup?.let{if(due(it,15_000))return it}
-        return authorizedRoster.keys.firstOrNull{it!=activeGroup&&due(it,60_000)}
+        // A failed first request must not impose the healthy-room refresh
+        // interval. Pending requests remain single-flight; retry only after
+        // they finish/expire, and never grant authority from this retry hint.
+        return authorizedRoster.keys.firstOrNull{it!=activeGroup&&due(it,if(isFresh(it))60_000 else 5_000)}
     }
     fun request(group:String,operation:String,room:String="",send:(JSONObject)->Boolean):String? {
         prune();require(id(group,32)&&operation in setOf("snapshot","join_voice","leave_voice"))
