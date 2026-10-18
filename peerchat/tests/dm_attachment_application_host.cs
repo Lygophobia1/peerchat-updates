@@ -13,9 +13,27 @@ using PeerChatDesktop;
 // Isolated process bridge to the actual authenticated TLS server and shipping
 // Windows transport codec. Only public test keys and encrypted wire cross it.
 class DirectAttachmentApplicationHost {
- static int Main(string[] args){try{Console.InputEncoding=new UTF8Encoding(false,true);Console.OutputEncoding=new UTF8Encoding(false,true);AttachmentCacheRuntimeTest.DirectApplicationHost(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
+ static int Main(string[] args){try{Console.InputEncoding=new UTF8Encoding(false,true);Console.OutputEncoding=new UTF8Encoding(false,true);AttachmentCacheRuntimeTest.NativeReplyFailureProof();if(args.Length==1&&args[0]=="--adapter-proof")return 0;AttachmentCacheRuntimeTest.DirectApplicationHost(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }
 partial class AttachmentCacheRuntimeTest {
+ internal static void NativeReplyFailureProof(){
+  const string id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  byte[] command=HostRecord("PeerChat/DMCacheCommand/v1",w=>{w.Write(7UL);Text(w,id);Text(w,"cache_dm_capability");w.Write(0UL);Text(w,"");Text(w,"");w.Write(0UL);w.Write(0UL);w.Write(0UL);for(int i=0;i<3;i++)Field(w,new byte[0]);});
+  int rejected=0,failed=0;string failure="";
+  var execution=new DmAttachmentExecution((operation,input)=>{
+   if(operation==25)return Convert.ToBase64String(command);
+   if(operation==26){rejected++;throw new InvalidDataException("Injected native reply rejection before commit");}
+   if(operation==27){failed++;failure=input;return "ok";}
+   throw new InvalidDataException("Unexpected native operation");
+  },7);
+  bool threw=false;try{execution.Service(payload=>new Dictionary<string,object>{{"type","cache_result"},{"operation",payload["type"]},{"requestId",payload["requestId"]},{"state","accepted"},{"cacheVersion",2L},{"dmAttachmentVersion",1L}});}catch(InvalidDataException){threw=true;}
+  Check(threw&&rejected==1&&failed==1&&execution.LastState=="native_reply_rejected","DM native reply rejection must release its borrowed request");
+  var wire=Convert.FromBase64String(failure);using(var stream=new MemoryStream(wire))using(var reader=new BinaryReader(stream,new UTF8Encoding(false,true))){
+   Func<string> readText=()=>{ulong count=reader.ReadUInt64();Check(count<=100000,"DM failure text bound");return new UTF8Encoding(false,true).GetString(reader.ReadBytes((int)count));};
+   Check(reader.ReadBytes(4).SequenceEqual(new byte[]{80,84,1,30})&&readText()=="PeerChat/DMCacheFailure/v1"&&reader.ReadUInt64()==7&&readText()==id&&readText()=="network_unavailable"&&stream.Position==stream.Length,"DM native failure correlation");
+  }
+  Console.Error.WriteLine("PASS DM managed transport releases rejected native reply with exact generation/request correlation");
+ }
  internal static void DirectApplicationHost(string root){
   var control=Console.Out;Console.SetOut(Console.Error);var json=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=100000};
   var setup=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(root,"fixture.json")));
@@ -39,6 +57,7 @@ partial class AttachmentCacheRuntimeTest {
   Action restart=()=>{foreach(var client in clients)if(client!=null)client.StopEventChannel();if(server!=null)server.Dispose();server=String.IsNullOrEmpty(candidate)?(IDisposable)new ContextServer(config):new CandidateServer(candidate,config);for(int actor=0;actor<3;actor++)if(eventActors[actor])startEvents(actor);};
   Action<Dictionary<string,object>> send=value=>{control.WriteLine(Convert.ToBase64String(HostRecord("PeerChat/AttachmentTestHost/v1",w=>HostValue(w,value))));control.Flush();};
   var timings=new List<long>();long cachedBytes=0;int appendRequests=0,readRequests=0;var offsets=new HashSet<string>();Dictionary<string,object> lastPublication=null;int lastPublisher=0;
+  var capabilityTraces=new int[3];
   try{
    restart();for(int i=0;i<3;i++){clients[i]=new DiscoveryClient("localhost",port,pin){AccountId=accountsByActor[i],SessionToken=tokens[i],RegisteredPublicIdentity=devices[i]};clients[i].RefreshSessionInfo();}
    send(new Dictionary<string,object>{{"pin",pin},{"port",port},{"accounts",accountsByActor}});
@@ -47,6 +66,15 @@ partial class AttachmentCacheRuntimeTest {
      int actor=Convert.ToInt32(command["actor"])-1;Check(actor>=0&&actor<3,"DM host actor");var native=Convert.FromBase64String((string)command["command"]);var watch=System.Diagnostics.Stopwatch.StartNew();
      byte[] response=DmAttachmentExecution.Execute(native,payload=>{
       string type=(string)payload["type"];var result=clients[actor].AttachmentCache(devices[actor],payload,accountsByActor[actor],clients[actor].SessionToken,pin);
+      if((type=="cache_dm_capability"||type=="cache_dm_register")&&capabilityTraces[actor]++<6){
+       var state=Convert.ToString(result["state"]);if(!System.Text.RegularExpressions.Regex.IsMatch(state??"","^(accepted|cache_[a-z_]{1,80})$"))state="unclassified";
+       Console.Error.WriteLine("DM fixture cache actor="+(actor+1)+" operation="+type+" state="+state+" cache_version="+Convert.ToString(result.ContainsKey("cacheVersion")?result["cacheVersion"]:0)+" dm_version="+Convert.ToString(result.ContainsKey("dmAttachmentVersion")?result["dmAttachmentVersion"]:0));
+       if(state=="cache_storage_unavailable"){
+        try{using(var diagnostic=new AttachmentCacheRuntime(options,()=>DateTimeOffset.UtcNow.ToUnixTimeSeconds())){}Console.Error.WriteLine("DM fixture cache startup diagnostic=unexpected_success");}
+        catch(Exception failure){if(failure is OutOfMemoryException)throw;var code=failure.Message;Console.Error.WriteLine("DM fixture cache startup diagnostic="+(failure is InvalidOperationException&&System.Text.RegularExpressions.Regex.IsMatch(code??"","^cache_[a-z_]{1,80}$")?code:"storage_owner_or_platform_failure"));}
+        throw new InvalidOperationException("DM fixture cache storage unavailable before capability registration");
+       }
+      }
       if(Convert.ToString(result["state"])=="accepted"){
        if(type=="cache_dm_append"){appendRequests++;string binding=Convert.ToString(payload["lease"])+":"+Convert.ToString(payload["offset"]);if(offsets.Add(binding))cachedBytes+=AttachmentCacheRequests.Decode((string)payload["data"]).Length;}
        if(type=="cache_dm_read")readRequests++;

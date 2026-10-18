@@ -61,7 +61,8 @@ internal sealed class MailboxExecution {
     int eligibilityOffset;
     long eligibilityGeneration,eligibilityLocalAccount;
     string eligibilityLocalDevice="";
-    bool registered;
+    volatile bool registered;
+    internal bool RegistrationAccepted { get { return registered; } }
     public bool NeedsContinuation {get;private set;}
     public DateTime NextRetryUtc {get;private set;}
     public DateTime NextEligibilityUtc {get;private set;}

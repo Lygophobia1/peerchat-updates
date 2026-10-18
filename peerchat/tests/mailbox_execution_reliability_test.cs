@@ -61,6 +61,11 @@ internal static class MailboxExecutionReliabilityTest {
         string snapshot=execution.DiagnosticsSnapshot();
         Check(snapshot.Contains("Authenticated mailbox_store RPC")&&snapshot.Contains("Native envelope encryption/preparation"));
         Check(snapshot.Contains("Retry pending: 4")&&snapshot.Contains("recipient_key_retired=4")&&!snapshot.Contains("message=m5"));
+        Check(execution.RegistrationAccepted);
+        execution.Reset();Check(!execution.RegistrationAccepted);
+        execution.Service(null,"device",true,(peer,inserted)=>{},diagnostics.Add,rpc);
+        Check(execution.RegistrationAccepted);
+        Check(!new MailboxExecution((op,input,id,allowed)=>{throw new Exception("Fresh executor must not use an old registration");}).RegistrationAccepted);
 
         // A refused device must not back off another device of the same message.
         var deviceStores=new List<byte>();

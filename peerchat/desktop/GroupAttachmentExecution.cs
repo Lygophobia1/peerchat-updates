@@ -95,7 +95,8 @@ public partial class DesktopApplication {
     }
     void PumpDmAttachmentNetwork(){
         if(closing||busy)return;var owner=discovery;var client=groupAttachmentDeviceClient??owner;
-        bool ready=owner!=null&&owner.AccountId>0&&owner.AccountId==mailboxContextAccount&&!String.IsNullOrEmpty(model.OwnId)&&client!=null&&!String.IsNullOrEmpty(client.SessionToken)&&client.CertificateSha256!=null&&client.CertificateSha256.Length==64;
+        bool ready=owner!=null&&owner.AccountId>0&&owner.AccountId==mailboxContextAccount&&!String.IsNullOrEmpty(model.OwnId)&&client!=null&&!String.IsNullOrEmpty(client.SessionToken)&&client.CertificateSha256!=null&&client.CertificateSha256.Length==64&&
+            mailboxService==owner&&mailboxExecutionSessionGeneration==discoverySessionGeneration&&mailboxExecutionProfileGeneration==profileSessionGeneration&&mailboxExecution!=null&&mailboxExecution.RegistrationAccepted;
         bool changed=!ready||owner!=dmAttachmentNetworkOwner||client!=dmAttachmentNetworkClient||profileSessionGeneration!=dmAttachmentProfile||discoverySessionGeneration!=dmAttachmentSession||client.AccountId!=dmAttachmentAccount||client.SessionToken!=dmAttachmentToken||client.CertificateSha256.ToLowerInvariant()!=dmAttachmentPin||model.OwnId!=dmAttachmentPeer;
         if(changed&&dmAttachmentExecution!=null)StopDmAttachmentNetwork();
         if(!ready||!dmAttachmentNetworkTask.IsCompleted||!groupAttachmentNetworkTask.IsCompleted||DateTime.UtcNow<dmAttachmentNext)return;

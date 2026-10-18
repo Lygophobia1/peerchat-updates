@@ -64,7 +64,16 @@ public sealed class DmAttachmentExecution {
         if(stopped)return false;string pending=native(25,"");if(String.IsNullOrEmpty(pending))return false;byte[] command=Convert.FromBase64String(pending);
         using(var r=new Reader(command,"PeerChat/DMCacheCommand/v1"))Require(r.Number()==generation);
         byte[] response;uint operation;try{response=Execute(command,request);using(var r=new Reader(response,"PeerChat/DMCacheReply/v1")){r.Number();r.Text();LastState=r.Text();}operation=26;}catch{LastState="network_unavailable";response=Failure(command);operation=27;}
-        if(stopped)return false;native(operation,Convert.ToBase64String(response));return true;
+        if(stopped)return false;
+        try{native(operation,Convert.ToBase64String(response));}
+        catch{
+            // The native reply may have been rejected before it consumed this
+            // borrowed request. Let its own correlation and retry owner release
+            // that request now, without changing any server-side outcome.
+            if(operation==26&&!stopped){LastState="native_reply_rejected";try{native(27,Convert.ToBase64String(Failure(command)));}catch{}}
+            throw;
+        }
+        return true;
     }
 }
 }
