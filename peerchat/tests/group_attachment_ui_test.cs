@@ -75,7 +75,12 @@ class GroupAttachmentUiTest {
             var row=new CoreAdapter.GroupAttachmentData{id="attempt-"+state,logicalId="one-message",group=group.Id,name="日本 👩🏽‍💻.png",size=100,transferSize=200,done=50,state=state,sending=false,time=100};
             Check(GroupAttachmentProjection.Apply(group,row)&&group.Messages.Count==1,"retry duplicate bubble");Check(!GroupAttachmentProjection.Apply(group,row),"unchanged snapshot redraw");Check(group.Messages[0].TextVisibility==Visibility.Collapsed,"attachment showed extra text bubble");
             var card=new GroupAttachmentCard{Attachment=row};Check(!Actions(card).Contains("Preview")&&!Actions(card).Contains("Save As…"),"unverified local content exposed");
-            if(state=="uploading"||state=="downloading"){Check(card.Children.OfType<ProgressBar>().Single().Maximum==200,"progress used plaintext size for ciphertext ACKs");Check(card.Children.OfType<TextBlock>().Any(text=>text.Text.Contains("confirmed encrypted bytes")),"ciphertext ACK units missing");}
+            if(state=="uploading"||state=="downloading"){
+                Check(card.Children.OfType<ProgressBar>().Single().Maximum==200,"progress used plaintext size for ciphertext ACKs");
+                var details=card.Children.OfType<StackPanel>().Single();Check(details.Visibility==Visibility.Collapsed,"ciphertext ACK diagnostics were exposed in the collapsed attachment bubble");
+                card.DetailsExpanded=true;details=card.Children.OfType<StackPanel>().Single();
+                Check(details.Visibility==Visibility.Visible&&details.Children.OfType<TextBlock>().Any(text=>text.Text.Contains("confirmed encrypted bytes")),"expanded ciphertext ACK units missing");
+            }
             if(state=="complete")Check(!GroupAttachmentProjection.Status(row).Contains("Complete — plaintext verified"),"ciphertext completion mislabeled verified");
         }
         var complete=group.Messages[0].GroupAttachment;complete.path=Path.Combine(args[0],"local.png");complete.plaintextVerified=true;

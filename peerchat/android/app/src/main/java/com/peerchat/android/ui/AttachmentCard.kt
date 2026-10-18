@@ -3,6 +3,7 @@ package com.peerchat.android.ui
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,6 +13,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.peerchat.android.application.AttachmentSnapshot
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +40,7 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
 }
 @Composable internal fun AttachmentCard(row:AttachmentSnapshot,dispatch:(UiAction)->Unit,preview:String?=null) {
     val context=LocalContext.current;val scope=rememberCoroutineScope()
+    var detailsExpanded by remember(row.id){mutableStateOf(false)}
     var expanded by remember(row.id){mutableStateOf(false)}
     var saveError by remember(row.id){mutableStateOf(false)}
     val bitmap by rememberAttachmentPicture(row.localPath,512)
@@ -46,21 +52,32 @@ internal fun attachmentPicture(path:String,edge:Int):android.graphics.Bitmap? {
     }
     Row(Modifier.fillMaxWidth(),horizontalArrangement=if(row.outgoing)Arrangement.End else Arrangement.Start){
         Surface(shape=MaterialTheme.shapes.large,color=if(row.outgoing)MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            modifier=Modifier.widthIn(max=330.dp).fillMaxWidth(.9f).testTag("attachment-${row.id}")){
+            modifier=Modifier.widthIn(max=330.dp)
+                .toggleable(value=detailsExpanded,role=Role.Button,onValueChange={detailsExpanded=it})
+                .semantics { contentDescription="Attachment details";stateDescription=if(detailsExpanded)"Expanded" else "Collapsed" }
+                .testTag("attachment-${row.id}")){
             Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
                 bitmap?.let{Image(it.asImageBitmap(),row.name,Modifier.fillMaxWidth().heightIn(max=200.dp).clickable{expanded=true},contentScale=ContentScale.Fit)}
                 Text(if(longMessage)"Long message" else row.name,style=MaterialTheme.typography.bodyMedium)
+                Text(attachmentCompactSummary(row),style=MaterialTheme.typography.labelSmall,
+                    color=if(row.state==5||row.state==6)MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier=Modifier.testTag("attachment-summary-${row.id}"))
+                if(attachmentShowsCompactProgress(row))LinearProgressIndicator(progress={if(row.size>0)(row.done.toFloat()/row.size.toFloat()).coerceIn(0f,1f)else 0f},modifier=Modifier.fillMaxWidth())
                 if(preview!=null){
                     if(longMessage&&needsCompactMessage(preview))CompactLongMessage(preview)
                     else BoundedTextViewer(preview,!longMessage||codeLike(preview),if(longMessage)"Long message" else row.name)
                 }
-                Text("${row.size} bytes · "+when(row.state){0->"Preparing";1->"Waiting for recipient";2->"File offered";3->"Transferring";4->"Transfer complete";5->"Cancelled";6->"Failed";7->"Recovering";else->"Suspended"},
-                    style=MaterialTheme.typography.labelSmall)
-                if(row.cachePhase.isNotEmpty())Text(row.cachePhase,style=MaterialTheme.typography.labelSmall)
-                else Text(if(row.outgoing)"Direct transfer · selected device only" else "Direct transfer · this device only",style=MaterialTheme.typography.labelSmall)
-                if(row.state==3&&row.size>0)LinearProgressIndicator(progress={row.done.toFloat()/row.size.toFloat()},modifier=Modifier.fillMaxWidth())
-                Text(row.statisticsText,style=MaterialTheme.typography.labelSmall)
-                if(row.error.isNotEmpty())Text(row.error,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
+                if(detailsExpanded){
+                    Text("Collapse details",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary,
+                        modifier=Modifier.testTag("attachment-details-toggle-${row.id}"))
+                    Text("Transfer state: ${attachmentCompactStatus(row)}",style=MaterialTheme.typography.labelSmall)
+                    attachmentTransferPhaseText(row)?.let{Text(it,style=MaterialTheme.typography.labelSmall)}
+                    if(row.cachePhase.isEmpty()&&attachmentHasCurrentTransferPhase(row))
+                        Text(if(row.outgoing)"Direct transfer · selected device only" else "Direct transfer · this device only",style=MaterialTheme.typography.labelSmall)
+                    Text(row.statisticsText,style=MaterialTheme.typography.labelSmall)
+                    if(row.error.isNotEmpty())Text(row.error,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
+                } else Text("Tap for details",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier=Modifier.testTag("attachment-details-toggle-${row.id}"))
                 Row{
                     if(textFile&&preview==null&&(row.complete||longMessage&&row.outgoing))TextButton({dispatch(UiAction.AttachmentPreview(row.id))}){Text("Read text")}
                     if(row.awaitingAcceptance)TextButton({dispatch(UiAction.AttachmentAction(row.id,true))},Modifier.testTag("accept-file")){Text("Accept")}

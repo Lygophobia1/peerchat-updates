@@ -1,6 +1,7 @@
 package com.peerchat.android.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyListState
@@ -22,6 +23,10 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.delay
@@ -190,9 +195,13 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
     }
 }
 @Composable private fun MessageBubble(m: MessageUi, sender: Boolean, dispatch: (UiAction) -> Unit) {
+    var expanded by rememberSaveable(m.id){mutableStateOf(false)}
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (m.outgoing) Arrangement.End else Arrangement.Start) {
         Surface(color = if (m.outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            shape = MaterialTheme.shapes.large, modifier = Modifier.widthIn(max = 330.dp).fillMaxWidth(0.9f)) {
+            shape = MaterialTheme.shapes.large, modifier = Modifier.widthIn(max = 330.dp)
+                .toggleable(value=expanded,role=Role.Button,onValueChange={expanded=it})
+                .semantics { contentDescription=if(expanded)"Collapse message details" else "Expand message details";stateDescription=if(expanded)"Expanded" else "Collapsed" }
+                .testTag("message-bubble-${m.id}")) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (sender && !m.outgoing) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Avatar(m.senderName, size = 28)
@@ -200,32 +209,29 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
                 }
                 if(needsCompactMessage(m.text))CompactLongMessage(m.text)
                 else SelectionContainer { Text(linkedText(m.text)) }
-                val showAggregateStatus=m.outgoing&&(m.deliveryTargets==null||
-                    m.status in setOf(MessageStatus.Saving,MessageStatus.Failed,MessageStatus.Preview,MessageStatus.Read))
-                Text("${m.time}" + if (showAggregateStatus) " · ${when (m.status) {
-                    MessageStatus.Read -> "Read ✓✓"; MessageStatus.Delivered -> "Delivered ✓"; MessageStatus.Failed -> "Failed";
-                    MessageStatus.Saving -> "Saving locally…";
-                    MessageStatus.Queued -> "Queued";
-                    MessageStatus.Stored -> "Stored · awaiting recipient";
-                    MessageStatus.Preview -> "Local preview · not sent"; else -> "Sent"
-                }}" else "", style = MaterialTheme.typography.labelSmall,
-                    color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                if(m.deliveryDetail.isNotEmpty())Text(m.deliveryDetail,style=MaterialTheme.typography.labelSmall)
-                if(m.outgoing)m.deliveryTargets?.let{DeliveryTargets(m.id,it)}
+                Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(2.dp)) {
+                    Text("${m.time}" + compactMessageDelivery(m), style = MaterialTheme.typography.labelSmall,
+                        color = if (m.status == MessageStatus.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(if(expanded)Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription=null,modifier=Modifier.size(18.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if(expanded){
+                    Text("Collapse details",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary,
+                        modifier=Modifier.testTag("message-details-toggle-${m.id}"))
+                    Text("Aggregate status: ${messageStatusDetail(m.status)}",style=MaterialTheme.typography.labelSmall)
+                    if(m.deliveryDetail.isNotEmpty())Text(m.deliveryDetail,style=MaterialTheme.typography.labelSmall)
+                    if(m.outgoing)m.deliveryTargets?.let{DeliveryTargets(it)}
+                }
                 if (m.status == MessageStatus.Failed||m.retryAvailable) TextButton({ dispatch(UiAction.RetryPreview(m.id)) }) { Text(if(m.retryAvailable)"Retry encrypted message" else "Retry locally") }
             }
         }
     }
 }
-@Composable private fun DeliveryTargets(messageId:String,delivery:DeliveryTargetsUi) {
-    var expanded by rememberSaveable(messageId){mutableStateOf(false)}
+@Composable private fun DeliveryTargets(delivery:DeliveryTargetsUi) {
     Text(delivery.summary,style=MaterialTheme.typography.labelSmall)
     if(delivery.selectionUnresolved)Text("Device selection unresolved",style=MaterialTheme.typography.labelSmall)
     if(delivery.targets.isNotEmpty()) {
-        TextButton({expanded=!expanded},Modifier.testTag("delivery-targets-$messageId")) {
-            Text(if(expanded)"Hide device details" else "Show device details")
-        }
-        if(expanded)SelectionContainer {
+        SelectionContainer {
             Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 delivery.targets.forEach{target->
                     Text((target.displayName.takeIf{it.isNotEmpty()}?.let{"$it · "}?:"")+"${target.status.name}\n${target.deviceId}",style=MaterialTheme.typography.bodySmall)

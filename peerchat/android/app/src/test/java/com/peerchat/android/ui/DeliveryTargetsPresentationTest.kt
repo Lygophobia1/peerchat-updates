@@ -77,16 +77,20 @@ class DeliveryTargetsInteractionTest {
                 DeliveryTargetUi("c".repeat(64),DeliveryTargetStatusUi.Pending))))
         val conversation=mutableStateOf(ConversationUi("account:2","Peer",ChatKind.Direct,false,"","",messages=listOf(message),hasOlder=false))
         compose.setContent{PeerChatTheme(true){ConversationScreen(conversation.value,PeerChatUiState(demo=false),{})}}
-        compose.onNodeWithText("Devices: 1 received · 1 pending · 0 unavailable").assertExists()
+        compose.onNodeWithText("00:00 · Partially received").assertExists()
+        compose.onNodeWithText("Devices: 1 received · 1 pending · 0 unavailable").assertDoesNotExist()
         compose.onNodeWithText("Stored · awaiting recipient",substring=true).assertDoesNotExist()
+        compose.onNodeWithTag("message-bubble-message").performClick()
+        compose.onNodeWithText("Devices: 1 received · 1 pending · 0 unavailable").assertExists()
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(status=MessageStatus.Delivered)))}
-        compose.onNodeWithText("Delivered ✓",substring=true).assertDoesNotExist()
+        compose.onNodeWithText("Aggregate status: Delivered ✓",substring=true).assertExists()
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(status=MessageStatus.Saving)))}
         compose.onNodeWithText("Saving locally…",substring=true).assertExists()
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(status=MessageStatus.Failed)))}
         compose.onNodeWithText("00:00 · Failed").assertExists()
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(deliveryTargets=null)))}
         compose.onNodeWithText("00:00 · Stored · awaiting recipient").assertExists()
+        compose.onNodeWithTag("message-bubble-message").performClick()
         compose.onNodeWithText("Devices: 1 received · 1 pending · 0 unavailable").assertDoesNotExist()
     }
     @Test fun expandsExactDeviceIdsAndUpdatesReceiptsWithoutHidingDetails() {
@@ -95,10 +99,13 @@ class DeliveryTargetsInteractionTest {
             deliveryTargets=DeliveryTargetsUi(true,listOf(DeliveryTargetUi(device,DeliveryTargetStatusUi.Pending))))
         val conversation=mutableStateOf(ConversationUi("account:2","Peer",ChatKind.Direct,false,"","",messages=listOf(message),hasOlder=false))
         compose.setContent{PeerChatTheme(true){ConversationScreen(conversation.value,PeerChatUiState(demo=false),{})}}
+        compose.onNodeWithText("00:00 · Pending · selection unresolved").assertExists()
+        compose.onNodeWithText("Devices: 0 received · 1 pending · 0 unavailable").assertDoesNotExist()
+        compose.onNodeWithText("Device selection unresolved").assertDoesNotExist()
+        compose.onNodeWithText("Pending\n$device").assertDoesNotExist()
+        compose.onNodeWithTag("message-bubble-message").performClick()
         compose.onNodeWithText("Devices: 0 received · 1 pending · 0 unavailable").assertExists()
         compose.onNodeWithText("Device selection unresolved").assertExists()
-        compose.onNodeWithText("Pending\n$device").assertDoesNotExist()
-        compose.onNodeWithText("Show device details").performClick()
         compose.onNodeWithText("Pending\n$device").assertExists()
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(
             deliveryTargets=DeliveryTargetsUi(false,listOf(DeliveryTargetUi(device,DeliveryTargetStatusUi.Received))))))}
@@ -108,7 +115,7 @@ class DeliveryTargetsInteractionTest {
         compose.runOnIdle{conversation.value=conversation.value.copy(messages=listOf(message.copy(
             deliveryTargets=DeliveryTargetsUi(false,listOf(DeliveryTargetUi(device,DeliveryTargetStatusUi.Received,"Renamed phone"))))))}
         compose.onNodeWithText("Renamed phone · Received\n$device").assertExists()
-        compose.onNodeWithText("Hide device details").performClick()
+        compose.onNodeWithTag("message-bubble-message").performClick()
         compose.onNodeWithText("Renamed phone · Received\n$device").assertDoesNotExist()
     }
 }

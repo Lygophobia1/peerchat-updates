@@ -4,9 +4,28 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media;
 
 namespace PeerChatDesktop {
+public sealed class MessageBubble : Border {
+    public MessageBubble(){AddHandler(Mouse.MouseUpEvent,new MouseButtonEventHandler(OnMessageClick),true);}
+    static DependencyObject ParentOf(DependencyObject value){
+        if(value is ContentElement){var content=(ContentElement)value;return ContentOperations.GetParent(content)??LogicalTreeHelper.GetParent(content);}
+        if(value is Visual||value is System.Windows.Media.Media3D.Visual3D)return VisualTreeHelper.GetParent(value);
+        return LogicalTreeHelper.GetParent(value);
+    }
+    void OnMessageClick(object sender,MouseButtonEventArgs args){
+        if(args.ChangedButton!=MouseButton.Left)return;
+        for(DependencyObject current=args.OriginalSource as DependencyObject;current!=null&&current!=this;current=ParentOf(current))
+            if(current is ButtonBase||current is TextBoxBase||current is PasswordBox||current is ScrollBar||current is ScrollViewer||current is Selector||current is Hyperlink||current is Image)return;
+        var message=DataContext as MessageModel;if(message==null)return;
+        message.IsExpanded=!message.IsExpanded;args.Handled=true;
+    }
+}
 public abstract class ObservableModel : INotifyPropertyChanged {
     public event PropertyChangedEventHandler PropertyChanged;
     protected void Changed(string name){if(PropertyChanged!=null)PropertyChanged(this,new PropertyChangedEventArgs(name));}
@@ -87,9 +106,13 @@ public class MessageModel : ObservableModel {
     public CoreAdapter.FileTransferData Attachment {get;private set;}
     public CoreAdapter.GroupAttachmentData GroupAttachment {get;private set;}
     public string GroupAttachmentRevision {get;private set;}
-    public void SetGroupAttachment(CoreAdapter.GroupAttachmentData value,string revision){GroupAttachment=value;GroupAttachmentRevision=revision;Changed("GroupAttachment");Changed("TextVisibility");Changed("Text");Changed("Preview");Changed("Stamp");}
+    bool expanded;
+    public bool IsExpanded {get{return expanded;}set{if(expanded==value)return;expanded=value;Changed("IsExpanded");Changed("DetailsLabel");Changed("ExpandedVisibility");}}
+    public string DetailsLabel {get{return IsExpanded?"Hide details  ▴":"Show details  ▾";}}
+    public Visibility ExpandedVisibility {get{return IsExpanded?Visibility.Visible:Visibility.Collapsed;}}
+    public void SetGroupAttachment(CoreAdapter.GroupAttachmentData value,string revision){GroupAttachment=value;GroupAttachmentRevision=revision;Changed("GroupAttachment");Changed("TextVisibility");Changed("Text");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     public Visibility TextVisibility {get{return Attachment==null&&GroupAttachment==null?Visibility.Visible:Visibility.Collapsed;}}
-    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");}
+    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     public MessageData Data;
     // Null means that this row has no authoritative recipient manifest (legacy
     // history and imported messages retain their original aggregate stamp).
@@ -116,6 +139,32 @@ public class MessageModel : ObservableModel {
         if(deliveryTargets.selectionUnresolved)summary+=" · recipient selection unresolved";
         return summary;
     }}
+    public string CompactStatus {get{
+        if(Attachment!=null)return ChatAttachmentProjection.CompactStatus(Attachment);
+        if(GroupAttachment!=null)return GroupAttachmentProjection.CompactStatus(GroupAttachment);
+        if(!Outgoing)return "";
+        if(IsGroupMessage&&!String.IsNullOrEmpty(Data.status)){
+            string groupStatus=Data.status.Replace('_',' ').Replace('-',' ');
+            if(groupStatus.IndexOf("fail",StringComparison.OrdinalIgnoreCase)>=0||groupStatus.IndexOf("unknown",StringComparison.OrdinalIgnoreCase)>=0)return "Delivery status unknown";
+            if(groupStatus.IndexOf("server accepted",StringComparison.OrdinalIgnoreCase)>=0||groupStatus.IndexOf("duplicate server request",StringComparison.OrdinalIgnoreCase)>=0||groupStatus.IndexOf("await",StringComparison.OrdinalIgnoreCase)>=0)return "Awaiting delivery";
+            return "Sending";
+        }
+        if(Data.delivery==0)return "Queued";
+        if(deliveryTargets!=null){
+            var targets=ValidTargets(deliveryTargets).ToArray();
+            if(targets.Length==0)return "Recipient status unavailable";
+            if(targets.Any(target=>target.status==0))return Data.delivery==3?"Stored · awaiting devices":"Awaiting devices";
+            if(targets.Any(target=>target.status==2))return "Some devices unavailable";
+            if(deliveryTargets.selectionUnresolved)return "Recipient status incomplete";
+            return "Received";
+        }
+        if(Data.delivery==2)return "Delivered";
+        if(Data.delivery==3)return "Stored · awaiting recipient";
+        if(Data.delivery==1)return "Awaiting delivery";
+        if(!String.IsNullOrEmpty(Data.status))return Data.status.IndexOf("fail",StringComparison.OrdinalIgnoreCase)>=0||Data.status.IndexOf("unknown",StringComparison.OrdinalIgnoreCase)>=0?"Delivery status unknown":"Sending";
+        return "Queued";
+    }}
+    public string DetailedStatus {get{return !String.IsNullOrEmpty(Data.status)?Data.status:Stamp;}}
     static IEnumerable<DeliveryTargetData> ValidTargets(DeliveryTargetsData data){
         var seen=new HashSet<string>(StringComparer.Ordinal);
         return (data.targets??new DeliveryTargetData[0]).Where(target=>target!=null&&target.device!=null&&target.device.Length==64&&
@@ -135,14 +184,14 @@ public class MessageModel : ObservableModel {
     public DateTime LocalTime {get{try{return new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddMilliseconds(Data.time).ToLocalTime();}catch{return DateTime.MinValue;}}}
     public string ShortTime {get{return Data.status=="attachment_reference"?"Time unavailable":LocalTime.Date==DateTime.Today?LocalTime.ToString("h:mm tt"):LocalTime.ToString("MMM d");}}
     public string Stamp {get{return GroupAttachment!=null?LocalTime.ToString("MMM d · h:mm tt")+" · Group attachment":Data.status=="attachment_reference"?"Authenticated reference · original time/order unavailable":Attachment!=null?(ChatAttachmentProjection.IsLongMessage(Attachment)?LocalTime.ToString("MMM d · h:mm tt"):"File attachment"):LocalTime.ToString("MMM d · h:mm tt")+(Outgoing&&deliveryTargets==null?(!String.IsNullOrEmpty(Data.status)?"  "+Data.status:Data.delivery==2?"  ✓✓ Delivered":Data.delivery==3?"  ◷ Stored · awaiting recipient":Data.delivery==1?"  ◷ Sent · delivery not fully confirmed":"  ◷ Queued"):"");}}
-    public void Delivered(){Data.delivery=2;Changed("Stamp");}
+    public void Delivered(){Data.delivery=2;Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     public void ProjectNativeDelivery(int value,DeliveryTargetsData targets=null){
         Func<int,int> rank=state=>state==2?3:state==3?2:state==1?1:0;
-        if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");}
-        if(targets!=null){deliveryTargets=targets;Data.deliveryTargets=targets;Changed("DeliveryVisibility");Changed("DeliverySummary");Changed("DeliveryRows");Changed("Stamp");}
+        if(value>=0&&value<=3&&rank(value)>rank(Data.delivery)){Data.delivery=value;Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
+        if(targets!=null){deliveryTargets=targets;Data.deliveryTargets=targets;Changed("DeliveryVisibility");Changed("DeliverySummary");Changed("DeliveryRows");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     }
     public void InitializeNativeDelivery(){if(Data!=null&&Data.deliveryTargets!=null)ProjectNativeDelivery(Data.delivery,Data.deliveryTargets);}
-    public void GroupStatus(string status){Data.status=status;Changed("Stamp");}
+    public void GroupStatus(string status){Data.status=status;Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
 }
 // Dispatcher-confined presentation state. Core events, never the GUI, determine
 // online/trust/delivery state. Switching views retains drafts and history.

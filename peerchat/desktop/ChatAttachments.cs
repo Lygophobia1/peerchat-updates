@@ -56,6 +56,33 @@ public static class ChatAttachmentProjection {
         if(row.state==3&&row.size>0)label+=" · "+Math.Min(100,Math.Max(0,100.0*row.done/row.size)).ToString("0")+"%";
         return label;
     }
+    public static string CompactStatus(CoreAdapter.FileTransferData row){
+        if(row==null)return "";
+        if(row.state==5||row.dmState=="canceled")return "Canceled";
+        if(row.state==6||row.dmState=="failed")return "Failed";
+        if(!row.sending&&row.saveState=="failed")return "Retry Save";
+        if(!row.sending&&(row.saveState=="pending"||row.saveState=="copying"))return "Saving";
+        if(row.dmState=="paused"||row.state==8)return "Paused";
+        if(row.state==3){
+            string action=row.sending?"Sending":"Receiving";
+            return row.size>0?action+" · "+Math.Min(100,Math.Max(0,100.0*row.done/row.size)).ToString("0")+"%":action;
+        }
+        if(row.dmCache&&row.uploadComplete)return row.noticesStored?"Available":"Uploaded";
+        if(row.state==0||row.state==7)return "Preparing";
+        if(row.state==1)return "Waiting";
+        if(row.state==2&&!row.sending)return "Ready to download";
+        if(row.state==4)return row.saveState=="complete"?"Saved":row.sending?"Uploaded":"Downloaded";
+        if(row.state==9)return "Archive reference";
+        if(row.dmState=="verifying")return "Verifying";
+        if(row.dmState=="available")return "Available";
+        return "Unavailable";
+    }
+    public static string CompactSize(long bytes){
+        if(bytes<0)return "Size unavailable";
+        string[] units={"bytes","KB","MB","GB","TB"};double value=bytes;int unit=0;
+        while(value>=1024&&unit<units.Length-1){value/=1024;unit++;}
+        return unit==0?bytes.ToString("N0")+" bytes":value.ToString(value>=100?"0":value>=10?"0.#":"0.##",System.Globalization.CultureInfo.InvariantCulture)+" "+units[unit];
+    }
     public static string Statistics(CoreAdapter.FileTransferData row){
         var culture=System.Globalization.CultureInfo.InvariantCulture;
         double percent=row.size>0?Math.Min(100,100.0*row.done/row.size):row.state==4?100:0;
@@ -164,41 +191,48 @@ public sealed class AttachmentActionEventArgs:RoutedEventArgs {
 }
 public sealed class AttachmentCard:StackPanel {
     public static readonly RoutedEvent ActionEvent=EventManager.RegisterRoutedEvent("Action",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(AttachmentCard));
-    public static readonly DependencyProperty TransferProperty=DependencyProperty.Register("Transfer",typeof(CoreAdapter.FileTransferData),typeof(AttachmentCard),new PropertyMetadata(null,(sender,args)=>((AttachmentCard)sender).Render()));
+    public static readonly DependencyProperty TransferProperty=DependencyProperty.Register("Transfer",typeof(CoreAdapter.FileTransferData),typeof(AttachmentCard),new PropertyMetadata(null,(sender,args)=>((AttachmentCard)sender).TransferChanged()));
+    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(AttachmentCard),new PropertyMetadata(false,(sender,args)=>((AttachmentCard)sender).Render()));
     public CoreAdapter.FileTransferData Transfer{get{return (CoreAdapter.FileTransferData)GetValue(TransferProperty);}set{SetValue(TransferProperty,value);}}
+    public bool DetailsExpanded{get{return (bool)GetValue(DetailsExpandedProperty);}set{SetValue(DetailsExpandedProperty,value);}}
     string previewPath="",previewId="";AttachmentPreview preview;bool autoPreviewAttempted;
     static readonly Queue<WeakReference> residentCards=new Queue<WeakReference>();
-    public AttachmentCard(){MaxWidth=360;Loaded+=(s,e)=>Render();}
+    public AttachmentCard(){MaxWidth=360;Loaded+=(s,e)=>{Render();TryAutomaticPreview();};}
     Button ActionButton(string label,Action action){var button=new Button{Content=label,Margin=new Thickness(0,4,6,0),Padding=new Thickness(8,4,8,4)};button.Click+=(s,e)=>action();return button;}
     void Signal(CoreAdapter.FileTransferData row,string action){RaiseEvent(new AttachmentActionEventArgs(ActionEvent,row,action));}
+    void TransferChanged(){Render();TryAutomaticPreview();}
+    void TryAutomaticPreview(){var row=Transfer;if(IsLoaded&&IsVisible&&row!=null&&row.state==4&&!autoPreviewAttempted){autoPreviewAttempted=true;LoadPreview(row);}}
     void Render(){
         var row=Transfer;Visibility=row==null?Visibility.Collapsed:Visibility.Visible;Children.Clear();if(row==null)return;
         if(previewId!=row.id||previewPath!=row.path){preview=null;previewId=row.id;previewPath=row.path;autoPreviewAttempted=false;}
         bool longMessage=ChatAttachmentProjection.IsLongMessage(row);
         if(!longMessage)Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
         else if(preview==null)Children.Add(new TextBlock{Text="Long message",FontWeight=FontWeights.SemiBold});
-        Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
-        if(!row.dmCache&&!row.isArchive)Children.Add(new TextBlock{Text=row.sending?"Direct transfer · selected device only":"Direct transfer · this device only",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
-        Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
-        if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.dmCache&&row.error=="cache_dm_recipient_upgrade_required"?"Update PeerChat on every recipient device before retrying this encrypted attachment. No recipient was silently omitted.":row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
-        if(!String.IsNullOrEmpty(row.saveError))Children.Add(new TextBlock{Text="Save failed: "+row.saveError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
-        if(!row.sending&&(row.saveState=="pending"||row.saveState=="copying"))Children.Add(new TextBlock{Text=row.saveState=="pending"?"Verifying retained attachment…":"Saving verified attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
-        if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(row.done,row.size),Margin=new Thickness(0,6,0,2)});
-        var actions=new WrapPanel();Children.Add(actions);actions.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
+        Children.Add(new TextBlock{Text=ChatAttachmentProjection.CompactSize(row.size)+" · "+ChatAttachmentProjection.CompactStatus(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
+        if(row.state==3&&row.size>0)Children.Add(new ProgressBar{Height=4,Maximum=row.size,Value=Math.Min(Math.Max(0,row.done),row.size),Margin=new Thickness(0,4,0,2)});
+        if(preview!=null&&preview.Error.Length==0){
+            if(preview.Image!=null){var image=new Image{Source=preview.Image,MaxWidth=320,MaxHeight=240,HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,0),Cursor=Cursors.Hand,ToolTip="Open read-only image viewer"};image.MouseLeftButtonUp+=(s,e)=>{e.Handled=true;ShowPreview(row,preview);};Children.Add(image);}
+            else{Children.Add(new BoundedTextView(preview.Text,!longMessage,longMessage?"Long message":"Text preview",null,()=>OpenFull(row)));if(preview.Truncated)Children.Add(new TextBlock{Text="Preview limited to 32 KiB / 200 lines — Open full to read more",Foreground=Brushes.LightGray});}
+        }
+        var actions=new WrapPanel{Margin=new Thickness(0,2,0,0)};Children.Add(actions);
         if(row.sending&&row.state!=4&&!row.dmCache)actions.Children.Add(ActionButton("Transfer settings…",()=>Signal(row,"settings")));
         if(row.state==2&&!row.sending)actions.Children.Add(ActionButton("Download…",()=>Signal(row,"accept")));
         if(row.state<4||row.state==7||row.state==8)actions.Children.Add(ActionButton("Cancel",()=>Signal(row,"cancel")));
-        if(row.state==9)Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
-        if(row.state!=4)return;
-        if(!row.sending){
+        if((row.protectedSource||!String.IsNullOrEmpty(row.path))&&(preview==null||preview.Error.Length>0))actions.Children.Add(ActionButton(preview==null?"Preview":"Retry preview",()=>{preview=null;LoadPreview(row);}));
+        if(row.state==4&&!row.sending){
             if(row.saveState=="complete"&&!String.IsNullOrWhiteSpace(row.savePath)&&File.Exists(row.savePath)){actions.Children.Add(ActionButton("Open File",()=>Signal(row,"open-saved")));actions.Children.Add(ActionButton("Open Folder",()=>Signal(row,"folder-saved")));}
-            else if(row.state==4&&row.saveState!="copying"&&row.saveState!="pending")actions.Children.Add(ActionButton("Retry Save…",()=>Signal(row,"retry-save")));
+            else if(row.saveState!="copying"&&row.saveState!="pending")actions.Children.Add(ActionButton("Retry Save…",()=>Signal(row,"retry-save")));
         }
-        if(!row.protectedSource&&String.IsNullOrEmpty(row.path))return;
-        if(preview==null){actions.Children.Add(ActionButton("Preview",()=>LoadPreview(row)));if(IsLoaded&&IsVisible&&!autoPreviewAttempted){autoPreviewAttempted=true;LoadPreview(row);}return;}
-        if(preview.Image!=null){var image=new Image{Source=preview.Image,MaxWidth=320,MaxHeight=240,HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,0),Cursor=Cursors.Hand,ToolTip="Open read-only image viewer"};image.MouseLeftButtonUp+=(s,e)=>ShowPreview(row,preview);Children.Add(image);}
-        else if(preview.Error.Length==0){Children.Add(new BoundedTextView(preview.Text,!longMessage,longMessage?"Long message":"Text preview",null,()=>OpenFull(row)));if(preview.Truncated)Children.Add(new TextBlock{Text="Preview limited to 32 KiB / 200 lines — Open full to read more",Foreground=Brushes.LightGray});}
-        else{Children.Add(new TextBlock{Text=preview.Error,Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});actions.Children.Add(ActionButton("Retry preview",()=>{preview=null;LoadPreview(row);}));}
+        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};Children.Add(details);
+        details.Children.Add(new TextBlock{Text=row.size.ToString("N0")+" bytes · "+ChatAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        details.Children.Add(new TextBlock{Text=row.dmCache?"Cached transfer · encrypted attachment":row.isArchive?"Archive transfer · source availability is not proven":row.sending?"Direct transfer · selected device only":"Direct transfer · this device only",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        details.Children.Add(new TextBlock{Text=ChatAttachmentProjection.Statistics(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
+        details.Children.Add(ActionButton("Open Diagnostics",()=>Signal(row,"diagnostics")));
+        if(!String.IsNullOrEmpty(row.error))details.Children.Add(new TextBlock{Text=row.dmCache&&row.error=="cache_dm_recipient_upgrade_required"?"Update PeerChat on every recipient device before retrying this encrypted attachment. No recipient was silently omitted.":row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!String.IsNullOrEmpty(row.saveError))details.Children.Add(new TextBlock{Text="Save failed: "+row.saveError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!row.sending&&(row.saveState=="pending"||row.saveState=="copying"))details.Children.Add(new TextBlock{Text=row.saveState=="pending"?"Verifying retained attachment…":"Saving verified attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        if(row.state==9)details.Children.Add(new TextBlock{Text="Restore through an authorized source in History / Archive Settings. Source availability is not yet proven.",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        if(preview!=null&&!String.IsNullOrEmpty(preview.Error))details.Children.Add(new TextBlock{Text=preview.Error,Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
     }
     bool loading;
     public void ProtectedPreview(string id,string text,string error){loading=false;if(Transfer==null||Transfer.id!=id)return;while(residentCards.Count>=24){var old=residentCards.Dequeue().Target as AttachmentCard;if(old!=null&&old!=this){old.preview=null;old.autoPreviewAttempted=true;old.Render();}}residentCards.Enqueue(new WeakReference(this));preview=String.IsNullOrEmpty(error)?(ChatAttachmentProjection.IsLongMessage(Transfer)?new AttachmentPreview{Text=text}:SafeAttachmentPreview.FromText(text,Transfer.size)):new AttachmentPreview{Error=error};previewPath=Transfer.path;Render();}

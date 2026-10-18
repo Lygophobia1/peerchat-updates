@@ -139,6 +139,22 @@ public static class GroupAttachmentProjection {
         if(!row.sending&&row.state=="complete")return "Downloaded — plaintext verification pending";
         return State(row.state,row.sending);
     }
+    public static string CompactStatus(CoreAdapter.GroupAttachmentData row){
+        if(row==null)return "";
+        if(row.state=="canceled"||row.state=="cancelled")return "Canceled";
+        if(row.state=="failed")return "Failed";
+        if(!row.sending&&(row.exportState=="failed"||!String.IsNullOrEmpty(row.exportError)))return "Retry Save";
+        if(!row.sending&&(row.exportState=="pending"||row.exportState=="copying"||row.outputPending))return "Saving";
+        if(row.state=="uploading"||row.state=="downloading"){
+            long total=row.transferSize>0?row.transferSize:row.size;
+            return total>0?(row.state=="uploading"?"Uploading":"Downloading")+" · "+Math.Min(100,Math.Max(0,100.0*row.done/total)).ToString("0")+"%":row.state=="uploading"?"Uploading":"Downloading";
+        }
+        if(row.state=="complete")return row.sending?"Uploaded":row.plaintextVerified?"Downloaded":"Verifying";
+        if(row.state=="available")return row.sending?"Available":"Ready to download";
+        if(row.state=="paused")return "Paused";
+        if(row.state=="expired")return "Expired";
+        return "Preparing";
+    }
     public static bool Apply(GroupModel group,CoreAdapter.GroupAttachmentData row){
         if(row==null||String.IsNullOrEmpty(row.id)||String.IsNullOrEmpty(LogicalId(row))||row.group!=group.Id||row.size<0||row.transferSize<0||row.done<0)return false;
         var message=group.Messages.FirstOrDefault(item=>(item.GroupAttachment!=null&&LogicalId(item.GroupAttachment)==LogicalId(row))||(item.Data.id==LogicalId(row)&&item.Data.status=="attachment_reference"));
@@ -157,20 +173,24 @@ public sealed class GroupAttachmentActionEventArgs:RoutedEventArgs {
 public sealed class GroupAttachmentCard:StackPanel {
     public static readonly RoutedEvent ActionEvent=EventManager.RegisterRoutedEvent("Action",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(GroupAttachmentCard));
     public static readonly DependencyProperty AttachmentProperty=DependencyProperty.Register("Attachment",typeof(CoreAdapter.GroupAttachmentData),typeof(GroupAttachmentCard),new PropertyMetadata(null,(sender,args)=>((GroupAttachmentCard)sender).Render()));
+    public static readonly DependencyProperty DetailsExpandedProperty=DependencyProperty.Register("DetailsExpanded",typeof(bool),typeof(GroupAttachmentCard),new PropertyMetadata(false,(sender,args)=>((GroupAttachmentCard)sender).Render()));
     public CoreAdapter.GroupAttachmentData Attachment{get{return (CoreAdapter.GroupAttachmentData)GetValue(AttachmentProperty);}set{SetValue(AttachmentProperty,value);}}
+    public bool DetailsExpanded{get{return (bool)GetValue(DetailsExpandedProperty);}set{SetValue(DetailsExpandedProperty,value);}}
     public GroupAttachmentCard(){MaxWidth=360;Visibility=Visibility.Collapsed;}
     void AddAction(WrapPanel actions,string title,string action){var button=new Button{Content=title,Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,4,6,0)};button.Click+=(s,e)=>RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,Attachment,action));actions.Children.Add(button);}
     void Render(){
         Children.Clear();var row=Attachment;Visibility=row==null?Visibility.Collapsed:Visibility.Visible;if(row==null)return;
         Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
-        Children.Add(new TextBlock{Text=row.size.ToString("N0")+" file bytes · "+GroupAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        Children.Add(new TextBlock{Text=ChatAttachmentProjection.CompactSize(row.size)+" · "+GroupAttachmentProjection.CompactStatus(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
         if(row.state=="uploading"||row.state=="downloading"){
-            Children.Add(new TextBlock{Text=Math.Max(0,row.done).ToString("N0")+" confirmed encrypted bytes",FontSize=12,Foreground=Brushes.LightGray});
             if(row.transferSize>0)Children.Add(new ProgressBar{Height=4,Maximum=row.transferSize,Value=Math.Min(row.done,row.transferSize),Margin=new Thickness(0,6,0,2)});
         }
-        if(!String.IsNullOrEmpty(row.error))Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
-        if(!String.IsNullOrEmpty(row.exportError))Children.Add(new TextBlock{Text="Save failed: "+row.exportError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
-        if(row.outputPending||row.exportState=="copying")Children.Add(new TextBlock{Text=row.exportState=="copying"?"Saving verified attachment…":"Verifying local attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        var details=new StackPanel{Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed,Margin=new Thickness(0,5,0,0)};Children.Add(details);
+        details.Children.Add(new TextBlock{Text=row.size.ToString("N0")+" file bytes · "+GroupAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        if(row.state=="uploading"||row.state=="downloading")details.Children.Add(new TextBlock{Text=Math.Max(0,row.done).ToString("N0")+" confirmed encrypted bytes",FontSize=12,Foreground=Brushes.LightGray});
+        if(!String.IsNullOrEmpty(row.error))details.Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(!String.IsNullOrEmpty(row.exportError))details.Children.Add(new TextBlock{Text="Save failed: "+row.exportError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+        if(row.outputPending||row.exportState=="copying")details.Children.Add(new TextBlock{Text=row.exportState=="copying"?"Saving verified attachment…":"Verifying local attachment…",Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
         if(row.recipients!=null&&row.recipients.Length>0){
             var list=new StackPanel();foreach(var recipient in row.recipients){
                 string label=String.IsNullOrEmpty(recipient.name)?"Account "+recipient.account:recipient.name;
@@ -178,7 +198,7 @@ public sealed class GroupAttachmentCard:StackPanel {
                 if(!String.IsNullOrEmpty(recipient.error))label+=" · "+recipient.error;
                 list.Children.Add(new TextBlock{Text=label,FontSize=12,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,2,0,2)});
             }
-            Children.Add(new Expander{Header="Recipient status ("+row.recipients.Length+")",Content=new ScrollViewer{Content=list,MaxHeight=160,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},Margin=new Thickness(0,6,0,0)});
+            details.Children.Add(new Expander{Header="Recipient status ("+row.recipients.Length+")",Content=new ScrollViewer{Content=list,MaxHeight=160,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},Margin=new Thickness(0,6,0,0)});
         }
         var actions=new WrapPanel();Children.Add(actions);
         if(!row.sending&&row.state=="available"&&!row.plaintextVerified)AddAction(actions,"Download…","accept");
