@@ -341,6 +341,48 @@ internal class MailboxExecution(private val native:MailboxNative=JniMailboxNativ
 
 private class MailboxItemRefused(val state:String):Exception()
 
+/** Bounds transport retries independently of event hints and the idle poll. */
+internal class MailboxRetryCadence(private val clock:()->Long={System.nanoTime()/1_000_000}) {
+    private var transportFailures=0
+    var notBefore=0L
+        private set
+
+    fun reset(){transportFailures=0;notBefore=0L}
+
+    fun failed(failure:Exception){
+        val now=clock()
+        if(retryableTransport(failure)){
+            transportFailures=(transportFailures+1).coerceAtMost(6)
+            notBefore=now+minOf(60_000L,1_000L shl transportFailures)
+        }else{
+            // A rejected binding or invalid native result needs a changed scope
+            // or explicit action; authenticated hints must not spin on denial.
+            transportFailures=0
+            notBefore=now+900_000L
+        }
+    }
+
+    fun ready(now:Long,mailboxAt:Long)=now>=mailboxAt&&now>=notBefore
+
+    fun scheduledAt(currentAt:Long,now:Long,continuation:Boolean,connected:Boolean,outgoingRetryAt:Long):Long {
+        val idle=now+if(continuation)1_000L else if(connected)900_000L else 120_000L
+        return minOf(currentAt,idle,if(outgoingRetryAt>0)outgoingRetryAt else Long.MAX_VALUE,
+            if(notBefore>0)notBefore else Long.MAX_VALUE)
+    }
+
+    private fun retryableTransport(failure:Exception):Boolean {
+        if(failure !is java.io.IOException)return false
+        var reason:Throwable?=failure
+        repeat(8){
+            if(reason is javax.net.ssl.SSLHandshakeException||reason is javax.net.ssl.SSLPeerUnverifiedException||
+                reason is java.security.cert.CertificateException)return false
+            reason=reason?.cause
+            if(reason==null)return true
+        }
+        return true
+    }
+}
+
 internal fun safeMailboxState(state:String):String=if(state in setOf("accepted","ready","stored","acknowledged",
     "not_authorized","invalid_timestamp","key_conflict_or_revoked","invalid_generation","unknown_key",
     "revoked","recipient_unavailable","recipient_disabled","quota_exceeded",

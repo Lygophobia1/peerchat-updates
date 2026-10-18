@@ -269,6 +269,13 @@ class MailboxIsolationTest {
         assertTrue(execution.diagnostic.contains("outgoing_retry=1"))
         assertTrue(execution.diagnostic.contains("retry_reason=rejected_or_storage_unavailable"))
         assertEquals(0,n.stored)
+        // Item-level refusal is handled inside the service; it must not impose
+        // a transport cooldown on its existing durable retry schedule.
+        val now=System.nanoTime()/1_000_000
+        val retry=MailboxRetryCadence{now}
+        val scheduled=retry.scheduledAt(Long.MAX_VALUE,now,execution.needsContinuation,true,execution.nextRetryAt)
+        assertEquals(execution.nextRetryAt,scheduled)
+        assertTrue(retry.ready(scheduled,scheduled))
     }
     @Test fun lostServerAckReopensRegistrationAndDrainsDuplicateWithoutAnotherImport(){
         val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
@@ -298,21 +305,58 @@ class MailboxIsolationTest {
     @Test fun transientFetchDisconnectRetriesWithoutAcknowledgingOrReplacingRegistration(){
         val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
         val s=Server().apply{withReceipt=false}
-        val execution=MailboxExecution(n);var disconnect=true
+        val execution=MailboxExecution(n);var disconnect=true;var now=1_000L
+        val retry=MailboxRetryCadence{now};val scope=ScopedBackendWork(Any()){true}
         val transport={op:String,body:JSONObject->
             if(op=="mailbox_fetch"&&disconnect){disconnect=false;throw java.io.IOException("isolated fetch interrupted")}
             s.request(op,body)
         }
         val notifications=mutableListOf<Boolean>()
-        assertThrows(java.io.IOException::class.java){execution.service(transport,1,true){notifications.add(it)}}
+        val failure=assertThrows(java.io.IOException::class.java){execution.serviceScoped(scope,transport,1,true,
+            committed={_,_->fail("No import before fetch recovery")}){notifications.add(it)}}
+        retry.failed(failure)
+        val scheduled=retry.scheduledAt(Long.MAX_VALUE,now,execution.needsContinuation,true,execution.nextRetryAt)
+        assertTrue("Transport retry cannot wait for the 15-minute connected idle poll",scheduled<=now+2_000L)
         assertTrue(notifications.isEmpty());assertEquals(0,n.receives)
         assertEquals(listOf("mailbox_register"),s.operations)
         assertEquals(2,n.registrationReads)
-        execution.service(transport,1,true){notifications.add(it)}
+        now=scheduled;assertFalse(retry.ready(now,scheduled))
+        now=retry.notBefore;assertTrue(retry.ready(now,scheduled)) // No new event hint.
+        var committed=0
+        execution.serviceScoped(scope,transport,1,true,committed={_,_->committed++}){notifications.add(it)}
+        retry.reset()
+        assertEquals(1,committed)
         assertEquals(listOf(true),notifications)
         assertEquals(2,n.registrationReads)
         assertArrayEquals(byteArrayOf(7),n.binding)
         assertTrue(execution.inboundDiagnostic.contains("imported=1 acknowledged=1"))
+        assertTrue(s.operations.contains("mailbox_ack"))
+        assertTrue(retry.ready(now,0))
+    }
+    @Test fun transportLossAfterDurableImportRetriesTheSameReceiptWithoutDuplicatePublication(){
+        val n=Native().apply{binding=byteArrayOf(7);uploads=false;receiveResult=received(1)}
+        val s=Server().apply{withReceipt=false}
+        val execution=MailboxExecution(n);val scope=ScopedBackendWork(Any()){true}
+        var now=1_000L;val retry=MailboxRetryCadence{now};var loseAck=true;var committed=0
+        val acknowledged=mutableListOf<Boolean>()
+        val transport={op:String,body:JSONObject->
+            if(op=="mailbox_ack"&&loseAck){loseAck=false;throw java.io.IOException("isolated ACK response lost")}
+            s.request(op,body)
+        }
+        val failure=assertThrows(java.io.IOException::class.java){execution.serviceScoped(scope,transport,1,true,
+            committed={_,_->committed++}){acknowledged.add(it)}}
+        retry.failed(failure)
+        assertEquals(1,committed);assertTrue(acknowledged.isEmpty())
+        assertTrue(execution.inboundDiagnostic.contains("durable_import_receipt_ready"))
+        val scheduled=retry.scheduledAt(Long.MAX_VALUE,now,execution.needsContinuation,true,execution.nextRetryAt)
+        assertTrue(scheduled<=now+2_000L)
+        now=retry.notBefore;assertTrue(retry.ready(now,scheduled))
+        n.receiveResult=received(0)
+        execution.serviceScoped(scope,transport,1,true,committed={_,_->committed++}){acknowledged.add(it)}
+        retry.reset()
+        assertEquals(1,committed);assertEquals(listOf(false),acknowledged)
+        assertEquals(2,n.registrationReads);assertArrayEquals(byteArrayOf(7),n.binding)
+        assertTrue(s.operations.contains("mailbox_ack"))
     }
     private fun received(inserted:Long)=NativeRecordWriter(3).also{
         it.number(inserted);it.blob(byteArrayOf(8));it.text("peer");it.text("message")

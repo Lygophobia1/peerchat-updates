@@ -114,6 +114,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastNativeReceiveAttempt=0L
     private val mailboxPublication=MailboxPublicationGate({publishMessageProjection()})
     private var mailboxAt=0L
+    private val mailboxRetry=MailboxRetryCadence()
     private var mailboxExecution=MailboxExecution()
     private var mailboxEnrollmentScope:ScopedBackendWork.Identity?=null
     private var mailboxEnrollmentEndpoint:ServerEndpoint?=null
@@ -360,7 +361,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         }
         mailboxPreferences.update{it.copy(mailboxStorageAllowed=allowed)}
         OpaquePushWake.refreshPeriodic(context)
-        mailboxExecution=MailboxExecution();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
+        mailboxExecution=MailboxExecution();mailboxRetry.reset();mailboxAt=0L;mutable.value=mutable.value.copy(mailboxStorageAllowed=allowed)
     }}
     private fun configureMailboxScope(owner:ServerAccounts,native:Long){
         val session=checkNotNull(owner.session)
@@ -370,7 +371,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // Replace rather than mutate an executor borrowed by an old session.
             // Native invalidation remains authoritative; the existing key must
             // be accepted again through the authenticated registration path.
-            mailboxExecution=MailboxExecution();mailboxAt=0L
+            mailboxExecution=MailboxExecution();mailboxRetry.reset();mailboxAt=0L
             mailboxEnrollmentScope=ScopedBackendWork.Identity(checkNotNull(profile),owner,session,session.accountId,generation)
             mailboxEnrollmentEndpoint=owner.endpoint
         }
@@ -405,7 +406,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             error(mailboxRecoveryFailure(reason))
         }
         mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError=null)
-        if(accept){mailboxExecution=MailboxExecution();mailboxAt=0L}
+        if(accept){mailboxExecution=MailboxExecution();mailboxRetry.reset();mailboxAt=0L}
     }}
     private fun projectMailboxRecovery(native:Long){
         if(!mailboxAllowed()||!mutable.value.authenticated||!mutable.value.serverPresenceLive){mutable.value=mutable.value.copy(mailboxReenrollment=null);return}
@@ -494,6 +495,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     @Synchronized internal fun setInUse(value:Boolean,deadlineNanos:Long=Long.MAX_VALUE,allowPeerWork:Boolean=deadlineNanos==Long.MAX_VALUE,allowArchiveWork:Boolean=allowPeerWork,retainConnectionsUntilNanos:Long=0L) {
         if(stopped)return
         val revision=++lifetimeRevision
+        val resumed=value&&!inUse
         requestedRetentionUntil=retainConnectionsUntilNanos
         inUse=value
         operationDeadline=deadlineNanos
@@ -509,6 +511,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         executor.execute {synchronized(gate){if(revision==lifetimeRevision){
             executions.values.forEach{it.setActiveWork(value)}
             if(value){
+                if(resumed)mailboxRetry.reset()
                 mailboxAt=0L;refreshAt=0L;groupRefreshAt=0L;eligibilityAt=0L;pushAt=0L
                 archiveMetadataAt=0L
             }
@@ -1130,7 +1133,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         eligibilityAt=0L;pushAt=0L;nativeDiagnosticAt=0L;nativeDiagnosticSampleAt=0L
         nativeDiagnostic="native_registration_stage=waiting_for_idle_diagnostic_sample"
         events?.close();events=null;eventWasConnected=false;eventRetryAt=0L;eventRetryDelay=1000L
-        mailboxExecution=MailboxExecution();mailboxPublication.reset();eligibilitySnapshots=EligibilitySnapshotExecution();eligibilityOwner=null;mailboxAt=0L
+        mailboxExecution=MailboxExecution();mailboxRetry.reset();mailboxPublication.reset();eligibilitySnapshots=EligibilitySnapshotExecution();eligibilityOwner=null;mailboxAt=0L
         val writer=NativeRecordWriter(1);writer.number(0)
         profile?.let {check(ReliableBridge.friends(it.handle,0,generation.coerceAtLeast(1),writer.bytes())==0)}
         executions.values.forEach {it.close()};executions.clear()
@@ -1487,7 +1490,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
     // Called under gate; the existing owner invokes the returned bounded script
     // outside it. Reset replaces the script instance instead of racing its state.
     private fun borrowMailboxRequest():(()->Unit)? {
-        if(!mutable.value.authenticated||System.nanoTime()/1_000_000<mailboxAt)return null
+        val now=System.nanoTime()/1_000_000
+        if(!mutable.value.authenticated||!mailboxRetry.ready(now,mailboxAt))return null
         val owner=checkNotNull(accounts);val native=checkNotNull(profile).handle;val allowed=mailboxAllowed()
         configureMailboxEnrollment(owner,native)
         val execution=mailboxExecution
@@ -1514,6 +1518,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     }
                 }}
                 scope.local{
+                    mailboxRetry.reset()
                     mutable.value=mutable.value.copy(mailboxRecoveryError=null)
                     publishMailboxChanges(execution)
                     mailboxPublication.servicePublished()
@@ -1526,6 +1531,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     }
                     if(expiredServerSession(failure))handleTickFailure(failure)
                     else {
+                        mailboxRetry.failed(failure)
                         if(execution.diagnostic.contains("stage=mailbox_register"))mutable.value=mutable.value.copy(
                             mailboxRecoveryError="The server did not accept this mailbox enrollment. Existing keys, the original binding and queued messages are preserved. Return the diagnostics; do not reset or retry with a different key.")
                         // No plaintext/error message. An unavailable/rejected mailbox
@@ -1536,9 +1542,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
             } finally {
                 scope.finish{
                     try{projectMailboxRecovery(native)}catch(_:Exception){mutable.value=mutable.value.copy(mailboxReenrollment=null,mailboxRecoveryError="Mailbox recovery validation is unavailable. Preserve app data and return the diagnostics.")}
-                    val next=System.nanoTime()/1_000_000+if(execution.needsContinuation)1000 else if(events?.connected==true)900000 else 120000
-                    mailboxAt=minOf(mailboxAt,next)
-                    if(execution.nextRetryAt>0)mailboxAt=minOf(mailboxAt,execution.nextRetryAt)
+                    mailboxAt=mailboxRetry.scheduledAt(mailboxAt,System.nanoTime()/1_000_000,
+                        execution.needsContinuation,events?.connected==true,execution.nextRetryAt)
                 }
                 synchronized(gate){if(mailboxInFlight===execution)mailboxInFlight=null}
             }

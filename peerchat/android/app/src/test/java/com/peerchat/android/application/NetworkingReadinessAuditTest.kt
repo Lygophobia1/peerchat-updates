@@ -10,11 +10,36 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.net.Socket
+import java.net.SocketTimeoutException
 
 /** Audit regressions for mailbox registration and runtime ownership. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[34])
 class NetworkingReadinessAuditTest {
+    @Test fun mailboxTransportFailureRetriesSoonWithoutHintStorm(){
+        var now=1_000L
+        val retry=MailboxRetryCadence{now}
+        retry.failed(SocketTimeoutException("offline"))
+        assertEquals(3_000L,retry.notBefore)
+        assertFalse(retry.ready(now,0)) // An authenticated event hint cannot erase the cooldown.
+        now=3_000L;assertTrue(retry.ready(now,0))
+        retry.failed(SocketTimeoutException("offline"))
+        assertEquals(7_000L,retry.notBefore)
+        repeat(8){now=retry.notBefore;retry.failed(SocketTimeoutException("offline"))}
+        assertEquals(now+60_000L,retry.notBefore)
+        retry.reset() // Successful service or a new authenticated scope.
+        assertTrue(retry.ready(now,0))
+        retry.failed(IllegalStateException("binding rejected"))
+        assertEquals(now+900_000L,retry.notBefore)
+        assertFalse(retry.ready(now+60_000L,0))
+        retry.reset()
+        retry.failed(javax.net.ssl.SSLHandshakeException("pin mismatch"))
+        assertEquals(now+900_000L,retry.notBefore)
+        retry.reset()
+        retry.failed(java.io.IOException("TLS failed",java.security.cert.CertificateException("pin mismatch")))
+        assertEquals(now+900_000L,retry.notBefore)
+    }
+
     private class Native:MailboxNative {
         var accepted=false
         var registrations=0
