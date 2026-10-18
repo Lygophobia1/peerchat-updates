@@ -1,5 +1,33 @@
 # Transfer cache integration manifest
 
+## Client delivery/choice correction dev.178
+
+Checkpoints: `9c6c2cb` (Android attachment-choice ownership), `fc326879ca286b6b3ad200401ad414c566cda594`
+(per-device receipt presentation and matching client version). Based on clean audit
+checkpoint `84e3cae`; no branch/worktree merge, server change or deployment.
+
+- Shared/native files: new read-only `delivery_status.hpp`; `node.hpp`, `node.cpp`,
+  `ui_bridge.cpp`; Android JNI `portable/peerchat_core.cpp`. Existing protected target
+  manifests supply device ID, received/pending/unavailable status and unresolved
+  audience flag. No binding keys, envelopes, signatures or credentials enter the UI.
+- Local Windows event JSON gains optional `deliveryTargets`. Android history pages
+  gain the optional trailing `PeerChat/DeliveryTargetsSnapshot/v1` extension. These
+  are **local application bridges**, not message, ACK, cache or server protocols.
+  Package JNI/Kotlin together; the new parser also accepts old extension-free pages.
+- No change to exported native function signatures, DeliveryManager, TransferManager,
+  protected database schema, group encryption, authentication, HPKE, eligibility,
+  revocation or receipt validation. Existing all-device ACK requirements remain.
+- Windows `CoreAdapter`, `ChatViewModel`, `Main.xaml` and Android snapshots/presenter/
+  conversation UI display the projection. Android backend changes concern only an
+  uncommitted attachment choice; durable jobs, staged sources and active transfers
+  are not removed or rewritten.
+- Reviewed the existing Android groups/voice integration manifest before shared
+  edits. No group/voice interface conflict; no edits in Android Work or other checkouts.
+
+Validation/package details and physical checklist are recorded in the dev.178
+follow-up section of `NETWORKING_READINESS_DEV177.md`. The deployed dev.177 Pi is
+compatible and needs no update for these client fixes.
+
 ## Networking priority candidate dev 175
 
 Based on preserved dev.174 and audit checkpoint `8cd6287`, dev.175 changes local

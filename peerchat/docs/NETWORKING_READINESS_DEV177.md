@@ -1,5 +1,107 @@
 # PeerChat dev.177 registration readiness and connection grace
 
+## Latest follow-up: dev.178 client delivery status and attachment choice
+
+The user corrected the physical report: direct attachments complete, and text
+arrives in both directions. The remaining misleading Windows "Stored · awaiting
+recipient" label can represent one received phone copy plus an unacknowledged
+secondary-device copy, not a total delivery failure. No receipt is fabricated to
+make the account appear fully delivered.
+
+Implemented and checkpointed from `84e3cae` on the same branch/worktree:
+
+- `9c6c2cb`: a validated new Android attachment selection can supersede an abandoned,
+  uncommitted compatibility choice. Active preparation stays exclusive; a stale
+  cancellation/failure clears only its own choice. The real presenter replacement
+  regression now passes. This corrects a reproduced lifecycle defect; it is not a
+  claim that the successful physical transfers had failed this way. Existing private
+  staged bytes and durable jobs remain intact.
+- `fc326879ca286b6b3ad200401ad414c566cda594`: both clients show received/pending/
+  unavailable devices from the existing protected per-message target manifest,
+  with expandable identities and an explicit unresolved-audience indicator.
+  No guessed phone/PC labels are added. Legacy/history-imported rows without local
+  target evidence retain their existing status. Partial validated mailbox ACKs now
+  publish a Windows message update; the final ACK updates device details immediately.
+  The obsolete aggregate label is hidden when authoritative device details exist.
+
+The projection reads bounded existing history/receipt data and introduces no
+continuous database writes. Security and aggregate delivery logic are unchanged.
+Read-only review found no security blocker. Existing authenticated cache rejection
+for an incapable secondary device remains intentional; the explicit direct choice
+still names its selected-device-only scope. Neither cache authorization nor the
+optimized transfer engine changed. No Pi update was necessary, despite conditional
+permission to deploy if needed; no live Pi commands or phone installation were run.
+
+### Validation and retained evidence
+
+- Android final full run: **380 tests, 85 suites, zero failures/errors/skips**;
+  lint passes with 25 existing warnings, zero errors; signed ARM64 debug APK builds.
+  `build/dev178-android-reviewed.log`. Tests cover optional/legacy native pages,
+  malformed/duplicate targets, received/pending/unavailable/unresolved presentation,
+  Compose expansion and status refresh, misleading-label suppression, retained
+  Saving/Failed states, presenter replacement, stale cancellation and active ownership.
+- Native protected durability fixture passes, including partial receipts after
+  reopening storage, exact local-only projection, JNI extension serialization,
+  final target ACKs, unresolved selection, commit failures and authenticated rejection:
+  `build/dev178-native-delivery.log` and
+  `build/tests/messaging-durability-audit-ebf38fbc82ef4aa8990e0062653c5138`.
+- Windows status/model tests, wrong-sender rejection and immediate final receipt
+  refresh pass: `build/dev178-delivery-ui.log`, `build/dev178-desktop-model.log`.
+  Mailbox fair scans and authenticated receipt/eligibility rejection pass:
+  `build/dev178-windows-mailbox.log`.
+- Actual Android JNI/Java TLS versus Windows Schannel host fixture passes in both
+  directions: 2 MiB+123 verified bytes, negotiated 64 KiB/window16, durable completion
+  ACKs, pinned identities and bounded opaque output. Evidence:
+  `build/dev178-transfer-interop.log`,
+  `build/tests/transfer-auth-interop-28fc5f5cafcf46c28d58f05590f4984b`.
+  This is host interoperability, not a new physical network performance measurement.
+- Windows compilation and package dependency checks pass, including existing
+  group voice/screen ABI lifetime smoke checks. Group attachment and DM transfer
+  UI regressions pass: `build/dev178-windows-build.log`,
+  `build/dev178-group-ui-reviewed.log`, `build/dev178-transfer-ui.log`.
+
+Recorded failed attempts are not hidden: the first Android compile needed a namespace
+qualification in the new JNI extension (fixed before final successful run). The first
+group UI invocation preceded client-only Package staging (rerun successfully after
+assembling the runtime). The old full desktop adapter fixture fails its `Share format`
+assertion on **both unchanged dev.177 and dev.178** because it expects a listening
+port at relay-only startup. It was not weakened or reported as passing; its model-only
+checks and current authenticated interoperability fixtures pass. Evidence:
+`build/dev178-desktop-adapter.log` and `build/dev178-desktop-adapter-baseline.log`.
+
+### Audited client packages
+
+Paths below are relative to this worktree's `peerchat` directory. Previous builds
+remain unchanged. Source checkpoint is `fc326879ca286b6b3ad200401ad414c566cda594`.
+
+- Windows: `build/development/4.0.2-dev.178/PeerChat-Windows-4.0.2-dev.178.zip`
+  (12,479,798 bytes), SHA-256
+  `7af0c8e4af230f4cc390e1ecb3a33c7e246619cb0e3c73728260e671baee4c67`.
+- Android: `build/development/4.0.2-dev.178/Android/PeerChat-Android-4.0.2-dev.178-debug.apk`
+  (27,406,209 bytes), SHA-256
+  `8af9188b084b4818383bc109b9f82167244cfb60951158532a1a6128011a6064`.
+- `build/dev178-package-audit.log` and versioned `messaging-repair-package-audit.json`
+  confirm source, version, unchanged Android signing certificate, ARM64 ABI, runtime
+  dependencies and every Windows ZIP payload hash. No server package was produced.
+
+### Manual physical acceptance — then stop
+
+1. Run the dev.178 Windows package; update Android with `adb install -r` using the
+   APK above. Do not uninstall, clear data, change profiles or trust additional devices.
+2. Send text both ways. Expand device details: the received phone copy and any pending
+   secondary copy must be distinguishable. Reopen/restart and confirm the same state.
+3. When an already-authorized secondary device reconnects and actually acknowledges,
+   verify its row becomes Received; no account-wide success should precede that ACK.
+4. On Android choose an attachment, cancel/reopen the choice, switch away/back or
+   recreate the screen, then choose another. Confirm no orphaned-choice blockage and
+   no unexpected send. Complete two explicitly selected direct transfers in succession.
+5. Confirm filenames, verified completion, group attachments and clipboard sending
+   still work. Cache-incompatible audiences must still show the honest compatibility
+   explanation instead of silently narrowing delivery scope.
+
+Physical acceptance is pending. No new latency, battery or throughput improvement
+is claimed by this UI/lifecycle correction. Development stops at this package handoff.
+
 ## Scope and result
 
 This release implements the three approved Android repairs from the [dev.176 networking audit](audits/networking/2026-10-17-dev176-independent-audit.md): reconcile accepted registration before cache capability work, move attachment preparation waits outside the application gate, and retain healthy connections for a best-effort 60-second background grace period. Physical acceptance remains pending. These changes do not establish that all previously reported message or ACK latency is resolved.
