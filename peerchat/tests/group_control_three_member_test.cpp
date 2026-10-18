@@ -20,6 +20,7 @@ int main(int argc,char** argv){
     std::array<std::string,Count> ids;
     std::array<std::wstring,Count> paths;
     std::array<std::uint64_t,2> ownerAttempts{},memberAttempts{};
+    std::array<unsigned,2> ownerRequests{},memberRequests{};
     std::array<bool,2> attached{};
     std::set<std::string> acknowledged;
     std::array<unsigned,Count> textMessages{};
@@ -44,9 +45,11 @@ int main(int argc,char** argv){
                     if(i==0){
                         size_t target=event.peerId==ids[1]?1:event.peerId==ids[2]?2:0;
                         require(target>0,"owner requested an unknown group-control device");
+                        ownerRequests[target-1]++;
                         ownerAttempts[target-1]=event.attemptId;
                     }else{
                         require(event.peerId==ids[0],"member attempted a peer mesh instead of owner key control");
+                        memberRequests[i-1]++;
                         memberAttempts[i-1]=event.attemptId;
                     }
                 }else if(event.kind==NodeEvent::Kind::ConnectionLifecycle&&i==0&&
@@ -80,6 +83,7 @@ int main(int argc,char** argv){
             }
         };
         auto wait=[&](auto done,const char* reason){auto until=Clock::now()+std::chrono::seconds(20);while(Clock::now()<until){pump();if(done())return;std::this_thread::sleep_for(std::chrono::milliseconds(3));}throw std::runtime_error(reason);};
+        auto settle=[&]{auto until=Clock::now()+std::chrono::milliseconds(500);while(Clock::now()<until){pump();std::this_thread::sleep_for(std::chrono::milliseconds(3));}pump();};
         wait([&]{for(const auto& id:ids)if(id.empty())return false;return true;},"three group devices did not initialize");
         std::string legacy=peers[0].createGroup(L"Three-member server-roster group");
         wait([&]{return !peers[0].groupCreationProof(legacy).empty();},"owner did not persist the signed Create event");
@@ -95,11 +99,27 @@ int main(int argc,char** argv){
         }
         wait([&]{return ownerAttempts[0]&&ownerAttempts[1]&&memberAttempts[0]&&memberAttempts[1];},"three-member group did not request both owner/member relay pairs");
         for(size_t offset=0;offset<2;offset++){
+            size_t member=offset+1;
+            for(int repeat=0;repeat<3;repeat++)require(peers[0].beginGroupControl(roster.serverGroupId,member+1,ids[member],1)&&
+                peers[member].beginGroupControl(roster.serverGroupId,1,ids[0],1),"repeated pending group demand was not accepted");
+        }
+        settle();
+        require(ownerRequests[0]==1&&ownerRequests[1]==1&&memberRequests[0]==1&&memberRequests[1]==1,
+                "repeated pending demand allocated another group-control relay");
+        for(size_t offset=0;offset<2;offset++){
             require(peers[0].relayReady(ownerAttempts[offset],false)&&
                     peers[offset+1].relayReady(memberAttempts[offset],true),"existing scoped relay adapter rejected a group member");
             attached[offset]=true;
         }
         wait([&]{return acknowledged.size()==2;},"one group member did not receive and ACK the current protected key");
+        for(size_t offset=0;offset<2;offset++){
+            size_t member=offset+1;
+            for(int repeat=0;repeat<3;repeat++)require(peers[0].beginGroupControl(roster.serverGroupId,member+1,ids[member],1)&&
+                peers[member].beginGroupControl(roster.serverGroupId,1,ids[0],1),"repeated connected group demand was not accepted");
+        }
+        settle();
+        require(ownerRequests[0]==1&&ownerRequests[1]==1&&memberRequests[0]==1&&memberRequests[1]==1,
+                "repeated connected demand allocated another group-control relay");
         for(size_t sender=0;sender<Count;sender++){
             require(peers[sender].sendGroup(legacy,L"Deterministic encrypted text"),"Group composer command failed");
             wait([&]{return messageReceipts==2*(sender+1);},"Encrypted text did not verify/decrypt/store/ACK at both recipients");
@@ -121,6 +141,8 @@ int main(int argc,char** argv){
         require(peers[0].beginGroupControl(roster.serverGroupId,2,ids[1],1)&&
                 peers[1].beginGroupControl(roster.serverGroupId,1,ids[0],1),"remaining devices could not reopen scoped control");
         wait([&]{return ownerAttempts[0]&&memberAttempts[0];},"rotated group did not request a fresh scoped relay");
+        require(ownerRequests[0]==2&&memberRequests[0]==2&&ownerRequests[1]==1&&memberRequests[1]==1,
+                "roster rotation did not create only the fresh authorized relay pair");
         require(peers[0].relayReady(ownerAttempts[0],false)&&peers[1].relayReady(memberAttempts[0],true),
                 "rotated group relay could not attach");
         attached[0]=true;
@@ -143,7 +165,7 @@ int main(int argc,char** argv){
         require(Storage(paths[1]).groupKey(legacy,4)==rotated,"remaining member did not receive the rotated key");
         require(Storage(paths[2]).groupKey(legacy,4).empty(),"removed member received the future key generation");
         require(!ownerStore.hasGroupKeyReceipt(legacy,4,ids[2]),"removed member received a future ACK receipt");
-        std::cout<<"PASS: three non-friend devices ACKed keys and authenticated encrypted text without a mesh; duplicate display prevented, protected history reload/pagination, and removal key rotation.\n";
+        std::cout<<"PASS: repeated pending/connected group-key demands were idempotent; three non-friend devices ACKed keys and authenticated encrypted text without a mesh; duplicate display prevented, protected history reload/pagination, and removal key rotation.\n";
         return 0;
     }catch(const std::exception& error){for(auto& peer:peers)peer.stop();std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

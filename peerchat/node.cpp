@@ -40,6 +40,7 @@
 #include <deque>
 #include <future>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -94,6 +95,14 @@ struct Resolver {
 };
 void nonblocking(SOCKET s){u_long yes=1;if(ioctlsocket(s,FIONBIO,&yes))throw std::runtime_error("Cannot configure socket");BOOL one=TRUE;setsockopt(s,IPPROTO_TCP,TCP_NODELAY,reinterpret_cast<char*>(&one),sizeof(one));}
 std::wstring observedAddress(SOCKET socket){sockaddr_in addr{};int length=sizeof(addr);if(getpeername(socket,reinterpret_cast<sockaddr*>(&addr),&length))return {};wchar_t text[64]{};InetNtopW(AF_INET,&addr.sin_addr,text,64);return text;}
+std::uint64_t activeVoiceControlTransport(const session::SessionTransportManager* sessions,const std::string& peer,
+                                          const std::function<bool(std::uint64_t)>& eligible){
+    if(!sessions)return 0;
+    auto snapshot=sessions->snapshot(peer);
+    if(!snapshot||!snapshot->connected||!snapshot->activeTransport.value)return 0;
+    auto winner=snapshot->activeTransport.value;
+    return eligible(winner)?winner:0;
+}
 }
 using namespace node_detail;
 struct Node::Impl {
@@ -666,10 +675,12 @@ struct Node::Impl {
     static const wchar_t* voiceStateName(calls::State state){switch(state){case calls::State::Idle:return L"Idle";case calls::State::Outgoing:return L"Outgoing / Ringing";case calls::State::Incoming:return L"Incoming / Ringing";case calls::State::Negotiating:return L"Negotiating";case calls::State::ConnectingMedia:return L"Connecting Media";case calls::State::Connected:return L"Connected";case calls::State::Ending:return L"Ending";case calls::State::Ended:return L"Ended";case calls::State::Failed:return L"Failed";}return L"Idle";}
     void voiceEvent(calls::State state,const std::wstring& reason={}){auto active=calls.active();NodeEvent event;event.kind=NodeEvent::Kind::VoiceCall;event.callState=static_cast<std::uint32_t>(state);if(active){event.peerId=calls.peer();event.detail=std::wstring(active->id.value.begin(),active->id.value.end());event.callLifetime=active->lifetime;event.callType=static_cast<std::uint32_t>(active->type);event.callMuted=active->muted;event.callDeafened=active->deafened;event.mediaState=static_cast<std::uint32_t>(active->mediaState);event.mediaGeneration=active->mediaGeneration;event.mediaRoute=static_cast<std::uint32_t>(active->mediaRoute);event.callControlAvailable=active->controlAvailable;}event.text=voiceStateName(state);if(!reason.empty())event.text+=L" · "+reason;emit(std::move(event));}
     Connection* voiceConnection(const std::string& peer){
-        std::uint64_t winner=0;if(sessionTransports){auto snapshot=sessionTransports->snapshot(peer);if(snapshot&&snapshot->connected)winner=snapshot->activeTransport.value;}
-        if(winner)for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls&&connection->authorization.permitsDirectMessage())return connection.get();
-        for(auto& connection:connections)if(connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls&&connection->authorization.permitsDirectMessage())return connection.get();
-        return nullptr;
+        Connection* selected=nullptr;
+        activeVoiceControlTransport(sessionTransports.get(),peer,[&](std::uint64_t winner){
+            for(auto& connection:connections)if(connection->attemptId==winner&&connection->online&&!connection->dead&&connection->peerId==peer&&connection->voiceCalls&&connection->authorization.permitsDirectMessage()){selected=connection.get();return true;}
+            return false;
+        });
+        return selected;
     }
     Connection* screenConnection(const std::string& peer){
         std::uint64_t winner=0;
@@ -1677,6 +1688,8 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                    !group_keys::GroupKeyManager::currentMember(*roster,command.accountId,command.peer)||
                    command.peer==profile.peerId)throw std::runtime_error("Group-control relay is not authorized by the current roster");
                 session::ReliableAuthorization authorization{session::ReliableAuthorizationScope::GroupControl,command.group,roster->generation,command.peer};
+                auto existing=sessionTransports->snapshot(authorization.continuityKey());
+                if(existing&&(existing->connected||existing->pending))continue;
                 const auto attempt=nextAttemptId++;
                 session::RouteObservation route{{nextRouteRevision++},"relay:"+authorization.continuityKey(),"PeerChat server relay","group key control over peer TLS",false,networkGeneration,session::TransportKind::Relay,session::RouteClass::ServerRelay};
                 if(!sessionTransports->registerGroupControlAttempt(sessionEpoch,{attempt},authorization,route,nowMilliseconds()))throw std::runtime_error("Group-control relay registration was rejected");

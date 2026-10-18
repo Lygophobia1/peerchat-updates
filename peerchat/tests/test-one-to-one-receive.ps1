@@ -5,10 +5,11 @@ $output=Join-Path $root ('build\tests\one-to-one-receive-'+[guid]::NewGuid().ToS
 New-Item -ItemType Directory -Path $output|Out-Null
 Push-Location $root
 try {
+    & .\scripts\build-go-hpke.ps1 -OutputDirectory $output
     Copy-Item -LiteralPath 'C:\Peerchatdep\build\apm\webrtc-6cf6bcb-presets\x64\PeerChat.AudioReceive.dll' -Destination $output
     Copy-Item -LiteralPath 'C:\Peerchatdep\artifacts\audio-processing\webrtc-6cf6bcb-voice-presets\x64\PeerChat.AudioProcessing.dll' -Destination $output
     Copy-Item -LiteralPath (Join-Path (Split-Path (Get-Command g++).Source -Parent) 'libssp_64-0.dll') -Destination $output
-    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. ('-I'+(Join-Path $NativeCache 'include')) -std=c++17 -O2 -Wall -Wextra -Werror -static-libgcc -static-libstdc++ tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp group_message_envelope.cpp voice_media.cpp voice_receive_engine.cpp audio.cpp ('-L'+(Join-Path $NativeCache 'lib')) -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m -lssp -lwinmm -liphlpapi -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -o "$output\voice-call-test.exe"
+    & g++ -DPEERCHAT_TEST_MEDIA_DIRECT -DPEERCHAT_TEST_SHORT_CALL_TIMEOUTS -DPEERCHAT_TEST_SHORT_RECONNECT_BACKOFF -I. ('-I'+(Join-Path $NativeCache 'include')) -std=c++17 -O2 -Wall -Wextra -Werror -Wno-cast-function-type -static-libgcc -static-libstdc++ tests\voice_call_test.cpp node.cpp tls.cpp storage.cpp group.cpp group_message_envelope.cpp share_id.cpp voice_media.cpp voice_receive_engine.cpp group_voice_session.cpp voice_media_topology.cpp group_voice_bridge.cpp screen_media_topology.cpp group_screen_share_bridge.cpp audio.cpp platform/go_hpke_provider.cpp ('-L'+(Join-Path $NativeCache 'lib')) -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m -lssp -lwinmm -liphlpapi -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -o "$output\voice-call-test.exe"
     if($LASTEXITCODE -ne 0){throw 'One-to-one CallManager/receive integration compilation failed'}
     $previous=$env:PATH
     try {

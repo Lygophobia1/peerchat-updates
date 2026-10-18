@@ -1,15 +1,59 @@
 #include "node.hpp"
 #include "call_manager.hpp"
+#include "direct_transport_adapter.hpp"
+#include "session_transport_manager.hpp"
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
 
+namespace peerchat::node_detail {
+std::uint64_t activeVoiceControlTransport(const session::SessionTransportManager*,const std::string&,
+                                          const std::function<bool(std::uint64_t)>&);
+}
+
 namespace {
 void require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 struct CallView {std::wstring state;std::string callId,peer;std::uint64_t lifetime=0,mediaGeneration=0;std::uint32_t mediaState=0,mediaRoute=0;bool muted=false,deafened=false,controlAvailable=true;int connectedCount=0,idleCount=0;};
+
+void voiceWinnerRouteContract(){
+    using namespace peerchat;
+    using namespace peerchat::session;
+    const std::string local(64,'a'),remote(64,'b');const SessionEpoch epoch{23};
+    SessionTransportManager manager("voice-route",local,epoch,40,400);
+    require(manager.observeNetwork(epoch,1),"Voice route network generation was rejected");
+    RouteObservation relay{{1},"relay:voice-route","server","authenticated relay",false,1,TransportKind::Relay,RouteClass::ServerRelay};
+    auto authenticate=[&](std::uint64_t id,RouteObservation route){
+        require(manager.registerAttempt(epoch,{id},remote,route,id),"Voice route attempt registration failed");
+        DirectTransportAdapter adapter(epoch,{id},route,remote);
+        require(manager.observeTransport(adapter.identityPresented(remote,protocol::CapabilityMutualTls|protocol::CapabilityVoiceCalls),id),"Voice route identity presentation failed");
+        require(manager.markLocallyTrusted(epoch,{id})&&manager.markRemoteAccepted(epoch,{id}),"Voice route authentication failed");
+        return manager.arbitrateWinner(epoch,{id},id);
+    };
+    require(authenticate(10,relay).activated(),"Initial voice relay did not become winner");
+    RouteObservation direct{{2},"192.0.2.10:7777","scoped consent","P2P standby",false,1,TransportKind::Direct,RouteClass::DirectLan};
+    require(manager.beginScopedP2pProbe(epoch,remote,std::string(43,'p'),10000,direct,20),"Voice standby probe was rejected");
+    auto due=manager.takeDueRetries(20);require(due.size()==1,"Voice standby probe was not scheduled");
+    require(authenticate(11,due.front().route).disposition==WinnerDisposition::VerifiedStandby,"Voice candidate did not remain standby");
+    std::vector<std::uint64_t> visited;
+    auto eligible=[&](std::uint64_t id){visited.push_back(id);return id==10||id==11||id==12;};
+    require(node_detail::activeVoiceControlTransport(&manager,remote,eligible)==10&&visited==std::vector<std::uint64_t>{10},
+            "Voice control chose standby instead of the authenticated winner");
+    manager.closeTransport(epoch,{10},"relay lost",true);visited.clear();
+    auto snapshot=manager.snapshot(remote);
+    require(snapshot&&!snapshot->connected&&snapshot->p2pStandbyTransport.value==11,"Fixture lost standby before voice route gap");
+    require(node_detail::activeVoiceControlTransport(&manager,remote,eligible)==0&&visited.empty(),
+            "Voice control sent to an authenticated standby without an active winner");
+    require(authenticate(12,relay).activated(),"Replacement voice relay did not become winner");visited.clear();
+    require(node_detail::activeVoiceControlTransport(&manager,remote,eligible)==12&&visited==std::vector<std::uint64_t>{12},
+            "Voice control did not resume on the replacement winner");
+    visited.clear();auto unavailableWinner=[&](std::uint64_t id){visited.push_back(id);return id==11;};
+    require(node_detail::activeVoiceControlTransport(&manager,remote,unavailableWinner)==0&&visited==std::vector<std::uint64_t>{12},
+            "Voice control fell back to standby when the winner lacked voice capability");
+}
 }
 
 int main(){
@@ -28,6 +72,7 @@ int main(){
     auto wait=[&](auto predicate,const char* failure){auto deadline=Clock::now()+std::chrono::seconds(20);while(Clock::now()<deadline){collect();if(predicate())return;std::this_thread::sleep_for(std::chrono::milliseconds(20));}throw std::runtime_error(failure);};
     auto state=[&](size_t index,const wchar_t* prefix){return calls[index].state.rfind(prefix,0)==0;};
     try{
+        voiceWinnerRouteContract();
         calls::CallManager ownership;
         require(ownership.beginOutgoing({"call-one"},calls::CallType::Voice,{"peer-one"},1000),"CallManager rejected a valid 1:1 call");
         const auto firstLifetime=ownership.lifetime();
