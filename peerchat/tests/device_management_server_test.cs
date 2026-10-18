@@ -47,6 +47,7 @@ internal static class DeviceManagementServerTest {
             var rename=Fields("device_rename","sessionToken",actorSession,"publicIdentity",actor,"targetPublicIdentity",target,"expectedRevision",revision,"name","Phone e\u0301");
             var renamed=Call(server,rename);Check((string)Row(renamed,target)["name"]=="Phone \u00e9","Rename NFC mismatch: "+BitConverter.ToString(Encoding.UTF8.GetBytes((string)Row(renamed,target)["name"])));Denied(Call(server,rename),"Stale concurrent rename accepted");revision=Revision(renamed);
             rename["expectedRevision"]=revision;rename["name"]="bad\nname";Denied(Call(server,rename),"Control name accepted");rename["name"]="Valid";rename["targetPublicIdentity"]=foreign;Denied(Call(server,rename),"Cross-account rename accepted");
+            ContactNames(server,db,account,other,foreignSession,target);
             Denied(Challenge(server,actorSession,actor,target,revision,"bad-password"),"Wrong password accepted");Denied(Challenge(server,actorSession,actor,actor,revision),"Self revoke accepted");Denied(Challenge(server,actorSession,actor,foreign,revision),"Cross-account revoke accepted");
             var challenge=Challenge(server,actorSession,actor,target,revision);
             string canonical=Encoding.ASCII.GetString(Convert.FromBase64String((string)challenge["signatureInput"]));Check(canonical.StartsWith("PeerChat device management v1|revoke|"+account+"|"+actor+"|"+target+"|"+revision+"|"),"Canonical scope mismatch");Check(Convert.ToInt64(challenge["expiresUtc"])-Convert.ToInt64(challenge["issuedUtc"])==60,"Freshness not bounded");
@@ -59,12 +60,38 @@ internal static class DeviceManagementServerTest {
             Check((bool)Call(server,request)["ok"],"Exact accepted response-loss retry failed");request["targetPublicIdentity"]=actor;Denied(Call(server,request),"Modified accepted operation inherited success");request["targetPublicIdentity"]=target;
             Check(!db.AddDevice(account,target),"Revoked identity re-added");string relogin=Value(Call(server,Fields("login","username","manager","password","fixture-password")),"sessionToken");Denied(Call(server,Fields("presence","sessionToken",relogin,"publicIdentity",target)),"Password login bypassed tombstone");Denied(Call(server,Fields("remember_enroll_challenge","sessionToken",relogin,"publicIdentity",target)),"Automatic reenrollment allowed");
             db.SendFriendRequest(account,other);db.RespondToRequest(other,account,true);var friends=(List<Dictionary<string,object>>)db.FriendState(other)["friends"];Check(((List<string>)friends.Single()["revokedPublicIdentities"]).Contains(target),"Contact revocation not projected");Check(!friends.Single().ContainsKey("name"),"Private inventory leaked");
-            using(var reopened=new AccountDatabase(config.DatabasePath)){Check(!reopened.ActiveDevice(account,target)&&reopened.OwnsDevice(account,target),"Restart lost tombstone/provenance");var persisted=reopened.DeviceInventory(account,actor,Hash(actorSession));Check((string)Row(persisted,target)["name"]=="Phone \u00e9","Restart lost name");}
+            using(var reopened=new AccountDatabase(config.DatabasePath)){Check(!reopened.ActiveDevice(account,target)&&reopened.OwnsDevice(account,target),"Restart lost tombstone/provenance");var persisted=reopened.DeviceInventory(account,actor,Hash(actorSession));Check((string)Row(persisted,target)["name"]=="Phone \u00e9","Restart lost name");var contact=((List<Dictionary<string,object>>)reopened.FriendState(other,true)["friends"]).Single();Check(((Dictionary<string,string>)contact["deviceNames"])[target]=="Phone \u00e9","Restart lost contact display label");Check(((List<string>)contact["revokedPublicIdentities"]).Contains(target),"Retained display label revived revoked identity");}
             db.Dispose();
         }
         PreserveMailbox(args[0],args[3]);
         Console.WriteLine("PASS device manager: scoped auth/signature/step-up/freshness/replay, CAS names, isolation, durable tombstone, session retirement, no reenrollment, queued ciphertext preservation, active authorization.");return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
+    static void ContactNames(DiscoveryServer server,AccountDatabase db,long account,long other,string session,string target){
+        Check(!db.Search("manager",other).ContainsKey("deviceNames"),"Public search leaked names");
+        Check(db.Suggestions("man",other,5).All(p=>!p.ContainsKey("deviceNames")),"Suggestions leaked names");
+        db.SendFriendRequest(account,other);
+        Check(((List<Dictionary<string,object>>)db.FriendState(other,true)["incoming"]).All(p=>!p.ContainsKey("deviceNames")),"Pending request leaked names");
+        db.RespondToRequest(other,account,true);
+        var legacy=Call(server,Fields("friend_state","sessionToken",session));
+        Check(!((List<Dictionary<string,object>>)legacy["friends"]).Single().ContainsKey("deviceNames"),"Legacy/bootstrap response changed without opt-in");
+        var request=Fields("friend_state","sessionToken",session);request["deviceNamesVersion"]=1;
+        var response=Call(server,request);var row=((List<Dictionary<string,object>>)response["friends"]).Single();
+        var names=(Dictionary<string,string>)row["deviceNames"];Check(names.Count==1&&names[target]=="Phone \u00e9","Accepted contact did not receive exact account/device label");
+        Check(!row.ContainsKey("platform")&&!row.ContainsKey("version")&&!row.ContainsKey("devices")&&!row.ContainsKey("credential"),"Private inventory leaked with labels");
+        var serialize=typeof(DiscoveryServer).GetMethod("SerializeOrdinaryResponse",BindingFlags.NonPublic|BindingFlags.Instance);
+        string wire=(string)serialize.Invoke(server,new object[]{"friend_state",response});Check(wire.Contains("deviceNames"),"Wire serializer dropped names");
+        var expanded=new Dictionary<string,object>{{"deviceNamesVersion",1},{"padding",new string('x',17000)}};
+        Check(((string)serialize.Invoke(server,new object[]{"friend_state",expanded})).Length>16384,"Negotiated response retained old small-frame bound");
+        bool legacyBound=false;try{serialize.Invoke(server,new object[]{"friend_state",new Dictionary<string,object>{{"padding",new string('x',17000)}}});}catch(TargetInvocationException e){legacyBound=e.InnerException is InvalidOperationException;}Check(legacyBound,"Legacy frame bound changed");
+        db.Execute("UPDATE device_authority SET name='not-base64' WHERE public_identity='"+target+"';");
+        var damaged=Call(server,request);Check((bool)damaged["ok"]&&((Dictionary<string,string>)((List<Dictionary<string,object>>)damaged["friends"]).Single()["deviceNames"]).Count==0,"Corrupt cosmetic label blocked contact state");
+        db.Execute("UPDATE device_authority SET name='"+Convert.ToBase64String(Encoding.UTF8.GetBytes("Phone \u00e9"))+"' WHERE public_identity='"+target+"';");
+        db.RemoveFriend(other,account);Check(((List<Dictionary<string,object>>)Call(server,request)["friends"]).Count==0,"Removed contact still received names");
+        db.SendFriendRequest(account,other);db.RespondToRequest(other,account,true);db.SetBlocked(other,account,true);
+        var blocked=Call(server,request);Check(((List<Dictionary<string,object>>)blocked["friends"]).Count==0&&((List<Dictionary<string,object>>)blocked["blocked"]).All(p=>!p.ContainsKey("deviceNames")),"Blocked contact received names");
+        db.SetBlocked(other,account,false);
+        Console.WriteLine("PASS contact labels: negotiated only, Unicode, accepted friendship, search/pending/removal/block privacy, no private inventory.");
+    }
     static void PreserveMailbox(string root,string fixture){
         byte[] binding=File.ReadAllBytes(Path.Combine(fixture,"binding.bin")),envelope=File.ReadAllBytes(Path.Combine(fixture,"envelope.bin")),senderPublic=File.ReadAllBytes(Path.Combine(fixture,"sender-public.bin")),recipientPublic=File.ReadAllBytes(Path.Combine(fixture,"recipient-public.bin"));
         var descriptor=MailboxProtocol.Binding.Parse(binding);var message=MailboxProtocol.Envelope.Parse(envelope);string actor=new string('a',64),token=new string('b',64),path=Path.Combine(root,"mailbox-retention.sqlite");
