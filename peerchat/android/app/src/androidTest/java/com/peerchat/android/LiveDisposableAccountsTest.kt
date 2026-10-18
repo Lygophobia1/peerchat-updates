@@ -58,6 +58,9 @@ class LiveDisposableAccountsTest {
             val state=owner.state.value
             evidence("LIVE_OWNER $label authenticated=${state.authenticated} presence=${state.serverPresenceLive} rooms=${state.voiceRooms.size}")
             state.conversations.filter { it.friend.username in setOf("codex","codex1") }.forEach { evidence("LIVE_FRIEND $label account=${it.friend.accountId} selected=${it.friend.peerId} known=${it.friend.knownPeerIds.joinToString(",")} ready=${it.connection.ready}") }
+            state.conversations.filter{it.friend.username in setOf("codex","codex1")}.flatMap{it.messages}.filter{it.text.startsWith("PC-LIVE-DM-v1:")}.forEach{
+                evidence("LIVE_RETAINED_DM $label id=${it.id} sender=${it.senderDevice} recipient=${it.recipientDevice} unresolved=${it.deliveryTargets?.selectionUnresolved} targets=${it.deliveryTargets?.targets?.joinToString(","){t->t.deviceId+":"+t.status.name}}")
+            }
             evidence("LIVE_VERIFICATION $label pending_count=${state.deviceVerifications.size}")
             state.conversations.flatMap{it.attachments}.forEach{
                 val error=when(it.error){

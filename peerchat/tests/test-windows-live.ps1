@@ -7,11 +7,14 @@ param(
     [Parameter(Mandatory=$true)][string]$Profile,
     [Parameter(Mandatory=$true)][ValidateSet('codex','codex1')][string]$Account,
     [Parameter(Mandatory=$true)][pscredential]$Credential,
-    [Parameter(Mandatory=$true)][ValidateSet('status','create-group','room','send')][string]$Command,
+    [Parameter(Mandatory=$true)][ValidateSet('status','create-group','room','send','dm')][string]$Command,
     [string]$GroupId,
     [string]$Name,
     [string]$Message,
     [ValidateSet('codex','codex1')][string]$Invite,
+    [ValidateSet('codex','codex1')][string]$Target,
+    [string]$ExpectedPeer,
+    [string]$ProbeId,
     [switch]$Join,
     [switch]$Media,
     [ValidateRange(0,600)][int]$HoldSeconds=180,
@@ -40,6 +43,12 @@ if(-not(Test-Path -LiteralPath $marker)){
 if($Command -eq 'create-group' -and -not $Name){throw 'create-group requires -Name'}
 if($Command -eq 'room' -and (-not $GroupId -or -not $Name)){throw 'room requires -GroupId and -Name'}
 if($Command -eq 'send' -and (-not $GroupId -or -not $Message)){throw 'send requires -GroupId and -Message'}
+if($Command -eq 'dm'){
+    if(-not $Target -or $Target -eq $Account){throw 'dm requires -Target set to the other disposable account'}
+    if($ProbeId -cnotmatch '^[0-9a-f]{32}$'){throw 'dm requires a 32-character lowercase hex -ProbeId'}
+    if($ExpectedPeer -cnotmatch '^[0-9a-f]{64}$'){throw 'dm requires the exact 64-character lowercase hex -ExpectedPeer'}
+    if($HoldSeconds -lt 30){throw 'dm requires -HoldSeconds of at least 30'}
+}elseif($Target -or $ProbeId -or $ExpectedPeer){throw '-Target, -ExpectedPeer, and -ProbeId apply only to dm'}
 if($Invite -and $Command -ne 'create-group'){throw '-Invite applies only to create-group'}
 if($Join -and $Command -ne 'room'){throw '-Join applies only to room'}
 if($Media -and ($Command -ne 'room' -or -not $Join -or $HoldSeconds -le 0)){throw '-Media requires -Command room, -Join, and positive -HoldSeconds'}
@@ -63,6 +72,7 @@ try {
     if($Command -eq 'create-group'){$extra=@($Name);if($Invite){$extra+= $Invite}}
     if($Command -eq 'room'){$extra=@($GroupId,$Name,$(if($Join){'join'}else{'observe'}),$HoldSeconds);if($Media){$extra+='media'}}
     if($Command -eq 'send'){$extra=@($GroupId,$Message)}
+    if($Command -eq 'dm'){$extra=@($Target,$ProbeId,$HoldSeconds,$ExpectedPeer)}
     $Credential.GetNetworkCredential().Password | & $probe $HostName $Port $CertificateSha256 $Profile $Account $Command @extra
     if($LASTEXITCODE -ne 0){throw "Windows live probe exited with code $LASTEXITCODE"}
 } finally {

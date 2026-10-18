@@ -65,6 +65,14 @@ class LiveWindowsRoomJoinTest {
                 fun count(name:String)=backend.state.value.voice.mediaDiagnostics.lineSequence()
                     .firstOrNull{it.startsWith("$name=")}?.substringAfter('=')?.toLongOrNull()?:0L
                 await("encrypted_media_received"){count("group_connected_routes")>0&&count("group_received_packets")>=10&&count("group_encoded_packets")>=10}
+                val before=count("group_received_packets")
+                val message=backend.sendGroup(group,"PC-LIVE-VOICE-TEXT:"+java.util.UUID.randomUUID())
+                await("group_text_ack_during_media"){
+                    backend.state.value.groups.singleOrNull{it.id==group}?.messages?.any{
+                        it.id==message&&Regex("Recipients: [1-9][0-9]* accepted, [0-9]+ duplicates, 0 rejected / [0-9]+ sessions").matches(it.status)
+                    }==true
+                }
+                await("media_continues_after_text"){count("group_received_packets")>before+10}
                 delay(5000)
                 evidence("LIVE_WINDOWS_MEDIA connected=${count("group_connected_routes")} encoded=${count("group_encoded_packets")} received=${count("group_received_packets")} mixed=${count("group_mixed_10ms_blocks")}")
             } else delay(2000)

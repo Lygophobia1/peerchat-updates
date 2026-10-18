@@ -111,8 +111,8 @@ voice rooms until a client creates one, and manual network reset intentionally
 suppresses automatic sign-in. The successful test uses authenticated empty room
 snapshots and the normal lifecycle quiescence/resume path instead.
 
-**Still required:** actual Windows/emulator cross-platform live transfer matrix,
-cached/direct delivery, active room join and media, repeated process restarts,
+**Still required:** full Windows/emulator cross-platform live transfer matrix,
+cached delivery, repeated process restarts,
 concurrent media/message/attachment activity and physical Motorola acceptance.
 Two owners in one emulator process do not prove cross-device audio or OS battery
 behavior. No production package is declared ready on that evidence alone.
@@ -160,7 +160,7 @@ command-line arguments to test processes, reports or diagnostic exports.
 - `live-disposable-be76b39beb7e490f95523cbcbdc3bdcc` stopped at Android group
   readiness. The initial Windows helper did not perform production peer-TLS
   group-key handoff; this is a fixture gap, not proof of the reported call bug.
-  The helper is being extended to reuse the existing production relay/controller
+  The subsequent helper correction reused the production relay/controller
   boundary. Server room occupancy alone must never be reported as audio success.
 - `live-disposable-53ef6f74dd854f1db02305e0eb03f7d7`: with production Windows
   `RelayTransport` and signed-roster reconciliation, Android group readiness
@@ -205,3 +205,63 @@ Keep the protected test profiles for restart/resume. Do not delete registrations
 or replace unavailable device keys to make the matrix green. Any unresolved
 recipient identity remains a fail-closed cache prerequisite, not an invitation
 to omit a device or weaken HPKE audience verification.
+
+### Windows/Android DM probe: incomplete mailbox fixture boundary
+
+`LiveWindowsDmTest` and the Windows `dm` probe use a shared random probe ID and
+synthetic content only. The Android probe can explicitly verify only the exact
+Windows test fingerprint supplied independently from the isolated Windows
+profile, using the existing current-generation verification command. It never
+approves arbitrary presented identities or replaces unrelated trust.
+
+`live-disposable-a455a34c76b1498a88a365c6f2a0aec4` and Windows runtime
+`windows-live-runtime-b71ee01ff5a544b9827c699baff5947a` demonstrated Windows to
+Android durable receipt and a native ACK for that device. Windows correctly
+reported unresolved account-wide selection, not aggregate delivery. Android's
+26,689-ms receive wait included starting the Windows process and explicit test
+fingerprint verification; it is **not message transport latency**.
+
+The reverse probe timed out. Read-only retained-state inspection
+`live-disposable-ea0b41afdbc54b6fa8ef67d4bb9057b1` showed the reply's logical
+recipient was the expected Windows device, but the resolved delivery target was
+the other Android test device. The Windows helper did not yet run production
+mailbox registration/eligibility execution. This fixture omission must be
+corrected before using it to evaluate independent-device reverse delivery.
+No pending message, identity, target record or server registration was removed.
+
+The helper now reuses the packaged production `MailboxExecution.Service` in a
+single-flight background task, including actual key registration and signed
+eligibility installation. Generation invalidation precedes worker cancellation;
+no custom mailbox protocol or fabricated response was introduced. Compilation
+passed. The live repeat stopped at `other_active_friend_present` before this
+service started: `codex` has an active friendship outside the two test accounts.
+The account-wide production fetch must not be treated as a test-message-only
+operation. No friendship was removed to satisfy the harness. Windows evidence:
+`windows-live-runtime-b23473fbeb064aa7bfe0929569225195`. The corresponding Android
+wait (`live-disposable-651b57be35ad431fb789c7b978519306`) timed out because the
+Windows side had correctly stopped; this is not another product delivery failure.
+
+### Concurrent Windows/Android group text and media
+
+`live-disposable-179637061c57419884697a1a23ec686d` and Windows runtime
+`windows-live-runtime-11e5284abfe34b328d1839af3d1e8b2e` passed the production room/media
+path again, now sending encrypted group text while media was flowing. Android
+observed group visibility in 1,224 ms, authorized retained key in 1 ms, room
+visibility in another 1,426 ms, join in 1,986 ms, and media packet threshold in
+another 1,122 ms. Group-text recipient acknowledgement was observed after 511 ms;
+the receive counter continued increasing. Sampled counters: one connected route,
+320 encoded packets, 266 received packets, 644 mixed 10-ms blocks. Windows
+recorded native authenticated message admission and accepted ACK, with one
+accepted recipient and zero rejections. Its final media check reported a connected
+route, received packets, and no failure. Stage waits are sequential, local,
+monotonic observations, not synchronized end-to-end latency measurements.
+
+### Remaining acceptance gate
+
+The full cached-delivery matrix is **not passed**. The earlier recipient identity
+rejection and older linked test device remain unresolved. The complete DM mailbox
+probe additionally needs an isolated account-wide mailbox scope. Do not solve
+either prerequisite by silently omitting a device, removing a friendship,
+revoking a registration, or trusting a key without verification. Existing tests,
+profiles, source files, pending messages and candidate packages are retained.
+Physical packages remain candidates rather than a completed release handoff.
