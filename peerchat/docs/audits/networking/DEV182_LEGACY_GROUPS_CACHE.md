@@ -1,11 +1,12 @@
-# dev.181 follow-up: legacy startup, group enrollment and DM attachment modes
+# dev.182: legacy startup, group enrollment and DM attachment modes
 
 ## Scope and evidence boundaries
 
 Worktree: `C:\Users\Livel\.codex\worktrees\native-unicode-emoji\Create 2D Game\peerchat`.
 Branch: `codex/native-unicode-emoji`; starting checkpoint: `6dd31a5`, including
-the Android voice implementation at `86ab170`. Candidate validation is in progress;
-this document is not a physical acceptance or package-completion claim.
+the Android voice implementation at `86ab170`. Client repairs and candidate
+packaging are complete. Physical acceptance and the explicitly listed wider
+emulator/UI scenarios remain outstanding; this is not a physical acceptance claim.
 
 No live Pi writes, deployment, phone installation, profile reset, identity
 replacement, revocation change or migration is part of this follow-up. Accepted
@@ -122,7 +123,7 @@ Incoming supported direct/cache messages remain automatic. Group attachment
 behavior is unchanged; the preference is labeled DM-only. Existing native
 transfer negotiation, integrity, durable ACKs and journals are reused.
 
-## Validation ledger (in progress)
+## Validation ledger
 
 - PASS: Windows mailbox reliability, full managed desktop compilation.
 - PASS: Windows attachment UI/model and protected preference regressions.
@@ -140,13 +141,44 @@ transfer negotiation, integrity, durable ACKs and journals are reused.
 - PASS: actual Android emulator `NativeDmCacheRegistrationTest`, 1/1, about
   11 seconds, real JNI/POSIX/Keystore, current source. This is registration and
   reopen proof, not complete Windows-to-emulator file delivery.
+- PASS: additional genuine emulator-to-Windows boundary test: Android
+  Keystore/POSIX identity and binding, reciprocal native TLS with Windows
+  Schannel, initial pinning and explicit second-device verification, followed by
+  authenticated DM cache registration for all three devices. Evidence:
+  `F:\PeerChat-isolated-cache-tests\dm-emulator-9687061c211e4528878520f405d85696`;
+  instrumentation 1/1, 16.845 seconds. In this fixture the managed Windows host
+  proxies server RPCs over pinned TLS; Android's `ServerAccounts` network adapter
+  is not exercised. This initial run does not claim attachment payload delivery.
 - UI HARNESS BLOCKED: concrete `UiSmokeTest` discovered 12 tests; all failed
   before assertions because Espresso cannot find `InputManager.getInstance()`
   on the current image. Earlier invocation of abstract `UiFlowChecks` was also
   a harness-selection failure. Neither is a passing UI test or a demonstrated
   product assertion failure.
-- Full genuine Android OS / Windows cached and direct transfer coverage remains
-  pending. Windows-host JNI tests must not be relabeled emulator coverage.
+- PASS: genuine Android OS / Windows **cached payload delivery in both
+  directions**, 262,161 bytes per attachment, Unicode basenames and exact binary
+  plaintext. Android's upload reaches two independently authorized Windows
+  devices. Both directions require durable signed notice ACKs, verified payload
+  completion, and sender validation of signed file-completion receipts; a notice
+  ACK or successful upload alone cannot pass. Evidence:
+  `F:\PeerChat-isolated-cache-tests\dm-emulator-803e7ac548de483984e7a5e295999917`;
+  instrumentation 1/1, 37.618 seconds. This duration includes setup, identity,
+  TLS and several transfers; it is **not** a throughput or ACK-latency benchmark.
+  Real production JNI, Android POSIX storage/Keystore, Windows native cache
+  controllers and the production managed server/executor are used. The test
+  control socket is ADB-reversed loopback; server RPCs are proxied by the Windows
+  fixture, not Android `ServerAccounts` or the app's foreground scheduler.
+- LIMIT: this follow-up does not complete genuine emulator/Windows **direct**
+  payload testing, large-file/background/file-picker UI scenarios, or cached
+  payload interruption/restart on Android. Host native and Windows restart
+  regressions are separate evidence, not substitutes mislabeled Android OS
+  coverage. These gaps remain in physical acceptance or subsequent test work.
+- An additional emulator archive run passed its route-authentication case, but
+  the nonempty/reopen case stopped at its unconditional cleanup assertion:
+  `ReliableBridge.close` returned `PC_CORE_INVALID_HANDLE` (2), not 0. Production
+  request processing can retire and erase a completed route before cleanup;
+  the close API explicitly returns 2 for an absent handle. This run is **not**
+  counted as a passing complete/reopen test. Production History Sync was not
+  modified to suppress the result.
 - PASS: full Windows validation build, including native dependency audit and
   group screen C ABI lifetime checks. Validation output retains source version
   dev.180 by design and is **not** the versioned handoff package.
@@ -164,6 +196,12 @@ transfer negotiation, integrity, durable ACKs and journals are reused.
 - `39891ce`: exact Windows registration readiness before DM cache capability.
 - `79ed3ad`: client startup/group readiness and protected explicit attachment
   mode selection, including original picker context and fresh fallback checks.
+- `640db22`: genuine-emulator registration/reopen regression and this audit
+  report. This is test/documentation only; package production source remains
+  `79ed3ad`.
+- `0f1498c`: reviewed bidirectional emulator/Windows cached-payload and signed
+  receipt integration fixture. Final C++ compile-only validation also passed
+  after removing a redundant test diagnostic; no production code changed.
 
 The file picker retains launch-time account, conversation, UI generation and
 mode across normal Activity recreation. A result for a stale context is dropped
@@ -210,8 +248,40 @@ Source checkpoint `79ed3adf91f373e86083d115dfe3841d37c263a6`:
   deployment. The three generated compiler objects are retained under
   `object-evidence` in this candidate's build directory.
 
-Candidate packaging is complete; cross-platform fixture work and final handoff
-remain in progress. Artifact existence is not full integration acceptance.
+Candidate packaging is complete. Later test/documentation checkpoints do not
+change the production source in these packages. Artifact existence and fixture
+success are not full physical acceptance.
+
+All implementation and test changes are checkpointed on the existing branch;
+the final handoff commit contains this report. No feature WIP or unstaged source
+is intentionally left behind. Ignored build outputs, logs, accepted dev.181
+packages and isolated fixture evidence are retained. No branch merge, history
+rewrite, live Pi change or physical phone installation occurred. Development
+stops here for physical acceptance; the wider unrun scenarios above are not
+silently declared complete.
+
+## Emulator fixture reproduction and limits
+
+Use the isolated x86-64 emulator application ID
+`com.peerchat.android.voiceintegration` and its instrumentation APK, compiled
+from the checkpoint containing `NativeWindowsDmInteropTest`. This is not an APK
+installation on a physical phone or the normal PeerChat package. With the
+existing managed fixture built at
+`tests/portable/bin/Release/net10.0/PeerChat.DirectAttachmentApplicationHost.dll`,
+run `tests/test-android-emulator-dm-attachment.ps1 -Serial emulator-5580
+-FixtureRoot F:\PeerChat-isolated-cache-tests`. The runner rejects non-emulator
+serials, uses a unique evidence directory, compiles the Windows native bridge,
+and removes only its own ADB reverse endpoint. It requires the existing MinGW,
+Go HPKE build prerequisites, .NET runtime and Android SDK. The configured fixture
+filesystem must satisfy the unmodified cache free-space policy.
+
+Initial bridge failures were test-fixture defects: duplicate-device friend
+snapshot shape, a nonconforming private staging token, borrowed-reader lifetime,
+and treating the expected fresh-context/pending notice ACK as a fatal null.
+They were corrected in test code only. No production authorization, source-token
+validation or durable ACK boundary was relaxed to obtain the passing result.
+The passing fixture does not assert physical network throughput, Motorola voice
+quality, FCM delivery, or complete app UI acceptance.
 
 ## Physical acceptance checklist
 
