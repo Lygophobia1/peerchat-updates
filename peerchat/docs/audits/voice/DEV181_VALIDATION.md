@@ -6,6 +6,33 @@ This is a physical-test candidate, **not physical voice acceptance**. Work conti
 
 Earlier architecture/readiness documents describe the pre-implementation state. This report supersedes their open build/application gates where evidence below explicitly closes them; it does not supersede the physical gates.
 
+## Final packages and checkpoints
+
+Source checkpoint: **`86ab170bdf3485d42a6ed6ae4066557c32d6f78f`**.
+Build/notices checkpoint: `91e9298`; preceding genuine receive integration:
+`616a259`. A subsequent documentation-only commit records these final hashes.
+
+- Windows: `build/development/4.0.2-dev.181/PeerChat-Windows-4.0.2-dev.181.zip`
+  (12,499,559 bytes), SHA-256
+  `362249d3e12d85a2b3942dc62c5b24ff0e4473dc82629d3a3595e0f5e65a03c5`.
+- Android: `build/development/4.0.2-dev.181/Android/PeerChat-Android-4.0.2-dev.181-debug.apk`
+  (28,332,828 bytes), SHA-256
+  `c4e2971bb268dcab786c0f5e80c40233ccac4e0a173ab70eb1d40cc9c1009831`.
+- Machine-readable package audit:
+  `build/development/4.0.2-dev.181/messaging-repair-package-audit.json`.
+  Source ancestry/no production drift, ZIP entry count and every payload hash,
+  copied APK hash, version, signature and runtime dependency checks passed.
+- Accepted dev.180 ZIP/APK hashes were rechecked unchanged:
+  `eb0de3ac7032a49383181268649b61f7bdcebf9a8f8eb55633187bece18d448e` /
+  `49b98a29339b74c7b9f02fdc14e758af3ff87e6bc727f9ea55dc572dca7f4cf5`.
+
+The isolated TURN helper exited at its bounded 900-second deadline; no permanent
+TURN service was installed. Its optional SQLite warning did not affect the
+explicit in-memory fixture credential or successful allocations. Three generated
+Windows compiler objects were retained in the ignored dev.181 `object-evidence`
+directory rather than committed as source or deleted. Working tree was clean
+after the source checkpoint; final documentation is checkpointed separately.
+
 ## Implementation and integration manifest
 
 | Area | Implementation / shared boundary |
