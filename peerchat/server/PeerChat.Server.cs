@@ -778,6 +778,13 @@ namespace PeerChat.Server {
         public void Run(){
             startedUtc=DateTime.UtcNow;listener=new TcpListener(IPAddress.Any,config.Port);
             try{
+                // Event subscriptions, relay endpoints and reusable RPC sockets
+                // block pool workers while idle. The default small pool grows
+                // slowly, delaying newly accepted TLS/ACK work by seconds.
+                // A modest floor avoids that ramp for ordinary reconnect bursts;
+                // it is not a connection limit or a substitute for async I/O.
+                int minimumWorkers,minimumIo;ThreadPool.GetMinThreads(out minimumWorkers,out minimumIo);
+                if(minimumWorkers<32&&!ThreadPool.SetMinThreads(32,minimumIo))Log("WARNING","Server worker reserve unavailable; existing runtime scheduling retained.");
                 listener.Start(64);Log("INFO","PeerChat Server "+VersionInfo.Display+" listener started on 0.0.0.0:"+config.Port+" (TLS enabled).");
                 using(var sha=SHA256.Create())Log("INFO","Server certificate SHA-256: "+BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-",""));
                 Log("INFO",config.TurnEnabled?"TURN media credential issuer enabled.":"TURN media credential issuer disabled.");
