@@ -1827,7 +1827,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
             if(listeningPortOverride||!displayNameOverride.empty())store->saveProfile(profile);
             credentials=std::make_unique<TlsCredentials>(profile);
             contacts.clear();for(auto& c:store->contacts())contacts[c.peerId]=c;
-            liveOutboxPeers.clear();for(const auto& c:contacts)if(!deliveries->pendingMessages(c.first,1).empty())liveOutboxPeers.insert(c.first);
+            liveOutboxPeers.clear();for(const auto& c:contacts)if(store->pendingRouteDemand(c.first))liveOutboxPeers.insert(c.first);
             groupAccount=store->groupAccount();groupKeys.reset();groupRosterDiscoveryGeneration=0;groups.clear();for(const auto& groupId:store->groupIds()){auto ledger=group_devices::Replica::restoreStored(*store,groupId);if(ledger.state().created)groups.emplace(groupId,std::move(ledger));}
             screenAvailable=ScreenShareMedia::available();
             startupDirectListener=startDirectListener;
@@ -1846,8 +1846,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
                 if(nowMilliseconds()>=demandCheckAt){
                     const auto now=nowMilliseconds();demandCheckAt=now+1000;
                     for(auto it=liveOutboxPeers.begin();it!=liveOutboxPeers.end();){
-                        auto pending=deliveries->pendingMessages(*it,1000);
-                        if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=Delivery::Stored;})){it=liveOutboxPeers.erase(it);continue;}
+                        if(!store->pendingRouteDemand(*it)){it=liveOutboxPeers.erase(it);continue;}
                         auto contact=contacts.find(*it);
                         if(contact==contacts.end()||!contact->second.verified){++it;continue;} // Verification has a bounded demand window.
                         sessionTransports->demandLiveRoute(*it,now+2000,now);++it;

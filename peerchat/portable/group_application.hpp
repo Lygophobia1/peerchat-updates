@@ -86,7 +86,8 @@ public:
         if(remote==r->devices.end())return false;
         if(key){
             if(Storage::publicKeyId(*key)!=remote->peerId)return false;
-            for(const auto& contact:store_.contacts())if(contact.peerId==remote->peerId&&contact.verified&&contact.publicKey!=*key)return false;
+            auto contact=store_.contact(remote->peerId);
+            if(contact&&contact->verified&&contact->publicKey!=*key)return false;
         }
         return true;
     }

@@ -86,6 +86,7 @@ struct Instance {
     // windows namespace does not introduce a platform dependency or transfer owner.
     peerchat::transfer::windows::TransferTiming transferTiming;
     peerchat::portable::OperationTiming reliableReceiveTiming,reliableOutputTiming;
+    peerchat::portable::OperationTiming reliableRequestsTiming,routeDemandTiming,groupDemandTiming;
     std::string receivingTransferPeer,receivingTransferId;
     std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
         using namespace peerchat;auto open=[&](const transfer::DurableState& row){return transfer::posix::FileSource::reopen(attachmentCache,row);};
@@ -988,7 +989,10 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_deman
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_requests(JNIEnv* env,jobject,jlong handle){
     try{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
-        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->relayRequests)return nullptr;
+        const auto waiting=peerchat::portable::OperationTiming::now();
+        std::lock_guard<std::mutex> lock(instance->gate);
+        peerchat::portable::OperationTiming::Scope total(&instance->reliableRequestsTiming,waiting);
+        if(!instance->relayRequests)return nullptr;
         // Poll execution commands, not a Kotlin retry/session policy.
         auto now=runtimeNow();
         if(instance->voice)instance->voice->tick(now);
@@ -998,20 +1002,26 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             if(!contactSnapshot)contactSnapshot=instance->storage->contacts();
             return *contactSnapshot;
         };
-        if(!instance->outboxDemandLoaded){
-            for(const auto& contact:contacts())if(!instance->deliveries->pendingMessages(contact.peerId,1).empty())instance->liveOutboxPeers.insert(contact.peerId);
-            instance->outboxDemandLoaded=true;
-        }
-        if(now>=instance->demandCheckAt){
-            instance->demandCheckAt=now+1000;
-            for(auto it=instance->liveOutboxPeers.begin();it!=instance->liveOutboxPeers.end();){
-                auto pending=instance->deliveries->pendingMessages(*it,1000);
-                if(std::none_of(pending.begin(),pending.end(),[](const auto& message){return message.delivery!=peerchat::Delivery::Stored;})){it=instance->liveOutboxPeers.erase(it);continue;}
-                const auto& current=contacts();
-                if(std::none_of(current.begin(),current.end(),[&](const auto& contact){return contact.peerId==*it&&contact.verified;})){++it;continue;}
-                instance->sessions.demandLiveRoute(*it,now+2000,now);++it;
+        const bool demandDue=now>=instance->demandCheckAt;
+        {
+            peerchat::portable::OperationTiming::Scope scan(&instance->routeDemandTiming,peerchat::portable::OperationTiming::now());
+            if(!instance->outboxDemandLoaded){
+                for(const auto& contact:contacts())if(instance->storage->pendingRouteDemand(contact.peerId))instance->liveOutboxPeers.insert(contact.peerId);
+                instance->outboxDemandLoaded=true;
             }
-            instance->sessions.retireIdleRoutes(now);
+            if(demandDue){
+                instance->demandCheckAt=now+1000;
+                for(auto it=instance->liveOutboxPeers.begin();it!=instance->liveOutboxPeers.end();){
+                    if(!instance->storage->pendingRouteDemand(*it)){it=instance->liveOutboxPeers.erase(it);continue;}
+                    const auto& current=contacts();
+                    if(std::none_of(current.begin(),current.end(),[&](const auto& contact){return contact.peerId==*it&&contact.verified;})){++it;continue;}
+                    instance->sessions.demandLiveRoute(*it,now+2000,now);++it;
+                }
+                instance->sessions.retireIdleRoutes(now);
+            }
+        }
+        if(demandDue){
+            peerchat::portable::OperationTiming::Scope group(&instance->groupDemandTiming,peerchat::portable::OperationTiming::now());
             if(instance->groups&&instance->groups->generation()==instance->friends.generation())
                 for(const auto& group:instance->groups->groups()){
                     auto roster=instance->groups->roster(group);
@@ -1241,7 +1251,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             auto rows=instance->transfers?instance->transfers->diagnostics(now):std::vector<std::string>{};if(rows.size()>62)rows.resize(62);
             w.number(rows.size()+2);w.string(instance->transferRequestFailure.line("native_transfer_request_failure")+" dm_cache_storage="+(instance->dmStorageUnavailable?"protected_recovery_unavailable;_legacy_journal_retained":"available"));
             w.string(instance->reliableExchangeFailure.line("native_reliable_exchange_failure")+
-                instance->reliableReceiveTiming.line("native_receive")+instance->reliableOutputTiming.line("native_output"));
+                instance->reliableReceiveTiming.line("native_receive")+instance->reliableOutputTiming.line("native_output")+
+                instance->reliableRequestsTiming.line("native_requests")+instance->routeDemandTiming.line("native_route_demand")+
+                instance->groupDemandTiming.line("native_group_demand"));
             for(const auto& row:rows){const auto end=row.find(' ');const auto id=row.substr(std::string("transfer=").size(),end-std::string("transfer=").size());w.string(row+instance->transferTiming.diagnostics(id));}
             return platform::android::Context::input(env,w.data);
         }

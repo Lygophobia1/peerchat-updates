@@ -279,6 +279,13 @@ DeliveryTargetRetry decodeTargetRetry(const Blob& bytes,const std::string& id,co
     DeliveryTargetRetry retry;retry.reason=reader.string();retry.retryUtcMs=reader.number();reader.end();
     require(validTargetRetryReason(retry.reason)&&retry.retryUtcMs>0,"Invalid target retry marker");return retry;
 }
+Contact decodeContactRecord(const std::string& key,const Blob& plain){
+    Reader r(plain);Contact c;
+    c.peerId=r.string();c.name=r.text();c.publicKey=r.bytes();auto trust=r.number(),count=r.number();
+    require(trust<=1&&count<=128&&key=="contact/"+c.peerId&&(c.publicKey.empty()||Storage::publicKeyId(c.publicKey)==c.peerId),"Invalid contact record");c.verified=trust==1;
+    for(std::uint64_t i=0;i<count;i++){Endpoint e;e.host=r.text();auto port=r.number();require(port>0&&port<=65535,"Invalid contact port");e.port=static_cast<std::uint16_t>(port);c.endpoints.push_back(std::move(e));}
+    r.end();return c;
+}
 }
 
 using namespace storage_detail;
@@ -465,13 +472,18 @@ void Storage::removeContact(const std::string& peerId) {
 std::vector<Contact> Storage::contacts() {
     Statement s(impl_->sql,"SELECT k,b FROM objects WHERE k LIKE 'contact/%' ORDER BY k");std::vector<Contact> result;
     while(s.row()) {
-        std::string key=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/"+key,false)};Reader r(plain.data);Contact c;
-        c.peerId=r.string();c.name=r.text();c.publicKey=r.bytes();auto trust=r.number(),count=r.number();
-        require(trust<=1&&count<=128&&key=="contact/"+c.peerId&&(c.publicKey.empty()||publicKeyId(c.publicKey)==c.peerId),"Invalid contact record");c.verified=trust==1;
-        for(std::uint64_t i=0;i<count;i++){Endpoint e;e.host=r.text();auto port=r.number();require(port>0&&port<=65535,"Invalid contact port");e.port=static_cast<std::uint16_t>(port);c.endpoints.push_back(std::move(e));}
-        r.end();result.push_back(std::move(c));
+        std::string key=s.text(0);Secret plain{impl_->protect(s.bytes(1),"PeerChat.v1/"+key,false)};
+        result.push_back(decodeContactRecord(key,plain.data));
     }
     return result;
+}
+std::optional<Contact> Storage::contact(const std::string& peerId){
+    require(identifier(peerId),"Invalid contact identity");
+    const auto key="contact/"+peerId;
+    Statement s(impl_->sql,"SELECT b FROM objects WHERE k=?");s.text(1,key);
+    if(!s.row())return {};
+    Secret plain{impl_->protect(s.bytes(0),"PeerChat.v1/"+key,false)};
+    return decodeContactRecord(key,plain.data);
 }
 bool Storage::append(const std::string& conversation,const StoredMessage& m) {
     require(identifier(conversation)&&identifier(m.id,32)&&identifier(m.sender)&&identifier(m.recipient)&&
@@ -1009,6 +1021,20 @@ std::vector<StoredMessage> Storage::pending(const std::string& conversation,int 
         result.push_back(std::move(m));
     }
     return result;
+}
+bool Storage::pendingRouteDemand(const std::string& device){
+    require(identifier(device),"Invalid route demand device");
+    // Only durable indexes and exact per-device mailbox acceptance markers are
+    // consulted. An uncertain target may cause an extra route; send admission
+    // still reads and authenticates the protected message and target manifest.
+    Statement query(impl_->sql,
+        "SELECT EXISTS(SELECT 1 FROM outbox o WHERE o.peer=? "
+        "AND NOT EXISTS(SELECT 1 FROM objects m WHERE m.k='delivery-targets/v1/'||o.id) "
+        "AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||o.id||'/'||?) LIMIT 1) "
+        "OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.device=? "
+        "AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||t.id||'/'||?) LIMIT 1)");
+    query.text(1,device);query.text(2,device);query.text(3,device);query.text(4,device);
+    require(query.row(),"Route demand index unavailable");return query.number(0)!=0;
 }
 std::vector<std::string> Storage::pendingTargetDevices(int limit){
     require(limit>0&&limit<=256,"Invalid pending target device page");

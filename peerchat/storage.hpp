@@ -99,6 +99,7 @@ public:
     Profile profile();
     void saveProfile(const Profile& profile);
     std::vector<Contact> contacts();
+    std::optional<Contact> contact(const std::string& peerId);
     void saveContact(const Contact& contact);
     void removeContact(const std::string& peerId);
     // False means an identical ID/payload is already durable; mismatched reuse throws.
@@ -173,6 +174,8 @@ public:
     // identity remain intact so a later message starts a fresh conversation safely.
     void eraseHistory(const std::string& conversation);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
+    // Index-only, conservative hint for live route scheduling. Never authorizes a send.
+    bool pendingRouteDemand(const std::string& device);
     std::vector<std::string> pendingTargetDevices(int limit=256);
     bool appendGroupEvent(const GroupEvent& event);
     Blob groupReplicaReceipt(const std::string& groupId,const std::string& eventId);
