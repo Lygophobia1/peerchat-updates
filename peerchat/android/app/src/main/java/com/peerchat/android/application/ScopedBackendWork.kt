@@ -23,3 +23,10 @@ internal class ScopedBackendWork(private val gate:Any,private val current:()->Bo
         if(!current())false else {operation();true}
     }
 }
+
+/** Fetch without holding the profile gate, then install only for that same owner. */
+internal fun <T> scopedBootstrap(scope:ScopedBackendWork,fetch:()->T,install:(T)->Unit,
+    installFailure:(Exception)->Unit={}) {
+    val response=scope.network(fetch)
+    scope.local{try{install(response)}catch(failure:Exception){installFailure(failure);throw failure}}
+}

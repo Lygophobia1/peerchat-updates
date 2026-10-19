@@ -6,6 +6,67 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ScopedBackendWorkTest {
+    @Test fun loginBootstrapFetchDoesNotHoldProfileGateAndInstallsUnderIt(){
+        val gate=Any();val started=java.util.concurrent.CountDownLatch(1)
+        val release=java.util.concurrent.CountDownLatch(1)
+        val pool=java.util.concurrent.Executors.newSingleThreadExecutor()
+        var installed=""
+        try{
+            val work=pool.submit{
+                scopedBootstrap(ScopedBackendWork(gate){true},{
+                    assertFalse("Contact fetch held the profile gate",Thread.holdsLock(gate))
+                    started.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                    "contacts"
+                },{response->
+                    assertTrue("Native contact install must hold the profile gate",Thread.holdsLock(gate))
+                    installed=response
+                })
+            }
+            assertTrue(started.await(5,java.util.concurrent.TimeUnit.SECONDS))
+            synchronized(gate){assertEquals("",installed)}
+            release.countDown();work.get(5,java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals("contacts",installed)
+        }finally{release.countDown();pool.shutdownNow()}
+    }
+    @Test fun lateBootstrapCannotInstallAcrossSessionSwitchOrForegroundCancellation(){
+        for(cancel in listOf(false,true)){
+            val gate=Any();val first=Any();var session=first;var active=true
+            val started=java.util.concurrent.CountDownLatch(1)
+            val release=java.util.concurrent.CountDownLatch(1)
+            val pool=java.util.concurrent.Executors.newSingleThreadExecutor()
+            var installed=false;var invalidated=false
+            val scope=ScopedBackendWork(gate){session===first&&active}
+            try{
+                val work=pool.submit{
+                    try{scopedBootstrap(scope,{
+                        started.countDown();check(release.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                        "late contacts"
+                    },{installed=true})}catch(_:ScopedBackendWork.Superseded){
+                        scope.finish{invalidated=true}
+                    }
+                }
+                assertTrue(started.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                synchronized(gate){if(cancel)active=false else session=Any()}
+                release.countDown();work.get(5,java.util.concurrent.TimeUnit.SECONDS)
+                assertFalse(installed);assertFalse(invalidated)
+            }finally{release.countDown();pool.shutdownNow()}
+        }
+    }
+    @Test fun partialContactInstallFailureIsHandledUnderOriginalGateAfterGenerationAdvance(){
+        val gate=Any();var generation=7L;var cleaned=false
+        val scope=ScopedBackendWork(gate){generation==7L}
+        assertThrows(IllegalStateException::class.java){scopedBootstrap(scope,{"contacts"},{
+            assertTrue(Thread.holdsLock(gate))
+            generation++ // Native authority may advance before a later install step fails.
+            throw IllegalStateException("native install failed")
+        },{failure->
+            assertEquals("native install failed",failure.message)
+            assertTrue(Thread.holdsLock(gate))
+            cleaned=true
+        })}
+        assertTrue(cleaned)
+        assertFalse(scope.finish{fail("Partial install changed generation")})
+    }
     @Test fun backgroundResumeCannotReuseAnOldScopeEvenWithTheSameAuthentication(){
         val profile=Any();val owner=Any();val session=Any();var lifetime=1L
         val identity=ScopedBackendWork.Identity(profile,owner,session,7,11,lifetime)
