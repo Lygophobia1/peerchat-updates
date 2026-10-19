@@ -24,7 +24,7 @@ sealed partial class AccountDatabase {
     static string MailboxData(byte[] bytes){return "X'"+Hex(bytes)+"'";}
     static long MailboxNow(){return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();}
     void PurgeMailbox(){long now=MailboxNow();Execute("DELETE FROM encrypted_mailbox WHERE expires<="+now+" OR NOT EXISTS(SELECT 1 FROM devices d WHERE d.account_id=encrypted_mailbox.recipient_account AND d.public_identity=encrypted_mailbox.recipient_device) OR NOT EXISTS(SELECT 1 FROM devices d WHERE d.account_id=encrypted_mailbox.sender_account AND d.public_identity=encrypted_mailbox.sender_device);");}
-    internal string RegisterMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(gate){
+    internal string RegisterMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(cacheAuthorityGate)lock(gate){
         var binding=MailboxProtocol.Binding.Parse(wire);
         if(binding.Account!=account||binding.Device!=device||!ActiveDevice(account,device)||!MailboxProtocol.Verify(binding.Original,binding.Signature,identity,device))return "not_authorized";
         if(binding.Created>MailboxNow()+300000)return "invalid_timestamp";
@@ -192,7 +192,7 @@ sealed partial class AccountDatabase {
             {"validateUntilUtcMs",ScalarLong(database,"SELECT validate_until FROM mailbox_eligibility_snapshots WHERE "+where)},
             {"eligibilityDigest",originalDigest},{"candidates",EligibilityResponse(current,true)}};
     }}
-    internal string RevokeMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(gate){
+    internal string RevokeMailboxKey(long account,string device,byte[] identity,byte[] wire){lock(cacheAuthorityGate)lock(gate){
         var revoke=MailboxProtocol.Revocation.Parse(wire);
         if(revoke.Account!=account||revoke.Device!=device||!ActiveDevice(account,device)||!MailboxProtocol.Verify(revoke.Original,revoke.Signature,identity,device))return "not_authorized";
         string predicate="account_id="+account+" AND device="+Quote(device)+" AND key_id="+Quote(revoke.Key)+" AND generation="+revoke.Generation;

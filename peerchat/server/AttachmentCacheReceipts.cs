@@ -65,7 +65,7 @@ internal sealed partial class AttachmentCacheAdmission {
   var items=new List<Dictionary<string,object>>();string cursor=after;bool more=false;
   foreach(var recipient in cache.OriginalRecipients(id)){
    if(String.CompareOrdinal(recipient.Device,after)<=0)continue;if(items.Count>=8){more=true;break;}
-   accounts.WithGroupRosterAuthorization(d.Group,recipient.Account,recipient.Device,roster=>{
+   accounts.WithCacheGroupAuthorization(d.Group,recipient.Account,recipient.Device,roster=>{
     if(accounts.AttachmentMembership(d.Group,recipient.Account,recipient.Device)==recipient.Membership)items.Add(cache.Verification(id,recipient));
    });cursor=recipient.Device;
   }

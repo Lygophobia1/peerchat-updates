@@ -47,7 +47,7 @@ sealed partial class AccountDatabase {
  string DirectCacheRelationship(long sender,long recipient){return ScalarText(database,"SELECT binding FROM attachment_dm_relationships WHERE account_low="+Low(sender,recipient)+" AND account_high="+High(sender,recipient));}
  bool DirectCacheKeyAvailable(MailboxProtocol.Binding binding,bool retired){return AttachmentKeyAvailable(binding,retired)&&AttachmentRecipientKey(binding.Account,binding.Device)!=null;}
  bool DirectCacheCapable(MailboxProtocol.Binding binding){return ScalarLong(database,"SELECT count(*) FROM attachment_dm_capabilities WHERE account="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation)==1;}
- internal bool RegisterDirectCache(long account,string device,Func<bool> current,byte[] wire){lock(gate){
+ internal bool RegisterDirectCache(long account,string device,Func<bool> current,byte[] wire){lock(cacheAuthorityGate)lock(gate){
   try{
    if(!current()||wire==null||wire.Length>1024||wire.Length<4||wire[0]!=80||wire[1]!=84||wire[2]!=1||wire[3]!=30)throw new InvalidOperationException();
    int at=4;if(GroupRosterProof.Text(wire,ref at,64)!="PeerChat/dm-cache-device/v1")throw new InvalidOperationException();
@@ -76,7 +76,8 @@ sealed partial class AccountDatabase {
   var proof=MailboxBlob("SELECT proof FROM mailbox_recipient_keys WHERE account_id="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation+" AND allowed=1 AND state IN ('active','retired')");
   return proof!=null&&proof.SequenceEqual(binding.Wire);
  }
- internal T WithDirectCacheAuthority<T>(AttachmentCacheDescriptor descriptor,DirectCacheAudience audience,long account,string device,Func<bool> current,bool admission,Func<T> action,bool retainedComplete=false){lock(gate){
+ internal T WithDirectCacheAuthority<T>(AttachmentCacheDescriptor descriptor,DirectCacheAudience audience,long account,string device,Func<bool> current,bool admission,Func<T> action,bool retainedComplete=false){RequireCacheFenceOrder();lock(cacheAuthorityGate){
+  lock(gate){
   bool historicalSource=!admission&&retainedComplete&&account==descriptor.RecipientAccount&&device!=descriptor.Sender;
   bool sourceAuthorized=historicalSource?
    OwnsDevice(descriptor.Account,descriptor.Sender)&&Friends(descriptor.Account,descriptor.RecipientAccount)&&!Blocked(descriptor.Account,descriptor.RecipientAccount)&&RetainedDirectSourceProof(audience.Source):
@@ -92,6 +93,7 @@ sealed partial class AccountDatabase {
    if(account!=descriptor.RecipientAccount||local==null||!DirectCacheKeyAvailable(local,true))throw new InvalidOperationException("cache_dm_original_recipient_required");
   }
   if(admission&&audience.Recipients.Any(x=>!DirectCacheKeyAvailable(x,false)))throw new InvalidOperationException("cache_dm_audience_changed");
+  }
   return action();
  }}
 }

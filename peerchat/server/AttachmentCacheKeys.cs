@@ -67,7 +67,7 @@ internal sealed partial class AttachmentCacheAdmission {
  internal List<Dictionary<string,object>> RecipientKeys(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>{
   Require(d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");var result=new List<Dictionary<string,object>>();var source=accounts.AttachmentMembership(d.Group,account,device);
   foreach(var recipient in cache.OriginalRecipients(id)){
-   accounts.WithGroupRosterAuthorization(d.Group,recipient.Account,recipient.Device,roster=>{
+   accounts.WithCacheGroupAuthorization(d.Group,recipient.Account,recipient.Device,roster=>{
     if(accounts.AttachmentMembership(d.Group,recipient.Account,recipient.Device)!=recipient.Membership)return;
     var binding=accounts.AttachmentRecipientKey(recipient.Account,recipient.Device);
     result.Add(new Dictionary<string,object>{{"accountId",recipient.Account},{"device",recipient.Device},{"membership",recipient.Membership},{"sourceMembership",source},{"keyState",binding==null?"unavailable":"available"},{"binding",binding==null?"":AttachmentCacheRequests.Encode(binding)}});
@@ -77,7 +77,7 @@ internal sealed partial class AttachmentCacheAdmission {
  internal bool PublishKey(long account,string device,Func<bool> current,string id,byte[] wire){var value=AttachmentKeyEnvelope.Parse(wire);return Authorized(account,device,current,id,d=>{
   Require(d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");Require(d.Wire.SequenceEqual(value.Descriptor.Wire),"cache_key_descriptor_mismatch");
   Require(accounts.AttachmentMembership(d.Group,account,device)==value.SourceMembership,"cache_key_membership_mismatch");bool published=false,executed=false;
-  bool allowed=accounts.WithGroupRosterAuthorization(d.Group,value.Recipient.Account,value.Recipient.Device,roster=>{
+  bool allowed=accounts.WithCacheGroupAuthorization(d.Group,value.Recipient.Account,value.Recipient.Device,roster=>{
    Require(accounts.AttachmentMembership(d.Group,value.Recipient.Account,value.Recipient.Device)==value.RecipientMembership&&cache.OriginalMembership(id,value.Recipient.Account,value.Recipient.Device)==value.RecipientMembership,"cache_original_membership_required");
    Require(accounts.AttachmentKeyAvailable(value.Recipient,cache.ExistingKey(id,value.Recipient.Device,wire)),"cache_recipient_key_unavailable");Require(current(),"cache_session_invalid");published=cache.PublishKey(id,value);executed=true;
   });Require(allowed&&executed,"cache_group_not_authorized");return published;

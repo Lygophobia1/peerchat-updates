@@ -44,15 +44,32 @@ partial class AttachmentCacheRuntimeTest {
   // Test-only storage barrier, not measured physical SD latency.
   using(var entered=new System.Threading.ManualResetEvent(false))using(var release=new System.Threading.ManualResetEvent(false))
   using(var lookupStarted=new System.Threading.ManualResetEvent(false))using(var lookupDone=new System.Threading.ManualResetEvent(false)){
-   Exception appendFailure=null,lookupFailure=null;long durable=0,lookupMilliseconds=0;
+   Exception appendFailure=null,lookupFailure=null;long durable=0,lookupMilliseconds=0;int currentValid=1;
    AttachmentCacheRuntime.TestFault=phase=>{if(phase=="before_commit"){entered.Set();if(!release.WaitOne(5000))throw new TimeoutException("isolated append barrier");}};
-   var append=new System.Threading.Thread(()=>{try{durable=admission.AppendDirect(1,source,()=>true,lease,0,block);}catch(Exception error){appendFailure=error;}});
+   var append=new System.Threading.Thread(()=>{try{durable=admission.AppendDirect(1,source,()=>System.Threading.Volatile.Read(ref currentValid)==1,lease,0,block);}catch(Exception error){appendFailure=error;}});
    var lookup=new System.Threading.Thread(()=>{try{var watch=System.Diagnostics.Stopwatch.StartNew();lookupStarted.Set();Check(db.OwnsDevice(3,unrelatedDevice),"unrelated account mapping");lookupMilliseconds=watch.ElapsedMilliseconds;}catch(Exception error){lookupFailure=error;}finally{lookupDone.Set();}});
-   bool blocked=false;
-   try{append.Start();Check(entered.WaitOne(5000),"append did not reach durable commit");lookup.Start();Check(lookupStarted.WaitOne(5000),"unrelated lookup not scheduled");blocked=!lookupDone.WaitOne(250);}
-   finally{release.Set();Check(append.Join(6000),"append barrier did not drain");if(lookup.ThreadState!=System.Threading.ThreadState.Unstarted)Check(lookup.Join(6000),"unrelated lookup did not drain");AttachmentCacheRuntime.TestFault=null;}
-   Check(blocked&&appendFailure==null&&lookupFailure==null&&durable==block.Length,"cache authority lock latency characterization changed");
-   Console.WriteLine("CACHE_AUTHORITY_CONTENTION injected_commit_barrier_ms=250 unrelated_account_lookup_ms="+lookupMilliseconds+" blocked=true scope=isolated_production_admission_not_physical_disk");return durable;
+   bool completed=false;
+   try{append.Start();Check(entered.WaitOne(5000),"append did not reach durable commit");lookup.Start();Check(lookupStarted.WaitOne(5000),"unrelated lookup not scheduled");completed=lookupDone.WaitOne(250);}
+   finally{System.Threading.Volatile.Write(ref currentValid,0);release.Set();Check(append.Join(6000),"append barrier did not drain");if(lookup.ThreadState!=System.Threading.ThreadState.Unstarted)Check(lookup.Join(6000),"unrelated lookup did not drain");AttachmentCacheRuntime.TestFault=null;}
+   Check(completed&&appendFailure==null&&lookupFailure==null&&durable==block.Length,"cache authority fence blocked unrelated account lookup");
+   Reject(()=>admission.AppendDirect(1,source,()=>false,lease,0,block),"cache_dm_authority_stale");
+   Console.WriteLine("CACHE_AUTHORITY_CONTENTION injected_commit_barrier_ms=250 unrelated_account_lookup_ms="+lookupMilliseconds+" blocked=false scope=isolated_production_admission_not_physical_disk");return durable;
+  }
+ }
+ static void ObserveAppendRevocationFence(AccountDatabase db,AttachmentCacheAdmission admission,string source,string other,string lease,byte[] block){
+  using(var entered=new System.Threading.ManualResetEvent(false))using(var release=new System.Threading.ManualResetEvent(false))
+  using(var lookupDone=new System.Threading.ManualResetEvent(false))using(var revokeDone=new System.Threading.ManualResetEvent(false)){
+   Exception appendFailure=null,lookupFailure=null,revokeFailure=null;long durable=0;string revokeResult=null;
+   AttachmentCacheRuntime.TestFault=phase=>{if(phase=="before_commit"){entered.Set();if(!release.WaitOne(5000))throw new TimeoutException("isolated revocation barrier");}};
+   var append=new System.Threading.Thread(()=>{try{durable=admission.AppendDirect(1,source,()=>true,lease,0,block);}catch(Exception error){appendFailure=error;}});
+   var lookup=new System.Threading.Thread(()=>{try{Check(db.OwnsDevice(3,other),"unrelated account lookup");}catch(Exception error){lookupFailure=error;}finally{lookupDone.Set();}});
+   var revoke=new System.Threading.Thread(()=>{try{revokeResult=db.RemoveFriend(1,2);}catch(Exception error){revokeFailure=error;}finally{revokeDone.Set();}});
+   bool lookupCompleted=false,revokeBlocked=false;
+   try{append.Start();Check(entered.WaitOne(5000),"append did not reach durable commit");lookup.Start();revoke.Start();lookupCompleted=lookupDone.WaitOne(250);revokeBlocked=!revokeDone.WaitOne(250);}
+   finally{release.Set();Check(append.Join(6000),"append did not drain");Check(lookup.Join(6000),"lookup did not drain");Check(revoke.Join(6000),"revocation did not drain");AttachmentCacheRuntime.TestFault=null;}
+   Check(lookupCompleted&&revokeBlocked&&appendFailure==null&&lookupFailure==null&&revokeFailure==null&&durable==block.Length&&revokeResult=="removed","cache authority revocation fence failed");
+   Reject(()=>admission.AppendDirect(1,source,()=>true,lease,block.Length,block),"cache_dm_authority_stale");
+   Console.WriteLine("PASS cache append releases unrelated account lookup while friendship revocation waits for durable commit and later append is denied");
   }
  }
  static void DRegister(AccountDatabase db,ECDsaCng key,long account,byte[] binding){Check(db.RegisterMailboxKey(account,DId(key),key.Key.Export(CngKeyBlobFormat.EccPublicBlob),binding)=="accepted","DM verified key registration");}
@@ -60,6 +77,43 @@ partial class AttachmentCacheRuntimeTest {
   writer.Write(new byte[]{80,84,1,30});Text(writer,"PeerChat/dm-cache-device/v1");writer.Write((ulong)account);Text(writer,DId(key));Text(writer,binding.Key);writer.Write((ulong)binding.Generation);writer.Write(1UL);writer.Write(1UL);Field(writer,key.Key.Export(CngKeyBlobFormat.EccPublicBlob));Field(writer,SignKeyBytes(key,stream.ToArray()));return stream.ToArray();
  }}
  static void DRevoke(AccountDatabase db,ECDsaCng key,long account,byte[] wire){var b=MailboxProtocol.Binding.Parse(wire);using(var stream=KD("PeerChat/device-recipient-revoke/v1")){KN(stream,1,2);KN(stream,(ulong)account,8);KT(stream,b.Device);KT(stream,b.Key);KN(stream,(ulong)b.Generation,8);KB(stream,SignKeyBytes(key,stream.ToArray()));Check(db.RevokeMailboxKey(account,b.Device,key.Key.Export(CngKeyBlobFormat.EccPublicBlob),stream.ToArray())=="revoked","DM key revocation");}}
+ static void ObserveFencedMutator(AccountDatabase db,string group,string source,string other,string name,Func<bool> mutate){
+  using(var entered=new System.Threading.ManualResetEvent(false))using(var release=new System.Threading.ManualResetEvent(false))
+  using(var mutationStarted=new System.Threading.ManualResetEvent(false))using(var mutationDone=new System.Threading.ManualResetEvent(false))
+  using(var lookupDone=new System.Threading.ManualResetEvent(false)){
+   Exception holderFailure=null,mutationFailure=null,lookupFailure=null;bool changed=false;
+   var holder=new System.Threading.Thread(()=>{try{Check(db.WithCacheGroupAuthorization(group,1,source,roster=>{entered.Set();if(!release.WaitOne(5000))throw new TimeoutException("authority fence barrier");}),"cache group authorization");}catch(Exception error){holderFailure=error;}});
+   var mutation=new System.Threading.Thread(()=>{try{mutationStarted.Set();changed=mutate();}catch(Exception error){mutationFailure=error;}finally{mutationDone.Set();}});
+   var lookup=new System.Threading.Thread(()=>{try{Check(db.OwnsDevice(3,other),"unrelated lookup during authority fence");}catch(Exception error){lookupFailure=error;}finally{lookupDone.Set();}});
+   bool lookupCompleted=false,mutationBlocked=false;
+   try{holder.Start();Check(entered.WaitOne(5000),"cache fence holder did not enter");mutation.Start();lookup.Start();Check(mutationStarted.WaitOne(5000),"mutation not scheduled");lookupCompleted=lookupDone.WaitOne(250);mutationBlocked=!mutationDone.WaitOne(250);}
+   finally{release.Set();Check(holder.Join(6000),"cache fence holder did not drain");if(mutation.ThreadState!=System.Threading.ThreadState.Unstarted)Check(mutation.Join(6000),"mutation did not drain");if(lookup.ThreadState!=System.Threading.ThreadState.Unstarted)Check(lookup.Join(6000),"lookup did not drain");}
+   Check(lookupCompleted&&mutationBlocked&&changed&&holderFailure==null&&mutationFailure==null&&lookupFailure==null,"cache fence mutation ordering: "+name);
+  }
+ }
+ static void AuthorityFenceMutators(string root){Directory.CreateDirectory(root);
+  using(var sourceKey=new ECDsaCng(256))using(var readerKey=new ECDsaCng(256))using(var managerKey=new ECDsaCng(256))using(var otherKey=new ECDsaCng(256)){
+   string source=DId(sourceKey),reader=DId(readerKey),manager=DId(managerKey),other=DId(otherKey);
+   string sourceSession=new string('b',64),readerSession=new string('c',64),sourceCredential=new string('d',64),readerCredential=new string('e',64);
+   var proof=GroupRosterProof.Parse(Convert.ToBase64String(GroupRosterProofTest.CreateProof(sourceKey,new string('1',32),1)));
+   using(var db=new AccountDatabase(Path.Combine(root,"accounts.sqlite"))){
+    Check(db.CreateAccountWithDevice("source",new byte[16],new byte[32],source)==1&&db.CreateAccountWithDevice("reader",new byte[16],new byte[32],reader)==2&&db.CreateAccountWithDevice("other",new byte[16],new byte[32],other)==3,"fence accounts");
+    Check(db.AddDevice(2,manager),"fence manager device");db.InitializeMailbox();
+    Check(db.RegisterGroup(1,source,proof)!=null&&db.GroupInvite(proof.ServerGroupId,1,source,2,reader,1)!=null&&db.GroupRespond(proof.ServerGroupId,2,reader,true,2)!=null,"fence group roster");
+    var sourceBinding=RecipientBinding(sourceKey,1);DRegister(db,sourceKey,1,sourceBinding);
+    db.RememberDevice(1,source,sourceCredential);db.CreateDeviceSession(sourceSession,1,source,now+3600,sourceCredential);
+    db.RememberDevice(2,manager,readerCredential);db.CreateDeviceSession(readerSession,2,manager,now+3600,readerCredential);
+    string group=proof.ServerGroupId;
+    ObserveFencedMutator(db,group,source,other,"session",()=>{db.RevokeSession(sourceSession);return db.Authenticate(sourceSession)==0;});
+    db.CreateDeviceSession(sourceSession,1,source,now+3600,sourceCredential);
+    ObserveFencedMutator(db,group,source,other,"remembered device",()=>{db.RevokeRememberedDevice(1,source);return db.Authenticate(sourceSession)==0;});
+    ObserveFencedMutator(db,group,source,other,"recipient key",()=>{DRevoke(db,sourceKey,1,sourceBinding);return true;});
+    ObserveFencedMutator(db,group,source,other,"group membership",()=>db.GroupRemove(group,1,source,2,reader,3)!=null);
+    ObserveFencedMutator(db,group,source,other,"managed device",()=>db.RevokeManagedDevice(2,manager,readerSession,reader,db.DeviceAuthorityRevision(2),new string('f',64),new string('a',64))==null&& !db.ActiveDevice(2,reader));
+   }
+  }
+  Console.WriteLine("PASS cache authority fence covers session, remembered-device, recipient-key, group-roster and managed-device mutations while unrelated lookups proceed");
+ }
  static byte[] DNotice(ECDsaCng source,AttachmentCacheDescriptor descriptor,byte[] wire,string message=null,byte marker=17){
   // Server-only opaque ciphertext/signature fixture. Native/Application suites
   // independently prove actual HPKE private-body opening and file verification.
@@ -144,7 +198,12 @@ partial class AttachmentCacheRuntimeTest {
     DRevoke(db,first,2,firstKey);Reject(()=>admission.ReadDirect(2,reader,()=>true,download,65536,65536),"cache_dm_original_recipient_required");Check(admission.InspectDirect(2,sibling,()=>true,descriptor.Id).Complete,"Revoked sibling blocked eligible recipient");
     // A newly verified recipient is not silently granted access to an old blob.
     Check(db.AddDevice(2,other)==false,"Foreign identity moved account");using(var late=new ECDsaCng(256)){Check(db.AddDevice(2,DId(late)),"Late fixture device");var lateBinding=RecipientBinding(late,2);DRegister(db,late,2,lateBinding);admission.RegisterDirect(2,DId(late),()=>true,DCapability(late,2,lateBinding));Reject(()=>admission.InspectDirect(2,DId(late),()=>true,descriptor.Id),"cache_dm_original_recipient_required");}
-    db.RemoveFriend(1,2);Reject(()=>admission.InspectDirect(2,sibling,()=>true,descriptor.Id),"cache_dm_authority_stale");DFriend(db);Reject(()=>admission.InspectDirect(2,sibling,()=>true,descriptor.Id),"cache_dm_authority_stale");
+    var fenceAudience=DirectCacheAudience.Parse(admission.PrepareDirect(1,source,()=>true,2),1,source,2);
+    var fencePayload=Payload(65536);var fenceDescriptor=DirectDescriptor(sender,1,2,fenceAudience,fencePayload);
+    admission.AdmitDirect(1,source,()=>true,fenceDescriptor.Wire,fenceAudience.Wire);
+    string fenceLease=admission.AcquireDirect(1,source,()=>true,fenceDescriptor.Id,true);
+    ObserveAppendRevocationFence(db,admission,source,other,fenceLease,fencePayload.Take(32768).ToArray());
+    Reject(()=>admission.InspectDirect(2,sibling,()=>true,descriptor.Id),"cache_dm_authority_stale");DFriend(db);Reject(()=>admission.InspectDirect(2,sibling,()=>true,descriptor.Id),"cache_dm_authority_stale");
     var newAudience=DirectCacheAudience.Parse(admission.PrepareDirect(1,source,()=>true,2),1,source,2);Check(newAudience.Relationship!=audience.Relationship,"Re-friend reused historical authority");
     var current=DirectDescriptor(sender,1,2,newAudience,Payload(1));admission.AdmitDirect(1,source,()=>true,current.Wire,newAudience.Wire);Upload(cache,current,Payload(1));db.SetBlocked(2,1,true);Reject(()=>admission.InspectDirect(1,source,()=>true,current.Id),"cache_dm_authority_stale");
     db.SetBlocked(2,1,false);DFriend(db);
@@ -154,7 +213,7 @@ partial class AttachmentCacheRuntimeTest {
     DRevoke(db,sender,1,sourceKey);Reject(()=>admission.ReadDirect(2,sibling,()=>true,liveReader,0,65536),"cache_dm_authority_stale");Reject(()=>admission.InspectDirect(1,source,()=>true,revokedSourceObject.Id),"cache_dm_authority_stale");
     Check(cache.ChargedBytes<=options.MaximumBytes,"DM storage exceeded quota");
    }
-  }}finally{now=previous;}
+  }AuthorityFenceMutators(Path.Combine(root,"authority-fence"));}finally{now=previous;}
   Console.WriteLine("PASS typed DM scope, signed immutable offline audience, duplicate durable chunks, upload restart, independent recipient offsets, revocation, late-device/cross-account denial, unfriend/re-add and block invalidation; no plaintext completion claim");
  }
 }
