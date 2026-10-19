@@ -1,4 +1,4 @@
-param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b',[switch]$IndependentDeviceDelivery,[string]$CandidateScope='')
+param([string]$Version='4.0.2-dev.165',[string]$SourceCheckpoint='396cd9b',[switch]$IndependentDeviceDelivery,[string]$CandidateScope='',[switch]$PiDeployed)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -36,7 +36,7 @@ try {
     $scope=if($IndependentDeviceDelivery){'Phase 2 frozen verified DM targets and independent ACKs; groups unchanged'}else{'Phase 1 repairs only'}
     if($CandidateScope){$scope=$CandidateScope}
     $phase2=if($IndependentDeviceDelivery){'Authenticated snapshot contract; no fresh snapshot means canonical-only unresolved, not all-device Delivered'}else{'Blocked pending authenticated target-snapshot contract review'}
-    [ordered]@{version=$Version;sourceCheckpoint=$source;branch='codex/native-unicode-emoji';physicalAcceptance='Pending';scope=$scope;independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;phase2=$phase2;piDeployed=$false;phoneInstalled=$false;payload=$payload}|
+    [ordered]@{version=$Version;sourceCheckpoint=$source;branch='codex/native-unicode-emoji';physicalAcceptance='Pending';scope=$scope;independentDeviceDelivery=$IndependentDeviceDelivery.IsPresent;phase2=$phase2;piDeployed=$PiDeployed.IsPresent;phoneInstalled=$false;payload=$payload}|
         ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $stage 'candidate-manifest.json') -Encoding utf8
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$zip)
