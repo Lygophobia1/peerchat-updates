@@ -125,6 +125,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private var lastNativeReceiveNanos=0L
     private var lastNativeReceiveAttempt=0L
     private val mailboxPublication=MailboxPublicationGate({publishMessageProjection()})
+    private val pendingFriendRelayDemands=PendingFriendRelayDemands()
     private var mailboxAt=0L
     private val mailboxRetry=MailboxRetryCadence()
     private var mailboxExecution=MailboxExecution()
@@ -953,26 +954,38 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=localOfflineSnapshot(mutable.value,if(rememberedRetryEndpoint!=null)"Reconnecting; saved authorization retained" else "Saved authentication failed; sign in again").copy(localPeerId=saved.device)
         if(isRememberedCredentialRejected(failure)){remembered.clear();OpaquePushWake.refreshPeriodic(context)}
     }
-    override suspend fun send(peerId: String,text: String): String = withContext(Dispatchers.IO) {
+    override suspend fun send(peerId:String,text:String):String=withContext(Dispatchers.IO){
         val waiting=System.nanoTime()
-        synchronized(gate) {
+        synchronized(gate){ownerTimings.record(OwnerStage.SendWait,System.nanoTime()-waiting);queueTextLocked(peerId,text)}
+    }
+    override suspend fun sendToAccount(localAccount:Long,recipientAccount:Long,text:String):String=withContext(Dispatchers.IO){
+        val waiting=System.nanoTime()
+        synchronized(gate){
             ownerTimings.record(OwnerStage.SendWait,System.nanoTime()-waiting)
-            check(!stopped&&friends.any {it.peerId==peerId}&&(accounts?.session!=null||mutable.value.localHistoryReady))
-            val utf8=text.toByteArray(Charsets.UTF_8);require(utf8.size<=512*1024&&!text.contains('\u0000'))
-            val result=ownerTimings.measure(OwnerStage.LocalCommit){if(text.length>4096){check(authorizationSnapshotInstalled);checkNotNull(com.peerchat.android.TransferBridge.offerText(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
-                else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
-            val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
-            mailboxAt=0L
-            historyProjection.invalidate(friends.first{it.peerId==peerId})
-            // The durable command already succeeded. A later projection/network
-            // failure must not turn it into a failed Send or cause a second ID.
-            val committedProfile=profile
-            try{executor.execute{try{synchronized(gate){if(!stopped&&profile===committedProfile)publish()}}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
-            val friend=friends.first{it.peerId==peerId};val owner=accounts
-            // Best effort after native durable queueing. Not another retry policy.
-            try{executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
-            id
+            check(localAccount>0&&mutable.value.accountId==localAccount)
+            // Resolve the conversation's current device at durable admission,
+            // not from a UI snapshot captured before a contact refresh.
+            val friend=friends.single{it.accountId==recipientAccount}
+            queueTextLocked(friend.peerId,text)
         }
+    }
+    private fun queueTextLocked(peerId:String,text:String):String {
+        check(Thread.holdsLock(gate))
+        check(!stopped&&friends.any {it.peerId==peerId}&&(accounts?.session!=null||mutable.value.localHistoryReady))
+        val utf8=text.toByteArray(Charsets.UTF_8);require(utf8.size<=512*1024&&!text.contains('\u0000'))
+        val result=ownerTimings.measure(OwnerStage.LocalCommit){if(text.length>4096){check(authorizationSnapshotInstalled);checkNotNull(com.peerchat.android.TransferBridge.offerText(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
+            else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
+        val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
+        mailboxAt=0L
+        historyProjection.invalidate(friends.first{it.peerId==peerId})
+        // The durable command already succeeded. A later projection/network
+        // failure must not turn it into a failed Send or cause a second ID.
+        val committedProfile=profile
+        try{executor.execute{try{synchronized(gate){if(!stopped&&profile===committedProfile)publish()}}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
+        val friend=friends.first{it.peerId==peerId};val owner=accounts
+        // Best effort after native durable queueing. Not another retry policy.
+        try{executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
+        return id
     }
     override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
         // Read-only JNI lookup admits its own native instance lease and mutex.
@@ -1301,6 +1314,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        pendingFriendRelayDemands.clear()
         resumeRequest?.completion?.complete(false);resumeRequest=null
         bootstrapRequest?.completion?.complete(false);bootstrapRequest=null
         identityAt=0L;identityUnsupported=false;identityCursor=0;identityRegistration=null
@@ -1411,6 +1425,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val sent=List(outgoing.length()){i->val row=outgoing.getJSONObject(i);val id=row.getLong("accountId");val name=row.getString("username");require(id>0&&name.length<=64);AccountRequestSnapshot(id,name)}
         mutable.value=mutable.value.copy(incomingRequests=requests.toList(),outgoingRequests=sent)
         friends.filter{it.peerId !in it.revokedPeerIds}.forEach {friend->check(ReliableBridge.presence(native,friend.peerId.toByteArray(Charsets.US_ASCII),friend.online,generation,network)==0)}
+        drainFriendRelayDemands()
         val presenceLive=!livePeerWorkAllowed||events?.connected==true
         mutable.value=mutable.value.copy(serverPresenceLive=presenceLive,localHistoryReady=true,status=if(presenceLive)"Authenticated server presence available; message delivery requires a verified peer or mailbox ACK" else "Connecting authenticated server events; local history available")
         // Complete application projection as part of backend bootstrap, not a
@@ -1996,10 +2011,18 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }
                 if(!livePeerWorkAllowed||event.optString("purpose")!="friend"||event.optString("targetPublicIdentity")!=mutable.value.localPeerId)return
                 val peer=event.optString("publicIdentity")
-                val friend=friends.singleOrNull{it.accountId==event.optLong("accountId")&&it.peerId==peer} ?: run{contactsDirty=true;return}
-                check(ReliableBridge.demand(checkNotNull(profile).handle,friend.peerId.toByteArray(Charsets.US_ASCII))==0)
-                android.util.Log.i("PeerChatNetwork","route_demand=authorized_incoming")
+                pendingFriendRelayDemands.offer(event.optLong("accountId"),peer,System.nanoTime()/1_000_000)
+                if(!authorizationSnapshotInstalled||friends.none{it.accountId==event.optLong("accountId")&&it.peerId==peer})contactsDirty=true
+                drainFriendRelayDemands()
+                android.util.Log.i("PeerChatNetwork","route_demand=retained_hint")
             }
+        }
+    }
+    private fun drainFriendRelayDemands(){
+        if(!authorizationSnapshotInstalled||!livePeerWorkAllowed)return
+        pendingFriendRelayDemands.drain(friends,System.nanoTime()/1_000_000){peer->
+            check(ReliableBridge.demand(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII))==0)
+            android.util.Log.i("PeerChatNetwork","route_demand=authorized_incoming")
         }
     }
     override suspend fun verifyDevice(value:DeviceVerification,accept:Boolean)=withContext(Dispatchers.IO){synchronized(gate){

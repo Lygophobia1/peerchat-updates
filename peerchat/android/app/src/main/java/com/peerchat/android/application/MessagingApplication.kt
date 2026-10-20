@@ -24,6 +24,11 @@ interface MessagingApplication:AutoCloseable {
     suspend fun verifyDevice(value:DeviceVerification,accept:Boolean){error("Device verification unavailable")}
     suspend fun reenrollMailbox(value:MailboxReenrollment,accept:Boolean){error("Mailbox re-enrollment unavailable")}
     suspend fun send(peerId:String,text:String):String
+    suspend fun sendToAccount(localAccount:Long,recipientAccount:Long,text:String):String {
+        val current=state.value
+        check(localAccount>0&&current.accountId==localAccount)
+        return send(current.conversations.single{it.friend.accountId==recipientAccount}.friend.peerId,text)
+    }
     suspend fun prepareVoice(peerId:String,answer:VoiceCallTarget?=null):VoiceConsent = error("Voice unavailable")
     suspend fun prepareGroupVoice(group:String,room:String):VoiceConsent = error("Group voice unavailable")
     suspend fun activateVoice(token:String):VoiceSnapshot = error("Voice unavailable")

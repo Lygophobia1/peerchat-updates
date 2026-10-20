@@ -1024,7 +1024,8 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 }
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
                 if(action.text.isBlank()||action.text.toByteArray().size>512*1024)return
-                beginLocalSend("account:${c.friend.accountId}",action.text,{backend.send(c.friend.peerId,action.text)}){
+                val sendingAccount=current.accountId
+                beginLocalSend("account:${c.friend.accountId}",action.text,{backend.sendToAccount(sendingAccount,c.friend.accountId,action.text)}){
                         largeDrafts["account:${c.friend.accountId}"]=""
                         val accountKey=preferenceAccountKey();if(accountKey!=null){
                             val key=conversationPreferenceKey(accountKey,c.friend.accountId);draftSaves.remove(key)?.cancel()

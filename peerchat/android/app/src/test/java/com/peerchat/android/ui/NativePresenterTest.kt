@@ -32,7 +32,7 @@ class NativePresenterTest {
     }
     private class Commands:MessagingApplication {
         override val state=MutableStateFlow(MessagingSnapshot())
-        var reject=true;var sends=0;var failSend=false;var closed=false
+        var reject=true;var sends=0;var failSend=false;var closed=false;var sentPeer:String?=null
         var sendBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
         val sendBlockers=mutableMapOf<String,kotlinx.coroutines.CompletableDeferred<Unit>>()
         val sendIds=mutableMapOf<String,String>()
@@ -89,7 +89,7 @@ class NativePresenterTest {
                 ConversationSnapshot(FriendIdentity(8,"Sammy","b".repeat(64),true),ConnectionSnapshot(ready=true),emptyList())),serverPresenceLive=true)
             return AccountSession(19,"Jonah","test-only-token",true)
         }
-        override suspend fun send(peerId:String,text:String):String {sends++;(sendBlockers[text]?:sendBlocker)?.await();if(failSend)error("test failure");return sendIds[text]?:"c".repeat(32)}
+        override suspend fun send(peerId:String,text:String):String {sentPeer=peerId;sends++;(sendBlockers[text]?:sendBlocker)?.await();if(failSend)error("test failure");return sendIds[text]?:"c".repeat(32)}
         override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
         var compatibility:AttachmentCompatibilityChoice?=null
         var attachmentFailure=false
@@ -728,6 +728,23 @@ class NativePresenterTest {
         p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
         assertNull(p.state.value.account);assertNotNull(p.state.value.loginError)
         p.dispatch(UiAction.Explore);assertFalse(p.state.value.demo);assertTrue(p.state.value.conversations.isEmpty())
+    }
+    @Test fun textSendResolvesAccountAfterDeviceChangesBeforeCommandRuns() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.PreviewMessage("fixture"))
+        val row=commands.state.value.conversations.single()
+        commands.state.value=commands.state.value.copy(conversations=listOf(row.copy(friend=row.friend.copy(peerId="d".repeat(64)))))
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("d".repeat(64),commands.sentPeer);assertTrue(p.state.value.sendAccepted)
+    }
+    @Test fun queuedTextCannotCrossLocalAccountReplacement() {
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.PreviewMessage("fixture"))
+        commands.state.value=commands.state.value.copy(accountId=20)
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(0,commands.sends)
     }
     @Test fun sendDelegatesWithoutInventingHistoryOrDeliveryAndFailurePreservesDraftSignal() {
         val commands=Commands().apply {reject=false};val p=presenter(commands)

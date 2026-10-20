@@ -29,7 +29,7 @@ class LiveResumeLatencyTest {
         val first=MessagingBackend(context,"test-live-codex")
         val second=MessagingBackend(context,"test-live-codex1")
         var stage="retained_resume"
-        fun evidence(value:String)=instrumentation.sendStatus(2,android.os.Bundle().apply{putString("stream",value+"\n")})
+        fun evidence(value:String){ android.util.Log.i("PeerChatResumeProbe",value); instrumentation.sendStatus(2,android.os.Bundle().apply{putString("stream",value+"\n")}) }
         suspend fun await(label:String,ready:()->Boolean){
             stage=label;val start=System.nanoTime()
             while(!ready()){
@@ -53,11 +53,13 @@ class LiveResumeLatencyTest {
                         ?.let{owner.verifyDevice(it,true)}
                 }
             }
-            for(round in 0..3){
+            val rounds=(args.getString("probeRounds")?.toInt()?:4).also{require(it in 1..40)}
+            for(round in 0 until rounds){
                 val sender=if(round%2==0)first else second
                 val recipient=if(round%2==0)second else first
                 val expected=recipient.state.value.localPeerId
-                sender.setInUse(false);check(sender.awaitQuiescence(30000));sender.setInUse(true)
+                await("selected_test_device"){sender.state.value.conversations.any{it.friend.peerId==expected}}
+                if(args.getString("probeWarm")!="true"){sender.setInUse(false);check(sender.awaitQuiescence(30000));sender.setInUse(true)}
                 val resumeStart=System.nanoTime()
                 val resume=async(Dispatchers.IO){sender.restoreRemembered(endpoint)}
                 await("resume_started"){resume.isCompleted||sender.state.value.status=="Signing in with saved authorization"}
@@ -65,11 +67,13 @@ class LiveResumeLatencyTest {
                 stage="local_durable_queue"
                 evidence("RESUME_PROBE_SCOPE round=$round local_history=${sender.state.value.localHistoryReady} canonical_matches=${sender.state.value.conversations.any{it.friend.peerId==expected}} known_matches=${sender.state.value.conversations.any{expected in it.friend.knownPeerIds}}")
                 val sendStart=System.nanoTime()
-                val id=sender.send(expected,"PeerChat authorized resume latency probe "+java.util.UUID.randomUUID())
+                val body="PeerChat authorized resume latency probe "+java.util.UUID.randomUUID()
+                val id=if(args.getString("probeAccountSend")=="true")sender.sendToAccount(sender.state.value.accountId,recipient.state.value.accountId,body) else sender.send(expected,body)
                 val committed=System.nanoTime()
                 evidence("RESUME_PROBE_COMMIT round=$round id=$id overlap=$overlapped elapsed_ms=${(committed-sendStart)/1_000_000}")
                 check(resume.await())
                 val resumed=System.nanoTime()
+                evidence("RESUME_PROBE_RESUMED round=$round id=$id elapsed_ms=${(resumed-sendStart)/1_000_000}")
                 val receiptStart=System.nanoTime()
                 while(recipient.state.value.conversations.none{row->row.messages.any{it.id==id}}){
                     stage="durable_receive";check((System.nanoTime()-receiptStart)/1_000_000<60000)
