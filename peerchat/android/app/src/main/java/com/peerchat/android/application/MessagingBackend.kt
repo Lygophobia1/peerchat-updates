@@ -43,6 +43,12 @@ internal class AttachmentSelectionOwner<T> {
 class MessagingBackend(context: Context,private val profileName: String="default") : MessagingApplication {
     private val context=context.applicationContext
     private val gate=Any()
+    // Credential transactions acquire this BEFORE gate. Network resume may
+    // release gate, but must finish before explicit enrollment or revocation.
+    private val credentialGate=Any()
+    private data class ResumeRequest(val endpoint:ServerEndpoint,val generation:Long,val lifetime:Long,
+        val completion:java.util.concurrent.CompletableFuture<Boolean> = java.util.concurrent.CompletableFuture())
+    private var resumeRequest:ResumeRequest?=null
     private val ownerTimings=OwnerStageTimings(slow={stage,elapsed->android.util.Log.i("PeerChatWake","stage=owner_$stage elapsed_ms=$elapsed")})
     private val executor=Executors.newSingleThreadScheduledExecutor {task->Thread(task,"PeerChat application projection").apply {isDaemon=true}}
     private val metadataWork=CoroutineScope(SupervisorJob()+Dispatchers.IO)
@@ -635,15 +641,6 @@ class MessagingBackend(context: Context,private val profileName: String="default
             }
         })
     }
-    private fun scheduleRememberedBootstrapLocked(saved:RememberedLogin){
-        val request=beginBootstrapLocked(saved)
-        metadataWork.launch {
-            try{completeBootstrap(request)}catch(failure:Exception){
-                bootstrapScope(request).finish{failRememberedLocked(saved,failure)}
-                request.completion.complete(false)
-            }
-        }
-    }
     // Called only while holding gate, including cache failures after the exact
     // borrowed scope guard. A stale response cannot log out a replacement login.
     private fun handleTickFailure(failure:Exception){
@@ -661,7 +658,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             // One bounded refresh through the same coordinator; never
             // fight a superseded session or bypass server revocation.
             if(inUse&&failure.code=="session_invalid")try{
-                val saved=remembered.load();if(saved!=null&&!saved.revocationPending)restoreRememberedLocked(saved.endpoint)
+                val saved=remembered.load();if(saved!=null&&!saved.revocationPending)scheduleRememberedResumeLocked(saved.endpoint)
             }catch(_:Exception){/* Retain fail-closed offline state; lifecycle/wake may retry. */}
             return
         }
@@ -686,7 +683,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         authenticate(endpoint,username,password,remember,false)
     override suspend fun createAccountRemembered(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean):AccountSession =
         authenticate(endpoint,username,password,remember,true)
-    private suspend fun authenticate(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean,creating:Boolean):AccountSession = withContext(Dispatchers.IO) {
+    private suspend fun authenticate(endpoint:ServerEndpoint,username:String,password:String,remember:Boolean,creating:Boolean):AccountSession = withContext(Dispatchers.IO) { synchronized(credentialGate) {
         val startup=synchronized(gate) {
             check(!stopped&&!resetting&&accounts==null)
             resumeSuppressed=false
@@ -720,7 +717,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                     save={remembered.save(it)},
                     retirePasswordSession={generation++;clearAuthorization();accounts=null;index=null;friends=emptyList();connection.logout()},
                     resume={value->
-                        if(remember){check(restoreRememberedLocked(endpoint,false));checkNotNull(accounts?.session)} else {
+                        if(remember){check(restoreRememberedDuringLoginLocked(endpoint));checkNotNull(accounts?.session)} else {
                             val resumedConnection=ServerAccounts(endpoint,device,operations)
                             val resumed=resumedConnection.resume(value,key){checkNotNull(ProfileBridge.sign(native.handle,it))}
                             check(resumed.accountId==authenticated.accountId)
@@ -773,7 +770,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
             throw MessagingStartupFailure(failure)
         }
     }
+    }
     private fun revokeSaved(native:NativeProfile,key:ByteArray) {
+        check(Thread.holdsLock(credentialGate)&&Thread.holdsLock(gate))
         val saved=remembered.load() ?: run{OpaquePushWake.maintainPeriodic(context,false);return}
         check(saved.device==PeerIdentityFormat.peerId(key))
         remembered.save(saved.pendingRevocation())
@@ -784,23 +783,104 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     override suspend fun restoreRemembered(endpoint:ServerEndpoint):Boolean = withContext(Dispatchers.IO) {
         val start=System.nanoTime()
-        val captured=synchronized(gate){
+        val completion=synchronized(gate){
             android.util.Log.i("PeerChatWake","stage=bootstrap_gate_acquired elapsed_ms="+(System.nanoTime()-start)/1_000_000)
-            if(!restoreRememberedLocked(endpoint,false))null else if(authorizationSnapshotInstalled)null to false else {
-                val existing=bootstrapRequest
-                (existing?:beginBootstrapLocked(remembered.load())) to (existing==null)
+            scheduleRememberedResumeLocked(endpoint)
+        }
+        try{completion.get()}catch(failure:java.util.concurrent.ExecutionException){throw (failure.cause?:failure)}
+    }
+    /** All callers, including retry ticks, share one bounded resume. The worker
+     * owns credentialGate before borrowing gate, never the reverse. */
+    private fun scheduleRememberedResumeLocked(endpoint:ServerEndpoint):java.util.concurrent.CompletableFuture<Boolean> {
+        check(!stopped&&inUse)
+        if(resetting||resumeSuppressed)return java.util.concurrent.CompletableFuture.completedFuture(false)
+        accounts?.let{
+            check(it.endpoint==endpoint)
+            return bootstrapRequest?.completion ?: java.util.concurrent.CompletableFuture.completedFuture(authorizationSnapshotInstalled)
+        }
+        resumeRequest?.let{
+            if(it.generation==generation&&it.lifetime==bootstrapLifetime){check(it.endpoint==endpoint);return it.completion}
+            it.completion.complete(false);resumeRequest=null
+        }
+        val request=ResumeRequest(endpoint,generation,bootstrapLifetime)
+        resumeRequest=request
+        metadataWork.launch {
+            try {
+                val bootstrap=synchronized(credentialGate){resumeRememberedOutsideGate(request)}
+                if(bootstrap!=null){
+                    var installFailed=false
+                    try{
+                        completeBootstrap(bootstrap){installFailed=true}
+                        request.completion.complete(true)
+                    }catch(failure:Exception){
+                        val current=bootstrapScope(bootstrap).finish{failRememberedLocked(checkNotNull(bootstrap.saved),failure)}
+                        bootstrap.completion.complete(false)
+                        if(current||installFailed)request.completion.completeExceptionally(failure)
+                    }
+                }
+            }finally{
+                synchronized(gate){if(resumeRequest===request)resumeRequest=null}
+                request.completion.complete(false)
             }
         }
-        if(captured==null)false else {
-            val (request,owned)=captured
-            if(request==null)true else if(!owned)request.completion.get() else try {
-                completeBootstrap(request);true
-            }catch(failure:Exception){
-                val current=bootstrapScope(request).finish{failRememberedLocked(checkNotNull(request.saved),failure)}
-                request.completion.complete(false)
-                if(current)throw failure
-                false
+        return request.completion
+    }
+    private fun resumeRememberedOutsideGate(request:ResumeRequest):BootstrapRequest? {
+        val scope=ScopedBackendWork(gate){resumeRequest===request&&!stopped&&!resetting&&inUse&&!resumeSuppressed&&
+            accounts==null&&generation==request.generation&&bootstrapLifetime==request.lifetime}
+        var saved:RememberedLogin?=null
+        var connection:ServerAccounts?=null
+        try {
+            val prepared=scope.local {
+                operations.check()
+                restoreLocalLocked(request.endpoint)
+                val value=remembered.load()?:return@local null
+                saved=value
+                check(value.endpoint==request.endpoint){"Remembered credential belongs to different trusted server"}
+                val native=profile?:measured("profile_open"){NativeProfile(context,profileName)}.also{profile=it}
+                val key=measured("identity_read"){checkNotNull(ProfileBridge.publicKey(native.handle))}
+                check(value.device==PeerIdentityFormat.peerId(key))
+                mutable.value=mutable.value.copy(authenticated=false,serverPresenceLive=false,status="Signing in with saved authorization")
+                Triple(value,native,key)
+            }?:return null
+            val (value,native,key)=prepared
+            val owner=ServerAccounts(request.endpoint,value.device,operations).also{connection=it}
+            val sign:(ByteArray)->ByteArray={input->scope.local{
+                check(profile===native)
+                measured("identity_sign"){checkNotNull(ProfileBridge.sign(native.handle,input))}
+            }}
+            if(value.revocationPending){
+                scope.network{try{owner.revoke(value,key,sign)}catch(failure:ServerRejected){if(failure.code!="remember_revoked")throw failure}}
+                scope.local{remembered.clear();OpaquePushWake.maintainPeriodic(context,false)}
+                return null
             }
+            val authenticated=ownerTimings.measure(OwnerStage.RememberedResume){scope.network{owner.resume(value,key,sign)}}
+            return scope.local {
+                check(profile===native&&authenticated.accountId==value.accountId)
+                // Prepare storage before publishing the session; failures still
+                // belong to this exact pending credential transaction.
+                val metadata=FriendIdentityIndex(context,profileName,request.endpoint,authenticated.accountId)
+                accounts=owner;index=metadata;pushRegisteredToken=null;network++
+                mutable.value=mutable.value.copy(accountId=authenticated.accountId,username=authenticated.username,
+                    localPeerId=value.device,authenticated=true,status="Authenticated; refreshing contacts")
+                rememberedRetryEndpoint=null;rememberedRetryDelay=1000
+                beginBootstrapLocked(value).also{resumeRequest=null}
+            }
+        }catch(_:ScopedBackendWork.Superseded){
+            // Do not log out a stale bound session: logout may revoke newer
+            // remembered authority. A replacement owns all publication/cleanup.
+            return null
+        }catch(failure:Exception){
+            scope.finish{
+                // Detach before fail-closed cleanup completes cancelled work.
+                // Preserve the original TLS/auth error for the awaiting UI.
+                resumeRequest=null
+                saved?.let{failRememberedLocked(it,failure)}
+                request.completion.completeExceptionally(failure)
+            }
+            return null
+        }finally{
+            synchronized(gate){if(accounts!==connection)connection?.closeRpc()}
         }
     }
     override suspend fun restoreLocalHistory(endpoint:ServerEndpoint):Boolean=withContext(Dispatchers.IO){synchronized(gate){
@@ -833,7 +913,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         android.util.Log.i("PeerChatWake","stage=local_history_projected contacts=${friends.size}")
         return true
     }
-    private fun restoreRememberedLocked(endpoint:ServerEndpoint,asyncBootstrap:Boolean=true):Boolean {
+    private fun restoreRememberedDuringLoginLocked(endpoint:ServerEndpoint):Boolean {
+        check(Thread.holdsLock(credentialGate)&&Thread.holdsLock(gate))
         check(!stopped&&inUse)
         if(resetting||resumeSuppressed)return false
         operations.check()
@@ -853,7 +934,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             accounts=connection;index=FriendIdentityIndex(context,profileName,endpoint,authenticated.accountId);pushRegisteredToken=null;network++
             mutable.value=mutable.value.copy(status="Authenticated; refreshing contacts")
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000
-            if(asyncBootstrap)scheduleRememberedBootstrapLocked(saved)
+
             return true
         }catch(failure:Exception){
             failRememberedLocked(saved,failure)
@@ -1220,6 +1301,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         refresh();publish()
     }}
     private fun clearAuthorization() {
+        resumeRequest?.completion?.complete(false);resumeRequest=null
         bootstrapRequest?.completion?.complete(false);bootstrapRequest=null
         identityAt=0L;identityUnsupported=false;identityCursor=0;identityRegistration=null
         stopGroupVoice();groupVoiceRooms.reset();groupVoiceSnapshotAt=0L
@@ -1268,7 +1350,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             android.util.Log.i("PeerChatNetwork","event=session_reset result=disconnected generation=$generation")
         }}}finally {resetting=false;operations.configure(inUse&&!stopped,operationDeadline)}
     }
-    override suspend fun signOut():Unit = withContext(Dispatchers.IO) {
+    override suspend fun signOut():Unit = withContext(Dispatchers.IO) { synchronized(credentialGate) {
         synchronized(gate) {
             OpaquePushWake.maintainPeriodic(context,false)
             rememberedRetryEndpoint=null;rememberedRetryDelay=1000
@@ -1280,6 +1362,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             finally {groupExecution.reset();mutable.value=MessagingSnapshot(localPeerId=mutable.value.localPeerId)}
             Unit
         }
+    }
     }
     private fun refresh(bootstrap:Boolean=true)=ownerTimings.measure(OwnerStage.Contacts){refreshLocked(bootstrap)}
     private fun refreshLocked(bootstrap:Boolean) {
@@ -1464,7 +1547,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
         val now=System.nanoTime()/1_000_000
         if(accounts?.session==null) {
             rememberedRetryEndpoint?.let {endpoint->if(now>=rememberedRetryAt) {
-                try {restoreRememberedLocked(endpoint)}catch(_:Exception){/* Restore classifies and schedules only transient failure. */}
+                try {scheduleRememberedResumeLocked(endpoint)}catch(_:Exception){/* Restore classifies and schedules only transient failure. */}
             }}
             return
         }

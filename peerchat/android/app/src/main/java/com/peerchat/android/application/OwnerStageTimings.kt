@@ -2,7 +2,7 @@ package com.peerchat.android.application
 
 /** Bounded process-local timing diagnostics. No identities, response bodies or
  * exception messages; measurements never authorize or retry an operation. */
-internal enum class OwnerStage { GateWait,Tick,Contacts,ContactNetwork,ContactApply,Groups,GroupNetwork,GroupApply,Mailbox,Eligibility,Archive,NativeRelay,Projection,LocalPage,LocalIndex,ProfileOpen,SendWait,LocalCommit,UiLocalListFrame,UiChatFrame,UiSendFrame,UiDurableReturn }
+internal enum class OwnerStage { GateWait,RememberedResume,Tick,Contacts,ContactNetwork,ContactApply,Groups,GroupNetwork,GroupApply,Mailbox,Eligibility,Archive,NativeRelay,Projection,LocalPage,LocalIndex,ProfileOpen,SendWait,LocalCommit,UiLocalListFrame,UiChatFrame,UiSendFrame,UiDurableReturn }
 internal class OwnerStageTimings(private val clock:()->Long=System::nanoTime,
     private val slow:(String,Long)->Unit={_,_->}) {
     private data class Cost(var calls:Long=0,var last:Long=0,var maximum:Long=0,var failures:Long=0)
