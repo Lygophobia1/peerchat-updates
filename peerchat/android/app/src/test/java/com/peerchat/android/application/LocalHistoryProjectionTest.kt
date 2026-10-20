@@ -42,6 +42,30 @@ class LocalHistoryProjectionTest {
         assertEquals(listOf(2L,1L),reads)
         assertFalse(cache.hasPending(listOf(first,sender)))
     }
+    @Test fun exactNativeLiveRowsUpdateCleanPagesWithoutReadingHistoricalRecords(){
+        val cache=LocalHistoryProjection();val f=friend(1)
+        val queued=MessageSnapshot("c".repeat(32),"b".repeat(64),f.peerId,1,1,1,0,"fixture")
+        cache.put(f,listOf(queued),0)
+        val nativeAck=queued.copy(delivery=2)
+        assertTrue(cache.applyNativeMessage(f,nativeAck,1))
+        val incoming=MessageSnapshot("d".repeat(32),f.peerId,"b".repeat(64),2,2,2,2,"reply")
+        assertTrue(cache.applyNativeMessage(f,incoming,2))
+        cache.refreshOne(listOf(f),3){fail("Live row caused full history reread");emptyList()}
+        assertEquals(listOf(nativeAck,incoming),cache.rows(f))
+        var reconciled=false;cache.refreshOne(listOf(f),60_000){reconciled=true;listOf(nativeAck,incoming)}
+        assertTrue("Live updates postponed full reconciliation",reconciled)
+    }
+    @Test fun liveRowCannotClearUnrelatedDirtyHistoryOrCrossDeviceScope(){
+        val cache=LocalHistoryProjection();val f=friend(1)
+        val row=MessageSnapshot("c".repeat(32),f.peerId,"b".repeat(64),1,1,1,2,"fixture")
+        assertFalse(cache.applyNativeMessage(f,row,0))
+        cache.put(f,emptyList(),0);cache.invalidate(f)
+        assertFalse(cache.applyNativeMessage(f,row,1));assertTrue(cache.hasPending(listOf(f)))
+        cache.put(f,emptyList(),2)
+        assertFalse(cache.applyNativeMessage(f,row.copy(senderDevice="c".repeat(64)),3))
+        assertFalse(cache.applyNativeMessage(f.copy(knownPeerIds=listOf(f.peerId,"d".repeat(64))),row,3))
+        assertTrue(cache.rows(f).isEmpty())
+    }
     @Test fun verifiedReceiptInvalidatesOnlyTheCachedMessageOwner(){
         val cache=LocalHistoryProjection();val first=friend(1);val recipient=friend(2)
         val id="c".repeat(32)

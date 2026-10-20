@@ -35,6 +35,17 @@ internal class LocalHistoryProjection {
         if(friend.accountId !in pages&&pages.size>=128)pages.remove(pages.keys.first())
         pages[friend.accountId]=Page(friend.knownPeerIds.toList(),rows.toList(),now);dirty.remove(friend.accountId);urgent.remove(friend.accountId)
     }
+    /** Merge only an exact native durable row into an already complete page.
+     * Dirty/missing/device-changed pages still require the normal bounded read. */
+    @Synchronized fun applyNativeMessage(friend:FriendIdentity,row:MessageSnapshot,now:Long):Boolean {
+        val page=pages[friend.accountId]?:return false
+        if(page.devices!=friend.knownPeerIds||friend.accountId in dirty||
+            row.senderDevice !in friend.knownPeerIds&&row.recipientDevice !in friend.knownPeerIds)return false
+        val rows=chronologicalMessages(page.rows.filter{it.id!=row.id}+row).takeLast(8)
+        // Incremental events must not postpone the periodic full reconciliation.
+        pages[friend.accountId]=Page(page.devices,rows,minOf(page.at,now))
+        return true
+    }
     fun refreshOne(friends:List<FriendIdentity>,now:Long,read:(FriendIdentity)->List<MessageSnapshot>) {
         val next=synchronized(this){
             val active=friends.map{it.accountId}.toSet();pages.keys.retainAll(active);dirty.retainAll(active);urgent.retainAll(active)

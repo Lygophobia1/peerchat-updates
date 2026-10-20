@@ -105,6 +105,8 @@ public:
     // False means an identical ID/payload is already durable; mismatched reuse throws.
     bool append(const std::string& conversation, const StoredMessage& message);
     std::optional<StoredMessage> message(const std::string& messageId);
+    // Exact durable row plus the same opaque local cursor exposed by history().
+    std::optional<StoredMessage> historyMessage(const std::string& messageId);
     std::optional<DeliveryTargetManifest> deliveryTargets(const std::string& messageId);
     std::optional<DeliveryTargetRetry> targetRetry(const std::string& messageId,const std::string& device);
     // Called only after DeliveryManager validates current archive authorization

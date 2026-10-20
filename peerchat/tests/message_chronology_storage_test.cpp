@@ -26,10 +26,16 @@ int main(){try{
         expected=ids(all);latest=all.back();early=all.front();
         auto first=store.history(peer,8);const auto reads=records->reads;
         require(ids(store.history(peer,8))==ids(first)&&records->reads-reads==8,"Warm history decrypted the whole conversation");
+        const auto exactReads=records->reads;auto exact=store.historyMessage(first.front().id);
+        require(exact&&exact->sequence==first.front().sequence&&exact->text==first.front().text&&exact->delivery==first.front().delivery,"Exact history row differs from page");
+        require(records->reads-exactReads==1,"Exact history projection decrypted unrelated messages");
+        require(!store.historyMessage(std::string(32,'f')),"Missing exact history row was fabricated");
         auto second=store.history(peer,8,first.front().sequence);require(second.size()==8&&second.back().utcMilliseconds==1023,"Opaque cursor compared arrival positions");
         // A late old message gets the newest rowid and belongs on the oldest page.
         StoredMessage late{Storage::newMessageId(),peer,profile.peerId,L"late fixture",900,Delivery::Delivered,0,999};store.append(peer,late);
+        const auto lateReads=records->reads;
         require(ids(store.history(peer,8))==ids(first),"Late old arrival displaced newest preview/page");
+        require(records->reads-lateReads==9,"Live append rebuilt the entire protected ordering cache");
         require(store.history(peer).front().id==late.id,"Late old message was not merged chronologically");
         expected.insert(expected.begin(),late.id);
         // Equal timestamps use sender then ID, independently of arrival/logical.
@@ -44,7 +50,16 @@ int main(){try{
         require(beforeCross.size()>=15&&beforeCross.back().utcMilliseconds<=1015,"Cross-device anchor lost earlier history");
         // A second connection inserts a new item while the first cache is warm.
         Storage writer(root.wstring());StoredMessage external{Storage::newMessageId(),peer,profile.peerId,L"external live fixture",2000,Delivery::Delivered,0,1};writer.append(peer,external);
+        const auto externalReads=records->reads;
         require(store.history(peer,1).front().id==external.id,"External append did not invalidate ordering cache");expected.push_back(external.id);
+        require(records->reads-externalReads==2,"External append rebuilt the whole ordering cache");
+        // Delete plus multiple appends must not masquerade as an append-only
+        // delta, even when the resulting count is greater than the cached count.
+        writer.eraseHistory(other);
+        StoredMessage replacement=cross;replacement.id=Storage::newMessageId();writer.append(other,replacement);
+        StoredMessage replacement2=replacement;replacement2.id=Storage::newMessageId();writer.append(other,replacement2);
+        auto replaced=store.history(other);
+        require(replaced.size()==2&&std::none_of(replaced.begin(),replaced.end(),[&](const auto& row){return row.id==cross.id;}),"Append delta retained a deleted protected row");
         require(!store.append(peer,external),"History/live duplicate inserted twice");
         require(store.pending(peer).empty(),"History projection generated delivery work");
         const Blob tuning{1,2,3};require(store.transferTuning(profile.peerId).empty(),"Unexpected tuning fixture");

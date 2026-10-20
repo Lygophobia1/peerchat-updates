@@ -92,6 +92,13 @@ public:
         }
         return result;
     }
+    // Physical adapters use this readout to retire sockets whose native request
+    // was revoked while rendezvous was still waiting. It grants no TLS authority.
+    bool pending(session::TransportInstanceId id)const {
+        auto found=pending_.find(id.value);
+        return found!=pending_.end()&&allowed(found->second)&&found->second.route.networkRevision==network_&&
+            owner_.attachablePeer(epoch_,id)==std::optional<std::string>{continuity(found->second)};
+    }
     std::optional<Request> attach(session::TransportInstanceId id,const std::string& expected){
         auto found=pending_.find(id.value);
         if(found==pending_.end()||found->second.peer!=expected||!allowed(found->second)||

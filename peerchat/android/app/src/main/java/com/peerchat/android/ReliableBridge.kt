@@ -18,6 +18,7 @@ object ReliableBridge {
     // Local durable queue only. Does not authorize friendship or any route.
     external fun queueLocal(profile: Long, expectedPeer: ByteArray, utf8: ByteArray): ByteArray?
     external fun history(profile: Long, expectedPeer: ByteArray, beforeSequence: Long): ByteArray?
+    external fun message(profile:Long,expectedPeer:ByteArray,messageId:ByteArray):ByteArray?
     external fun state(profile: Long, expectedPeer: ByteArray): ByteArray?
     const val RECEIVE = 0
     const val OUTPUT = 1

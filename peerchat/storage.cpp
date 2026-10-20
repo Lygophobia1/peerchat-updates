@@ -543,6 +543,12 @@ std::optional<StoredMessage> Storage::message(const std::string& id){
     auto peer=query.text(0);Secret plain{impl_->protect(query.bytes(1),"PeerChat.v1/message/"+id+"/"+peer,false)};
     auto message=decodeMessage(plain.data);require(message.id==id,"Stored message ID mismatch");return message;
 }
+std::optional<StoredMessage> Storage::historyMessage(const std::string& id){
+    auto result=message(id);if(!result)return {};
+    Statement cursor(impl_->sql,"SELECT rowid FROM messages WHERE id=?");cursor.text(1,id);
+    require(cursor.row(),"History message disappeared");result->sequence=cursor.number(0);
+    require(result->sequence>0,"Invalid history message cursor");return result;
+}
 bool Storage::appendArchiveHistory(const std::string& conversation,const StoredMessage& original,
                                   const Blob& assertion,bool recipientAlias){
     require(identifier(conversation)&&identifier(original.id,32)&&identifier(original.sender)&&identifier(original.recipient)&&
@@ -985,6 +991,24 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
     }
     Statement revision(impl_->sql,"SELECT COALESCE(MAX(a.sequence),0),COUNT(*) FROM messages m JOIN message_archive_index a ON a.message_id=m.id WHERE m.peer=?");
     revision.text(1,conversation);require(revision.row(),"History revision unavailable");
+    // An append-only index lets a warm DM ordering cache authenticate only new
+    // rows. A deletion/replacement makes the delta count disagree and falls back
+    // to the full protected scan below. Never persist plaintext ordering keys.
+    auto cached=std::find_if(impl_->historyCaches.begin(),impl_->historyCaches.end(),[&](const auto& c){return c.conversation=="dm/"+conversation;});
+    const auto watermark=revision.number(0),count=revision.number(1);
+    if(cached!=impl_->historyCaches.end()&&watermark>cached->watermark&&count>cached->count&&count<=32768){
+        std::vector<Impl::HistoryKey> added;
+        Statement delta(impl_->sql,"SELECT m.rowid,m.id,m.b FROM messages m JOIN message_archive_index a ON a.message_id=m.id WHERE m.peer=? AND a.sequence>? AND a.sequence<=?");
+        delta.text(1,conversation);delta.number(2,cached->watermark);delta.number(3,watermark);
+        while(delta.row()){
+            auto id=delta.text(1);Secret plain{impl_->protect(delta.bytes(2),"PeerChat.v1/message/"+id+"/"+conversation,false)};auto m=decodeMessage(plain.data);
+            require(m.id==id,"Stored message ID mismatch");added.push_back({m.utcMilliseconds,m.sender,m.id,{},delta.number(0)});
+        }
+        if(static_cast<std::int64_t>(added.size())==count-cached->count){
+            cached->keys.insert(cached->keys.end(),added.begin(),added.end());std::sort(cached->keys.begin(),cached->keys.end());
+            cached->watermark=watermark;cached->count=count;
+        }
+    }
     auto keys=impl_->historyPageKeys("dm/"+conversation,revision.number(0),revision.number(1),limit,before,[&](const auto& accept){
         Statement rows(impl_->sql,"SELECT rowid,id,b FROM messages WHERE peer=?");rows.text(1,conversation);
         while(rows.row()){

@@ -1161,7 +1161,12 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         std::lock_guard<std::mutex> lock(instance->gate);const auto began=runtimeNow();const auto length=input?env->GetArrayLength(input):0;
         peerchat::portable::OperationTiming::Scope timing(operation==0?&instance->reliableReceiveTiming:operation==1?&instance->reliableOutputTiming:nullptr,waiting);
         if(!input||length>65536){instance->reliableExchangeFailure.record(operation,static_cast<std::uint64_t>(length),"jni_input","input_bound_rejected",0);return nullptr;}
-        auto found=instance->peers.find(static_cast<std::uint64_t>(token));if(found==instance->peers.end())return nullptr;
+        auto found=instance->peers.find(static_cast<std::uint64_t>(token));
+        if(found==instance->peers.end()){
+            if(operation==2&&length==0&&instance->relayRequests&&instance->relayRequests->pending({static_cast<std::uint64_t>(token)}))
+                return peerchat::platform::android::Context::input(env,peerchat::Blob{0,0});
+            return nullptr;
+        }
         auto& endpoint=*found->second;peerchat::Blob output;endpoint.tick(runtimeNow());
         instance->receivingTransferPeer.clear();instance->receivingTransferId.clear();
         try{
@@ -1450,6 +1455,25 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         peerchat::protocol::Writer record(peerchat::protocol::Text);record.number(history.size());
         for(const auto& message:history){record.string(message.id);messageRecord(record,message);}
         peerchat::delivery_status::append(record,peerchat::delivery_status::read(*instance->storage,instance->profile.peerId,history));
+        return peerchat::platform::android::Context::input(env,record.data);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+// Exact durable row projection for a live receive/ACK event. This is read-only
+// local history; target status is read from the same native owner as full pages.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_message(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jbyteArray messageId){
+    try{
+        if(!messageId||env->GetArrayLength(messageId)!=32)return nullptr;
+        auto peer=peerArgument(env,destination);auto bytes=peerchat::platform::android::Context::output(env,messageId);
+        std::string id(bytes.begin(),bytes.end());peerchat::protocol::check(peerchat::protocol::id(id,32));
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return nullptr;
+        std::vector<peerchat::StoredMessage> rows;
+        if(auto message=instance->storage->historyMessage(id)){
+            peerchat::protocol::check(message->sender==peer||message->recipient==peer);rows.push_back(std::move(*message));
+        }
+        peerchat::protocol::Writer record(peerchat::protocol::Text);record.number(rows.size());
+        for(const auto& message:rows){record.string(message.id);messageRecord(record,message);}
+        peerchat::delivery_status::append(record,peerchat::delivery_status::read(*instance->storage,instance->profile.peerId,rows));
         return peerchat::platform::android::Context::input(env,record.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }

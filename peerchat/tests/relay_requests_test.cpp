@@ -15,6 +15,7 @@ int main(){using namespace peerchat;try{
         owner.demandLiveRoute(bob,45000);
         auto first=requests.take(10,0,32);check(first.size()==1&&first[0].peer==bob,"manager relay request missing");
         check(requests.take(11,0,32).empty(),"duplicate pending request");
+        check(requests.pending(first[0].id),"valid waiting socket reported stale");
         check(!requests.attach(first[0].id,other),"wrong-device attachment accepted");
         check(requests.close(first[0].id,20,0,true),"failed rendezvous not retired");
         check(requests.presence(bob,true,1,1,21),"identical presence rejected");
@@ -23,11 +24,13 @@ int main(){using namespace peerchat;try{
         check(!requests.attach(first[0].id,bob),"stale attempt attached");
         check(requests.presence(bob,true,1,2,1021),"new network rejected");
         check(!requests.attach(retry[0].id,bob),"old network attached");
+        check(!requests.pending(retry[0].id),"old network waiting socket remained valid");
         check(!requests.presence(bob,true,1,1,1022),"stale network accepted");
         auto fresh=requests.take(1022,0,32);check(fresh.empty(),"stale route retirement skipped backoff");
         fresh=requests.take(2022,0,32);check(fresh.size()==1,"fresh network retry missing");
         auto attached=requests.attach(fresh[0].id,bob);check(attached&&attached->route.networkRevision==2,"attachment lost route binding");
         check(!requests.attach(fresh[0].id,bob),"repeated attachment accepted");
+        check(!requests.pending(fresh[0].id),"attached transport still reported as pending");
         requests.failed(*attached,2023,0,true);
         auto timed=requests.take(4023,0,32);check(timed.size()==1,"timeout fixture missing");
         check(requests.take(24024,0,32).empty(),"timeout did not schedule bounded owner backoff");
@@ -74,6 +77,17 @@ int main(){using namespace peerchat;try{
         requests.failed(retry[0],1021,0,true);
         authorized=false;check(requests.take(9999,0,32).empty(),"revoked archive request retried");
         check(!friends.contains(bob),"archive established friendship");
+    }
+    {
+        session::SessionTransportManager owner(alice,alice,{1},100,1000);
+        reliable::AuthenticatedFriendSnapshot friends;friends.replace(10,1,{{20,bob,{bob,other}}});
+        std::uint64_t next=1;portable::RelayRequests requests(owner,friends,{1},next);
+        check(requests.presence(bob,true,1,1,10),"stale waiting fixture presence");
+        owner.demandLiveRoute(bob,45000,10);auto first=requests.take(10,0,32);
+        check(first.size()==1&&requests.pending(first[0].id),"waiting fixture missing");
+        friends.replace(10,2,{{20,other,{bob,other}}});requests.revoke();
+        check(!requests.pending(first[0].id),"canonical replacement kept stale socket valid");
+        check(!requests.attach(first[0].id,bob),"revoked waiting request attached");
     }
     std::cout<<"PASS: 1000 manager-owned relay lifecycles plus archive nonfriend scope, authenticated zero-friend network, retry, revocation, idle demand and retirement. HOST ONLY\n";
     return 0;

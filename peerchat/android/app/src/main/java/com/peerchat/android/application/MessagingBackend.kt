@@ -65,6 +65,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     private val cacheLane=BackendWorkLane()
     private val archiveLane=BackendWorkLane()
     private val pushLane=BackendWorkLane()
+    private val sendHintLane=BackendWorkLane()
     private val identityLane=BackendWorkLane()
     private var identityAt=0L
     private var identityUnsupported=false
@@ -977,14 +978,21 @@ class MessagingBackend(context: Context,private val profileName: String="default
             else checkNotNull(ReliableBridge.queueLocal(checkNotNull(profile).handle,peerId.toByteArray(Charsets.US_ASCII),utf8))}
         val id=result.toString(Charsets.US_ASCII);check(id.matches(Regex("[0-9a-f]{32}")))
         mailboxAt=0L
-        historyProjection.invalidate(friends.first{it.peerId==peerId})
+        val friend=friends.first{it.peerId==peerId}
         // The durable command already succeeded. A later projection/network
         // failure must not turn it into a failed Send or cause a second ID.
         val committedProfile=profile
-        try{executor.execute{try{synchronized(gate){if(!stopped&&profile===committedProfile)publish()}}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
-        val friend=friends.first{it.peerId==peerId};val owner=accounts
+        try{executor.execute{try{synchronized(gate){if(!stopped&&profile===committedProfile){
+            friends.singleOrNull{it.accountId==friend.accountId}?.let{current->
+                refreshNativeMessage(checkNotNull(committedProfile).handle,peerId,id,current)
+            }
+            publish()
+        }}}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
+        val owner=accounts
         // Best effort after native durable queueing. Not another retry policy.
-        try{executor.execute{try{owner?.hint(friend.accountId,friend.peerId)}catch(_:Exception){}}}catch(_:java.util.concurrent.RejectedExecutionException){}
+        if(owner!=null)try{launchBackendWork(sendHintLane){scope->
+            try{scope.network{owner.hint(friend.accountId,friend.peerId)}}catch(_:Exception){/* Best effort wake only. */}
+        }}catch(_:Exception){/* A wake hint cannot fail the committed Send. */}
         return id
     }
     override suspend fun older(peerId: String,before: Long): List<MessageSnapshot> = withContext(Dispatchers.IO) {
@@ -1712,7 +1720,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 ownerTimings.measure(OwnerStage.Mailbox){measured("mailbox_service") {
                     execution.serviceScoped(scope,owner::mailbox,native,allowed,committed={ messageId,sender ->
                         val friend=friends.firstOrNull{sender in it.knownPeerIds}
-                        if(friend!=null)historyProjection.invalidateUrgent(friend)
+                        if(friend!=null)refreshNativeMessage(native,sender,messageId,friend)
                         else {historyProjection.invalidate();contactsDirty=true}
                         // Publish at the durable-import boundary. A later ACK,
                         // receipt lookup or outgoing failure cannot hide this row.
@@ -1845,9 +1853,9 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 relayFailureDiagnostics[attempt]=execution.diagnostics()
                 while(relayFailureDiagnostics.size>16)relayFailureDiagnostics.remove(relayFailureDiagnostics.keys.first())
                 groupCompletionObserved.remove(attempt);iterator.remove();projectionCadence.dirty();continue}
-            if(!execution.attached)continue // rendezvous is not yet a native TLS execution
             val status=ReliableBridge.exchange(native,attempt,ReliableBridge.STATUS,ByteArray(0))
             if(status==null||status[1].toInt()!=0){execution.close();iterator.remove();projectionCadence.dirty();continue}
+            if(!execution.attached)continue // Valid native request still waiting for rendezvous.
             if(checkGroupCompletion&&execution.groupScope!=null){
                 try{
                     if(groupExecution.controlSettled(native,mutable.value.accountId,generation,attempt)){
@@ -1862,14 +1870,16 @@ class MessagingBackend(context: Context,private val profileName: String="default
                 }catch(_:Exception){groupCompletionObserved.remove(attempt)}
             }
             drainNativeEvents({ReliableBridge.exchange(native,attempt,ReliableBridge.EVENT,ByteArray(0))}) { event ->
-                val record=NativeRecord(event,3);val kind=record.number();record.text();record.text();record.number()
+                val record=NativeRecord(event,3);val kind=record.number();record.text();val messageId=record.text();record.number()
                 if(kind in 0L..3L)projectionCadence.dirty()
                 if(kind==1L){execution.observedAuthenticatedPeer();android.util.Log.i("PeerChatWake","stage=peer_session_ready")}
                 if(kind==2L){
                     lastNativeReceiveNanos=System.nanoTime();lastNativeReceiveAttempt=attempt
                     android.util.Log.i("PeerChatWake","stage=native_history_received_ack_queued")
                 }
-                if(kind==2L||kind==3L)friends.filter{execution.requestPeerId in it.knownPeerIds}.forEach{historyProjection.invalidate(it)}
+                if(kind==2L||kind==3L)friends.filter{execution.requestPeerId in it.knownPeerIds}.forEach{friend->
+                    refreshNativeMessage(native,execution.requestPeerId,messageId,friend)
+                }
                 if(kind==3L)android.util.Log.i("PeerChatWake","stage=delivery_ack_received")
                 if(kind==0L) {
                     val accepted=ReliableBridge.exchange(native,attempt,ReliableBridge.INITIAL_AUTHENTICATED_FRIEND_PIN,ByteArray(0))
@@ -2020,7 +2030,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
     }
     private fun drainFriendRelayDemands(){
         if(!authorizationSnapshotInstalled||!livePeerWorkAllowed)return
-        pendingFriendRelayDemands.drain(friends,System.nanoTime()/1_000_000){peer->
+        pendingFriendRelayDemands.drain(friends,generation,System.nanoTime()/1_000_000){peer->
             check(ReliableBridge.demand(checkNotNull(profile).handle,peer.toByteArray(Charsets.US_ASCII))==0)
             android.util.Log.i("PeerChatNetwork","route_demand=authorized_incoming")
         }
@@ -2046,10 +2056,25 @@ class MessagingBackend(context: Context,private val profileName: String="default
         mutable.value=mutable.value.copy(status="Device explicitly verified; delivery awaits native acknowledgment")
         mailboxAt=0L;check(ReliableBridge.demand(native,value.presented.toByteArray(Charsets.US_ASCII))==0)
     }}
+    private fun refreshNativeMessage(native:Long,peer:String,id:String,friend:FriendIdentity){
+        val started=System.nanoTime()
+        val row=try{messageSnapshots(checkNotNull(ReliableBridge.message(native,peer.toByteArray(Charsets.US_ASCII),id.toByteArray(Charsets.US_ASCII)))).singleOrNull()}catch(_:Exception){null}
+        val applied=row!=null&&row.id==id&&historyProjection.applyNativeMessage(friend,row,System.nanoTime()/1_000_000)
+        if(!applied)historyProjection.invalidateUrgent(friend)
+        android.util.Log.i("PeerChatWake","stage=live_row_projection result=${if(applied)"incremental" else if(row==null)"native_row_unavailable" else "full_page_required"} elapsed_ms=${(System.nanoTime()-started)/1_000_000}")
+    }
     private fun publishIfDue(){if(projectionCadence.due(System.nanoTime()/1_000_000))publish()}
     private fun publishMailboxChanges(execution:MailboxExecution){
         if(!execution.projectionChanged)return
-        if(!historyProjection.invalidateMessages(execution.changedMessageIds))historyProjection.invalidate()
+        var matched=false
+        val native=checkNotNull(profile).handle
+        for(friend in friends){
+            for(row in historyProjection.rows(friend).filter{it.id in execution.changedMessageIds}){
+                val peer=if(row.senderDevice in friend.knownPeerIds)row.senderDevice else row.recipientDevice
+                refreshNativeMessage(native,peer,row.id,friend);matched=true
+            }
+        }
+        if(!matched)historyProjection.invalidate()
         publishMessageProjection()
     }
     /** Commit-to-ACK publication must not enumerate transfers, all connections,
@@ -2073,7 +2098,8 @@ class MessagingBackend(context: Context,private val profileName: String="default
         // This diagnostic enumerates/decrypts retained delivery targets. It is
         // not a UI delivery-state source and must not run inside every durable
         // import/ACK publication or compete with active voice and transfers.
-        if(includeDiagnostics&&diagnosticNow>=nativeDiagnosticAt&&!mailboxLane.busy()&&!mutable.value.voice.active&&
+        if(includeDiagnostics&&authorizationSnapshotInstalled&&resumeRequest==null&&bootstrapRequest==null&&executions.isEmpty()&&
+            diagnosticNow>=nativeDiagnosticAt&&!mailboxLane.busy()&&!mutable.value.voice.active&&
             attachmentProjection.none{it.active}){
             nativeDiagnosticAt=diagnosticNow+60000
             nativeDiagnostic=profile?.let{com.peerchat.android.MailboxBridge.registrationDiagnostic(it.handle)?.toString(Charsets.US_ASCII)}?:"native_registration_stage=unavailable"
@@ -2088,7 +2114,7 @@ class MessagingBackend(context: Context,private val profileName: String="default
             appendLine(eligibilitySnapshots.diagnostic)
             appendLine(ownerTimings.summary())
             listOf("contacts" to contactLane,"groups" to groupLane,"eligibility" to eligibilityLane,
-                "mailbox" to mailboxLane,"cache" to cacheLane,"archive" to archiveLane).forEach{(name,lane)->appendLine("backend_lane=$name ${lane.diagnostic()}")}
+                "mailbox" to mailboxLane,"cache" to cacheLane,"archive" to archiveLane,"send_hint" to sendHintLane).forEach{(name,lane)->appendLine("backend_lane=$name ${lane.diagnostic()}")}
             appendLine("event_session_connected=${events?.connected==true} retry_at_monotonic_ms=$eventRetryAt retry_delay_ms=$eventRetryDelay next_mailbox_monotonic_ms=$mailboxAt next_archive_monotonic_ms=$archiveRetryAt")
             appendLine(accounts?.diagnostics() ?: "network_history=not_retained_for_closed_session")
             appendLine("own_device_inventory=$ownDeviceStatus revision=${mutable.value.ownDevices?.revision?:0} devices=${mutable.value.ownDevices?.devices?.size?:0}")

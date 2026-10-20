@@ -29,6 +29,7 @@ class LiveResumeLatencyTest {
         val first=MessagingBackend(context,"test-live-codex")
         val second=MessagingBackend(context,"test-live-codex1")
         var stage="retained_resume"
+        var lastSent:Triple<MessagingBackend,String,String>?=null
         fun evidence(value:String){ android.util.Log.i("PeerChatResumeProbe",value); instrumentation.sendStatus(2,android.os.Bundle().apply{putString("stream",value+"\n")}) }
         suspend fun await(label:String,ready:()->Boolean){
             stage=label;val start=System.nanoTime()
@@ -61,7 +62,7 @@ class LiveResumeLatencyTest {
                 await("selected_test_device"){sender.state.value.conversations.any{it.friend.peerId==expected}}
                 if(args.getString("probeWarm")!="true"){sender.setInUse(false);check(sender.awaitQuiescence(30000));sender.setInUse(true)}
                 val resumeStart=System.nanoTime()
-                val resume=async(Dispatchers.IO){sender.restoreRemembered(endpoint)}
+                val resume=async(Dispatchers.IO){if(args.getString("probeWarm")=="true")true else sender.restoreRemembered(endpoint)}
                 await("resume_started"){resume.isCompleted||sender.state.value.status=="Signing in with saved authorization"}
                 val overlapped=!resume.isCompleted
                 stage="local_durable_queue"
@@ -90,10 +91,20 @@ class LiveResumeLatencyTest {
                         message.deliveryTargets==null&&message.recipientDevice==expected&&message.delivery==2L)}}
                 }
                 val acknowledged=System.nanoTime()
+                lastSent=Triple(sender,expected,id)
                 val result=sender.state.value.conversations.flatMap{it.messages}.single{it.id==id}
                 evidence("RESUME_PROBE_ACK round=$round id=$id kind=${if(result.deliveryTargets==null)"canonical_device_only" else "target_manifest_device"} selection_unresolved=${result.deliveryTargets?.selectionUnresolved?:true}")
                 evidence("RESUME_PROBE round=$round id=$id overlap=$overlapped local_commit_ms=${(committed-sendStart)/1_000_000} resume_ms=${(resumed-resumeStart)/1_000_000} receive_from_send_ms=${(received-sendStart)/1_000_000} ack_from_send_ms=${(acknowledged-sendStart)/1_000_000}")
             }
+            stage="exact_native_row_contract"
+            val (lastOwner,lastPeer,lastId)=checkNotNull(lastSent)
+            val native=MessagingBackend::class.java.getDeclaredField("profile").also{it.isAccessible=true}.get(lastOwner) as NativeProfile
+            val exact=com.peerchat.android.application.messageSnapshots(checkNotNull(ReliableBridge.message(native.handle,lastPeer.toByteArray(Charsets.US_ASCII),lastId.toByteArray(Charsets.US_ASCII)))).single()
+            val page=lastOwner.older(lastPeer,Long.MAX_VALUE).single{it.id==lastId}
+            check(exact.id==page.id&&exact.sequence==page.sequence&&exact.text==page.text)
+            check(ReliableBridge.message(native.handle,"f".repeat(64).toByteArray(Charsets.US_ASCII),lastId.toByteArray(Charsets.US_ASCII))==null)
+            check(ReliableBridge.message(native.handle,lastPeer.toByteArray(Charsets.US_ASCII),ByteArray(31))==null)
+            evidence("RESUME_PROBE_NATIVE_ROW exact_cursor_and_content=true wrong_peer_rejected=true malformed_id_rejected=true")
             evidence("RESUME_PROBE_RESULT retained Android owners passed; selected-device ACK only; emulator observations, not physical phone or Windows interoperability")
         }catch(failure:Throwable){
             evidence("RESUME_PROBE_FAILURE stage=$stage type=${failure.javaClass.simpleName} category=${when(failure.message){"Check failed."->"admission_check";"Required value was null."->"native_null";"bounded_stage_timeout"->"timeout";else->"redacted"}}")
