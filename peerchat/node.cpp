@@ -933,7 +933,7 @@ bool configureVoiceMedia(std::uint64_t generation){if(!mediaIce||!mediaIce->vali
     void outbox(Connection& c){
         if(!c.online||c.dead||!c.authorization.permitsDirectMessage()||!deliveries||!sessionTransports->active({c.attemptId}))return;
         session::TransportInstanceId transport{c.attemptId};
-        for(const auto& m:deliveries->pendingMessages(c.peerId,100)) {
+        for(const auto& m:deliveries->pendingTransportMessages(c.peerId,transport)) {
             if(deliveries->wasSubmittedMessage(c.peerId,m.id,transport))continue;
             if(deliveries->inFlightCount(transport)>=16||c.output.size()-c.sent>MaxQueue/2)break;
             if(!deliveries->submittedMessage(c.peerId,m.id,transport,nowMilliseconds()))continue;

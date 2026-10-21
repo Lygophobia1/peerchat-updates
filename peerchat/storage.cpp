@@ -843,7 +843,7 @@ void Storage::mailboxStored(const std::string& id,const std::string& device,cons
 }
 std::vector<StoredMessage> Storage::pendingMailboxUploads(int limit){
     require(limit>0&&limit<=64,"Invalid mailbox upload page");
-    Statement query(impl_->sql,"SELECT m.id,m.peer,m.b FROM messages m WHERE EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18))) ORDER BY m.rowid LIMIT ?");query.number(1,limit);
+    Statement query(impl_->sql,"SELECT m.id,m.peer,m.b FROM messages m WHERE EXISTS(SELECT 1 FROM objects e WHERE e.k>='mailbox-envelope/'||m.id||'/' AND e.k<'mailbox-envelope/'||m.id||'0' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18))) ORDER BY m.rowid LIMIT ?");query.number(1,limit);
     std::vector<StoredMessage> result;
     while(query.row()){const auto id=query.text(0),peer=query.text(1);Secret plain{impl_->protect(query.bytes(2),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox upload identity mismatch");result.push_back(std::move(m));}
     return result;
@@ -855,13 +855,15 @@ bool Storage::mailboxUploadAccepted(const std::string& id,const std::string& dev
 }
 std::vector<StoredMessage> Storage::mailboxCandidates(std::int64_t afterSequence,int limit){
     require(afterSequence>=0&&limit>0&&limit<=64,"Invalid mailbox candidate page");
-    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND ((EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id) AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k LIKE 'mailbox-uploaded/'||m.id||'/%')) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id) OR EXISTS(SELECT 1 FROM objects e WHERE e.k LIKE 'mailbox-envelope/'||m.id||'/%' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
+    // Exact identifier prefixes use the binary primary-key index. A correlated
+    // LIKE expression scans every object for every retained message.
+    Statement query(impl_->sql,"SELECT m.rowid,m.id,m.peer,m.b FROM messages m WHERE m.rowid>? AND ((EXISTS(SELECT 1 FROM outbox o WHERE o.id=m.id) AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id) AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k>='mailbox-uploaded/'||m.id||'/' AND a.k<'mailbox-uploaded/'||m.id||'0')) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id) OR EXISTS(SELECT 1 FROM objects e WHERE e.k>='mailbox-envelope/'||m.id||'/' AND e.k<'mailbox-envelope/'||m.id||'0' AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)))) ORDER BY m.rowid LIMIT ?");
     query.number(1,afterSequence);query.number(2,limit);std::vector<StoredMessage> result;
     while(query.row()){const auto sequence=query.number(0);auto id=query.text(1),peer=query.text(2);Secret plain{impl_->protect(query.bytes(3),"PeerChat.v1/message/"+id+"/"+peer,false)};auto m=decodeMessage(plain.data);require(m.id==id&&m.recipient==peer,"Mailbox candidate identity mismatch");m.sequence=sequence;result.push_back(std::move(m));}
     return result;
 }
 bool Storage::mailboxHasPendingEnvelope(const std::string& id){
-    require(identifier(id,32),"Invalid pending envelope identity");Statement query(impl_->sql,"SELECT 1 FROM objects e WHERE e.k LIKE ? AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)) LIMIT 1");query.text(1,"mailbox-envelope/"+id+"/%");return query.row();
+    require(identifier(id,32),"Invalid pending envelope identity");Statement query(impl_->sql,"SELECT 1 FROM objects e WHERE e.k>=? AND e.k<? AND NOT EXISTS(SELECT 1 FROM objects a WHERE a.k='mailbox-uploaded/'||substr(e.k,18)) LIMIT 1");query.text(1,"mailbox-envelope/"+id+"/");query.text(2,"mailbox-envelope/"+id+"0");return query.row();
 }
 void Storage::mailboxIssue(const std::string& id,const std::string& device,const std::string& reason){
     require(identifier(id,32)&&identifier(device)&&reason.size()<=128&&std::all_of(reason.begin(),reason.end(),[](char c){return (c>='a'&&c<='z')||c=='_';}),"Invalid mailbox issue");
@@ -1030,9 +1032,14 @@ void Storage::eraseHistory(const std::string& conversation) {
     Statement removeMessages(impl_->sql,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();
     transaction.commit();
 }
-std::vector<StoredMessage> Storage::pending(const std::string& conversation,int limit) {
-    require(identifier(conversation)&&limit>0&&limit<=1000,"Invalid outbox page request");
-    Statement s(impl_->sql,"SELECT m.id,m.peer,m.b FROM outbox o JOIN messages m ON o.id=m.id WHERE (o.peer=? AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id)) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id AND t.device=?) ORDER BY m.rowid LIMIT ?");s.text(1,conversation);s.text(2,conversation);s.number(3,limit);
+std::vector<StoredMessage> Storage::pending(const std::string& conversation,int limit,std::int64_t afterSequence,bool newest,const std::vector<std::string>& excluded) {
+    require(identifier(conversation)&&limit>0&&limit<=1000&&afterSequence>=0&&excluded.size()<=16,"Invalid outbox page request");
+    std::string sql="SELECT m.id,m.peer,m.b,m.rowid FROM outbox o JOIN messages m ON o.id=m.id WHERE ((o.peer=? AND NOT EXISTS(SELECT 1 FROM objects t WHERE t.k='delivery-targets/v1/'||m.id)) OR EXISTS(SELECT 1 FROM delivery_target_outbox t WHERE t.id=m.id AND t.device=?)) AND m.rowid>?";
+    if(!excluded.empty()){sql+=" AND m.id NOT IN (";for(size_t i=0;i<excluded.size();++i){require(identifier(excluded[i],32),"Invalid excluded outbox identity");sql+=i?",?":"?";}sql+=")";}
+    sql+=newest?" ORDER BY m.rowid DESC LIMIT ?":" ORDER BY m.rowid LIMIT ?";
+    Statement s(impl_->sql,sql);s.text(1,conversation);s.text(2,conversation);s.number(3,afterSequence);int parameter=4;
+    for(const auto& id:excluded)s.text(parameter++,id);
+    s.number(parameter,limit);
     std::vector<StoredMessage> result;
     while(s.row()){
         auto id=s.text(0),canonical=s.text(1);Secret plain{impl_->protect(s.bytes(2),"PeerChat.v1/message/"+id+"/"+canonical,false)};
@@ -1042,7 +1049,7 @@ std::vector<StoredMessage> Storage::pending(const std::string& conversation,int 
             require(target!=manifest->targets.end()&&target->status==DeliveryTargetStatus::Pending,"Target outbox index mismatch");
             m.delivery=mailboxUploadAccepted(id,conversation)?Delivery::Stored:Delivery::Queued;
         }
-        result.push_back(std::move(m));
+        m.sequence=s.number(3);result.push_back(std::move(m));
     }
     return result;
 }

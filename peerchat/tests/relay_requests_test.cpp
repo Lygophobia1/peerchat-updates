@@ -1,4 +1,5 @@
 #include "../portable/relay_requests.hpp"
+#include "../direct_transport_adapter.hpp"
 #include <iostream>
 int main(){using namespace peerchat;try{
     auto check=[](bool value,const char* reason){if(!value)throw std::runtime_error(reason);};
@@ -88,6 +89,30 @@ int main(){using namespace peerchat;try{
         friends.replace(10,2,{{20,other,{bob,other}}});requests.revoke();
         check(!requests.pending(first[0].id),"canonical replacement kept stale socket valid");
         check(!requests.attach(first[0].id,bob),"revoked waiting request attached");
+    }
+    {
+        session::SessionTransportManager owner(alice,alice,{1},5000,300000);
+        reliable::AuthenticatedFriendSnapshot friends;friends.replace(10,1,{{20,bob,{bob}}});
+        std::uint64_t next=1;portable::RelayRequests requests(owner,friends,{1},next);
+        check(requests.presence(bob,true,1,1,10),"expedite presence");
+        owner.expediteLiveRoute(bob,45000,10);
+        auto first=requests.take(10,0,32);check(first.size()==1,"initial expedited demand");
+        owner.expediteLiveRoute(bob,45000,11);
+        check(requests.take(11,0,32).empty(),"hint duplicated pending attempt");
+        check(requests.close(first[0].id,20,0,true),"expedite close");
+        owner.expediteLiveRoute(bob,45000,21);
+        check(requests.take(21,0,32).empty(),"repeated hint bypassed rate bound");
+        owner.expediteLiveRoute(bob,45000,1010);
+        auto retry=requests.take(1010,0,32);check(retry.size()==1,"fresh hint waited for old backoff");
+        auto attached=requests.attach(retry[0].id,bob);check(attached.has_value(),"expedite attach");
+        session::DirectTransportAdapter adapter({1},attached->id,attached->route,bob);
+        check(owner.observeTransport(adapter.identityPresented(bob,0),1011),"retry identity");
+        check(owner.markLocallyTrusted({1},attached->id)&&owner.markRemoteAccepted({1},attached->id),"retry trust");
+        check(owner.arbitrateWinner({1},attached->id,1012).activated(),"retry winner");
+        owner.expediteLiveRoute(bob,45000,2010);
+        check(requests.take(2010,0,32).empty(),"hint replaced active winner");
+        owner.closeTransport({1},attached->id,"remote reconnect",true);
+        check(owner.scheduleRelayRetry(bob,2011,0).failureCount==1,"success did not reset relay backoff");
     }
     std::cout<<"PASS: 1000 manager-owned relay lifecycles plus archive nonfriend scope, authenticated zero-friend network, retry, revocation, idle demand and retirement. HOST ONLY\n";
     return 0;

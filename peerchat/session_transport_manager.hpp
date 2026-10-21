@@ -44,6 +44,17 @@ public:
         auto plan=plans_.find(peer);
         if(newlyDemanded&&plan!=plans_.end()&&plan->second.relayAvailable&&!plan->second.suspended&&!hasActiveWinner(peer))plan->second.relayDueMilliseconds=now;
     }
+    // Explicit authenticated incoming work may expedite a disconnected route.
+    // Ordinary presence/polling retains backoff; repeated hints are rate bounded.
+    void expediteLiveRoute(const std::string& peer,std::uint64_t until,std::uint64_t now) {
+        demandLiveRoute(peer,until,now);
+        auto found=plans_.find(peer);
+        if(found==plans_.end()||!found->second.relayAvailable||found->second.suspended||hasRepresentation(peer))return;
+        auto& plan=found->second;
+        if(now<plan.expediteAllowedAt)return;
+        plan.expediteAllowedAt=now+1000;
+        plan.relayDueMilliseconds=now;
+    }
     bool liveRouteDemanded(const std::string& peer,std::uint64_t now) const {
         auto found=liveDemand_.find(peer);
         return !demandDriven_||directOnly_||(found!=liveDemand_.end()&&found->second>now);
@@ -391,6 +402,7 @@ public:
             scoped.activeTransport = instance;
             scoped.sessionEstablished = true;
             scoped.session.observeLegacyActive(instance);
+            auto plan=plans_.find(key);if(plan!=plans_.end()){plan->second.relayFailures=0;plan->second.relayDelayMilliseconds=0;}
             touch(key);
             return decision;
         }
@@ -485,6 +497,7 @@ public:
         auto plan=plans_.find(peer);
         if(plan!=plans_.end()){
             if(candidate.route.kind==TransportKind::Relay){
+                plan->second.relayFailures=0;plan->second.relayDelayMilliseconds=0;
                 for(auto& route:plan->second.direct)if(route.dueMilliseconds==never())route.dueMilliseconds=nowMilliseconds+retryBaseMilliseconds_;
             }else plan->second.relayDueMilliseconds=never();
         }
@@ -957,7 +970,7 @@ private:
     struct CandidatePlan {
         ReliableAuthorization authorization{};
         std::vector<CandidateRoute> direct;bool relayAvailable=false,suspended=false;std::uint64_t networkRevision=0,beganMilliseconds=0;
-        std::uint64_t relayDueMilliseconds=never();std::uint32_t relayFailures=0,relayDelayMilliseconds=0;
+        std::uint64_t relayDueMilliseconds=never(),expediteAllowedAt=0;std::uint32_t relayFailures=0,relayDelayMilliseconds=0;
     };
 
     struct TransportRecord {

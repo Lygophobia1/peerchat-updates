@@ -210,7 +210,27 @@ public:
 
     std::vector<StoredMessage> pendingMessages(const std::string& destination,
                                                 int limit = 100) {
-        auto pending=storage_.pending(destination,limit);
+        return eligiblePending(destination,storage_.pending(destination,limit));
+    }
+    // Alternate a rotating backlog page with recent messages. Bound protected
+    // reads, skip this transport's ACK window before decrypting, and retain all
+    // durable rows until their exact authenticated ACK arrives.
+    std::vector<StoredMessage> pendingTransportMessages(const std::string& destination,session::TransportInstanceId instance){
+        auto found=transports_.find(instance.value);
+        if(found==transports_.end()||found->second.draining||found->second.destination!=destination)return {};
+        const auto flight=inFlightCount(instance);if(flight>=16)return {};
+        std::vector<std::string> excluded;
+        for(const auto& item:submissions_)if(item.first.kind==Kind::Message&&item.first.destination==destination&&item.second.count(instance.value))excluded.push_back(item.first.id);
+        auto& transport=found->second;const bool newest=transport.recentNext;transport.recentNext=!newest;
+        const int limit=static_cast<int>(std::min<std::size_t>(4,16-flight));
+        auto page=storage_.pending(destination,limit,newest?0:transport.outboxCursor,newest,excluded);
+        if(!newest){
+            if(page.empty()&&transport.outboxCursor)page=storage_.pending(destination,limit,0,false,excluded);
+            transport.outboxCursor=page.empty()?0:page.back().sequence;
+        }
+        return eligiblePending(destination,std::move(page));
+    }
+    std::vector<StoredMessage> eligiblePending(const std::string& destination,std::vector<StoredMessage> pending){
         const auto nowUtc=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
         const auto monotonic=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -223,10 +243,13 @@ public:
         return pending;
     }
     std::vector<StoredMessage> mailboxCandidates(){
-        auto page=storage_.mailboxCandidates(mailboxCursor_);
-        if(page.size()<64&&mailboxCursor_){
-            auto first=storage_.mailboxCandidates(0);std::set<std::string> seen;for(const auto& row:page)seen.insert(row.id);
-            for(auto& row:first){if(page.size()==64)break;if(seen.insert(row.id).second)page.push_back(std::move(row));}
+        // Match the upload batch: protected history and target-manifest reads
+        // must release the shared owner before servicing the next four rows.
+        constexpr int batchSize=4;
+        auto page=storage_.mailboxCandidates(mailboxCursor_,batchSize);
+        if(page.size()<batchSize&&mailboxCursor_){
+            auto first=storage_.mailboxCandidates(0,batchSize);std::set<std::string> seen;for(const auto& row:page)seen.insert(row.id);
+            for(auto& row:first){if(page.size()==batchSize)break;if(seen.insert(row.id).second)page.push_back(std::move(row));}
         }
         mailboxCursor_=page.empty()?0:page.back().sequence;
         return page;
@@ -555,6 +578,8 @@ private:
     struct TransportAuthorization {
         std::string destination;
         bool draining = false;
+        bool recentNext = true;
+        std::int64_t outboxCursor = 0;
     };
 
     bool submitted(Kind kind, const std::string& destination, const std::string& id,

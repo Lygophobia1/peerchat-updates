@@ -34,6 +34,7 @@ internal static class WindowsLiveProbe {
     static DiscoverySearchResult selectedFriend;
     static string selectedFriendName,expectedFriendPeer,dmMessageId,dmText,dmReplyText,dmProfile;
     static bool dmReplyReceived;
+    static readonly System.Diagnostics.Stopwatch dmClock=new System.Diagnostics.Stopwatch();
     static ulong friendGeneration=1;
     static string selectedRevocationKey="";
     static DateTime nextFriendRefresh=DateTime.MinValue;
@@ -150,6 +151,7 @@ internal static class WindowsLiveProbe {
     }
     static void StopRelays(){RelayTransport[] active;lock(relayGate){active=relays.Values.ToArray();relays.Clear();}foreach(var relay in active)try{relay.Dispose();}catch{}}
     static void StartMailbox(){
+        if(mailboxExecution!=null)return;
         Check(core.MailboxSupported,"Packaged native mailbox is unavailable");
         Check(!File.Exists(Path.Combine(dmProfile,"mailbox-policy.dat")),"Isolated profile has an explicit mailbox policy; probe will not override it");
         var type=typeof(CoreAdapter).Assembly.GetType("PeerChatDesktop.MailboxExecution",true);
@@ -216,7 +218,9 @@ internal static class WindowsLiveProbe {
             var state=server.GetFriendState();
             var friend=state.Friends.SingleOrDefault(f=>f.Username==selectedFriendName&&f.AccountId>0&&Hex(f.PublicIdentity,64));
             Check(friend!=null&&friend.Username!=server.Username,"Selected disposable friend is not active");
-            Check(friend.PublicIdentity==expectedFriendPeer,"Selected disposable friend device does not match the expected fingerprint");
+            // A deliberate Android reconnect can temporarily select another
+            // retained device. Clear authority and wait; never verify or send to it.
+            if(friend.PublicIdentity!=expectedFriendPeer){ClearFriendAuthority();nextFriendRefresh=DateTime.UtcNow.AddMilliseconds(250);return;}
             // Other friendships do not change this DM's scope. Only the selected
             // binding is installed below. Production native mailbox receive
             // rejects unmapped senders before import/ACK; never filter or forge
@@ -237,6 +241,7 @@ internal static class WindowsLiveProbe {
             }
             if(selectedFriend==null)core.UpdateCandidates(friend.PublicIdentity,"",0,"",0,true,networkGeneration,true);
             selectedFriend=friend;
+            if(mailboxExecution==null)StartMailbox();
             nextFriendRefresh=DateTime.UtcNow.AddSeconds(5);
         }catch{if(previouslySelected)friendTrustFailed=true;ClearFriendAuthority();nextFriendRefresh=DateTime.UtcNow.AddSeconds(5);throw;}
     }
@@ -265,11 +270,11 @@ internal static class WindowsLiveProbe {
         if(e.kind==3&&e.peer==selectedFriend.PublicIdentity&&(String.IsNullOrEmpty(e.expected)||e.expected==selectedFriend.PublicIdentity)){friendRouteReady=true;Console.WriteLine("dm_verified_route peer="+e.peer);}
         if(e.kind==4&&e.peer==selectedFriend.PublicIdentity)friendRouteReady=false;
         if((e.kind==5||e.kind==7)&&e.messages!=null)foreach(var message in e.messages){
-            if(message.sender==selectedFriend.PublicIdentity&&e.kind==5&&message.text==dmReplyText){dmReplyReceived=true;Console.WriteLine("dm_received_reply id="+message.id+" sender="+message.sender);}
+            if(message.sender==selectedFriend.PublicIdentity&&e.kind==5&&message.text==dmReplyText){dmReplyReceived=true;Console.WriteLine("dm_received_reply elapsed_ms="+dmClock.ElapsedMilliseconds+" id="+message.id+" sender="+message.sender);}
             if(message.sender==peer&&(dmMessageId==message.id||dmMessageId==null&&message.text==dmText)){
                 if(dmMessageId==null)dmMessageId=message.id;
                 dmTargets=message.deliveryTargets;
-                Console.WriteLine("dm_delivery id="+dmMessageId+" aggregate="+message.delivery+" selection_unresolved="+(dmTargets==null?"unknown":dmTargets.selectionUnresolved.ToString())+
+                Console.WriteLine("dm_delivery elapsed_ms="+dmClock.ElapsedMilliseconds+" id="+dmMessageId+" aggregate="+message.delivery+" selection_unresolved="+(dmTargets==null?"unknown":dmTargets.selectionUnresolved.ToString())+
                     " targets="+(dmTargets==null?"unknown":String.Join(",",(dmTargets.targets??new DeliveryTargetData[0]).Select(t=>t.device+":"+t.status))));
             }
         }
@@ -397,9 +402,14 @@ internal static class WindowsLiveProbe {
         stage="dm_mailbox_initialize";StartMailbox();
         stage="dm_verified_route_and_eligibility";Until(()=>friendRouteReady&&mailboxReady||friendTrustFailed,"selected verified friend route and signed eligibility",60);
         Check(!friendTrustFailed&&friendRouteReady&&mailboxReady&&selectedFriend!=null,"Selected peer identity or signed mailbox eligibility unavailable");
-        stage="dm_native_send";dmText="PC-LIVE-DM-v1:"+probeId+":win-to-android";
-        dmReplyText="PC-LIVE-DM-v1:"+probeId+":android-to-win";
-        Check(core.Send(selectedFriend.PublicIdentity,dmText),"Native durable direct message enqueue failed");
+        for(int round=0;round<8;round++){
+        dmMessageId=null;dmTargets=null;dmReplyReceived=false;
+        Console.WriteLine("dm_round round="+round);
+        stage="dm_native_send";dmText="PC-LIVE-DM-v1:"+probeId+":win-to-android:"+round;
+        dmReplyText="PC-LIVE-DM-v1:"+probeId+":android-to-win:"+round;
+        Until(()=>selectedFriend!=null&&friendRouteReady&&mailboxReady||friendTrustFailed,"reconnected selected device",60);
+        dmClock.Restart();
+        Check(!friendTrustFailed&&selectedFriend!=null&&core.Send(selectedFriend.PublicIdentity,dmText),"Native durable direct message enqueue failed");
         Console.WriteLine("dm_local_queued probe="+probeId+" selected_peer="+selectedFriend.PublicIdentity);
         stage="dm_wait_receipts";DateTime end=DateTime.UtcNow.AddSeconds(holdSeconds);
         DateTime completeAt=DateTime.MinValue;
@@ -419,6 +429,7 @@ internal static class WindowsLiveProbe {
             " reply_received="+dmReplyReceived+" selection_unresolved="+(dmTargets==null?"unknown":dmTargets.selectionUnresolved.ToString())+
             " target_statuses="+(dmTargets==null?"unknown":String.Join(",",(dmTargets.targets??new DeliveryTargetData[0]).Select(t=>t.device+":"+t.status))));
         Check(!friendTrustFailed&&dmMessageId!=null&&acknowledged&&dmReplyReceived,"Selected verified DM receipt or reply missing; account-wide delivery not asserted");
+        }
     }
     static int Main(string[] args){
         // host port pinned-sha256 existing-profile username command [command args]

@@ -96,6 +96,10 @@ class LiveResumeLatencyTest {
                 evidence("RESUME_PROBE_ACK round=$round id=$id kind=${if(result.deliveryTargets==null)"canonical_device_only" else "target_manifest_device"} selection_unresolved=${result.deliveryTargets?.selectionUnresolved?:true}")
                 evidence("RESUME_PROBE round=$round id=$id overlap=$overlapped local_commit_ms=${(committed-sendStart)/1_000_000} resume_ms=${(resumed-resumeStart)/1_000_000} receive_from_send_ms=${(received-sendStart)/1_000_000} ack_from_send_ms=${(acknowledged-sendStart)/1_000_000}")
             }
+            for(owner in listOf(first,second)){
+                val timings=Regex("native_[a-z_]+=[0-9]+").findAll(owner.state.value.transferDiagnostics).map{it.value}.joinToString(" ")
+                evidence("RESUME_PROBE_TIMINGS $timings")
+            }
             stage="exact_native_row_contract"
             val (lastOwner,lastPeer,lastId)=checkNotNull(lastSent)
             val native=MessagingBackend::class.java.getDeclaredField("profile").also{it.isAccessible=true}.get(lastOwner) as NativeProfile

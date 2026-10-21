@@ -58,26 +58,31 @@ class LiveWindowsDmTest {
         try {
             backend.signInRemembered(endpoint,"codex1",input.getString("secondPassword"),true);input.remove("secondPassword")
             await("authenticated_friend"){backend.state.value.authenticated&&backend.state.value.conversations.any{it.friend.username=="codex"&&expected in it.friend.knownPeerIds&&expected !in it.friend.revokedPeerIds}}
-            val incoming="PC-LIVE-DM-v1:$probe:win-to-android"
+            for(round in 0 until 8){
+            evidence("LIVE_DM_ROUND round=$round reconnect=${round%2==1}")
+            val incoming="PC-LIVE-DM-v1:$probe:win-to-android:$round"
             await("windows_durable_receive"){conversation().messages.any{it.senderDevice==expected&&it.text==incoming}}
             val received=conversation().messages.single{it.senderDevice==expected&&it.text==incoming}.id
             evidence("LIVE_DM received_id=$received")
-            val reply=backend.send(expected,"PC-LIVE-DM-v1:$probe:android-to-win")
+            if(round%2==1){
+                backend.setInUse(false);check(backend.awaitQuiescence(30000));backend.setInUse(true)
+                stage="retained_resume"
+                check(backend.restoreRemembered(endpoint))
+                await("history_after_resume"){conversation().messages.any{it.id==received}}
+            }
+            await("windows_current_device" ){conversation().friend.peerId==expected&&backend.state.value.authenticated}
+            val reply=backend.sendToAccount(backend.state.value.accountId,conversation().friend.accountId,"PC-LIVE-DM-v1:$probe:android-to-win:$round")
             evidence("LIVE_DM reply_id=$reply")
             await("windows_device_ack"){conversation().messages.any{it.id==reply&&it.deliveryTargets?.targets?.any{t->t.deviceId==expected&&t.status==DeliveryTargetStatus.Acknowledged}==true}}
             val targets=conversation().messages.single{it.id==reply}.deliveryTargets!!
             evidence("LIVE_DM_ACK selection_unresolved=${targets.selectionUnresolved} acknowledged=${targets.targets.count{it.status==DeliveryTargetStatus.Acknowledged}} pending=${targets.targets.count{it.status==DeliveryTargetStatus.Pending}} unavailable=${targets.targets.count{it.status==DeliveryTargetStatus.Unavailable}}")
-            // Let the Windows probe finish its five-second post-ACK observation
-            // before deliberately quiescing this device. Not transport latency.
-            delay(7000)
-            backend.setInUse(false);check(backend.awaitQuiescence(30000));backend.setInUse(true)
-            check(backend.restoreRemembered(endpoint))
-            await("history_after_resume"){backend.state.value.conversations.any{it.friend.username=="codex"&&it.messages.any{m->m.id==received}&&it.messages.any{m->m.id==reply}}}
-            evidence("LIVE_DM_RESULT Windows receipt, selected-device ACK and retained history passed; not account-wide completion")
+            }
+            delay(7000) // Keep the selected device live for the Windows observation grace.
+            evidence("LIVE_DM_RESULT Eight Windows round trips including four Android reconnects passed; not account-wide completion")
         } catch(failure:Throwable) {
             backend.state.value.conversations.filter{it.friend.username=="codex"}.forEach { row->
                 evidence("LIVE_DM_SCOPE selected_matches_expected=${row.friend.peerId==expected} expected_known=${expected in row.friend.knownPeerIds} route_ready=${row.connection.ready}")
-                row.messages.filter{it.text=="PC-LIVE-DM-v1:$probe:android-to-win"}.forEach { message->
+                row.messages.filter{it.text.startsWith("PC-LIVE-DM-v1:$probe:android-to-win:")}.forEach { message->
                     val targets=message.deliveryTargets
                     evidence("LIVE_DM_PENDING id=${message.id} recipient_matches_expected=${message.recipientDevice==expected} selection_unresolved=${targets?.selectionUnresolved} expected_target_status=${targets?.targets?.singleOrNull{it.deviceId==expected}?.status} target_count=${targets?.targets?.size}")
                 }

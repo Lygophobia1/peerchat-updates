@@ -9,6 +9,7 @@ import com.peerchat.android.platform.tls.RelayFrames
 // TLS/Hello/trust, route selection, retry, ACK/dedupe/history. No reconnect loop.
 internal class AndroidRelayExecution(private val profile: Long,private val request: RelayExecution,
     private val accounts: ServerAccounts,private val remoteAccount: Long,
+    private val onActivity:(AndroidRelayExecution)->Unit={},
     private val onTerminal:(AndroidRelayExecution,Exception?)->Unit={_,_->}) : AutoCloseable {
     val requestPeerId:String get()=request.peerId
     @Volatile var failureDiagnostic:String?=null
@@ -52,7 +53,9 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
             channel=relay.channel
             if(stopping)return
             val peer=request.peerId.toByteArray(Charsets.US_ASCII)
+            val openStarted=System.nanoTime()
             check(ReliableBridge.open(profile,request.attempt,relay.incoming,peer)==request.attempt)
+            android.util.Log.i("PeerChatWake","stage=native_peer_tls_opened elapsed_ms=${(System.nanoTime()-openStarted)/1_000_000}")
             attached=true
             stage="peer_tls_receive"
             progress.enter(RelayStage.PeerTlsReceive)
@@ -83,6 +86,7 @@ internal class AndroidRelayExecution(private val profile: Long,private val reque
                 ioTimings.measure(RelayIoStage.NativeReceive){check(ReliableBridge.exchange(profile,request.attempt,ReliableBridge.RECEIVE,bytes)!=null)}
                 // RECEIVE can create a TLS response or ACK while output polling is parked.
                 workSignal.signal()
+                onActivity(this)
             }
         } catch(failure: Exception) {
             if(!stopping&&terminalFailure==null)terminalFailure=failure

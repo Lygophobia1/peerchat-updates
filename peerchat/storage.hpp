@@ -175,7 +175,7 @@ public:
     // Removes only this local DM's encrypted message/outbox records. Contact, trust and account
     // identity remain intact so a later message starts a fresh conversation safely.
     void eraseHistory(const std::string& conversation);
-    std::vector<StoredMessage> pending(const std::string& conversation,int limit=100);
+    std::vector<StoredMessage> pending(const std::string& conversation,int limit=100,std::int64_t afterSequence=0,bool newest=false,const std::vector<std::string>& excluded={});
     // Index-only, conservative hint for live route scheduling. Never authorizes a send.
     bool pendingRouteDemand(const std::string& device);
     std::vector<std::string> pendingTargetDevices(int limit=256);

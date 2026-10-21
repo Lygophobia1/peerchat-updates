@@ -86,7 +86,7 @@ struct Instance {
     // Reuse the existing platform-independent packet observer. Its historical
     // windows namespace does not introduce a platform dependency or transfer owner.
     peerchat::transfer::windows::TransferTiming transferTiming;
-    peerchat::portable::OperationTiming reliableReceiveTiming,reliableOutputTiming;
+    peerchat::portable::OperationTiming reliableReceiveTiming,reliableOutputTiming,mailboxQueryTiming,mailboxFilterTiming;
     peerchat::portable::OperationTiming reliableRequestsTiming,routeDemandTiming,groupDemandTiming;
     std::string receivingTransferPeer,receivingTransferId;
     std::unique_ptr<peerchat::transfer::Source> openAttachment(const peerchat::transfer::DurableState& d){
@@ -531,7 +531,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_MailboxBridge_
         std::lock_guard<std::mutex> lock(instance->gate);
         peerchat::mailbox::require(instance->storage&&instance->friends.localAccount()>0);
         std::vector<peerchat::StoredMessage> pending;
-        for(auto& message:instance->deliveries->mailboxCandidates())if(instance->friends.accountFor(message.recipient)>0){
+        std::vector<peerchat::StoredMessage> candidates;{peerchat::portable::OperationTiming::Scope timing(&instance->mailboxQueryTiming,peerchat::portable::OperationTiming::now());candidates=instance->deliveries->mailboxCandidates();}
+        peerchat::portable::OperationTiming::Scope timing(&instance->mailboxFilterTiming,peerchat::portable::OperationTiming::now());
+        for(auto& message:candidates)if(instance->friends.accountFor(message.recipient)>0){
             auto route=instance->sessions.snapshot(message.recipient);auto targets=instance->storage->deliveryTargets(message.id);
             if(!(targets&&!targets->selectionUnresolved)&&route&&route->connected&&!instance->storage->mailboxHasPendingEnvelope(message.id))continue;
             pending.push_back(std::move(message));
@@ -1010,7 +1012,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_deman
         auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;
         std::lock_guard<std::mutex> lock(instance->gate);
         if(!instance->friends.contains(expected))return PC_CORE_INVALID_ARGUMENT;
-        const auto now=runtimeNow();instance->sessions.demandLiveRoute(expected,now+45000,now);
+        const auto now=runtimeNow();instance->sessions.expediteLiveRoute(expected,now+45000,now);
         return PC_CORE_OK;
     });
 }
@@ -1285,6 +1287,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             w.number(rows.size()+2);w.string(instance->transferRequestFailure.line("native_transfer_request_failure")+" dm_cache_storage="+(instance->dmStorageUnavailable?"protected_recovery_unavailable;_legacy_journal_retained":"available"));
             w.string(instance->reliableExchangeFailure.line("native_reliable_exchange_failure")+
                 instance->reliableReceiveTiming.line("native_receive")+instance->reliableOutputTiming.line("native_output")+
+                instance->mailboxQueryTiming.line("native_mailbox_query")+instance->mailboxFilterTiming.line("native_mailbox_filter")+
                 instance->reliableRequestsTiming.line("native_requests")+instance->routeDemandTiming.line("native_route_demand")+
                 instance->groupDemandTiming.line("native_group_demand"));
             for(const auto& row:rows){const auto end=row.find(' ');const auto id=row.substr(std::string("transfer=").size(),end-std::string("transfer=").size());w.string(row+instance->transferTiming.diagnostics(id));}

@@ -272,8 +272,8 @@ int main(int argc,char** argv){try{
     for(unsigned i=0;i<500;++i){auto& contact=(i%2)?other:target;reliable::queueText(senderStore,sender.profile,&contact,contact.peerId,Storage::newMessageId(),L"bounded audit burst",now+i,&burstFriends);}
     {Storage reopened((root/L"sender").wstring());auditNeed(reopened.pending(target.peerId,1000).size()==targetBefore+250&&reopened.pending(other.peerId,1000).size()==otherBefore+250,"two-conversation burst lost durable queued rows");}
     std::cout<<"SAFE: 500 local durable queued messages across two conversations survive protected reopen; no network performance claim\n";
-    std::set<std::string> reached;for(unsigned page=0;page<10;++page)for(const auto& row:outgoing.mailboxCandidates())reached.insert(row.id);
+    std::set<std::string> reached;for(unsigned page=0;page<140;++page){auto candidates=outgoing.mailboxCandidates();auditNeed(candidates.size()<=4,"mailbox pass exceeded protected-work batch");for(const auto& row:candidates)reached.insert(row.id);}
     auditNeed(reached.size()>=500,"rotating native candidate pages starve messages beyond first 64");
-    std::cout<<"SAFE: bounded rotating native pages reach all 500 queued messages beyond the first 64\n";
+    std::cout<<"SAFE: bounded four-row native pages reach all 500 queued messages without starvation\n";
     hpke->shutdown();return 0;
 }catch(const std::exception& error){std::cerr<<"AUDIT FIXTURE FAILED: "<<error.what()<<'\n';return 1;}}

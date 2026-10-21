@@ -111,7 +111,8 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
         require(sender.ready()&&receiver.ready(),"Full message window fixture did not authenticate");
         auto beforeReceived=received,beforeDelivered=delivered;
         for(unsigned n=0;n<17;++n){StoredMessage message{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",43,Delivery::Queued,0,a.nextLogicalOrder()};require(a.append(bob.peerId,message),"Full message window queue failed");}
-        sender.pump();require(ad.inFlightCount({205})==16,"Full message window did not fill");
+        for(unsigned batch=0;batch<4;++batch)sender.pump();
+        require(ad.inFlightCount({205})==16,"Full message window did not fill");
         auto beforeReads=protectedReads->reads;
         for(unsigned n=0;n<8;++n)sender.pump();
         auto afterReads=protectedReads->reads;
@@ -168,6 +169,23 @@ int main(){using namespace peerchat;using portable::ReliableEndpoint;try{
     require(left.ready()&&right.ready()&&downloads.snapshots().size()==6,"Capacity rejection closed the authenticated messaging winner");
     StoredMessage afterCapacity{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",44,Delivery::Queued,0,a.nextLogicalOrder()};
     require(a.append(bob.peerId,afterCapacity),"Post-capacity send persistence failed");left.pump();exchange(left,right);require(a.pending(bob.peerId).empty()&&b.message(afterCapacity.id).has_value(),"Messaging failed after file capacity rejection");
+    // A retained backlog must not require decrypting 100 rows before writing
+    // a newly queued chat message. Keep old rows fair and exact ACKs durable.
+    std::vector<std::string> backlog;
+    for(unsigned i=0;i<80;++i){StoredMessage m{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",44,Delivery::Queued,0,a.nextLogicalOrder()};require(a.append(bob.peerId,m),"Backlog persistence failed");backlog.push_back(m.id);}
+    const auto readsBefore=protectedReads->reads;left.pump();
+    require(protectedReads->reads-readsBefore<=4,"One live pump decrypted more than four legacy messages");
+    StoredMessage newest{Storage::newMessageId(),alice.peerId,bob.peerId,L"Shared runtime \u65e5\u672c\u8a9e / \U0001f600",44,Delivery::Queued,0,a.nextLogicalOrder()};require(a.append(bob.peerId,newest),"Newest persistence failed");
+    unsigned turns=0;
+    while(turns++<8&&!b.message(newest.id)){
+        auto forward=left.takeOutput();if(!forward.empty())right.receive(forward,++now);
+        auto backward=right.takeOutput();if(!backward.empty())left.receive(backward,++now);
+        drain(left);drain(right);
+    }
+    require(b.message(newest.id).has_value(),"New chat starved behind retained backlog");
+    exchange(left,right);require(a.pending(bob.peerId).empty(),"Old backlog starved while prioritizing new chat");
+    for(const auto& id:backlog)require(b.message(id).has_value(),"Backlog message lost");
+    std::cout<<"HOST BACKLOG: newest message reached within eight drains; all 80 older rows durably ACKed; four protected message reads per pump\n";
     af.replace(0,4,{});require(!left.sendTransfer(premature.data),"Logged-out endpoint sent file bytes");
     std::cout<<"PASS: 102 real Schannel/shared-runtime relay lifecycles, durable text/ACK/dedupe, bidirectional binary picture/file transfers through existing TransferManager, authenticated winner/capability/logout gates. HOST ONLY\n";
     return 0;

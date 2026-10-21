@@ -25,16 +25,17 @@ internal interface MailboxNative {
     fun storeFailure(handle:Long,retry:ByteArray):Int=-1
 }
 private object JniMailboxNative:MailboxNative {
+    private inline fun <T> timed(operation:String,block:()->T):T {val start=System.nanoTime();try{return block()}finally{val ms=(System.nanoTime()-start)/1_000_000;if(ms>=50)android.util.Log.i("PeerChatWake","stage=mailbox_native operation=$operation elapsed_ms=$ms")}}
     override fun identity(handle:Long)=ProfileBridge.publicKey(handle)
-    override fun registration(handle:Long,allowed:Boolean)=MailboxBridge.registration(handle,allowed)
-    override fun registered(handle:Long,binding:ByteArray)=MailboxBridge.registered(handle,binding)
-    override fun receive(handle:Long,wire:ByteArray)=MailboxBridge.receive(handle,wire)
-    override fun receipt(handle:Long,wire:ByteArray)=MailboxBridge.receipt(handle,wire)
-    override fun pending(handle:Long)=MailboxBridge.pending(handle)
-    override fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean)=MailboxBridge.prepareDevices(handle,id,bindings,allowed)
-    override fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean)=MailboxBridge.prepare(handle,id,binding,allowed)
-    override fun stored(handle:Long,wire:ByteArray)=MailboxBridge.stored(handle,wire)
-    override fun storeFailure(handle:Long,retry:ByteArray)=MailboxBridge.storeFailure(handle,retry)
+    override fun registration(handle:Long,allowed:Boolean)=timed("registration"){MailboxBridge.registration(handle,allowed)}
+    override fun registered(handle:Long,binding:ByteArray)=timed("registered"){MailboxBridge.registered(handle,binding)}
+    override fun receive(handle:Long,wire:ByteArray)=timed("receive"){MailboxBridge.receive(handle,wire)}
+    override fun receipt(handle:Long,wire:ByteArray)=timed("receipt"){MailboxBridge.receipt(handle,wire)}
+    override fun pending(handle:Long)=timed("pending"){MailboxBridge.pending(handle)}
+    override fun prepareDevices(handle:Long,id:ByteArray,bindings:ByteArray,allowed:Boolean)=timed("prepareDevices"){MailboxBridge.prepareDevices(handle,id,bindings,allowed)}
+    override fun prepare(handle:Long,id:ByteArray,binding:ByteArray,allowed:Boolean)=timed("prepare"){MailboxBridge.prepare(handle,id,binding,allowed)}
+    override fun stored(handle:Long,wire:ByteArray)=timed("stored"){MailboxBridge.stored(handle,wire)}
+    override fun storeFailure(handle:Long,retry:ByteArray)=timed("storeFailure"){MailboxBridge.storeFailure(handle,retry)}
 }
 private fun MailboxNative.scoped(scope:ScopedBackendWork):MailboxNative {
     val target=this
