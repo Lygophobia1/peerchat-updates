@@ -5,7 +5,7 @@ namespace peerchat::group_attachments {
 // Application E2EE object codec only. No socket, grant, retry or transfer engine.
 // The manifest is for an authenticated encrypted group body, NEVER a Pi request.
 constexpr std::uint64_t HeaderBytes=20,TagBytes=16,BlockBytes=32768;
-constexpr std::uint64_t MaxCipherBytes=transfer::MaxFileBytes+((transfer::MaxFileBytes+BlockBytes-1)/BlockBytes)*TagBytes+HeaderBytes;
+constexpr std::uint64_t MaxCipherBytes=transfer::MaxCachedFileBytes+((transfer::MaxCachedFileBytes+BlockBytes-1)/BlockBytes)*TagBytes+HeaderBytes;
 struct Binding {
  std::string attachment,group,sender;std::uint64_t account=0,epoch=0;
  // Explicit local codec context. Legacy group bytes and default construction
@@ -20,7 +20,7 @@ struct Manifest {
  ~Manifest(){platform::group_crypto::wipe(key.data(),key.size());}
  std::uint64_t blocks()const{return std::max<std::uint64_t>(1,(size+BlockBytes-1)/BlockBytes);}
  std::uint64_t cipherSize()const{return HeaderBytes+size+blocks()*TagBytes;}
- void validate()const{protocol::check(protocol::id(binding.attachment,32)&&protocol::id(binding.sender)&&binding.account&&binding.account<=INT64_MAX&&transfer::safeName(name)&&size<=transfer::MaxFileBytes&&key.size()==32&&prefix.size()==4);
+ void validate()const{protocol::check(protocol::id(binding.attachment,32)&&protocol::id(binding.sender)&&binding.account&&binding.account<=INT64_MAX&&transfer::safeName(name)&&size<=transfer::MaxCachedFileBytes&&key.size()==32&&prefix.size()==4);
   if(binding.direct)protocol::check(binding.group.empty()&&!binding.epoch&&binding.recipientAccount&&binding.recipientAccount<=INT64_MAX&&binding.recipientAccount!=binding.account&&protocol::id(binding.relationship,32)&&protocol::id(binding.audienceDigest));
   else protocol::check(protocol::id(binding.group,32)&&binding.epoch&&binding.epoch<=INT64_MAX&&!binding.recipientAccount&&binding.relationship.empty()&&binding.audienceDigest.empty());
  }

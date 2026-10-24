@@ -13,6 +13,7 @@ try {
     & .\tests\test-voice-settings.ps1 -OutputDirectory (Join-Path $OutputDirectory 'managed')
     if($LASTEXITCODE -ne 0){throw 'Voice preference settings regression failed.'}
     Copy-Item -LiteralPath $AudioProcessingDll -Destination $OutputDirectory -Force
+    & .\scripts\build-rnnoise.ps1 -OutputDirectory $OutputDirectory
     # TDM's default stack protector imports this runtime even with static libgcc.
     Copy-Item -LiteralPath (Join-Path (Split-Path (Get-Command g++).Source -Parent) 'libssp_64-0.dll') -Destination $OutputDirectory -Force
     Copy-Item -LiteralPath 'C:\Peerchatdep\build\apm\webrtc-6cf6bcb-presets\x64\PeerChat.AudioReceive.dll' -Destination $OutputDirectory -Force

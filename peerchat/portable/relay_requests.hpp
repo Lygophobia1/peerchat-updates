@@ -63,7 +63,10 @@ public:
     void failed(const Request& request,std::uint64_t now,std::uint32_t random,bool retry){
         owner_.closeTransport(epoch_,request.id,"platform relay failed",retry);
         auto key=continuity(request);
-        if(retry&&allowed(request)&&!owner_.hasActiveWinner(key))owner_.scheduleRelayRetry(key,now,random);
+        // A retired attempt on an old network is not a failure of the newly
+        // authenticated group route. Friend/archive retry behavior is unchanged.
+        const bool oldGroupNetwork=request.authorization.scope==session::ReliableAuthorizationScope::GroupControl&&request.route.networkRevision!=network_;
+        if(retry&&!oldGroupNetwork&&allowed(request)&&!owner_.hasActiveWinner(key))owner_.scheduleRelayRetry(key,now,random);
     }
     std::vector<Request> take(std::uint64_t now,std::uint32_t random,std::size_t capacity){
         revoke();

@@ -11,6 +11,8 @@ object ReliableBridge {
     external fun network(profile:Long,generation:Long,network:Long):Int
     external fun demand(profile: Long, expectedPeer: ByteArray): Int
     external fun requests(profile: Long): ByteArray?
+    // Same authenticated route owner; defer optional scans during explicit Start/Answer.
+    external fun voiceRequests(profile: Long): ByteArray?
     external fun open(profile: Long, attempt: Long, incoming: Boolean, expectedPeer: ByteArray): Long
     external fun exchange(profile: Long, peer: Long, operation: Int, input: ByteArray): ByteArray?
     external fun close(profile: Long, peer: Long, recoverable: Boolean): Int

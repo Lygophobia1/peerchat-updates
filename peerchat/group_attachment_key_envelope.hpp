@@ -14,6 +14,7 @@ struct Authority {
  const GroupState& currentLedger;const group_keys::RosterSnapshot& currentRoster;
  std::string sourceMembership,recipientMembership,currentRecipientMembership,currentSourceMembership;
  std::uint64_t cacheExpires=0; // Authenticated immutable object deadline, ms UTC.
+ std::uint64_t bodyVersion=1; // Optional presentation capability, never authority.
 };
 struct Header {
  Blob descriptor;std::string sourceMembership,recipientMembership;mailbox::RecipientBinding recipient;std::uint64_t created=0,expires=0;
@@ -47,8 +48,11 @@ inline PublicDescriptor authorize(const Header& h,const Authority& a,bool sendin
  if(sending){auto currentSource=a.currentLedger.device(d.account,d.sender);protocol::check(currentSource&&currentSource->publicKey==d.identity&&a.sourceMembership==a.currentSourceMembership&&group_keys::GroupKeyManager::currentMember(a.currentRoster,d.account,d.sender));}
  return d;
 }
+inline SecretRecord recipientBody(const Body& body,const Authority& authority){
+ auto copy=decodeBody(encodeBody(body).bytes);if(authority.bodyVersion<2)copy.thumbnail.clear();return encodeBody(copy);
+}
 inline Envelope seal(const Header& h,const Body& body,const Authority& authority,platform::IdentityProvider& sender,platform::HpkeProvider& hpke){
- auto d=authorize(h,authority,true);protocol::check(d.matches(body.manifest)&&sender.publicKey()==d.identity);auto plain=encodeBody(body);Envelope e;e.header=h;
+ auto d=authorize(h,authority,true);protocol::check(d.matches(body.manifest)&&sender.publicKey()==d.identity);auto plain=recipientBody(body,authority);Envelope e;e.header=h;
  e.encrypted=hpke.seal(h.recipient.publicKey,info(),headerPayload(h),plain.bytes);e.signature=sender.sign(signingPayload(e));protocol::check(e.signature.size()==64);return e;
 }
 inline Body open(const Envelope& e,const Authority& authority,const std::string& localDevice,std::uint64_t localAccount,DeviceKeyManager& manager,platform::HpkeProvider& hpke,std::uint64_t now){

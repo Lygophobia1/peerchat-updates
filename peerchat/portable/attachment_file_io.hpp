@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <cerrno>
@@ -35,15 +36,39 @@ class Cache {
 public:
     explicit Cache(const std::string& path){check(!path.empty()&&path.front()=='/'&&path.find('\0')==std::string::npos);directory_=std::make_shared<File>(open(path.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));}
     int fd()const{return directory_->fd;}
+    // OFD locks conflict with Java FileChannel's process locks, including in
+    // this same process. Hold admission through creation of a sized partial.
+    class Admission {
+        File lock_;
+    public:
+        explicit Admission(int directory):lock_(openat(directory,".capacity.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600)){
+            struct flock request{};request.l_type=F_WRLCK;request.l_whence=SEEK_SET;
+            int result;do{result=fcntl(lock_.fd,F_OFD_SETLKW,&request);}while(result<0&&errno==EINTR);check(result==0);
+        }
+    };
     void reserve(std::uint64_t size){
-        auto directory=fdopendir(dup(fd()));check(directory!=nullptr);std::uint64_t total=0;size_t count=0;bool valid=true;
+        auto directory=fdopendir(dup(fd()));check(directory!=nullptr);std::uint64_t total=0,allocated=0;size_t count=0;bool valid=true;
         rewinddir(directory);
         while(auto e=readdir(directory)){if(e->d_name[0]=='.')continue;struct stat s{};if(fstatat(fd(),e->d_name,&s,AT_SYMLINK_NOFOLLOW)!=0||!S_ISREG(s.st_mode)||s.st_size<0){valid=false;break;}
-            std::string name=e->d_name;total+=name.size()==37&&name.substr(32)==".part"?MaxCacheCipherBytes:static_cast<std::uint64_t>(s.st_size);
-            if(++count>256||total>1024ull*1024*1024){valid=false;break;}}
-        closedir(directory);check(valid&&count<256&&size<=1024ull*1024*1024-total);
+            allocated+=std::min(static_cast<std::uint64_t>(s.st_size),static_cast<std::uint64_t>(s.st_blocks)*512);total+=static_cast<std::uint64_t>(s.st_size);
+            if(++count>256||total>10ull*1024*1024*1024){valid=false;break;}}
+        closedir(directory);check(valid&&count<256&&size<=10ull*1024*1024*1024-total);
+        struct statvfs space{};check(fstatvfs(fd(),&space)==0);const auto available=static_cast<std::uint64_t>(space.f_bavail)*space.f_frsize;check(available>=total-allocated+size+64ull*1024*1024);
     }
 };
+inline void discardCiphertext(std::shared_ptr<Cache> cache,const Blob& token,const Metadata& metadata,Purpose purpose){
+    check((purpose==Purpose::GroupCacheCiphertext||purpose==Purpose::DirectCacheCiphertext)&&protocol::id(metadata.id,32)&&metadata.name=="ciphertext.peerchat"&&metadata.size<=MaxCacheCipherBytes);
+    protocol::Reader r(token);check(r.type()==protocol::FileTransfer);auto domain=r.string();std::vector<std::string> paths;bool source=false;
+    if(domain=="PeerChat/CacheSink/v1"){check(r.string()==metadata.id&&r.string()==metadata.name);paths={metadata.id+".part",metadata.id+"-"+metadata.name};}
+    else{check(domain=="PeerChat/CacheSource/v1");source=true;auto path=r.string();check(path==metadata.id+"-"+metadata.name&&r.string()==metadata.name);paths={path};}
+    auto identityAt=r.cursor;for(unsigned i=0;i<(source?4u:2u);++i)r.number();tokenPurpose(r,purpose);
+    Cache::Admission admission(cache->fd());
+    for(const auto& path:paths){int opened=openat(cache->fd(),path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if(opened<0){check(errno==ENOENT);continue;}File file(opened);protocol::Reader expected(token);expected.cursor=identityAt;verifyIdentity(expected,file.fd,source,purpose);
+        auto owned=identity(file.fd,purpose);struct stat actual{};check(owned.st_nlink==1&&fstatat(cache->fd(),path.c_str(),&actual,AT_SYMLINK_NOFOLLOW)==0&&actual.st_dev==owned.st_dev&&actual.st_ino==owned.st_ino);
+        check(unlinkat(cache->fd(),path.c_str(),0)==0);
+    }check(fsync(cache->fd())==0);
+}
 class FileSource final:public Source {
     std::shared_ptr<Cache> cache_;std::unique_ptr<File> file_;std::string name_,path_;Blob token_;std::uint64_t size_=0;Purpose purpose_=Purpose::PeerFile;
 public:
@@ -54,7 +79,7 @@ public:
     std::uint64_t size()const override{return size_;}std::string name()const override{return name_;}Blob resumeToken()const override{return token_;}
     const std::string& cacheName()const{return path_;}
     static std::unique_ptr<FileSource> create(std::shared_ptr<Cache> cache,const std::string& path,const std::string& name,const Blob& bytes){
-        check(bytes.size()<=1024*1024&&path.size()>33&&path.size()<=253&&protocol::id(path.substr(0,32),32)&&path[32]=='-'&&safeName(path.substr(33)));cache->reserve(bytes.size());
+        check(bytes.size()<=1024*1024&&path.size()>33&&path.size()<=253&&protocol::id(path.substr(0,32),32)&&path[32]=='-'&&safeName(path.substr(33)));Cache::Admission admission(cache->fd());cache->reserve(bytes.size());
         File file(openat(cache->fd(),path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600));size_t done=0;
         while(done<bytes.size()){auto n=write(file.fd,bytes.data()+done,std::min<size_t>(ChunkBytes,bytes.size()-done));if(n<0&&errno==EINTR)continue;check(n>0);done+=n;}
         check(fsync(file.fd)==0&&fsync(cache->fd())==0);return std::make_unique<FileSource>(std::move(cache),path,name);
@@ -69,10 +94,20 @@ class FileSink final:public Sink {
         // Logical names are bounded separately; ID prefix may exceed safeName's
         // UI basename bound but is still within NAME_MAX (32+1+<=220 bytes).
         check(final_.size()<=253);
+        Cache::Admission admission(cache_->fd());
+        if(!restore)cache_->reserve(m.size);
         int fd=openat(cache_->fd(),partial_.c_str(),O_RDWR|O_CLOEXEC|O_NOFOLLOW|(restore?0:O_CREAT|O_EXCL),0600);
         if(fd<0&&restore&&errno==ENOENT){fd=openat(cache_->fd(),final_.c_str(),O_RDWR|O_CLOEXEC|O_NOFOLLOW);committed_=fd>=0;}
-        file_=std::make_unique<File>(fd);identity(file_->fd,purpose_);
+        file_=std::make_unique<File>(fd);auto current=identity(file_->fd,purpose_);
+        try{
+        // Logical length reserves future blocks across crashes; offset_ remains
+        // the only durable progress authority. No unwritten suffix is exposed.
+        if(!committed_&&static_cast<std::uint64_t>(current.st_size)<m.size){
+            if(restore)cache_->reserve(m.size-static_cast<std::uint64_t>(current.st_size));
+            check(ftruncate(fd,static_cast<off_t>(m.size))==0&&fsync(fd)==0);
+        }
         protocol::Writer w(protocol::FileTransfer);w.string("PeerChat/CacheSink/v1");w.string(m.id);w.string(m.name);identityFields(w,file_->fd,false,purpose_);tokenPurpose(w,purpose_);token_=std::move(w.data);
+        }catch(...){if(!restore){struct stat owned{};if(fstatat(cache_->fd(),partial_.c_str(),&owned,AT_SYMLINK_NOFOLLOW)==0&&owned.st_dev==current.st_dev&&owned.st_ino==current.st_ino){unlinkat(cache_->fd(),partial_.c_str(),0);fsync(cache_->fd());}}throw;}
     }
 public:
     FileSink(std::shared_ptr<Cache> cache,const Metadata& m,Purpose purpose=Purpose::PeerFile):FileSink(cache,m,false,purpose){check(fsync(cache_->fd())==0);}
@@ -112,15 +147,17 @@ public:
     static std::unique_ptr<FileSink> restart(std::shared_ptr<Cache> cache,const DurableState& d){
         protocol::Reader r(d.location);check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSink/v1"&&r.string()==d.metadata.id&&r.string()==d.metadata.name);
         auto result=std::unique_ptr<FileSink>(new FileSink(std::move(cache),d.metadata,true,d.purpose));verifyIdentity(r,result->file_->fd,false,d.purpose);tokenPurpose(r,d.purpose);
+        Cache::Admission admission(result->cache_->fd());
         if(result->committed_){check(static_cast<std::uint64_t>(identity(result->file_->fd,d.purpose).st_size)==d.metadata.size);result->offset_=d.metadata.size;}
-        else check(ftruncate(result->file_->fd,0)==0&&fsync(result->file_->fd)==0);
+        else check(ftruncate(result->file_->fd,0)==0&&ftruncate(result->file_->fd,static_cast<off_t>(d.metadata.size))==0&&fsync(result->file_->fd)==0);
         return result;
     }
     static std::unique_ptr<FileSink> reopen(std::shared_ptr<Cache> cache,const DurableState& d){
         protocol::Reader r(d.location);check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSink/v1"&&r.string()==d.metadata.id&&r.string()==d.metadata.name);
         auto result=std::unique_ptr<FileSink>(new FileSink(std::move(cache),d.metadata,true,d.purpose));verifyIdentity(r,result->file_->fd,false,d.purpose);tokenPurpose(r,d.purpose);
+        Cache::Admission admission(result->cache_->fd());
         check(static_cast<std::uint64_t>(identity(result->file_->fd,d.purpose).st_size)>=d.done&&d.done<=d.metadata.size);result->offset_=d.done;
-        if(!result->committed_)check(ftruncate(result->file_->fd,static_cast<off_t>(d.done))==0&&fsync(result->file_->fd)==0);
+        if(!result->committed_)check(ftruncate(result->file_->fd,static_cast<off_t>(d.done))==0&&ftruncate(result->file_->fd,static_cast<off_t>(d.metadata.size))==0&&fsync(result->file_->fd)==0);
         else check(d.done==d.metadata.size&&static_cast<std::uint64_t>(identity(result->file_->fd,d.purpose).st_size)==d.done);
         return result;
     }

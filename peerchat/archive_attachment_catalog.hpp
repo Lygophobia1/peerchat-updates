@@ -59,6 +59,10 @@ public:
         }
         require(result.size()<=limit);return result;
     }
+    void eraseLocalHistory(const std::string& conversation){
+        const auto through=storage_.attachmentMetadataWatermark();std::int64_t after=0;
+        while(after<through){auto page=storage_.attachmentMetadataPage(after,through);for(const auto& record:page.records){auto row=decodeLocalAttachment(record.record);require(row.id==record.id);if(row.conversation==conversation)storage_.eraseMessage(conversation,row.id);}require(page.next>after);after=page.next;if(page.complete)break;}
+    }
     static transfer::DurableState localCopy(const Attachment& a,const std::string& local,const AttachmentAccounts& directory){
         auto account=directory(local);require(account.has_value());attachmentAccounts(a,directory,*account);
         require(!a.location.empty());transfer::DurableState row;row.metadata={a.id,a.name,a.size,a.digest};row.peer=a.conversation;

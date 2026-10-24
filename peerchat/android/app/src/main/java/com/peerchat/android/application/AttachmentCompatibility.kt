@@ -9,6 +9,21 @@ data class AttachmentCompatibilityChoice(val token:String,val name:String,val di
 }
 class AttachmentCompatibilityRequired(val choice:AttachmentCompatibilityChoice):Exception("Explicit attachment mode choice required")
 class AttachmentCachePreflightRejected(val state:String):Exception("Cached transfer rejected at recipient preflight: $state")
+class AttachmentRecipientVerificationRequired(val devices:List<String>):Exception("Verify recipient devices before cached delivery")
+internal fun cachedAudience(reply:JSONObject):ByteArray {
+    require(reply.getString("dataEncoding")=="base64url")
+    val encoded=reply.getString("audience")
+    require(encoded.length in 1..43691&&encoded.matches(Regex("[A-Za-z0-9_-]+")))
+    return java.util.Base64.getUrlDecoder().decode(encoded).also{
+        require(it.size in 1..32768&&java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(it)==encoded)
+    }
+}
+internal fun requireCachedRecipientIdentities(reply:ByteArray) {
+    val record=NativeRecord(reply,30);val count=record.number();require(count in 0..32)
+    val devices=List(count.toInt()){record.text().also{require(it.matches(Regex("[0-9a-f]{64}")))}}
+    record.end();require(devices.distinct().size==devices.size)
+    if(devices.isNotEmpty())throw AttachmentRecipientVerificationRequired(devices)
+}
 class AttachmentModeUnavailable(val reason:String):Exception(reason)
 
 internal enum class AttachmentRecipientPreflight { Ready, UpgradeRequired }

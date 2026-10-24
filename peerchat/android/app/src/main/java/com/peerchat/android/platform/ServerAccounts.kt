@@ -9,18 +9,81 @@ data class AccountSession(val accountId: Long, val username: String, internal va
     override fun toString() = "AccountSession(accountId=$accountId, username=$username, relayOnly=$relayOnly)"
 }
 
+private const val CACHE_TRACE_TAG="PeerChatCacheTrace"
+
 private val deliveryRpcOperations=setOf("mailbox_register","mailbox_revoke","mailbox_keys",
     "mailbox_store","mailbox_fetch","mailbox_ack","mailbox_receipts")
 internal fun deliveryRpcOperation(type:String)=type in deliveryRpcOperations
 
+// Only these two cache reads can be repeated after a lost response. The RPC
+// resource owner has already retired a failed channel before control returns.
+internal fun closedCacheReadTransport(operation:String,failure:Exception):Boolean {
+    if(operation!="cache_dm_capability"&&operation!="cache_dm_prepare")return false
+    var cause:Throwable?=failure
+    val seen=java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable,Boolean>())
+    while(cause!=null){
+        if(seen.size>=16||!seen.add(cause)||cause is javax.net.ssl.SSLException||cause is java.security.cert.CertificateException)return false
+        cause=cause.cause
+    }
+    return failure is java.io.EOFException||failure is java.net.SocketException&&
+        failure.message?.lowercase(java.util.Locale.ROOT) in setOf("socket closed","socket is closed","connection reset","connection reset by peer","broken pipe")
+}
+internal fun <T> retryClosedCacheRead(operation:String,checkCurrent:()->Unit,request:()->T):T {
+    checkCurrent()
+    val result=try{request()}catch(failure:Exception){
+        if(!closedCacheReadTransport(operation,failure))throw failure
+        checkCurrent()
+        request() // Exactly one fresh exchange, never a general RPC replay.
+    }
+    checkCurrent()
+    return result
+}
+
+internal class CacheRpcPipeline(val exchange:(List<Pair<String,JSONObject>>)->List<JSONObject>)
+
+// Opt-in only for one contiguous upload lease. Legacy and mixed windows keep
+// their existing individually durable replies; native owns retry and offsets.
+internal fun cacheAppendBatchCount(requests:List<Pair<String,JSONObject>>,advertised:Int):Int {
+    if(requests.size !in 2..minOf(BoundedRpc.MAX_WINDOW,advertised))return 0
+    var lease:String?=null;var next:Long?=null
+    for((operation,fields) in requests){
+        if(operation!="cache_dm_append"||fields.has("batchCount"))return 0
+        val current=fields.opt("lease") as? String?:return 0
+        if(current.isEmpty()||(lease!=null&&lease!=current))return 0
+        val value=fields.opt("offset") as? Number?:return 0
+        val offset=value.toLong();if(offset<0||value.toDouble()!=offset.toDouble()||(next!=null&&offset!=next))return 0
+        val encoded=fields.opt("data") as? String?:return 0
+        if(encoded.length !in 2..87382||encoded.length%4==1)return 0
+        val length=encoded.length.toLong()*3/4
+        if(length !in 1..65536||offset>Long.MAX_VALUE-length)return 0
+        lease=current;next=offset+length
+    }
+    return requests.size
+}
+
+
+// Append fields are flat immutable values. Copy the small map without encoding
+// and parsing its base64 chunk again; never mutate the native request's fields.
+internal fun copyCacheAppendFields(fields:JSONObject):JSONObject=JSONObject().also { copy ->
+    fields.keys().forEach { key ->
+        val value=fields.get(key)
+        require(value is String||value is Number||value is Boolean||value===JSONObject.NULL)
+        copy.put(key,value)
+    }
+}
+
 internal class RpcChannelPair<T:AutoCloseable>(ordinaryFactory:()->T,deliveryFactory:()->T,
-    available:(T)->Boolean):AutoCloseable {
+    available:(T)->Boolean,cacheFactory:()->T=ordinaryFactory):AutoCloseable {
     private val ordinary=BoundedRpc<T>({ordinaryFactory()},{available(it)})
     private val delivery=BoundedRpc<T>({deliveryFactory()},{available(it)})
-    private fun owner(type:String)=if(deliveryRpcOperation(type))delivery else ordinary
+    // File payloads have one bounded resource of their own. Ordinary metadata
+    // and mailbox delivery retain their existing owners and TLS implementation.
+    private val cache=BoundedRpc<T>({cacheFactory()},{available(it)},64)
+    private fun owner(type:String)=when {deliveryRpcOperation(type)->delivery;type.startsWith("cache_")->cache;else->ordinary}
     fun <R> run(type:String,binding:String,operation:(T)->R):R=owner(type).run(binding){operation(it)}
+    fun <R> runWindow(type:String,binding:String,count:Int,operation:(T)->R):R=owner(type).run(binding,count){operation(it)}
     fun closeSelected(type:String)=owner(type).close()
-    override fun close(){delivery.close();ordinary.close()}
+    override fun close(){cache.close();delivery.close();ordinary.close()}
 }
 
 // Counterpart of Desktop DiscoveryClient, not a native session/delivery owner.
@@ -33,6 +96,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         private set
     private var supportsRpc=false
     private var rpcAuthorized=false
+    @Volatile private var dmAppendBatchCapability:Pair<AccountSession,Int>?=null
     @Volatile private var ownMetadataPublished=false
     private val stages=ConnectionStageHistory()
     fun diagnostics():String=stages.snapshot()
@@ -48,7 +112,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             return connection
         }catch(error:Exception){connection.close();throw error}
     }
-    private val rpcOwners=RpcChannelPair({openRpcChannel("rpc")},{openRpcChannel("delivery_rpc")},{it.isOpen})
+    private val rpcOwners=RpcChannelPair({openRpcChannel("rpc")},{openRpcChannel("delivery_rpc")},{it.isOpen},{openRpcChannel("cache_rpc")})
     fun closeRpc(){rpcOwners.close()}
     private fun rpc(type:String,fields:JSONObject):JSONObject {
         operations.check()
@@ -63,7 +127,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             val request=JSONObject(fields.toString()).put("version",1).put("type",type)
                 .put("rpcRequestId",id).put("sessionToken",token).put("publicIdentity",device)
             if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))request.put("requestId",id)
-            connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_")||type.startsWith("cache_dm_"))100000 else 4096)
+            connection.write(request.toString().toByteArray(Charsets.UTF_8),if(type.startsWith("mailbox_")||type.startsWith("cache_"))100000 else 4096)
             val reply=JSONObject(connection.read(if(type.startsWith("device_identity_"))131072 else 100000).toString(Charsets.UTF_8))
             check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
             val body=reply.getJSONObject("body")
@@ -74,10 +138,67 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
             }finally{stages.rpcCorrelation(type,fields.optString("requestId"),id,(System.nanoTime()-began)/1_000_000)}
         }
     }
+    internal val cachePipeline=CacheRpcPipeline { requests ->
+        require(requests.size in 1..BoundedRpc.MAX_WINDOW&&requests.all{it.first=="cache_dm_append"||it.first=="cache_append"})
+        operations.check();val active=checkNotNull(session)
+        check(supportsRpc&&rpcAuthorized)
+        rpcOwners.runWindow(requests.first().first,active.token,requests.size){connection->
+            check(session===active);connection.readTimeout(10000)
+            val began=System.nanoTime();var encodedAt=0L;var writtenAt=0L;var wireBytes=0
+            val cpuBegan=android.os.Debug.threadCpuTimeNanos();var encodedCpu=0L;var writtenCpu=0L
+            try {
+                val batchCount=cacheAppendBatchCount(requests,dmAppendBatchCapability?.takeIf{it.first===active}?.second?:0)
+                if(batchCount>1&&android.util.Log.isLoggable(CACHE_TRACE_TAG,android.util.Log.DEBUG))android.util.Log.d(CACHE_TRACE_TAG,"stage=cache_atomic_batch chunks=$batchCount")
+                val frames=requests.mapIndexed{index,(type,fields)->
+                    val id=java.util.UUID.randomUUID().toString().replace("-","")
+                    val request=copyCacheAppendFields(fields).put("version",1).put("type",type)
+                        .put("rpcRequestId",id).put("sessionToken",active.token).put("publicIdentity",device)
+                    if(type=="cache_dm_append")request.put("requestId",id)
+                    if(index==0&&batchCount>1)request.put("batchCount",batchCount)
+                    id to request.toString().toByteArray(Charsets.UTF_8).also{require(it.size<=100000)}
+                }
+                // Ordered bounded frames on one existing TLS owner. Never replay an
+                // ambiguous window; native durable offsets remain the recovery owner.
+                encodedAt=System.nanoTime();encodedCpu=android.os.Debug.threadCpuTimeNanos();wireBytes=frames.sumOf{4+it.second.size}
+                connection.writeWindow(frames.map{it.second},100000)
+                writtenAt=System.nanoTime();writtenCpu=android.os.Debug.threadCpuTimeNanos()
+                requests.mapIndexed{i,(type,fields)->
+                    val id=frames[i].first
+                    val reply=JSONObject(connection.read(100000).toString(Charsets.UTF_8))
+                    check(reply.getString("type")=="rpc_result"&&reply.getString("rpcRequestId")==id&&reply.getString("operation")==type)
+                    val body=reply.getJSONObject("body")
+                    require(body.getString("type")=="cache_result"&&body.getString("operation")==type)
+                    if(type=="cache_dm_append")require(body.getString("requestId")==id)
+                    else require(body.getString("requestId")==fields.getString("requestId"))
+                    check(session===active)
+                    stages.rpcCorrelation(type,fields.optString("requestId"),id,(System.nanoTime()-began)/1_000_000)
+                    if(!reply.optBoolean("more")){
+                        check(i==requests.lastIndex){"RPC window interrupted"};rpcOwners.closeSelected(type)
+                    }
+                    body
+                }
+            } finally {
+                val ended=System.nanoTime();val endedCpu=android.os.Debug.threadCpuTimeNanos()
+                try { if(android.util.Log.isLoggable(CACHE_TRACE_TAG,android.util.Log.DEBUG)) {
+                    val encodeEnd=if(encodedAt>0)encodedAt else ended
+                    val writeEnd=if(writtenAt>0)writtenAt else ended
+                    android.util.Log.d(CACHE_TRACE_TAG,"stage=cache_pipeline chunks=${requests.size} wire_bytes=$wireBytes "+
+                        "encode_ms=${(encodeEnd-began)/1_000_000} write_ms=${if(encodedAt>0)(writeEnd-encodedAt)/1_000_000 else 0} "+
+                        "read_decode_ms=${if(writtenAt>0)(ended-writtenAt)/1_000_000 else 0} write_completed=${if(writtenAt>0)1 else 0} "+
+                        "encode_cpu_ms=${if(encodedCpu>0)(encodedCpu-cpuBegan)/1_000_000 else 0} write_cpu_ms=${if(writtenCpu>0)(writtenCpu-encodedCpu)/1_000_000 else 0} read_decode_cpu_ms=${if(writtenCpu>0)(endedCpu-writtenCpu)/1_000_000 else 0}")
+                }}catch(_:RuntimeException){/* Numeric diagnostics cannot affect transport or ACKs. */}
+            }
+        }
+    }
     init { require(device.matches(Regex("[0-9a-f]{64}"))) }
     private fun safeOperation(type:String)=if(type in setOf("remember_challenge","remember_resume","remember_revoke","remember_enroll_challenge","remember_enroll","session_info","presence","friend_state","messaging_bootstrap","push_register","push_hint","login","logout","register","search","people_search","friend_request","friend_respond","friend_cancel"))type else "other"
-    private fun channel(operation:String)=ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations) {stage,elapsed->
-        android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
+    private fun channel(operation:String):ServerChannel {
+        var phase="opening"
+        try{return ServerChannel(endpoint.host,endpoint.port,endpoint.certificatePin,false,operations,{stage,elapsed->
+            if(stage in setOf("tls_context_ready","server_tcp_connected","server_tls_ready"))phase=stage
+            android.util.Log.i("PeerChatWake","stage=$stage operation=$operation "+(if(stage=="crypto_provider_initializations")"count=$elapsed" else "elapsed_ms=$elapsed"))
+        },operation=="cache_rpc")}
+        catch(failure:Exception){stages.channelFailure(operation,phase,failure);throw failure}
     }
     fun request(type: String, fields: JSONObject = JSONObject(), authenticated: Boolean = true,allowRpc:Boolean=true): JSONObject =
         stages.measure(type){requestMeasured(type,fields,authenticated,allowRpc)}
@@ -111,7 +232,7 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
         val next = AccountSession(response.getLong("accountId"), response.getString("username"),
             response.getString("sessionToken"), response.optBoolean("relayOnlyPresence"),response.optInt("messagingBootstrapVersion",0))
         check(next.accountId > 0 && next.token.isNotEmpty() && next.relayOnly) { "Server lacks required relay-only capability" }
-        closeRpc();rpcAuthorized=false;ownMetadataPublished=false;supportsRpc=response.optInt("rpcVersion")==1
+        closeRpc();rpcAuthorized=false;dmAppendBatchCapability=null;ownMetadataPublished=false;supportsRpc=response.optInt("rpcVersion")==1
         session = next
         return next
     }
@@ -260,15 +381,29 @@ class ServerAccounts(val endpoint: ServerEndpoint, val device: String,
     }
     /** Existing authenticated, device-bound TLS RPC only. Native code owns the
      * descriptor, encrypted file, frozen recipients, offsets and retry journal. */
+    fun groupAttachmentCache(operation:String,payload:JSONObject):JSONObject=stages.measure(operation){
+        require(operation in setOf("cache_capability","cache_admit","cache_status","cache_context","cache_acquire","cache_append","cache_complete","cache_read","cache_progress","cache_release","cache_recipient_keys","cache_publish_key","cache_pending_keys","cache_key_ack","cache_verified","cache_receipts"))
+        check(supportsRpc&&rpcAuthorized&&session!=null){"Group attachments require authenticated device RPC"}
+        val result=rpc(operation,payload)
+        require(result.getString("type")=="cache_result"&&result.getString("operation")==operation)
+        result
+    }
     fun directAttachmentCache(operation:String,payload:JSONObject):JSONObject=stages.measure(operation){
         require(operation in setOf("cache_dm_capability","cache_dm_register","cache_dm_prepare","cache_dm_admit",
             "cache_dm_status","cache_dm_context","cache_dm_acquire","cache_dm_append",
             "cache_dm_complete","cache_dm_read","cache_dm_progress","cache_dm_release","cache_dm_publish",
             "cache_dm_verified","cache_dm_receipts"))
         check(supportsRpc&&rpcAuthorized&&session!=null){"Direct attachment cache requires authenticated device RPC"}
-        val result=rpc(operation,payload)
+        val active=checkNotNull(session)
+        val result=retryClosedCacheRead(operation,{
+            operations.check()
+            check(session===active&&supportsRpc&&rpcAuthorized)
+        }){rpc(operation,payload)}
         require(result.getString("type")=="cache_result"&&result.getString("operation")==operation&&
             (result.getInt("cacheVersion")==2||operation=="cache_dm_capability"&&result.getInt("cacheVersion")==1))
+        check(session===active)
+        if(operation=="cache_dm_capability")dmAppendBatchCapability=active to
+            (if(result.optString("state")=="accepted"&&result.optInt("cacheVersion")==2)result.optInt("dmAppendBatchMaxChunks",0).coerceIn(0,BoundedRpc.MAX_WINDOW) else 0)
         result
     }
     fun mailbox(operation: String, payload: JSONObject): JSONObject =stages.measure(operation){mailboxMeasured(operation,payload)}

@@ -18,6 +18,8 @@ public sealed class VoicePreferenceData {
     public int InputDeviceId=-1,OutputDeviceId=-1;
     public string InputDeviceName="Windows default microphone",OutputDeviceName="Windows default output";
     public int InputVolume=100,OutputVolume=100;
+    public bool AutomaticNoiseControlEnabled=true;
+    public int AutomaticNoiseControlLevel=1;
     public bool AudioProcessingEnabled=true,NoiseSuppressionEnabled=true,AutomaticGainEnabled=true;
     public bool EchoCancellationEnabled=true; // Missing field defaults ON; an explicit saved false is preserved.
     public int NoiseSuppressionStrength=1,AutomaticGainStrength=1;
@@ -40,7 +42,7 @@ public sealed class VoicePreferenceStore {
     public VoicePreferenceData Load(){try{if(!File.Exists(path))return new VoicePreferenceData();var value=json.Deserialize<VoicePreferenceData>(Encoding.UTF8.GetString(unprotect(File.ReadAllBytes(path))));return Valid(value)?value:new VoicePreferenceData();}catch{return new VoicePreferenceData();}}
     public void Save(VoicePreferenceData value){if(!Valid(value))throw new InvalidOperationException("Voice preferences are invalid.");Directory.CreateDirectory(Path.GetDirectoryName(path));string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";File.WriteAllBytes(temporary,protect(Encoding.UTF8.GetBytes(json.Serialize(value))));if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);}
     public static void ResolveDevices(VoicePreferenceData value,VoiceDevices devices){if(value==null||devices==null)return;var inputs=devices.inputs??new VoiceDevice[0];var outputs=devices.outputs??new VoiceDevice[0];if(!inputs.Any(item=>item.id==value.InputDeviceId&&item.name==value.InputDeviceName)){value.InputDeviceId=-1;value.InputDeviceName="Windows default microphone";}if(!outputs.Any(item=>item.id==value.OutputDeviceId&&item.name==value.OutputDeviceName)){value.OutputDeviceId=-1;value.OutputDeviceName="Windows default output";}}
-    static bool Valid(VoicePreferenceData value){return value!=null&&value.Version==1&&value.InputDeviceId>=-1&&value.OutputDeviceId>=-1&&value.InputVolume>=0&&value.InputVolume<=200&&value.OutputVolume>=0&&value.OutputVolume<=200&&value.NoiseSuppressionStrength>=0&&value.NoiseSuppressionStrength<=2&&value.AutomaticGainStrength>=0&&value.AutomaticGainStrength<=2&&(value.InputDeviceName??"").Length<=256&&(value.OutputDeviceName??"").Length<=256;}
+    static bool Valid(VoicePreferenceData value){return value!=null&&value.Version==1&&value.AutomaticNoiseControlLevel>=0&&value.AutomaticNoiseControlLevel<=2&&value.InputDeviceId>=-1&&value.OutputDeviceId>=-1&&value.InputVolume>=0&&value.InputVolume<=200&&value.OutputVolume>=0&&value.OutputVolume<=200&&value.NoiseSuppressionStrength>=0&&value.NoiseSuppressionStrength<=2&&value.AutomaticGainStrength>=0&&value.AutomaticGainStrength<=2&&(value.InputDeviceName??"").Length<=256&&(value.OutputDeviceName??"").Length<=256;}
 }
 
 // Screen preferences are profile-scoped. Handles, share IDs, peers and live

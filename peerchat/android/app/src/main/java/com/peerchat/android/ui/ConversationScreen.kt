@@ -2,6 +2,8 @@ package com.peerchat.android.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyListState
@@ -15,6 +17,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -44,6 +48,20 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun ConversationScreen(c: ConversationUi, state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var draft by rememberSaveable(state.account?.accountId,c.id) { mutableStateOf(state.drafts[c.id] ?: "") }
+    val context=LocalContext.current
+    fun pasteAttachment(mode:AttachmentSendMode):Boolean {
+        try{
+            val clipboard=context.getSystemService(android.content.ClipboardManager::class.java)
+            val clip=clipboard.primaryClip?:return false
+            val uris=(0 until clip.itemCount).mapNotNull{clip.getItemAt(it).uri}
+            if(uris.isEmpty())return false
+            require(uris.size==1){"Paste one file or photo at a time."}
+            val uri=uris.single();require(uri.scheme=="content"){"This clipboard attachment cannot be opened. Use the file picker instead."}
+            val account=state.account?.accountId?:return true
+            attachmentPickerAction(uri,AttachmentPickerBinding(account,c.id,state.attachmentContextGeneration,mode),state)?.let(dispatch)
+            return true
+        }catch(error:Exception){dispatch(UiAction.Notice(error.message?:"Clipboard attachment unavailable. Use the file picker instead."));return true}
+    }
     val list = rememberSaveable(c.id,saver=LazyListState.Saver){LazyListState()}
     val timeline=remember(c.messages,c.attachments){conversationTimeline(c)}
     var followingLatest by remember(c.id){mutableStateOf(true)}
@@ -58,12 +76,14 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
     var pickerConversation by rememberSaveable{mutableStateOf<String?>(null)}
     var pickerGeneration by rememberSaveable{mutableLongStateOf(-1L)}
     var pickerMode by rememberSaveable{mutableStateOf<String?>(null)}
-    val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()){uri->
+    fun pickedAttachment(uri:android.net.Uri?) {
         val binding=if(pickerAccount!=null&&pickerConversation!=null&&pickerMode!=null)
             AttachmentPickerBinding(pickerAccount!!,pickerConversation!!,pickerGeneration,AttachmentSendMode.valueOf(pickerMode!!)) else null
         pickerAccount=null;pickerConversation=null;pickerMode=null;pickerGeneration=-1L
         if(uri!=null)attachmentPickerAction(uri,binding,state)?.let(dispatch)
     }
+    val picker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),::pickedAttachment)
+    val photoPicker=androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),::pickedAttachment)
     LaunchedEffect(c.id,state.drafts[c.id]){if(!state.demo)draft=state.drafts[c.id] ?: ""}
     LaunchedEffect(c.id) {
         // Observe the anchored row, not total row count: appending/importing
@@ -109,10 +129,23 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
             } }
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
-                if(c.kind==ChatKind.Direct)Box {
+                Box {
                     ActionIcon(Icons.Default.Add, "Send picture or file", { if(!state.demo)attachmentMenu=true })
                     DropdownMenu(attachmentMenu,{attachmentMenu=false}) {
-                        listOf(AttachmentSendMode.Direct,AttachmentSendMode.Cached).forEach{mode->
+                        DropdownMenuItem(text={Text("Upload a photo")},onClick={
+                            attachmentMenu=false
+                            val account=state.account?.accountId
+                            if(account!=null&&state.route==Route.Conversation&&state.selectedId==c.id){
+                                pickerAccount=account;pickerConversation=c.id;pickerGeneration=state.attachmentContextGeneration;pickerMode=AttachmentSendMode.Cached.name
+                                photoPicker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            }
+                        },modifier=Modifier.testTag("upload-photo"))
+                        DropdownMenuItem(text={Text("Paste file or photo")},onClick={
+                            attachmentMenu=false
+                            if(!pasteAttachment(if(c.kind==ChatKind.Group)AttachmentSendMode.Cached else state.attachmentSendMode))
+                                dispatch(UiAction.Notice("No file or photo on the clipboard."))
+                        },modifier=Modifier.testTag("paste-attachment"))
+                        (if(c.kind==ChatKind.Group)listOf(AttachmentSendMode.Cached)else listOf(AttachmentSendMode.Direct,AttachmentSendMode.Cached)).forEach{mode->
                             DropdownMenuItem(text={Text((if(mode==AttachmentSendMode.Direct)"Direct transfer" else "Cached transfer")+
                                 (if(mode==state.attachmentSendMode)" · default" else ""))},onClick={
                                 attachmentMenu=false
@@ -127,7 +160,10 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
                 }
                 OutlinedTextField(draft, { if (it.toByteArray(Charsets.UTF_8).size <= if(c.kind==ChatKind.Group)4096 else 512*1024){draft=it;if(!state.demo)dispatch(UiAction.Draft(c.id,it))} }, placeholder = { Text("Message ${c.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     enabled = (state.demo&&state.connection==ConnectionState.Online||!state.demo&&state.account!=null), minLines = 1, maxLines = 5,
-                    modifier = Modifier.weight(1f).testTag("composer"), shape = MaterialTheme.shapes.large)
+                    modifier = Modifier.weight(1f).testTag("composer").onPreviewKeyEvent{event->
+                        if(event.type==KeyEventType.KeyDown&&((event.isCtrlPressed&&event.key==Key.V)||(event.isShiftPressed&&event.key==Key.Insert)))
+                            pasteAttachment(if(c.kind==ChatKind.Group)AttachmentSendMode.Cached else state.attachmentSendMode) else false
+                    }, shape = MaterialTheme.shapes.large)
                 IconButton({
                     val captured=draft
                     if(captured.isNotBlank()){
@@ -173,10 +209,11 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
                             Text(row.date, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    item(key = row.key) { when(row){
+                    item(key = if(row is ConversationTimelineEntry.File)state.localAttachmentIdentityKeys[row.attachment.id]?:row.key else row.key) { when(row){
                         is ConversationTimelineEntry.Text -> MessageBubble(row.message,c.kind==ChatKind.Group&&
-                            (index==0||(timeline[index-1] as? ConversationTimelineEntry.Text)?.message?.senderId!=row.message.senderId),dispatch)
-                        is ConversationTimelineEntry.File -> AttachmentCard(row.attachment,dispatch,state.attachmentPreviews[row.attachment.id])
+                            (index==0||(timeline[index-1] as? ConversationTimelineEntry.Text)?.message?.senderId!=row.message.senderId),c.id,dispatch)
+                        is ConversationTimelineEntry.File -> AttachmentCard(row.attachment,dispatch,state.attachmentPreviews[row.attachment.id],state.localAttachmentPreviews[row.attachment.id],
+                            state.localAttachmentIdentityKeys[row.attachment.id]?:row.attachment.id,c.id)
                     } }
                 }
             }
@@ -194,12 +231,14 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
         }
     }
 }
-@Composable private fun MessageBubble(m: MessageUi, sender: Boolean, dispatch: (UiAction) -> Unit) {
+@OptIn(ExperimentalFoundationApi::class)
+@Composable private fun MessageBubble(m: MessageUi, sender: Boolean, conversationId:String,dispatch: (UiAction) -> Unit) {
     var expanded by rememberSaveable(m.id){mutableStateOf(false)}
+    var deletePrompt by rememberSaveable(m.id){mutableStateOf(false)}
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (m.outgoing) Arrangement.End else Arrangement.Start) {
         Surface(color = if (m.outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
             shape = MaterialTheme.shapes.large, modifier = Modifier.widthIn(max = 330.dp)
-                .toggleable(value=expanded,role=Role.Button,onValueChange={expanded=it})
+                .combinedClickable(onClick={expanded=!expanded},onLongClick={deletePrompt=true},role=Role.Button)
                 .semantics { contentDescription=if(expanded)"Collapse message details" else "Expand message details";stateDescription=if(expanded)"Expanded" else "Collapsed" }
                 .testTag("message-bubble-${m.id}")) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -226,6 +265,11 @@ internal fun attachmentPickerAction(uri:android.net.Uri,binding:AttachmentPicker
             }
         }
     }
+    if(deletePrompt)AlertDialog(onDismissRequest={deletePrompt=false},
+        title={Text("Delete message from this device?")},
+        text={Text("This only removes your local copy. It does not unsend the message.")},
+        confirmButton={TextButton({deletePrompt=false;dispatch(UiAction.DeleteLocalMessage(conversationId,m.id))}){Text("Delete from this device")}},
+        dismissButton={TextButton({deletePrompt=false}){Text("Cancel")}})
 }
 @Composable private fun DeliveryTargets(delivery:DeliveryTargetsUi) {
     Text(delivery.summary,style=MaterialTheme.typography.labelSmall)

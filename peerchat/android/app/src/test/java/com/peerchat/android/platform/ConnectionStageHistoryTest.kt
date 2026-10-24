@@ -36,6 +36,13 @@ class ConnectionStageHistoryTest {
         assertEquals(64,rows.size);assertFalse(history.snapshot().contains("private"))
         assertTrue(rows.all{it.contains("operation=other")})
     }
+    @Test fun channelFailureRetainsOnlyAllowlistedPhaseAndCategory(){
+        val history=ConnectionStageHistory()
+        history.channelFailure("cache_rpc","server_tcp_connected",java.io.IOException("private photo path"))
+        assertTrue(history.snapshot().contains("channel=cache_rpc stage=server_tcp_connected reason=transport_io"))
+        history.channelFailure("secret","private",java.io.IOException("secret"))
+        assertFalse(history.snapshot().contains("secret"));assertFalse(history.snapshot().contains("private"))
+    }
     @Test fun realSupersessionRemainsDistinguishableAndIsRethrown() {
         val history=ConnectionStageHistory({1L},{1L});val failure=ServerRejected("session_superseded")
         try{history.measure("events"){throw failure};fail("Must rethrow")}

@@ -90,7 +90,12 @@ class NativePresenterTest {
             return AccountSession(19,"Jonah","test-only-token",true)
         }
         override suspend fun send(peerId:String,text:String):String {sentPeer=peerId;sends++;(sendBlockers[text]?:sendBlocker)?.await();if(failSend)error("test failure");return sendIds[text]?:"c".repeat(32)}
-        override suspend fun older(peerId:String,before:Long)=emptyList<MessageSnapshot>()
+        var historyRows=emptyList<MessageSnapshot>()
+        val historyReads=mutableListOf<Pair<String,Long>>()
+        override suspend fun older(peerId:String,before:Long):List<MessageSnapshot> {
+            historyReads.add(peerId to before)
+            return if(peerId=="b".repeat(64)&&before==Long.MAX_VALUE)historyRows else emptyList()
+        }
         var compatibility:AttachmentCompatibilityChoice?=null
         var attachmentFailure=false
         var attachmentBlocker:kotlinx.coroutines.CompletableDeferred<Unit>?=null
@@ -150,6 +155,29 @@ class NativePresenterTest {
         dispatcher.scheduler.runCurrent()
         assertFalse(p.state.value.voiceBusy)
         assertEquals(listOf(token),commands.releasedVoice)
+    }
+    @Test fun backgroundingPreservesAlreadyAuthorizedServicePreparation(){
+        val commands=Commands().apply{reject=false};val p=presenter(commands)
+        p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle()
+        val token="authorized-start-1"
+        @Suppress("UNCHECKED_CAST")
+        val stateField=NativePresenter::class.java.getDeclaredField("mutable").apply{isAccessible=true}
+        val uiState=stateField.get(p) as MutableStateFlow<PeerChatUiState>
+        uiState.value=uiState.value.copy(voiceBusy=true,voicePreparationToken=token,
+            voicePendingConversationId="account:8",voiceConversationId="account:8",voicePeerName="Sammy",
+            voiceUiIdentity="dm:fixture")
+        NativePresenter::class.java.getDeclaredField("voiceStartPendingToken").apply{isAccessible=true}.set(p,token)
+        NativePresenter::class.java.getDeclaredField("voiceStartExpected").apply{isAccessible=true}
+            .set(p,Triple("b".repeat(64),"c".repeat(32),""))
+
+        p.setForeground(false);dispatcher.scheduler.runCurrent()
+
+        assertEquals(token,p.state.value.voicePreparationToken)
+        assertTrue(p.state.value.voiceBusy)
+        assertEquals("account:8",p.state.value.voicePendingConversationId)
+        assertEquals("Sammy",p.state.value.voicePeerName)
+        assertEquals(token,NativePresenter::class.java.getDeclaredField("voiceStartPendingToken").apply{isAccessible=true}.get(p))
+        assertTrue(commands.releasedVoice.isEmpty())
     }
     @Test fun explicitRoomJoinUsesScopedPermissionAndDropsRemovedRoom() {
         val commands=Commands().apply{reject=false};val p=presenter(commands)
@@ -252,7 +280,7 @@ class NativePresenterTest {
         val cache=attachmentSendFailureText(AttachmentSendMode.Cached,AttachmentCachePreflightRejected("cache_storage_unavailable"))
         assertTrue(cache.contains("encrypted cache storage is unavailable"));assertTrue(cache.contains("No attachment was sent"))
         val direct=attachmentSendFailureText(AttachmentSendMode.Direct,AttachmentModeUnavailable("direct_device_offline; cached_recipient_upgrade_required"))
-        assertTrue(direct.contains("verified device online"));assertTrue(direct.contains("needs an update"))
+        assertTrue(direct.contains("verified device online"));assertTrue(direct.contains("no recipient device supports cached delivery"))
         assertFalse(direct.contains("Send Cached"))
     }
     @Test fun lostAuthenticationDismissesStaleAttachmentChoiceWithoutDirectSend(){
@@ -264,10 +292,11 @@ class NativePresenterTest {
     @Test fun leavingChatDuringConnectionWaitCannotPresentAnOldRecipientChoice(){
         val blocker=kotlinx.coroutines.CompletableDeferred<Unit>();val commands=Commands().apply{reject=false;attachmentBlocker=blocker;compatibility=AttachmentCompatibilityChoice("f".repeat(32),"selected.bin",true,"b".repeat(64))};val p=presenter(commands)
         p.login("Jonah","fixture");dispatcher.scheduler.advanceUntilIdle();p.dispatch(UiAction.Select("account:8"));p.dispatch(UiAction.Draft("account:8","retained draft"));p.dispatch(UiAction.SendAttachment(android.net.Uri.parse("content://fixture/selected")));dispatcher.scheduler.runCurrent()
-        assertEquals("Preparing direct encrypted file delivery…",p.state.value.notice)
+        assertNull(p.state.value.notice)
+        assertTrue(p.state.value.selected!!.attachments.single().id.startsWith("local-attachment-"))
         p.dispatch(UiAction.Navigate(Route.Home));blocker.complete(Unit);dispatcher.scheduler.advanceUntilIdle()
         assertNull(p.state.value.attachmentCompatibility);assertEquals(listOf("f".repeat(32) to null),commands.compatibilityResolutions);assertEquals("retained draft",p.state.value.drafts["account:8"])
-        assertNotEquals("Preparing direct encrypted file delivery…",p.state.value.notice)
+        assertNull(p.state.value.notice)
     }
     @Test fun viewingAnUnknownAttachmentNeverStartsFileDeliveryNotice(){
         val commands=Commands().apply{reject=false};val p=presenter(commands)
@@ -761,4 +790,28 @@ class NativePresenterTest {
         p.dispatch(UiAction.JoinVoice("room"));assertTrue(p.state.value.selected!!.voiceRooms.isEmpty())
         store.clear();assertTrue(commands.closed)
     }
+    @Test fun inactiveLargeHistoryEvictsWithoutChangingVisibleWindowAndRevisitReloads() {
+        val commands=Commands().apply{reject=false}
+        val p=presenter(commands);p.login("Jonah","test-only");dispatcher.scheduler.advanceUntilIdle()
+        val text="x".repeat(512*1024)
+        commands.historyRows=(1..8).map{n->MessageSnapshot(n.toString().padStart(32,'0'),"b".repeat(64),"a".repeat(64),n.toLong(),n.toLong(),n.toLong(),2,text)}
+        commands.state.value=commands.state.value.copy(conversations=commands.state.value.conversations+
+            ConversationSnapshot(FriendIdentity(9,"Second","e".repeat(64),false),ConnectionSnapshot(),emptyList()))
+        dispatcher.scheduler.advanceUntilIdle()
+        p.dispatch(UiAction.Select("account:8"));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(8,p.state.value.selected!!.messages.size)
+        p.dispatch(UiAction.Older);dispatcher.scheduler.advanceUntilIdle()
+        assertFalse(p.state.value.selected!!.hasOlder)
+        assertEquals(8,p.state.value.selected!!.messages.size)
+        p.dispatch(UiAction.Select("account:9"));dispatcher.scheduler.advanceUntilIdle()
+        val evicted=p.state.value.conversations.single{it.id=="account:8"}
+        assertTrue(evicted.messages.isEmpty());assertTrue(evicted.hasOlder)
+        val previousReads=commands.historyReads.count{it.first=="b".repeat(64)&&it.second==Long.MAX_VALUE}
+        p.dispatch(UiAction.Select("account:8"));dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(previousReads+1,commands.historyReads.count{it.first=="b".repeat(64)&&it.second==Long.MAX_VALUE})
+        assertEquals(8,p.state.value.selected!!.messages.size)
+        commands.state.value=MessagingSnapshot();dispatcher.scheduler.advanceUntilIdle()
+        assertTrue(p.state.value.conversations.isEmpty())
+    }
+
 }

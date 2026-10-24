@@ -45,14 +45,21 @@ class ServerTrustTest {
             java.security.Security.removeProvider(it.name)
         }
         try {
+        for(renewal in listOf(false,true)) {
         val pair=KeyPairGenerator.getInstance("RSA").apply{initialize(2048)}.generateKeyPair()
         val bc=BouncyCastleProvider()
         val name=X500Name("CN=localhost")
-        val cert=JcaX509CertificateConverter().setProvider(bc).getCertificate(
+        val anchor=JcaX509CertificateConverter().setProvider(bc).getCertificate(
             JcaX509v3CertificateBuilder(name,BigInteger.ONE,Date(System.currentTimeMillis()-60000),
                 Date(System.currentTimeMillis()+3600000),name,pair.public)
                 .build(JcaContentSignerBuilder("SHA256withRSA").setProvider(bc).build(pair.private)))
-        val pin=MessageDigest.getInstance("SHA-256").digest(cert.encoded).joinToString(""){"%02x".format(it)}
+        val cert=if(!renewal)anchor else JcaX509CertificateConverter().setProvider(bc).getCertificate(
+            JcaX509v3CertificateBuilder(name,BigInteger.TWO,Date(System.currentTimeMillis()-60000),
+                Date(System.currentTimeMillis()+3600000),name,pair.public)
+                .addExtension(org.bouncycastle.asn1.ASN1ObjectIdentifier(com.peerchat.android.platform.tls.ServerCertificateRenewal.ANCHOR_OID),false,anchor.encoded)
+                .build(JcaContentSignerBuilder("SHA256withRSA").setProvider(bc).build(pair.private)))
+        val pin=MessageDigest.getInstance("SHA-256").digest(anchor.encoded).joinToString(""){"%02x".format(it)}
+        val observedPin=MessageDigest.getInstance("SHA-256").digest(cert.encoded).joinToString(""){"%02x".format(it)}
         val keys=KeyStore.getInstance(KeyStore.getDefaultType()).apply{
             load(null,null);setKeyEntry("test-only",pair.private,"test-only".toCharArray(),arrayOf(cert))
         }
@@ -78,19 +85,33 @@ class ServerTrustTest {
             if(completed)assertNull("Pinned TLS fixture failed after handshake",serverFailure)
             return completed
         }
-        assertFalse(round{port,_->assertEquals(pin,ServerChannel.inspectCertificate("localhost",port))})
+        assertFalse(round{port,_->assertEquals(observedPin,ServerChannel.inspectCertificate("localhost",port))})
+        assertTrue(round(true){port,_->assertEquals(pin,ServerChannel.inspectCertificate("localhost",port,pin))})
         assertTrue(round(true){port,ready->ServerChannel("localhost",port,pin,false).use{
             assertTrue(ready.await(10,java.util.concurrent.TimeUnit.SECONDS))
             val tcp=ServerChannel::class.java.getDeclaredField("tcp").also{it.isAccessible=true}.get(it) as java.net.Socket
             assertTrue("Authenticated outer relay socket disables Nagle",tcp.tcpNoDelay)
         }})
+        assertTrue(round(true){port,ready->ServerChannel("localhost",port,pin,false,
+            ServerChannel.OperationScope(),null,true).use{
+            assertTrue(ready.await(10,java.util.concurrent.TimeUnit.SECONDS))
+        }})
         assertFalse(round{port,_->
             try{ServerChannel("localhost",port,"a".repeat(64),false).close();fail("Wrong pin accepted")}
             catch(error:Exception){
                 val change=ServerChannel.identityChange(error)
-                assertNotNull(change);assertEquals(pin,change!!.observed);assertEquals("a".repeat(64),change.expected)
+                assertNotNull(change);assertEquals(observedPin,change!!.observed);assertEquals("a".repeat(64),change.expected)
             }
         })
+        assertFalse(round{port,_->
+            try{ServerChannel("localhost",port,"a".repeat(64),false,
+                ServerChannel.OperationScope(),null,true).close();fail("Wrong cache pin accepted")}
+            catch(error:Exception){
+                val change=ServerChannel.identityChange(error)
+                assertNotNull(change);assertEquals(observedPin,change!!.observed);assertEquals("a".repeat(64),change.expected)
+            }
+        })
+        }
         } finally {
             providers.forEachIndexed{index,provider->
                 if(java.security.Security.getProvider(provider.name)==null)

@@ -28,6 +28,19 @@ class BoundedRpcTest {
         threads.forEach{it.start()};threads.forEach{it.join()}
         assertEquals(3,opens);owner.close()
     }
+    @Test fun windowCountsEveryFrameAndRetiresBeforeServerLimit(){
+        val resources=mutableListOf<Resource>()
+        val owner=BoundedRpc({Resource().also{resources.add(it)}},{!it.closed})
+        repeat(56){owner.run("same") {}}
+        owner.run("same",8){assertSame(resources.last(),it)}
+        assertEquals(2,resources.size);assertTrue(resources[0].closed)
+        repeat(6){owner.run("same",8){}}
+        assertEquals(2,resources.size)
+        owner.run("same",8){};assertEquals(3,resources.size)
+        for(count in listOf(0,9)){try{owner.run("same",count){};fail()}catch(_:IllegalArgumentException){}}
+        try{owner.run<Unit>("same",8){throw IOException("partial window")};fail()}catch(_:IOException){}
+        assertTrue(resources.last().closed);owner.close()
+    }
     @Test fun deliveryLaneRunsWhileOrdinaryLaneIsBlockedAndBothRetire(){
         val ordinaryResources=mutableListOf<Resource>()
         val deliveryResources=mutableListOf<Resource>()
@@ -75,5 +88,75 @@ class BoundedRpcTest {
         owners.run("mailbox_keys","session-two") {}
         owners.close()
         assertTrue(ordinaryResources.all{it.closed}&&deliveryResources.all{it.closed})
+    }
+    @Test fun cachePayloadCannotBlockMailboxOrMetadataAndRetiresIndependently() {
+        val ordinary=mutableListOf<Resource>();val delivery=mutableListOf<Resource>();val cache=mutableListOf<Resource>()
+        val owners=RpcChannelPair({Resource().also{ordinary+=it}},{Resource().also{delivery+=it}},
+            {!it.closed},{Resource().also{cache+=it}})
+        val entered=CountDownLatch(1);val release=CountDownLatch(1);val failure=AtomicReference<Throwable?>()
+        val blocked=Thread {try{owners.runWindow("cache_dm_append","one",8){entered.countDown();assertTrue(release.await(5,TimeUnit.SECONDS))}}
+            catch(t:Throwable){failure.set(t)}}
+        blocked.start()
+        try {
+            assertTrue(entered.await(2,TimeUnit.SECONDS))
+            val done=CountDownLatch(2)
+            val workers=listOf("mailbox_ack","device_identity_snapshot").map{type->Thread{
+                try{owners.run(type,"one"){done.countDown()}}catch(t:Throwable){failure.set(t)}
+            }.also{it.start()}}
+            assertTrue(done.await(2,TimeUnit.SECONDS));workers.forEach{it.join(2000)}
+        } finally {release.countDown();blocked.join(2000)}
+        assertNull(failure.get());assertEquals(1,ordinary.size);assertEquals(1,delivery.size);assertEquals(1,cache.size)
+        owners.run("cache_dm_complete","one"){assertSame(cache.first(),it)}
+        owners.run("cache_acquire","two"){}
+        assertTrue(cache.first().closed);assertFalse(ordinary.first().closed);assertFalse(delivery.first().closed)
+        try{owners.run<Unit>("cache_dm_append","two"){throw IOException("ambiguous")};fail()}catch(_:IOException){}
+        assertTrue(cache.last().closed)
+        owners.run("cache_dm_status","two"){}
+        owners.close();assertTrue((ordinary+delivery+cache).all{it.closed})
+    }
+    @Test fun cacheOwnerUsesServerFrame64ThenRetiresOnMoreFalse() {
+        val ordinary=mutableListOf<Resource>();val delivery=mutableListOf<Resource>();val cache=mutableListOf<Resource>()
+        val owners=RpcChannelPair({Resource().also{ordinary+=it}},{Resource().also{delivery+=it}},
+            {!it.closed},{Resource().also{cache+=it}})
+        try {
+            repeat(55){owners.run("cache_dm_receipts","session-one") {assertSame(cache.first(),it)}}
+            owners.runWindow("cache_dm_append","session-one",8){assertSame(cache.first(),it)}
+            assertEquals(1,cache.size)
+            // The server returns more=false on frame 64; close inside the
+            // operation exactly as ServerAccounts does before another request.
+            owners.run("cache_dm_complete","session-one"){
+                assertSame(cache.first(),it)
+                owners.closeSelected("cache_dm_complete")
+            }
+            assertTrue(cache.first().closed)
+            owners.run("cache_dm_status","session-one") {assertSame(cache.last(),it)}
+            assertEquals(2,cache.size)
+            owners.run("cache_dm_status","session-two") {assertSame(cache.last(),it)}
+            assertEquals(3,cache.size);assertTrue(cache[1].closed)
+            try {owners.runWindow<Unit>("cache_dm_append","session-two",8){throw IOException("partial window")};fail()}
+            catch(_:IOException) {}
+            assertTrue(cache.last().closed)
+            owners.run("cache_dm_status","session-two") {assertSame(cache.last(),it)}
+            assertEquals(4,cache.size)
+            // Both other owners retain their original 60-frame budget.
+            repeat(60){owners.run("device_identity_snapshot","session-one"){};owners.run("mailbox_ack","session-one") {}}
+            assertEquals(1,ordinary.size);assertEquals(1,delivery.size)
+            owners.run("device_identity_snapshot","session-one"){};owners.run("mailbox_ack","session-one") {}
+            assertEquals(2,ordinary.size);assertEquals(2,delivery.size)
+            assertTrue(ordinary.first().closed&&delivery.first().closed)
+        } finally {owners.close()}
+    }
+    @Test fun cacheBudgetNeverExceedsServer64FrameBound() {
+        val resources=mutableListOf<Resource>()
+        val owner=BoundedRpc({Resource().also{resources+=it}},{!it.closed},64)
+        repeat(57){owner.run("one") {assertSame(resources.first(),it)}}
+        owner.run("one",8){assertSame(resources.last(),it)}
+        assertEquals(2,resources.size);assertTrue(resources.first().closed)
+        repeat(7){owner.run("one",8){}}
+        assertEquals(2,resources.size) // New connection has used exactly 64 frames.
+        owner.run("one"){};assertEquals(3,resources.size);assertTrue(resources[1].closed)
+        owner.close()
+        try {BoundedRpc({Resource()},{!it.closed},65);fail("bound above server 64 accepted")}
+        catch(_:IllegalArgumentException) {}
     }
 }

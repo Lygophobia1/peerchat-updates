@@ -7,6 +7,7 @@ import java.security.cert.*;
 import javax.net.ssl.*;
 import org.bouncycastle.jsse.provider.BouncyCastleJsseProvider;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.tls.crypto.impl.jcajce.JcaTlsCryptoProvider;
 
 /** Outer discovery/opaque-relay socket adapter only. Never authenticates a peer
  * device, promotes friend trust, or owns reliable delivery/reconnect decisions. */
@@ -26,8 +27,14 @@ public final class ServerChannel implements AutoCloseable {
     /** Inspection REJECTS in the trust callback, before any application data.
      * Expired/malformed certificates fail before a pin can be offered. */
     public static String inspectCertificate(String host,int port)throws Exception {
+        return inspectCertificate(host,port,"");
+    }
+    /** A known pin remains the anchor after a verified same-key renewal. */
+    public static String inspectCertificate(String host,int port,String trustedPin)throws Exception {
+        boolean known=trustedPin!=null && trustedPin.matches("[0-9a-fA-F]{64}");
         try(ServerChannel ignored=new ServerChannel(host,port,
-                "0000000000000000000000000000000000000000000000000000000000000000",false)){
+                known?trustedPin:"0000000000000000000000000000000000000000000000000000000000000000",false)){
+            if(known)return trustedPin.toLowerCase(java.util.Locale.ROOT);
             throw new CertificateException("Certificate inspection did not reject handshake");
         }catch(Exception error){
             ServerIdentityChanged change=identityChange(error);
@@ -49,6 +56,9 @@ public final class ServerChannel implements AutoCloseable {
         private BouncyCastleJsseProvider tlsProvider;
         private int providerInitializations;
         private long providerInitializationNanos;
+        private BouncyCastleJsseProvider cacheTlsProvider;
+        private int cacheProviderInitializations;
+        private long cacheProviderInitializationNanos;
         // Provider construction loads the pinned algorithm registry. Reuse that
         // immutable registry within the backend I/O scope, not SSLContext,
         // sessions, credentials, sockets or a platform-global registration.
@@ -61,6 +71,17 @@ public final class ServerChannel implements AutoCloseable {
             }
             check();return tlsProvider;
         }
+        private synchronized BouncyCastleJsseProvider cacheTlsProvider() throws IOException {
+            check();
+            if(cacheTlsProvider==null){
+                long start=System.nanoTime();
+                cacheTlsProvider=cacheCryptoProvider();
+                cacheProviderInitializationNanos=System.nanoTime()-start;cacheProviderInitializations++;
+            }
+            check();return cacheTlsProvider;
+        }
+        private synchronized int cacheProviderInitializationCount(){return cacheProviderInitializations;}
+        private synchronized long cacheProviderInitializationMillis(){return cacheProviderInitializationNanos/1_000_000;}
         public synchronized int providerInitializationCount(){return providerInitializations;}
         public synchronized long providerInitializationMillis(){return providerInitializationNanos/1_000_000;}
         public synchronized void configure(boolean enabled,long deadlineNanos) {
@@ -94,6 +115,12 @@ public final class ServerChannel implements AutoCloseable {
     }
     public ServerChannel(String host, int port, String explicitPin, boolean longLived,OperationScope operations,
                          java.util.function.BiConsumer<String,Long> timing) throws Exception {
+        this(host,port,explicitPin,longLived,operations,timing,false);
+    }
+    /** Cache RPCs retain their separate resource but use private BC algorithms,
+     * matching the established connections. Trust and TLS policy are identical. */
+    public ServerChannel(String host, int port, String explicitPin, boolean longLived,OperationScope operations,
+                         java.util.function.BiConsumer<String,Long> timing,boolean cacheCrypto) throws Exception {
         long started=System.nanoTime();
         this.operations=java.util.Objects.requireNonNull(operations);operations.check();
         if(host == null || host.isEmpty() || port < 1 || port > 65535) throw new IOException("Invalid server endpoint");
@@ -118,7 +145,7 @@ public final class ServerChannel implements AutoCloseable {
                     byte[] observed=MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
                     byte[] expected=new byte[32];
                     for(int i=0;i<32;i++) expected[i]=(byte)Integer.parseInt(pin.substring(i*2,i*2+2),16);
-                    if(!MessageDigest.isEqual(expected,observed)){
+                    if(!MessageDigest.isEqual(expected,observed) && !ServerCertificateRenewal.matches(chain[0],expected)){
                         StringBuilder fingerprint=new StringBuilder();
                         for(byte b:observed)fingerprint.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
                         throw new ServerIdentityChanged(pin,fingerprint.toString());
@@ -132,15 +159,15 @@ public final class ServerChannel implements AutoCloseable {
         // No global provider
         // registration and no Android identity/private-key substitution. Outer
         // server TLS uses account authentication, not mutual device certificates.
-        int previousInitializations=operations.providerInitializationCount();
+        int previousInitializations=cacheCrypto?operations.cacheProviderInitializationCount():operations.providerInitializationCount();
         long providerAcquireStarted=System.nanoTime();
-        BouncyCastleJsseProvider provider=operations.tlsProvider();
+        BouncyCastleJsseProvider provider=cacheCrypto?operations.cacheTlsProvider():operations.tlsProvider();
         if(timing!=null)try{
-            timing.accept("crypto_provider_initializations",(long)operations.providerInitializationCount());
+            timing.accept("crypto_provider_initializations",(long)(cacheCrypto?operations.cacheProviderInitializationCount():operations.providerInitializationCount()));
             timing.accept(previousInitializations==0?"crypto_provider_initialized":"crypto_provider_reused",(System.nanoTime()-providerAcquireStarted)/1_000_000);
-            if(previousInitializations==0)timing.accept("crypto_provider_initialization_duration",operations.providerInitializationMillis());
+            if(previousInitializations==0)timing.accept("crypto_provider_initialization_duration",cacheCrypto?operations.cacheProviderInitializationMillis():operations.providerInitializationMillis());
         }catch(RuntimeException ignored){/* Instrumentation cannot affect TLS/trust. */}
-        SSLContext context=SSLContext.getInstance("TLS",provider);context.init(null,new TrustManager[]{trust},null);
+        SSLContext context=SSLContext.getInstance("TLS",provider);context.init(null,new TrustManager[]{trust},cacheCrypto?new SecureRandom():null);
         observe(timing,"tls_context_ready",started);
         tcp=new Socket(); SSLSocket candidate=null;
         try {
@@ -160,6 +187,15 @@ public final class ServerChannel implements AutoCloseable {
             socket=candidate;
         } catch(Exception error){disarm();operations.detach(tcp);tcp.close();throw error;}
     }
+    static JcaTlsCryptoProvider cacheCryptoAlgorithms(){
+        // Mixing platform primary algorithms with a BC fallback can select
+        // incompatible key/provider implementations on physical Android devices.
+        // Use the same private algorithm provider as ordinary server TLS.
+        return new JcaTlsCryptoProvider().setProvider(new BouncyCastleProvider());
+    }
+    static BouncyCastleJsseProvider cacheCryptoProvider(){
+        return new BouncyCastleJsseProvider(false,cacheCryptoAlgorithms());
+    }
     private static void observe(java.util.function.BiConsumer<String,Long> timing,String stage,long started) {
         // Fixed stages and elapsed time only. Diagnostics cannot change TLS behavior.
         if(timing!=null)try{timing.accept(stage,(System.nanoTime()-started)/1_000_000);}catch(RuntimeException ignored){}
@@ -171,6 +207,29 @@ public final class ServerChannel implements AutoCloseable {
         operations.check();
         if(data==null||data.length==0||data.length>maximum)throw new IOException("Invalid server frame size");
         DataOutputStream output=new DataOutputStream(socket.getOutputStream());output.writeInt(data.length);output.write(data);output.flush();
+    }
+    /** Cache-only bounded transport window. The original length-prefixed frames
+     * remain separate protocol messages; one TLS write avoids tiny header records.
+     * Validate every frame before any output or partially visible window. */
+    public synchronized void writeWindow(java.util.List<byte[]> frames,int maximum)throws IOException {
+        writeWindow(socket.getOutputStream(),frames,maximum,operations::check);
+    }
+    static void writeWindow(OutputStream output,java.util.List<byte[]> frames,int maximum,WriteOperation check)throws IOException {
+        if(frames==null||frames.isEmpty()||frames.size()>8||maximum<1||maximum>100000)
+            throw new IOException("Invalid server window bound");
+        int total=0;
+        for(byte[] frame:frames){
+            if(frame==null||frame.length==0||frame.length>maximum)throw new IOException("Invalid server frame size");
+            total+=4+frame.length;
+        }
+        if(total>800032)throw new IOException("Invalid server window size");
+        byte[] wire=new byte[total];int offset=0;
+        for(byte[] frame:frames){
+            int length=frame.length;wire[offset++]=(byte)(length>>>24);wire[offset++]=(byte)(length>>>16);
+            wire[offset++]=(byte)(length>>>8);wire[offset++]=(byte)length;
+            System.arraycopy(frame,0,wire,offset,length);offset+=length;
+        }
+        check.run();output.write(wire);output.flush();check.run();
     }
     /** A long-lived reader has no idle read timeout. Bound its independent
      * writer without changing that read policy or allocating a thread per write. */

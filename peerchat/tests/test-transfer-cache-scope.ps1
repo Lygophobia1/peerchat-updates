@@ -9,5 +9,13 @@ try{
  if($LASTEXITCODE){throw 'Cache scope compile failed'}
  & "$out/scope.exe"
  if($LASTEXITCODE){throw 'Cache scope regression failed'}
- Write-Output "Evidence: $out. Local purpose adapter only, no enabled server cache."
+ & g++ -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/transfer_cache_reservation_test.cpp -o "$out/reservation.exe" -lbcrypt -lcrypt32
+ if($LASTEXITCODE){throw 'Cache reservation compile failed'}
+ & "$out/reservation.exe"
+ if($LASTEXITCODE){throw 'Cache reservation regression failed'}
+ & g++ -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/transfer_cache_preparation_test.cpp -o "$out/preparation.exe" -lbcrypt -lcrypt32
+ if($LASTEXITCODE){throw 'Cache preparation compile failed'}
+ & "$out/preparation.exe"
+ if($LASTEXITCODE){throw 'Cache preparation regression failed'}
+ Write-Output "Evidence: $out. Local purpose and bounded reservation adapters only, no enabled server cache."
 }finally{Pop-Location}

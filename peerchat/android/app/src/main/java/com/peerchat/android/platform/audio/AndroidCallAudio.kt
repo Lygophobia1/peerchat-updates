@@ -14,7 +14,7 @@ import android.os.Looper
 /** Foreground-service call owner. prepare follows explicit Start/Answer and a
  * RECORD_AUDIO grant. Activity stop does not own or terminate an active call. */
 class AndroidCallAudio(private val context: Context, private val onFocusLost: () -> Unit) : AutoCloseable {
-    data class Processing(val echoCancellation: Boolean = false, val noiseSuppression: Boolean = true, val automaticGain: Boolean = true)
+    data class Processing(val echoCancellation: Boolean = true, val noiseSuppression: Boolean = true, val automaticGain: Boolean = true, val automaticNoiseControl: Boolean = true, val automaticNoiseControlLevel: Int = 1)
     private val manager = context.getSystemService(AudioManager::class.java)
     private var focus: AudioFocusRequest? = null
     private var previousMode = AudioManager.MODE_NORMAL
@@ -29,6 +29,7 @@ class AndroidCallAudio(private val context: Context, private val onFocusLost: ()
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setAcceptsDelayedFocusGain(false)
             .setOnAudioFocusChangeListener({ change ->
+                android.util.Log.w("PeerChatAudio","event=focus_change code=$change")
                 if (change != AudioManager.AUDIOFOCUS_GAIN && active) {
                     close()
                     onFocusLost()
@@ -66,6 +67,68 @@ class AndroidCallAudio(private val context: Context, private val onFocusLost: ()
         } catch (_: RuntimeException) { false }
     }
 
+    /** Select a communication device from the current device list. -1 is phone and -2 is speaker. */
+    fun setRoute(deviceId: Int): Boolean {
+        if (!active) return false
+        return try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val devices = manager.availableCommunicationDevices
+                val device = when (deviceId) {
+                    -1 -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                    -2 -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    else -> devices.firstOrNull { it.id == deviceId && it.type in bluetoothCommunicationTypes }
+                } ?: return false
+                manager.setCommunicationDevice(device)
+            } else {
+                when (deviceId) {
+                    -1 -> {
+                        @Suppress("DEPRECATION")
+                        manager.stopBluetoothSco()
+                        @Suppress("DEPRECATION")
+                        manager.isBluetoothScoOn = false
+                        @Suppress("DEPRECATION")
+                        manager.isSpeakerphoneOn = false
+                        true
+                    }
+                    -2 -> {
+                        @Suppress("DEPRECATION")
+                        manager.stopBluetoothSco()
+                        @Suppress("DEPRECATION")
+                        manager.isBluetoothScoOn = false
+                        @Suppress("DEPRECATION")
+                        manager.isSpeakerphoneOn = true
+                        true
+                    }
+                    else -> {
+                        val device = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                            .firstOrNull { it.id == deviceId && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                            ?: return false
+                        @Suppress("DEPRECATION")
+                        manager.isSpeakerphoneOn = false
+                        @Suppress("DEPRECATION")
+                        manager.startBluetoothSco()
+                        @Suppress("DEPRECATION")
+                        manager.isBluetoothScoOn = true
+                        device.id == deviceId
+                    }
+                }
+            }
+        } catch (_: RuntimeException) { false }
+    }
+
+    fun speakerActive(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= 31) manager.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        else {
+            @Suppress("DEPRECATION")
+            manager.isSpeakerphoneOn
+        }
+    } catch (_: RuntimeException) { false }
+
+    private val bluetoothCommunicationTypes: Set<Int> get() = buildSet {
+        add(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        if (Build.VERSION.SDK_INT >= 31) add(AudioDeviceInfo.TYPE_BLE_HEADSET)
+    }
+
     override fun close() {
         if (!active) return
         active = false
@@ -73,6 +136,10 @@ class AndroidCallAudio(private val context: Context, private val onFocusLost: ()
         runCatching {
             if (Build.VERSION.SDK_INT >= 31) manager.clearCommunicationDevice()
             else {
+                @Suppress("DEPRECATION")
+                manager.stopBluetoothSco()
+                @Suppress("DEPRECATION")
+                manager.isBluetoothScoOn = false
                 @Suppress("DEPRECATION")
                 manager.isSpeakerphoneOn = previousSpeaker
             }

@@ -12,11 +12,16 @@ int main(){try{
  protocol::Reader restored(cache.data);check(restored.type()==protocol::FileTransfer);posix::tokenPurpose(restored,Purpose::DirectCacheCiphertext);
  rejects([&]{protocol::Reader r(cache.data);r.type();posix::tokenPurpose(r,Purpose::PeerFile);});
  rejects([&]{protocol::Reader r(ordinary.data);r.type();posix::tokenPurpose(r,Purpose::DirectCacheCiphertext);});
- rejects([&]{protocol::Writer w(protocol::FileTransfer);posix::tokenPurpose(w,Purpose::GroupCacheCiphertext);});
+ protocol::Writer group(protocol::FileTransfer);posix::tokenPurpose(group,Purpose::GroupCacheCiphertext);
+ {protocol::Reader r(group.data);r.type();posix::tokenPurpose(r,Purpose::GroupCacheCiphertext);}
+ for(auto other:{Purpose::PeerFile,Purpose::DirectCacheCiphertext})rejects([&]{protocol::Reader r(group.data);r.type();posix::tokenPurpose(r,other);});
+ rejects([&]{protocol::Reader r(cache.data);r.type();posix::tokenPurpose(r,Purpose::GroupCacheCiphertext);});
+ rejects([&]{protocol::Reader r(ordinary.data);r.type();posix::tokenPurpose(r,Purpose::GroupCacheCiphertext);});
+ rejects([&]{protocol::Writer w(protocol::FileTransfer);posix::tokenPurpose(w,static_cast<Purpose>(99));});
  auto tampered=cache.data;tampered.back()^=1;
  rejects([&]{protocol::Reader r(tampered);r.type();posix::tokenPurpose(r,Purpose::DirectCacheCiphertext);});
  cache.number(9);rejects([&]{protocol::Reader r(cache.data);r.type();posix::tokenPurpose(r,Purpose::DirectCacheCiphertext);});
- check(posix::maximum(Purpose::PeerFile)==256ull*1024*1024&&posix::maximum(Purpose::DirectCacheCiphertext)==MaxCacheCipherBytes&&MaxCacheCipherBytes>MaxFileBytes);
+ check(posix::maximum(Purpose::PeerFile)==5ull*1024*1024*1024&&posix::maximum(Purpose::DirectCacheCiphertext)==MaxCacheCipherBytes&&posix::maximum(Purpose::GroupCacheCiphertext)==MaxCacheCipherBytes&&MaxCacheCipherBytes>MaxCachedFileBytes&&MaxCacheCipherBytes<MaxFileBytes);
  std::cout<<"PASS production Android file-scope helpers: legacy token bytes, purpose binding, substitutions, tampering, trailing data and distinct ciphertext bound. HOST ONLY; no POSIX filesystem execution.\n";
  return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

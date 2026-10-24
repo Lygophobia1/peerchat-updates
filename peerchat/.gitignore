@@ -15,3 +15,4 @@ google-services.json
 /tests/portable/obj/
 /tests/performance/bin/
 /tests/performance/obj/
+*.obj

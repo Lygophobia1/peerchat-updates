@@ -6,6 +6,46 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ScopedBackendWorkTest {
+    @Test fun receiptBatchYieldsBetweenCommitsAndResumesWithoutRepeatingProgress(){
+        val gate=Any();var preparing=false
+        val committed=mutableListOf<Int>()
+        val firstCommit=java.util.concurrent.CountDownLatch(1)
+        val resumeBatch=java.util.concurrent.CountDownLatch(1)
+        val yielded=java.util.concurrent.CountDownLatch(1)
+        val pool=java.util.concurrent.Executors.newSingleThreadExecutor()
+        val scope=ScopedBackendWork(gate){true}.yieldingWhile{if(preparing)yielded.countDown();preparing}
+        try{
+            val work=pool.submit{
+                scope.local{committed.add(1);preparing=true};firstCommit.countDown()
+                check(resumeBatch.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                scope.local{committed.add(2)}
+            }
+            assertTrue(firstCommit.await(5,java.util.concurrent.TimeUnit.SECONDS));resumeBatch.countDown()
+            assertTrue(yielded.await(5,java.util.concurrent.TimeUnit.SECONDS))
+            synchronized(gate){assertEquals(listOf(1),committed);preparing=false}
+            work.get(5,java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(listOf(1,2),committed)
+        }finally{resumeBatch.countDown();pool.shutdownNow()}
+    }
+    @Test fun optionalWorkYieldsGateToCallAndRechecksAuthorizationBeforeResuming(){
+        for(revoke in listOf(false,true)){
+            val gate=Any();var preparing=true;var authorized=true;var installed=false
+            val deferred=java.util.concurrent.CountDownLatch(1)
+            val pool=java.util.concurrent.Executors.newSingleThreadExecutor()
+            val scope=ScopedBackendWork(gate){authorized}.yieldingWhile{deferred.countDown();preparing}
+            try{
+                val work=pool.submit<Boolean>{try{scope.local{installed=true};true}catch(_:ScopedBackendWork.Superseded){false}}
+                assertTrue(deferred.await(5,java.util.concurrent.TimeUnit.SECONDS))
+                synchronized(gate){
+                    assertFalse(installed)
+                    if(revoke)authorized=false
+                    preparing=false
+                }
+                assertEquals(!revoke,work.get(5,java.util.concurrent.TimeUnit.SECONDS))
+                assertEquals(!revoke,installed)
+            }finally{pool.shutdownNow()}
+        }
+    }
     @Test fun loginBootstrapFetchDoesNotHoldProfileGateAndInstallsUnderIt(){
         val gate=Any();val started=java.util.concurrent.CountDownLatch(1)
         val release=java.util.concurrent.CountDownLatch(1)

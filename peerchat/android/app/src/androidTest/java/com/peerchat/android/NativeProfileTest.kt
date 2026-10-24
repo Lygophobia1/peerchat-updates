@@ -20,6 +20,35 @@ class NativeProfileTest {
         check(!directory.exists() || directory.deleteRecursively())
         check(!state.directory.exists() || state.directory.deleteRecursively())
     }
+    @Test fun localDeletionPersistsOfflineWithoutChangingOutboxOrIdentity() {
+        val profile="test_${UUID.randomUUID()}"
+        val peer="b".repeat(64).toByteArray(Charsets.US_ASCII)
+        val id="c".repeat(32).toByteArray(Charsets.US_ASCII)
+        var identity:ByteArray?=null
+        try {
+            NativeProfile(context,profile).use { native->
+                assertEquals(0,ProfileBridge.storageTest(native.handle,0))
+                identity=ProfileBridge.publicKey(native.handle)
+                assertArrayEquals(byteArrayOf(),ProfileBridge.activeTransfers(native.handle,id))
+                assertNull(ProfileBridge.activeTransfers(native.handle,"invalid".toByteArray()))
+                assertEquals(0,ProfileBridge.deleteLocal(native.handle,peer,id,false))
+                assertTrue(ProfileBridge.localHidden(native.handle,peer,id,false))
+                assertTrue(com.peerchat.android.application.messageSnapshots(checkNotNull(ReliableBridge.history(native.handle,peer,Long.MAX_VALUE))).isEmpty())
+            }
+            NativeProfile(context,profile).use { native->
+                assertArrayEquals(identity,ProfileBridge.publicKey(native.handle))
+                assertTrue(ProfileBridge.localHidden(native.handle,peer,id,false))
+                assertFalse(ProfileBridge.localHidden(native.handle,"a".repeat(64).toByteArray(),id,false))
+                assertEquals(0,ProfileBridge.deleteLocal(native.handle,peer,byteArrayOf(),false))
+                assertTrue(com.peerchat.android.application.messageSnapshots(checkNotNull(ReliableBridge.history(native.handle,peer,Long.MAX_VALUE))).isEmpty())
+            }
+            AndroidStoragePlatform(context,profile).use { platform->
+                val statement=platform.prepare("SELECT count(*) FROM outbox".toByteArray())
+                try {assertTrue(platform.row(statement));assertEquals("1",platform.text(statement,0).toString(Charsets.UTF_8))}
+                finally {platform.finish(statement)}
+            }
+        } finally {clean(profile)}
+    }
     @Test fun sqliteStartupPragmas() {
         val profile = "test_${UUID.randomUUID()}"
         try {

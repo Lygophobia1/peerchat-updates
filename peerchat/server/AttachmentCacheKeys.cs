@@ -44,7 +44,7 @@ internal sealed partial class AttachmentCacheRuntime {
  internal List<CacheRecipient> OriginalRecipients(string id){lock(gate){Check();Descriptor(id);return Rows("SELECT account,device,membership FROM recipients WHERE object_id="+Quote(id)+" ORDER BY device LIMIT 64",64,3).Select(row=>new CacheRecipient(Number(row[0]),row[1],row[2])).ToList();}}
  internal bool ExistingKey(string id,string device,byte[] wire){lock(gate){Check();Descriptor(id);var prior=Binary("SELECT wire FROM attachment_key_envelopes WHERE object_id="+Quote(id)+" AND device="+Quote(device));if(prior==null)return false;Require(prior.SequenceEqual(wire),"cache_conflicting_key_envelope");return true;}}
  internal bool PublishKey(string id,AttachmentKeyEnvelope value){lock(gate){Check();var d=Descriptor(id);Require(value.Descriptor.Wire.SequenceEqual(d.Wire),"cache_key_descriptor_mismatch");
-  Require(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1,"cache_upload_incomplete");long now=checked(Now()*1000),expires=checked(Scalar("SELECT expires FROM objects WHERE id="+Quote(id))*1000);
+  long now=checked(Now()*1000),expires=checked(ContextExpires(id,false)*1000);
   Require(now<expires&&value.Expires>now&&value.Expires<=expires&&value.Created<=now+300000,"cache_key_expiry_invalid");
   Require(OriginalMembership(id,d.Account,d.Sender)==value.SourceMembership&&OriginalMembership(id,value.Recipient.Account,value.Recipient.Device)==value.RecipientMembership,"cache_key_membership_mismatch");
   if(ExistingKey(id,value.Recipient.Device,value.Wire))return false;
@@ -55,13 +55,13 @@ internal sealed partial class AttachmentCacheRuntime {
  }}
  internal KeyEnvelope ReadKey(string id,string device){lock(gate){Check();Descriptor(id);Require(Scalar("SELECT expires FROM objects WHERE id="+Quote(id))>Now(),"cache_attachment_expired");
   var wire=Binary("SELECT wire FROM attachment_key_envelopes WHERE object_id="+Quote(id)+" AND device="+Quote(device));Require(wire!=null,"cache_key_unavailable");var parsed=AttachmentKeyEnvelope.Parse(wire);
-  var descriptor=Descriptor(id);Require(parsed.Descriptor.Wire.SequenceEqual(descriptor.Wire)&&parsed.Recipient.Device==device&&parsed.SourceMembership==OriginalMembership(id,descriptor.Account,descriptor.Sender)&&parsed.RecipientMembership==OriginalMembership(id,parsed.Recipient.Account,device)&&Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1,"cache_key_binding_invalid");Require(parsed.Expires>checked(Now()*1000),"cache_key_expired");
+  var descriptor=Descriptor(id);Require(parsed.Descriptor.Wire.SequenceEqual(descriptor.Wire)&&parsed.Recipient.Device==device&&parsed.SourceMembership==OriginalMembership(id,descriptor.Account,descriptor.Sender)&&parsed.RecipientMembership==OriginalMembership(id,parsed.Recipient.Account,device),"cache_key_binding_invalid");Require(parsed.Expires>checked(Now()*1000),"cache_key_expired");
   var rows=Rows("SELECT digest,key_id,generation FROM attachment_key_envelopes WHERE object_id="+Quote(id)+" AND device="+Quote(device),1,3);Require(rows.Count==1&&rows[0][0]==parsed.Digest&&rows[0][1]==parsed.Recipient.Key&&Number(rows[0][2])==parsed.Recipient.Generation,"cache_key_index_invalid");return new KeyEnvelope{Id=id,Device=device,Digest=parsed.Digest,Wire=wire};
  }}
  internal bool AcknowledgeKey(string id,string device,string digest){lock(gate){Check();Require(MailboxProtocol.Id(digest,64),"cache_key_ack_invalid");var value=ReadKey(id,device);Require(value.Digest==digest,"cache_key_ack_mismatch");if(Scalar("SELECT acked FROM attachment_key_envelopes WHERE object_id="+Quote(id)+" AND device="+Quote(device))==1)return false;
   Space(8192);Transaction(()=>Execute("UPDATE attachment_key_envelopes SET acked=1 WHERE object_id="+Quote(id)+" AND device="+Quote(device)+";"));return true;
  }}
- internal List<string> PendingKeys(long account,string device,string after){lock(gate){Check();Require(account>0&&MailboxProtocol.Id(device,64)&&(after==""||MailboxProtocol.Id(after,32)),"cache_key_cursor_invalid");return Rows("SELECT o.id FROM objects o JOIN attachment_key_envelopes k ON k.object_id=o.id JOIN recipients r ON r.object_id=o.id AND r.device=k.device WHERE r.account="+account+" AND r.device="+Quote(device)+" AND k.acked=0 AND o.complete=1 AND o.deleting=0 AND o.expires>"+Now()+" AND o.id>"+Quote(after)+" ORDER BY o.id LIMIT 64",64).Select(row=>row[0]).ToList();}}
+ internal List<string> PendingKeys(long account,string device,string after){lock(gate){Check();Require(account>0&&MailboxProtocol.Id(device,64)&&(after==""||MailboxProtocol.Id(after,32)),"cache_key_cursor_invalid");return Rows("SELECT o.id FROM objects o JOIN attachment_key_envelopes k ON k.object_id=o.id JOIN recipients r ON r.object_id=o.id AND r.device=k.device WHERE r.account="+account+" AND r.device="+Quote(device)+" AND k.acked=0 AND o.deleting=0 AND o.expires>"+Now()+" AND o.id>"+Quote(after)+" ORDER BY o.id LIMIT 64",64).Select(row=>row[0]).ToList();}}
 }
 internal sealed partial class AttachmentCacheAdmission {
  internal List<Dictionary<string,object>> RecipientKeys(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>{
@@ -70,7 +70,7 @@ internal sealed partial class AttachmentCacheAdmission {
    accounts.WithCacheGroupAuthorization(d.Group,recipient.Account,recipient.Device,roster=>{
     if(accounts.AttachmentMembership(d.Group,recipient.Account,recipient.Device)!=recipient.Membership)return;
     var binding=accounts.AttachmentRecipientKey(recipient.Account,recipient.Device);
-    result.Add(new Dictionary<string,object>{{"accountId",recipient.Account},{"device",recipient.Device},{"membership",recipient.Membership},{"sourceMembership",source},{"keyState",binding==null?"unavailable":"available"},{"binding",binding==null?"":AttachmentCacheRequests.Encode(binding)}});
+    result.Add(new Dictionary<string,object>{{"accountId",recipient.Account},{"device",recipient.Device},{"membership",recipient.Membership},{"sourceMembership",source},{"keyState",binding==null?"unavailable":"available"},{"binding",binding==null?"":AttachmentCacheRequests.Encode(binding)},{"attachmentBodyVersion",binding==null?1:accounts.AttachmentBodyVersion(MailboxProtocol.Binding.Parse(binding))}});
    });
   }Require(current(),"cache_session_invalid");return result;
  });}

@@ -7,11 +7,53 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using PeerChat.Server;
+using PeerChat.ServerShared;
 
 class DirectCacheTest {
- static int Main(string[] args){try{if(args.Length==3&&args[0]=="--legacy-runtime"){string root=Path.GetFullPath(args[2]);AttachmentCacheRuntimeTest.DirectChecks(root);AttachmentCacheRuntimeTest.DirectLegacyRollback(Path.GetFullPath(args[1]),Path.Combine(root,"encrypted-cache"));}else AttachmentCacheRuntimeTest.DirectChecks(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
+ static int Main(string[] args){try{if(args.Length==2&&args[0]=="--batch-network")AttachmentCacheRuntimeTest.DirectBatchNetwork(Path.GetFullPath(args[1]));else if(args.Length==3&&args[0]=="--legacy-runtime"){string root=Path.GetFullPath(args[2]);AttachmentCacheRuntimeTest.DirectChecks(root);AttachmentCacheRuntimeTest.DirectLegacyRollback(Path.GetFullPath(args[1]),Path.Combine(root,"encrypted-cache"));}else AttachmentCacheRuntimeTest.DirectChecks(Path.GetFullPath(args[0]));return 0;}catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }
 partial class AttachmentCacheRuntimeTest {
+ internal static void DirectBatchNetwork(string root){
+  Directory.CreateDirectory(root);using(var sender=new ECDsaCng(256))using(var recipient=new ECDsaCng(256)){
+   string database=Path.Combine(root,"accounts.db"),source=DId(sender),reader=DId(recipient),senderToken=Guid.NewGuid().ToString("N"),readerToken=Guid.NewGuid().ToString("N");
+   var sourceKey=RecipientBinding(sender,1);var readerKey=RecipientBinding(recipient,2);
+   using(var db=new AccountDatabase(database)){
+    Check(db.CreateAccountWithDevice("batch-source",new byte[16],new byte[32],source)==1&&db.CreateAccountWithDevice("batch-reader",new byte[16],new byte[32],reader)==2,"Batch network accounts");
+    db.InitializeMailbox();DFriend(db);DRegister(db,sender,1,sourceKey);DRegister(db,recipient,2,readerKey);
+    foreach(var entry in new[]{new{Token=senderToken,Device=source,Account=1L},new{Token=readerToken,Device=reader,Account=2L}}){
+     string hash=MailboxProtocol.Digest(System.Text.Encoding.UTF8.GetBytes(entry.Token)),credential=Guid.NewGuid().ToString("N");
+     db.RememberDevice(entry.Account,entry.Device,credential);db.CreateDeviceSession(hash,entry.Account,entry.Device,DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds(),credential);
+    }
+   }
+   string certificatePath=Path.Combine(root,"server.pfx"),pin;using(var key=RSA.Create(2048)){
+    var certificateRequest=new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=localhost",key,HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+    using(var certificate=certificateRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1),DateTimeOffset.UtcNow.AddHours(1))){File.WriteAllBytes(certificatePath,certificate.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx,"test-only"));pin=MailboxProtocol.Digest(certificate.RawData);}
+   }
+   var reservation=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);reservation.Start();int port=((System.Net.IPEndPoint)reservation.LocalEndpoint).Port;reservation.Stop();
+   var options=Options(Fixture(root,"encrypted-cache"));options.Enabled=true;
+   var config=new ServerConfiguration{DataDirectory=root,DatabasePath=database,LogDirectory=Path.Combine(root,"logs"),ListenAddress="127.0.0.1",Port=port,CertificatePath=certificatePath,CertificatePassword="test-only",ManagementPipe="",AttachmentCache=options};config.Validate();
+   var server=new DiscoveryServer(config);Exception failure=null;var worker=new System.Threading.Thread(()=>{try{server.Run();}catch(Exception error){failure=error;}}){IsBackground=true};worker.Start();
+   try{
+    var wait=System.Diagnostics.Stopwatch.StartNew();bool ready=false;while(wait.ElapsedMilliseconds<10000&&!ready){try{using(var probe=new System.Net.Sockets.TcpClient()){probe.Connect("localhost",port);ready=true;}}catch(System.Net.Sockets.SocketException){System.Threading.Thread.Sleep(20);}}Check(ready,"Batch network server startup");
+    using(var senderRpc=new RpcClient(port,pin,senderToken,source))using(var readerRpc=new RpcClient(port,pin,readerToken,reader)){
+     Check(Convert.ToInt32(senderRpc.Request("cache_dm_capability","accepted")["dmAppendBatchMaxChunks"])==8,"Batch network capability");
+     senderRpc.Request("cache_dm_register","accepted","proof",AttachmentCacheRequests.Encode(DCapability(sender,1,sourceKey)));
+     readerRpc.Request("cache_dm_register","accepted","proof",AttachmentCacheRequests.Encode(DCapability(recipient,2,readerKey)));
+     var prepared=senderRpc.Request("cache_dm_prepare","accepted","recipientAccountId",2L);
+     var audience=DirectCacheAudience.Parse(AttachmentCacheRequests.Decode((string)prepared["audience"],32768),1,source,2);
+     byte[] payload=Payload(1024*1024);var descriptor=DirectDescriptor(sender,1,2,audience,payload);
+     senderRpc.Request("cache_dm_admit","accepted","descriptor",AttachmentCacheRequests.Encode(descriptor.Wire),"audience",AttachmentCacheRequests.Encode(audience.Wire));
+     string lease=(string)senderRpc.Request("cache_dm_acquire","accepted","id",descriptor.Id,"upload",true)["lease"];
+     var first=BatchRequests(lease,payload,0,8);var wrong=first.Select(x=>new Dictionary<string,object>(x)).ToList();wrong[1]["lease"]=new string('f',32);
+     using(var incomplete=new RpcClient(port,pin,senderToken,source))incomplete.DirectBatch(first,"",true);
+     Check(Convert.ToInt64(senderRpc.Request("cache_dm_status","accepted","id",descriptor.Id)["durableOffset"])==0,"Partial network window committed");
+     senderRpc.DirectBatch(wrong,"cache_malformed_request");Check(Convert.ToInt64(senderRpc.Request("cache_dm_status","accepted","id",descriptor.Id)["durableOffset"])==0,"Malformed network batch committed");
+     senderRpc.DirectBatch(first,"accepted");Check(Convert.ToInt64(senderRpc.Request("cache_dm_status","accepted","id",descriptor.Id)["durableOffset"])==8L*65536,"Network batch prefix");
+    }
+   }finally{server.RequestStop();Check(worker.Join(10000),"Batch network server shutdown");if(failure!=null)throw failure;}
+   Console.WriteLine("PASS loopback TLS DM batch capability, ordered N replies after commit and whole-batch malformed rejection");
+  }
+ }
  internal static void DirectLegacyRollback(string assemblyPath,string directory){
   // Exercise the previous shipping assembly on an isolated cache created by
   // the new DM implementation. No live cache or older database is restored.
@@ -40,6 +82,34 @@ partial class AttachmentCacheRuntimeTest {
   }
  }
  static void DFriend(AccountDatabase db){Check(db.SendFriendRequest(1,2)=="pending"&&db.RespondToRequest(2,1,true)=="friends","DM friendship");}
+ static List<Dictionary<string,object>> BatchRequests(string lease,byte[] payload,int first,int count){
+  var requests=new List<Dictionary<string,object>>();
+  for(int i=first;i<first+count;i++){
+   int offset=i*65536,length=Math.Min(65536,payload.Length-offset);Check(length>0,"Batch fixture exhausted");
+   requests.Add(new Dictionary<string,object>{{"type","cache_dm_append"},{"requestId",Guid.NewGuid().ToString("N")},{"lease",lease},{"offset",(long)offset},{"data",AttachmentCacheRequests.Encode(payload.Skip(offset).Take(length).ToArray())}});
+  }return requests;
+ }
+ static void DirectBatchChecks(AccountDatabase db,AttachmentCacheRuntime cache,AttachmentCacheAdmission admission,AttachmentCacheRequests rpc,ECDsaCng sender,string source,DirectCacheAudience audience){
+  var bytes=Payload(1024*1024);var d=DirectDescriptor(sender,1,2,audience,bytes);
+  admission.AdmitDirect(1,source,()=>true,d.Wire,audience.Wire);string lease=admission.AcquireDirect(1,source,()=>true,d.Id,true);
+  var first=BatchRequests(lease,bytes,0,8);
+  Check(Convert.ToInt32(rpc.Execute(1,source,()=>true,new Dictionary<string,object>{{"type","cache_dm_capability"},{"requestId",Guid.NewGuid().ToString("N")}})["dmAppendBatchMaxChunks"])==8,"DM batch capability missing");
+  AttachmentCacheRuntime.TestFault=stage=>{if(stage=="before_commit")throw new InvalidOperationException("cache_test_batch_rollback");};
+  try{var failed=rpc.ExecuteDirectAppendBatch(1,source,()=>true,first);Check(failed.All(x=>(string)x["state"]=="cache_test_batch_rollback")&&cache.Inspect(d.Id).Offset==0,"Failed batch acknowledged a partial prefix");}
+  finally{AttachmentCacheRuntime.TestFault=null;}
+  var committed=rpc.ExecuteDirectAppendBatch(1,source,()=>true,first);
+  Check(committed.Count==8&&committed.Select((x,i)=>(string)x["state"]=="accepted"&&Convert.ToInt64(x["durableOffset"])==(i+1)*65536L).All(x=>x)&&cache.Inspect(d.Id).Offset==8L*65536,"Batch durable offsets or per-frame replies");
+  var repeated=rpc.ExecuteDirectAppendBatch(1,source,()=>true,first);Check(repeated.All(x=>(string)x["state"]=="accepted")&&cache.Inspect(d.Id).Offset==8L*65536,"Lost-response replay changed durable prefix");
+  var mixed=BatchRequests(lease,bytes,4,8);var rejected=new List<Dictionary<string,object>>(mixed.Select(x=>new Dictionary<string,object>(x)));rejected[4]["lease"]=new string('f',32);
+  Check(rpc.ExecuteDirectAppendBatch(1,source,()=>true,rejected).All(x=>(string)x["state"]=="cache_malformed_request")&&cache.Inspect(d.Id).Offset==8L*65536,"Mixed lease partially committed");
+  rejected=new List<Dictionary<string,object>>(mixed.Select(x=>new Dictionary<string,object>(x)));rejected[5]["offset"]=10L*65536;
+  Check(rpc.ExecuteDirectAppendBatch(1,source,()=>true,rejected).All(x=>(string)x["state"]=="cache_chunk_out_of_order")&&cache.Inspect(d.Id).Offset==8L*65536,"Gap partially committed");
+  Check(rpc.ExecuteDirectAppendBatch(1,source,()=>false,mixed).All(x=>(string)x["state"]=="cache_dm_authority_stale")&&cache.Inspect(d.Id).Offset==8L*65536,"Stale session committed batch");
+  var advanced=rpc.ExecuteDirectAppendBatch(1,source,()=>true,mixed);Check(advanced.All(x=>(string)x["state"]=="accepted")&&cache.Inspect(d.Id).Offset==12L*65536,"Mixed replay/new batch failed");
+  Check(cache.ChargedBytes<=64L*1024*1024,"Batch charged bytes exceeded configured quota");
+  admission.ReleaseDirect(1,source,()=>true,lease,true);
+  Console.WriteLine("PASS DM batch capability, one FULL commit, rollback, exact replay, mixed replay/new, malformed whole-batch rejection, stale authority and quota");
+ }
  static long ObserveAppendAdmissionBlocking(AccountDatabase db,AttachmentCacheAdmission admission,string source,string lease,byte[] block,string unrelatedDevice){
   // Test-only storage barrier, not measured physical SD latency.
   using(var entered=new System.Threading.ManualResetEvent(false))using(var release=new System.Threading.ManualResetEvent(false))
@@ -73,8 +143,8 @@ partial class AttachmentCacheRuntimeTest {
   }
  }
  static void DRegister(AccountDatabase db,ECDsaCng key,long account,byte[] binding){Check(db.RegisterMailboxKey(account,DId(key),key.Key.Export(CngKeyBlobFormat.EccPublicBlob),binding)=="accepted","DM verified key registration");}
- static byte[] DCapability(ECDsaCng key,long account,byte[] wire){var binding=MailboxProtocol.Binding.Parse(wire);using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){
-  writer.Write(new byte[]{80,84,1,30});Text(writer,"PeerChat/dm-cache-device/v1");writer.Write((ulong)account);Text(writer,DId(key));Text(writer,binding.Key);writer.Write((ulong)binding.Generation);writer.Write(1UL);writer.Write(1UL);Field(writer,key.Key.Export(CngKeyBlobFormat.EccPublicBlob));Field(writer,SignKeyBytes(key,stream.ToArray()));return stream.ToArray();
+ static byte[] DCapability(ECDsaCng key,long account,byte[] wire,ulong body=1){var binding=MailboxProtocol.Binding.Parse(wire);using(var stream=new MemoryStream())using(var writer=new BinaryWriter(stream)){
+  writer.Write(new byte[]{80,84,1,30});Text(writer,"PeerChat/dm-cache-device/v1");writer.Write((ulong)account);Text(writer,DId(key));Text(writer,binding.Key);writer.Write((ulong)binding.Generation);writer.Write(body);writer.Write(1UL);Field(writer,key.Key.Export(CngKeyBlobFormat.EccPublicBlob));Field(writer,SignKeyBytes(key,stream.ToArray()));return stream.ToArray();
  }}
  static void DRevoke(AccountDatabase db,ECDsaCng key,long account,byte[] wire){var b=MailboxProtocol.Binding.Parse(wire);using(var stream=KD("PeerChat/device-recipient-revoke/v1")){KN(stream,1,2);KN(stream,(ulong)account,8);KT(stream,b.Device);KT(stream,b.Key);KN(stream,(ulong)b.Generation,8);KB(stream,SignKeyBytes(key,stream.ToArray()));Check(db.RevokeMailboxKey(account,b.Device,key.Key.Export(CngKeyBlobFormat.EccPublicBlob),stream.ToArray())=="revoked","DM key revocation");}}
  static void ObserveFencedMutator(AccountDatabase db,string group,string source,string other,string name,Func<bool> mutate){
@@ -126,12 +196,12 @@ partial class AttachmentCacheRuntimeTest {
   writer.Write(new byte[]{80,84,1,30});Text(writer,"PeerChat/dm-attachment-verified-file/v1");writer.Write((ulong)descriptor.Account);Text(writer,descriptor.Sender);writer.Write((ulong)binding.Account);Text(writer,binding.Device);Text(writer,binding.Key);writer.Write((ulong)binding.Generation);Text(writer,descriptor.Message);Text(writer,descriptor.Id);Text(writer,MailboxProtocol.Digest(descriptor.Wire));Text(writer,descriptor.AudienceDigest);Field(writer,key.Key.Export(CngKeyBlobFormat.EccPublicBlob));writer.Write((ulong)(now*1000));Field(writer,SignKeyBytes(key,stream.ToArray()));return stream.ToArray();
  }}
  internal static void DirectChecks(string root){
-  Directory.CreateDirectory(root);long previous=now;now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+  Directory.CreateDirectory(root);long previous=now;now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();BatchQuota(root);
   try{using(var sender=new ECDsaCng(256))using(var first=new ECDsaCng(256))using(var second=new ECDsaCng(256))using(var outsider=new ECDsaCng(256)){
    string database=Path.Combine(root,"accounts.db"),source=DId(sender),reader=DId(first),sibling=DId(second),other=DId(outsider);
    var options=Options(Fixture(root,"encrypted-cache"));options.RetentionSeconds=48*60*60;
    var sourceKey=RecipientBinding(sender,1);var firstKey=RecipientBinding(first,2);var secondKey=RecipientBinding(second,2);
-   AttachmentCacheDescriptor descriptor;DirectCacheAudience audience;byte[] payload=Payload(1024*1024+37);string oldLease;
+   AttachmentCacheDescriptor descriptor;DirectCacheAudience audience;byte[] payload=Payload(1024*1024+37);string oldLease;byte[] notice=null,siblingNotice=null;
    using(var db=new AccountDatabase(database))using(var cache=new AttachmentCacheRuntime(options,()=>now)){
     Check(db.CreateAccountWithDevice("sender",new byte[16],new byte[32],source)==1&&db.CreateAccountWithDevice("recipient",new byte[16],new byte[32],reader)==2&&db.CreateAccountWithDevice("outsider",new byte[16],new byte[32],other)==3,"DM accounts");Check(db.AddDevice(2,sibling),"DM sibling owned device");db.InitializeMailbox();DFriend(db);DRegister(db,sender,1,sourceKey);DRegister(db,first,2,firstKey);DRegister(db,second,2,secondKey);
     var admission=new AttachmentCacheAdmission(db,cache);var gated=new AttachmentCacheRequests(admission);
@@ -142,17 +212,71 @@ partial class AttachmentCacheRuntimeTest {
     Reject(()=>admission.PrepareDirect(1,source,()=>true,2),"cache_dm_recipient_upgrade_required");
     var forged=(byte[])capability.Clone();forged[forged.Length-1]^=1;Reject(()=>admission.RegisterDirect(1,source,()=>true,forged),"cache_dm_capability_binding_invalid");
     Reject(()=>admission.RegisterDirect(2,reader,()=>true,capability),"cache_dm_capability_binding_invalid");
-    admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,firstKey));admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey));
+    admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,firstKey));
+    var mixedAudience=DirectCacheAudience.Parse(admission.PrepareDirect(1,source,()=>true,2),1,source,2);
+    Check(mixedAudience.Recipients.Count==1&&mixedAudience.Recipients[0].Device==reader,"Legacy device blocked or entered capable audience");
+    Check(admission.DirectIdentityProofs(1,source,()=>true,2,mixedAudience.Wire).Length==1,"Excluded device received identity envelope preparation");
+    var mixedPayload=Payload(1024);var mixedDescriptor=DirectDescriptor(sender,1,2,mixedAudience,mixedPayload);
+    admission.AdmitDirect(1,source,()=>true,mixedDescriptor.Wire,mixedAudience.Wire);
+    var mixedLease=admission.AcquireDirect(1,source,()=>true,mixedDescriptor.Id,true);
+    using(var capture=new CacheAppendTimings()){
+     Check(admission.AppendDirect(1,source,()=>true,mixedLease,0,mixedPayload)==mixedPayload.Length,"Mixed-version append failed");
+     var metrics=capture.Snapshot();Check(metrics[0]==11&&metrics[2]==1&&metrics[4]==1,"Direct append storage/authority inspections or durable transaction changed");
+    }
+    Check(CacheAppendTimings.Current==null&&admission.CompleteDirect(1,source,()=>true,mixedLease),"Mixed-version completion failed or append timings leaked");
+    admission.ReleaseDirect(1,source,()=>true,mixedLease,true);
+    Reject(()=>admission.AcquireDirect(2,sibling,()=>true,mixedDescriptor.Id,false),"cache_dm_original_recipient_required");
+    admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey));
+    Reject(()=>admission.AcquireDirect(2,sibling,()=>true,mixedDescriptor.Id,false),"cache_dm_original_recipient_required");
     var prepared=Rpc(rpc,1,source,"cache_dm_prepare","accepted","recipientAccountId",2L);
     var beforeUnrelatedFriend=admission.PrepareDirect(1,source,()=>true,2);
+    Check(Convert.ToInt64(prepared["thumbnailBodyVersion"])==1,"Legacy device advertised thumbnail bodies");
+    admission.RegisterDirect(1,source,()=>true,DCapability(sender,1,sourceKey,2));
+    admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,firstKey,2));
+    Check(admission.DirectThumbnailBodyVersion(1,source,()=>true,2,mixedAudience.Wire)==2,"Capable subset failed to enable encrypted previews");
+    Check(admission.DirectThumbnailBodyVersion(1,source,()=>true,2,beforeUnrelatedFriend)==1,"Legacy sibling received unsupported preview body");
+    admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey,2));
+    Check(admission.DirectThumbnailBodyVersion(1,source,()=>true,2,beforeUnrelatedFriend)==2,"Full capable audience failed preview negotiation");
+    foreach(var legacyProof in admission.DirectIdentityProofs(1,source,()=>true,2,beforeUnrelatedFriend)){
+     int proofAt=4;GroupRosterProof.Text(legacyProof,ref proofAt,64);GroupRosterProof.Number(legacyProof,ref proofAt);GroupRosterProof.Text(legacyProof,ref proofAt,64);GroupRosterProof.Text(legacyProof,ref proofAt,32);GroupRosterProof.Number(legacyProof,ref proofAt);
+     Check(GroupRosterProof.Number(legacyProof,ref proofAt)==1&&GroupRosterProof.Number(legacyProof,ref proofAt)==1,"New preview capability broke legacy identity proof parser");
+    }
+
+    admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey,1));
+    Check(admission.DirectThumbnailBodyVersion(1,source,()=>true,2,beforeUnrelatedFriend)==1,"App downgrade retained incompatible capability");
+    Reject(()=>admission.RegisterDirect(2,sibling,()=>true,DCapability(second,2,secondKey,3)),"cache_dm_capability_binding_invalid");
+    admission.RegisterDirect(1,source,()=>true,DCapability(sender,1,sourceKey,1));
+    admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,firstKey,1));
+
+    var initialProofs=admission.DirectIdentityProofs(1,source,()=>true,2,beforeUnrelatedFriend);
+    Check(initialProofs.Length==2&&initialProofs.All(p=>p.Length>0&&p.Length<=1024),"Initial device proofs bounded and complete");
+    Check(initialProofs.Zip(admission.DirectIdentityProofs(1,source,()=>true,2,beforeUnrelatedFriend),(a,b)=>a.SequenceEqual(b)).All(x=>x),"Device proofs stable across prepares");
+    Reject(()=>admission.DirectIdentityProofs(1,source,()=>false,2,beforeUnrelatedFriend),"cache_dm_not_authorized");
+    var wrongAudience=(byte[])beforeUnrelatedFriend.Clone();wrongAudience[wrongAudience.Length-1]^=1;
+    Reject(()=>admission.DirectIdentityProofs(1,source,()=>true,2,wrongAudience),"cache_dm_audience_changed");
     Check(db.SendFriendRequest(1,3)=="pending"&&db.RespondToRequest(3,1,true)=="friends","Unrelated fixture friendship");
     Check(admission.PrepareDirect(1,source,()=>true,2).SequenceEqual(beforeUnrelatedFriend),"Unrelated friend without cache keys changed the selected recipient audience");
     audience=DirectCacheAudience.Parse(AttachmentCacheRequests.Decode((string)prepared["audience"],32768),1,source,2);Check(audience.Recipients.Count==2,"Offline devices omitted from frozen audience");descriptor=DirectDescriptor(sender,1,2,audience,payload);
+    DirectBatchChecks(db,cache,admission,rpc,sender,source,audience);
+    // A sender may omit an unfamiliar but capable sibling, never add or change a binding.
+    Check(admission.PrepareDirect(1,source,()=>true,2,mixedAudience.Wire).SequenceEqual(mixedAudience.Wire),"Known subset rejected after sibling capability appeared");
+    Check(admission.DirectIdentityProofs(1,source,()=>true,2,mixedAudience.Wire).Length==1,"Subset proof expanded");
+    var subsetDescriptor=DirectDescriptor(sender,1,2,mixedAudience,mixedPayload);
+    admission.AdmitDirect(1,source,()=>true,subsetDescriptor.Wire,mixedAudience.Wire);Upload(cache,subsetDescriptor,mixedPayload);
+    Reject(()=>admission.AcquireDirect(2,sibling,()=>true,subsetDescriptor.Id,false),"cache_dm_original_recipient_required");
+    var changedSubset=DirectCacheAudience.Encode(new string('e',32),mixedAudience.Source.Wire,mixedAudience.Recipients.Select(x=>x.Wire));
+    Reject(()=>admission.PrepareDirect(1,source,()=>true,2,changedSubset),"cache_dm_audience_changed");
+
     Reject(()=>admission.Admit(1,source,()=>true,descriptor.Wire),"cache_scope_mismatch");Reject(()=>admission.AdmitDirect(1,source,()=>false,descriptor.Wire,audience.Wire),"cache_dm_authority_stale");
     var tampered=(byte[])descriptor.Wire.Clone();tampered[tampered.Length-1]^=1;Reject(()=>AttachmentCacheDescriptor.Parse(tampered),"*");
     var changed=(byte[])audience.Wire.Clone();changed[changed.Length-1]^=1;Reject(()=>admission.AdmitDirect(1,source,()=>true,descriptor.Wire,changed),"*");
     Check(!admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire).Complete,"Admission claimed plaintext/file completion");admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire);
     Reject(()=>admission.Inspect(2,reader,()=>true,descriptor.Id),"cache_scope_mismatch");Reject(()=>admission.InspectDirect(3,other,()=>true,descriptor.Id),"cache_dm_original_recipient_required");Reject(()=>admission.AcquireDirect(2,reader,()=>true,descriptor.Id,true),"cache_sender_binding_mismatch");
+    notice=DNotice(sender,descriptor,firstKey);siblingNotice=DNotice(sender,descriptor,secondKey);
+    Check(admission.PublishDirect(1,source,()=>true,descriptor.Id,notice)&&admission.PublishDirect(1,source,()=>true,descriptor.Id,siblingNotice),"Early DM encrypted offers unavailable");
+    Check(db.FetchMailbox(2,reader).Count==1&&db.FetchMailbox(2,sibling).Count==1,"Early DM offers not independently deliverable");
+    Check(!(bool)admission.DirectContext(2,reader,()=>true,descriptor.Id)["ciphertextComplete"],"Early context claimed file completion");
+    Reject(()=>admission.AcquireDirect(2,reader,()=>true,descriptor.Id,false),"cache_upload_incomplete");
     oldLease=admission.AcquireDirect(1,source,()=>true,descriptor.Id,true);var block=payload.Take(65536).ToArray();Check(ObserveAppendAdmissionBlocking(db,admission,source,oldLease,block,other)==65536,"DM prefix");Check(admission.AppendDirect(1,source,()=>true,oldLease,0,block)==65536,"DM duplicate inflated progress");
     var corrupt=(byte[])block.Clone();corrupt[0]^=1;Reject(()=>admission.AppendDirect(1,source,()=>true,oldLease,0,corrupt),"cache_conflicting_chunk");Reject(()=>admission.CompleteDirect(1,source,()=>true,oldLease),"cache_upload_incomplete");
    }
@@ -161,7 +285,7 @@ partial class AttachmentCacheRuntimeTest {
     Reject(()=>admission.AppendDirect(1,source,()=>true,oldLease,65536,new byte[32768]),"cache_lease_expired");Check(admission.InspectDirect(1,source,()=>true,descriptor.Id).Offset==65536,"Restart lost durable upload prefix");
     string upload=admission.AcquireDirect(1,source,()=>true,descriptor.Id,true);for(long offset=65536;offset<payload.Length;){int count=(int)Math.Min(65536,payload.Length-offset);offset=admission.AppendDirect(1,source,()=>true,upload,offset,payload.Skip((int)offset).Take(count).ToArray());}
     Check(admission.CompleteDirect(1,source,()=>true,upload)&&admission.CompleteDirect(1,source,()=>true,upload),"DM completion idempotence");admission.ReleaseDirect(1,source,()=>true,upload,true);
-    var notice=DNotice(sender,descriptor,firstKey);var siblingNotice=DNotice(sender,descriptor,secondKey);
+
     Reject(()=>admission.PublishDirect(2,reader,()=>true,descriptor.Id,notice),"cache_sender_binding_mismatch");
     Reject(()=>admission.PublishDirect(1,source,()=>true,descriptor.Id,DNotice(sender,descriptor,firstKey,Guid.NewGuid().ToString("N"))),"cache_dm_notice_binding_invalid");
     var broken=(byte[])notice.Clone();broken[broken.Length-1]^=1;Reject(()=>admission.PublishDirect(1,source,()=>true,descriptor.Id,broken),"cache_dm_notice_not_authorized");
@@ -180,7 +304,8 @@ partial class AttachmentCacheRuntimeTest {
     // existing attachment, but new admission requires the new capability.
     var rotated=RecipientBinding(first,2,generation:2,predecessor:MailboxProtocol.Binding.Parse(firstKey).Key);
     DRegister(db,first,2,rotated);Check(admission.InspectDirect(2,reader,()=>true,descriptor.Id).Complete,"Retired original key lost authorized attachment");
-    Reject(()=>admission.PrepareDirect(1,source,()=>true,2),"cache_dm_recipient_upgrade_required");
+    var rotatedAudience=DirectCacheAudience.Parse(admission.PrepareDirect(1,source,()=>true,2),1,source,2);
+    Check(rotatedAudience.Recipients.Count==1&&rotatedAudience.Recipients[0].Device==sibling,"Unregistered rotated key blocked compatible sibling");
     admission.RegisterDirect(2,reader,()=>true,DCapability(first,2,rotated));
     Reject(()=>admission.AdmitDirect(1,source,()=>true,descriptor.Wire,audience.Wire),"cache_dm_audience_changed");
     long beforeExpiry=now;now=cache.Inspect(descriptor.Id).Expires-1;

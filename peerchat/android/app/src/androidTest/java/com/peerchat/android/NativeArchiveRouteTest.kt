@@ -37,7 +37,7 @@ class NativeArchiveRouteTest {
         repeat(16){
             val page=messageSnapshots(checkNotNull(ReliableBridge.history(h,peer.toByteArray(),before)))
             if(page.isEmpty())return result
-            result.addAll(page);before=page.minOf{it.sequence}
+            result.addAll(page);before=chronologicalMessages(page).first().sequence
         }
         error("Unbounded fixture history")
     }

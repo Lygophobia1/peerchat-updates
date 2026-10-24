@@ -15,8 +15,8 @@ internal class NativeRecord(bytes: ByteArray, type: Int) {
         return Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
     }
-    fun bytes(): ByteArray {
-        val count=number();require(count<=65536 && count<=input.remaining())
+    fun bytes(maximum:Int=65536): ByteArray {
+        require(maximum in 1..262144);val count=number();require(count<=maximum && count<=input.remaining())
         return ByteArray(count.toInt()).also { input.get(it) }
     }
     fun end() { require(!input.hasRemaining()) }
@@ -24,6 +24,8 @@ internal class NativeRecord(bytes: ByteArray, type: Int) {
 }
 internal class NativeRecordWriter(type: Int) {
     private val output=ByteArrayOutputStream().apply {write(byteArrayOf(80,84,1,type.toByte()))}
+    fun raw(value:ByteArray){require(value.size<=262144&&output.size()+value.size<=262144);output.write(value)}
+    fun tag(value:Int){require(value in 0..6);output.write(value)}
     fun number(value: Long) {require(value>=0);repeat(8){output.write((value ushr (it*8)).toInt())}}
     fun text(value: String) {val bytes=value.toByteArray(Charsets.UTF_8);require(bytes.size<=65536);number(bytes.size.toLong());output.write(bytes)}
     fun blob(value: ByteArray) {require(value.size<=65536);number(value.size.toLong());output.write(value)}

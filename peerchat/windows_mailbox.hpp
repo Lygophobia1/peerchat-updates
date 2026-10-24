@@ -109,7 +109,7 @@ public:
     }
     Blob execute(unsigned operation,const Blob& input,const std::string& id,bool allowed,
                  Storage& storage,delivery::DeliveryManager& deliveries,const reliable::AuthenticatedFriendSnapshot& friends,
-                 session::SessionTransportManager& sessions){
+                 session::SessionTransportManager& sessions,const std::function<bool(const Blob&,const Contact&)>& attachmentReceipt={}){
         if(operation==9){require(id.empty()&&!allowed);return rememberedDeviceProof(input,storage.groupAccount().accountId,friends.localAccount());}
         if(operation==13){require(id.empty()&&!allowed);return deviceManagementProof(input,storage.groupAccount().accountId,friends.localAccount());}
         if(operation==14){require(id.empty()&&!allowed&&storage.groupAccount().accountId==friends.localAccount());
@@ -169,7 +169,7 @@ public:
             result.string(header.senderDevice);result.string(header.messageId);return result.data;
         }
         if(operation==6){auto receipt=parseReceipt(input);auto verified=contact(storage,friends,receipt.recipientDevice,receipt.recipientAccount);
-            bool authenticated=false;deliveries.acknowledgeMailbox(input,receipt.recipientAccount,verified,&authenticated);require(authenticated);return {1};}
+            bool authenticated=false;deliveries.acknowledgeMailbox(input,receipt.recipientAccount,verified,&authenticated);if(!authenticated&&attachmentReceipt)authenticated=attachmentReceipt(input,verified);require(authenticated);return {1};}
         if(operation==7)return identity_.publicKey();
         if(operation==8){
             require(allowed&&mailbox::id(id,32));auto message=storage.message(id);require(message.has_value());

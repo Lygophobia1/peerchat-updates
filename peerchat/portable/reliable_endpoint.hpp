@@ -112,9 +112,9 @@ private:
             auto key=tls_->remotePublicKey();
             protocol::check(archive::currentSessionAuthorization(*archive_->policy,archive_->scope,&key));
         }else{
-            auto known=contacts();auto found=known.find(runtime_.peerId);
-            protocol::check(found==known.end()||found->second.publicKey.empty()||found->second.publicKey==tls_->remotePublicKey());
-            reliable::persistAuthenticatedContact(store_,runtime_,found==known.end()?nullptr:&found->second,tls_->remotePublicKey());
+            auto known=store_.contact(runtime_.peerId);
+            protocol::check(!known||known->publicKey.empty()||known->publicKey==tls_->remotePublicKey());
+            reliable::persistAuthenticatedContact(store_,runtime_,known?&*known:nullptr,tls_->remotePublicKey());
         }
         runtime_.locallyTrusted();
         sessions_.observeTransport(observation_.locallyTrusted(),now_);
@@ -125,6 +125,7 @@ private:
         stage_="frame_decode";
         sessions_.observeTransport(observation_.observedReceive(bytes.size()),now_);
         protocol::Reader reader(bytes);
+        stage_=reader.type()==protocol::Hello?"hello_decode":reader.type()==protocol::Accepted?"acceptance_decode":"application_admission";
         auto kind=runtime_.enter(reader,true,tls_->remotePublicKey(),local_.peerId);
         if(kind==reliable::SharedPeerRuntime::FrameKind::Hello){
             stage_="hello_verification";
@@ -134,8 +135,8 @@ private:
                 protocol::check((runtime_.remoteCapabilities&protocol::CapabilityArchiveControl)!=0);approve();return;
             }
             if(group_){protocol::check((runtime_.remoteCapabilities&protocol::CapabilityGroupKeyHandoff)!=0);approve();return;}
-            auto known=contacts();auto found=known.find(runtime_.peerId);
-            if(runtime_.verifiedContactMatches(found==known.end()?nullptr:&found->second,tls_->remotePublicKey()))approve();
+            auto known=store_.contact(runtime_.peerId);
+            if(runtime_.verifiedContactMatches(known?&*known:nullptr,tls_->remotePublicKey()))approve();
             else event({EventKind::TrustRequired,runtime_.peerId,{},std::nullopt});
             return;
         }
@@ -177,16 +178,18 @@ private:
             catch(const transfer::ReceiveFailure& error){stage_=error.stage;throw;}
             catch(const transfer::CapacityError& error){protocol::Writer refusal(protocol::FileTransfer);refusal.data=error.cancellation();packet(refusal);}
         }else if(reader.type()==protocol::Text){
+            stage_="message_receive";
             auto result=reliable::receiveText(reader,runtime_.logicalOrdering,runtime_.peerId,local_,store_,deliveries_,friends_.localAccount());
             if(result.message){
                 protocol::Writer ack(protocol::Ack);ack.string(result.messageId);packet(ack);
                 if(result.inserted)event({EventKind::Message,runtime_.peerId,result.messageId,std::move(result.message)});
             }
         }else if(reader.type()==protocol::Ack){
+            stage_="message_ack_receive";
             auto id=reliable::receiveAck(reader);
             if(deliveries_.acknowledgeMessage(runtime_.peerId,id_,id))event({EventKind::Delivered,runtime_.peerId,id,std::nullopt});
             pump();
-        }else throw std::runtime_error("Unsupported operation on messaging-only endpoint");
+        }else {stage_="unsupported_application_frame";throw std::runtime_error("Unsupported operation on messaging-only endpoint");}
     }
 public:
     ReliableEndpoint(const Profile& local,Storage& store,session::SessionTransportManager& sessions,
@@ -214,6 +217,7 @@ public:
     bool closed()const noexcept{return closed_;}
     bool permitsDeferredHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveDeferred)!=0;}
     bool permitsGroupHistory()const noexcept{return ready()&&(runtime_.remoteCapabilities&protocol::CapabilityArchiveGroups)!=0;}
+    bool permitsTransferPreparation()const noexcept{return ready()&&!archive_&&!group_&&(runtime_.remoteCapabilities&protocol::CapabilityTransferPreparation)!=0;}
     bool permitsTransferPipeline()const noexcept{return ready()&&!archive_&&!group_&&(runtime_.remoteCapabilities&protocol::CapabilityTransferPipeline)!=0;}
     // Read-only admission for an explicitly selected online compatibility send.
     // It never creates a route or changes trust/capability negotiation.
@@ -256,7 +260,7 @@ public:
             const auto capabilities=protocol::CapabilityMutualTls|protocol::CapabilityLogicalOrdering|
                 ((!archive_&&!group_&&voice_&&voice_->available&&voice_->available())?(protocol::CapabilityVoiceCalls|protocol::CapabilityMediaRecovery):0)|
                 (group_?(protocol::CapabilitySignedGroups|protocol::CapabilityGroupKeyHandoff|(group_->historyOutgoing?protocol::CapabilityArchiveGroups:0)):0)|
-                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|(archive_->groups?protocol::CapabilityArchiveGroups:0)):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0)|((!archive_&&!group_&&transfer_)?protocol::CapabilityTransferPipeline:0);
+                (archive_?(protocol::CapabilityArchiveControl|protocol::CapabilityArchiveDeferred|(archive_->groups?protocol::CapabilityArchiveGroups:0)):0)|((archive_?archive_->attachments:bool(transfer_))?protocol::CapabilityFileTransfer:0)|((!archive_&&!group_&&transfer_)?(protocol::CapabilityTransferPipeline|protocol::CapabilityTransferPreparation):0);
             stage_="peer_tls_receive";
             bool live=runtime_.receive(*tls_,bytes,local_,capabilities,0,
                 [&]{return !closed_;},[&]{collect();},[&](protocol::Writer& value){packet(value);},[&](const Blob& frame){dispatch(frame);});

@@ -24,20 +24,26 @@ class PeerChatWakeJob:JobService() {
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
     private var work:Job?=null
     @Volatile private var execution=0L
+    @Volatile private var urgentRequested=false
     // Main-thread job admission only: both scheduler purposes share ONE worker.
     private val admittedJobs=mutableMapOf<Int,JobParameters>()
     override fun onStartJob(params:JobParameters):Boolean {
         WakeSystemDiagnostics.record(this,"wake_job_started")
         OpaquePushWake.started(params.jobId)
         admittedJobs[params.jobId]=params
+        if(work?.isActive!=true)urgentRequested=false
+        if(params.jobId==OpaquePushWake.JOB_ID)urgentRequested=true
         if(work?.isActive==true){
             android.util.Log.i("PeerChatWake","stage=wake_running_coalesced job_id=${params.jobId}")
             return true
         }
         val admitted=++execution
-        val deadline=System.nanoTime()+30_000_000_000L
+        val started=System.nanoTime()
+        val deadline=started+90_000_000_000L
         work=scope.launch {
             var lease:MessagingApplication?=null
+            var peerLease:MessagingApplication?=null
+            var sawCall=false
             var stage="configuration"
             var reschedule=true
             var lastOwnerState:String?=null
@@ -49,7 +55,7 @@ class PeerChatWakeJob:JobService() {
                     lastOwnerState=summary
                 }
             }
-            try{withTimeout(30000){
+            try{withTimeout(90000){
                 val config=AndroidServerConfigurationStore(this@PeerChatWakeJob).load()
                 if(config==null){reschedule=false;android.util.Log.i("PeerChatWake","stage=wake_exit reason=no_configuration");return@withTimeout}
                 val credential=AndroidRememberedLoginStore(this@PeerChatWakeJob).load()
@@ -72,19 +78,30 @@ class PeerChatWakeJob:JobService() {
                 val preferences=AndroidQolStore(this@PeerChatWakeJob)
                 val accountKey=accountPreferenceKey(config,credential.accountId)
                 while(isActive){
+                    // Opaque push is only a scheduling hint. Protected remembered
+                    // authentication above and native peer authorization still
+                    // own all signaling; this lease never grants microphone use.
+                    if(urgentRequested&&peerLease==null){
+                        peerLease=AndroidMessagingRuntime.acquire(this@PeerChatWakeJob,deadline,peerWakeLease=true)
+                        android.util.Log.i("PeerChatWake","stage=authenticated_peer_wake")
+                    }
                     recordOwnerState()
                     // Read completion BEFORE the snapshot used for notification
                     // planning. The owner gate drains the servicing/publish pass;
                     // an ACK arriving later must wait for the next iteration.
-                    val outputDrained=lease!!.backgroundOutputDrained(deadline-30_000_000_000L)
+                    val outputDrained=lease!!.backgroundOutputDrained(started)
                     val snapshot=lease!!.state.value
                     val completed=runWakeNotificationStep(snapshot,credential.accountId,accountKey,
                         preferences,outputDrained){show(accountKey,it)}
                     // Real native receive/ACK completion is independent of OS
                     // notification permission, suppression or prior posting.
-                    if(completed){
-                        reschedule=false
-                        android.util.Log.i("PeerChatWake","stage=wake_delivery_complete elapsed_ms="+(30_000_000_000L-(deadline-System.nanoTime()))/1_000_000)
+                    val incoming=snapshot.voice.direction==1L&&snapshot.voice.active
+                    sawCall=sawCall||incoming
+                    val elapsed=(System.nanoTime()-started)/1_000_000
+                    val finished=backgroundWakeCanFinish(urgentRequested,completed,snapshot.voice.active,elapsed)
+                    if(finished){
+                        reschedule=!completed
+                        android.util.Log.i("PeerChatWake","stage=wake_delivery_complete elapsed_ms="+(System.nanoTime()-started)/1_000_000)
                         return@withTimeout
                     }
                     delay(500)
@@ -96,9 +113,10 @@ class PeerChatWakeJob:JobService() {
                 android.util.Log.i("PeerChatWake","stage="+stage+" result="+if(failure is TimeoutCancellationException)"budget_complete" else failure.javaClass.simpleName)
             }
             finally{withContext(NonCancellable){
+                peerLease?.close()
                 lease?.close()
                 val released=lease?.awaitQuiescence(2000) ?: true
-                android.util.Log.i("PeerChatWake","stage=wake_job_finished reschedule=$reschedule quiescent=$released elapsed_ms="+(30_000_000_000L-(deadline-System.nanoTime()))/1_000_000)
+                android.util.Log.i("PeerChatWake","stage=wake_job_finished reschedule=$reschedule quiescent=$released elapsed_ms="+(System.nanoTime()-started)/1_000_000)
                 WakeSystemDiagnostics.power(this@PeerChatWakeJob,"wake_job_finished_power")
                 withContext(Dispatchers.Main.immediate){
                     if(execution==admitted){
@@ -165,3 +183,10 @@ internal fun publishWakeNotifications(snapshot:MessagingSnapshot,accountKey:Stri
         }
     }
 }
+
+/** Keep an urgent hint alive for a bounded incoming signaling window, even when
+ * mailbox work is empty or a short call ended: the server coalesces push for
+ * 30 seconds, so quick repeats must still find a live receiver. Accepted calls
+ * are retained by their own consent lease. */
+internal fun backgroundWakeCanFinish(urgent:Boolean,drained:Boolean,callActive:Boolean,elapsedMs:Long):Boolean =
+    if(!urgent)drained||elapsedMs>=30_000 else elapsedMs>=if(callActive)85_000 else 55_000

@@ -16,6 +16,10 @@ static class DmAttachmentHistoryProjectionTest {
         for(int number=576;number<608;++number)ChatAttachmentProjection.Apply(conversation,Row(number));
         Check(conversation.Messages.Count==608,"Repeated protected history page duplicated bubbles");
         var active=Row(700);active.state=3;active.done=17;active.size=100;var statistics=ChatAttachmentProjection.Statistics(active);Check(statistics.Contains("Encrypted payload throughput: unavailable")&&!statistics.Contains("Current 0")&&!statistics.Contains("ETA"),"DM throughput or ETA fabricated from logical plaintext progress");
+        var upload=Row(701);upload.sending=true;upload.state=3;upload.dmState="uploading";upload.size=100;upload.done=100;
+        Check(ChatAttachmentProjection.CompactStatus(upload)=="Finalizing server upload","100 percent falsely confirms storage");
+        upload.uploadComplete=true;
+        Check(ChatAttachmentProjection.CompactStatus(upload)=="Uploaded to server","Active transfer masks confirmed server upload");
         Console.WriteLine("PASS DM protected history projection: 608 rows, 32-row refresh, repeated older page");return 0;
     }catch(Exception error){Console.Error.WriteLine(error);return 1;}}
 }

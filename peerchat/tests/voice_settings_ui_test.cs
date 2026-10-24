@@ -12,7 +12,7 @@ using PeerChatDesktop;
 class VoiceSettingsUiTest {
     static void Require(bool condition,string message){if(!condition)throw new Exception(message);}
     static T Find<T>(DependencyObject root,string name) where T:DependencyObject {
-        if(root is T&&AutomationProperties.GetName(root)==name)return (T)root;
+        if(root is T&&(AutomationProperties.GetName(root)==name||(root is ContentControl && Object.Equals(((ContentControl)root).Content,name))))return (T)root;
         for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);++i){var result=Find<T>(VisualTreeHelper.GetChild(root,i),name);if(result!=null)return result;}
         return null;
     }
@@ -33,6 +33,8 @@ class VoiceSettingsUiTest {
                 try {
                     var voice=Find<Button>(settings,"Settings navigation Voice");Require(voice!=null,"Voice navigation missing");
                     voice.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));settings.UpdateLayout();
+                    var automatic=Find<CheckBox>(settings,"Automatic Noise Control");Require(automatic!=null,"Automatic Noise Control switch missing");
+                    var autoLevel=Find<ListBox>(settings,"Automatic Noise Control level");Require(autoLevel!=null,"Automatic levels missing");
                     var ns=Find<CheckBox>(settings,"Noise Suppression enabled");var agc=Find<CheckBox>(settings,"Automatic Gain Control enabled");
                     var nsStrength=Find<ListBox>(settings,"Noise Suppression strength");var agcStrength=Find<ListBox>(settings,"Automatic Gain Control strength");
                     var master=Find<CheckBox>(settings,"Enable Audio Processing");var aec=Find<CheckBox>(settings,"Echo Cancellation enabled");
@@ -41,18 +43,23 @@ class VoiceSettingsUiTest {
                     Require(ns.Template.FindName("SwitchThumb",ns)!=null&&agc.Template.FindName("SwitchThumb",agc)!=null,"On/Off switch presentation missing");
                     Require(aec!=null&&aec.IsEnabled,"AEC switch unavailable");
                     if(visits==0){
+                        Require(automatic.IsChecked==true&&!ns.IsEnabled&&!nsStrength.IsEnabled,"Automatic mode must own noise processing");
+                        Require(autoLevel.SelectedIndex==1&&autoLevel.IsEnabled,"Medium default missing");autoLevel.SelectedIndex=2;
+                        automatic.IsChecked=false;Require(!autoLevel.IsEnabled,"Automatic level still enabled while Off");Require(ns.IsEnabled,"Original processing fallback unavailable");
                         nsStrength.SelectedIndex=2;agcStrength.SelectedIndex=0;aec.IsChecked=true;
                         ns.IsChecked=false;agc.IsChecked=false;settings.UpdateLayout();
                         Require(!nsStrength.IsEnabled&&!agcStrength.IsEnabled&&nsStrength.Opacity<1&&agcStrength.Opacity<1,"OFF strengths were not disabled/grayed");
                         Require(nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"OFF discarded strength");
                         Require(((TextBlock)ns.Template.FindName("SwitchState",ns)).Text=="OFF","OFF switch text incorrect");
                     } else {
-                        Require(aec.IsChecked==true,"AEC preference did not persist");Require(ns.IsChecked==false&&agc.IsChecked==false&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"Reopening lost saved OFF strengths");
+                        Require(automatic.IsChecked==false,"Automatic mode preference did not persist");Require(aec.IsChecked==true,"AEC preference did not persist");Require(ns.IsChecked==false&&agc.IsChecked==false&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"Reopening lost saved OFF strengths");
                         ns.IsChecked=true;agc.IsChecked=true;settings.UpdateLayout();
                         Require(nsStrength.IsEnabled&&agcStrength.IsEnabled&&nsStrength.SelectedIndex==2&&agcStrength.SelectedIndex==0,"ON did not restore saved strength");
                         Require(((TextBlock)ns.Template.FindName("SwitchState",ns)).Text=="ON","ON switch text incorrect");
                         master.IsChecked=false;Require(!ns.IsEnabled&&!agc.IsEnabled&&!aec.IsEnabled&&!nsStrength.IsEnabled&&!agcStrength.IsEnabled,"Master OFF did not disable processing controls");
                         master.IsChecked=true;Require(nsStrength.IsEnabled&&agcStrength.IsEnabled,"Master ON did not restore controls");
+                        automatic.IsChecked=true;Require(!ns.IsEnabled&&!nsStrength.IsEnabled&&agc.IsEnabled&&aec.IsEnabled,"Automatic control must preserve AGC/AEC and disable duplicate NS");
+                        automatic.IsChecked=false;Require(nsStrength.IsEnabled,"Returning to original processing lost settings");
                         result=0;
                     }
                     visits++;

@@ -1,6 +1,8 @@
 param(
     [string]$SdkRoot=$env:ANDROID_HOME,
     [string]$Gradle=(Join-Path $PSScriptRoot 'gradlew.bat'),
+    [string]$VoiceReceiveDirectory=(Join-Path $PSScriptRoot '..\build\android-neteq\arm64-v8a'),
+    [string]$BuildVersion,
     [switch]$ConnectedTests,
     [switch]$FoundationProof
 )
@@ -14,6 +16,7 @@ $missing=@($required | Where-Object {-not (Test-Path -LiteralPath (Join-Path $Sd
 if(-not (Get-Command $Gradle -ErrorAction SilentlyContinue)){$missing+='Gradle 8.9 wrapper (android/gradlew.bat)'}
 if(-not (Get-Command java -ErrorAction SilentlyContinue)){$missing+='JDK 17+ java executable'}
 if($missing.Count){throw "Android preflight failed at '$SdkRoot': $($missing -join '; '). No tools installed or build attempted."}
+if(-not(Test-Path -LiteralPath (Join-Path $VoiceReceiveDirectory 'libpeerchat_audio_receive.a'))){throw 'Full Android builds require the pinned WebRTC/NetEq receive archive.'}
 $version=& $Gradle --version
 if($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '(?m)^Gradle 8\.9\s*$'){throw 'This source proof pins Gradle 8.9.'}
 $previousSdk=$env:ANDROID_HOME
@@ -22,8 +25,11 @@ try {
     $env:ANDROID_HOME=$SdkRoot
     $tasks=@(':app:assembleDebug')
     if($ConnectedTests){$tasks+=':app:connectedDebugAndroidTest'}
-    & $Gradle @tasks
+    $buildOptions=@('-PpeerchatVoiceEnabled=true',('-PpeerchatVoiceReceiveDirectory='+[IO.Path]::GetFullPath($VoiceReceiveDirectory)))
+    if($BuildVersion){$buildOptions+=('-PpeerchatVersion='+$BuildVersion)}
+    & $Gradle @tasks @buildOptions
     if($LASTEXITCODE -ne 0){throw "Android build failed with exit code $LASTEXITCODE"}
     Write-Host "Debug APK: $(Join-Path $PSScriptRoot 'app\build\outputs\apk\debug\app-debug.apk')"
     Write-Host 'Native messaging libraries included: arm64-v8a libpeerchat_messaging.so and libpeerchat_jni.so'
+    Write-Host 'Full voice enabled: pinned WebRTC/NetEq receive archive validated by Gradle.'
 } finally {$env:ANDROID_HOME=$previousSdk;Pop-Location}

@@ -1,3 +1,4 @@
+#include "../dm_attachment_initial_identity.hpp"
 #include "peerchat_core.h"
 #include "../session_transport_manager.hpp"
 #include "../group.hpp"
@@ -27,11 +28,16 @@
 #include "../archive_attachment_transfer.hpp"
 #include "transfer_storage.hpp"
 #include "dm_attachment_transfer_storage.hpp"
+#include "group_attachment_transfer_storage.hpp"
 #include "../dm_attachment_application.hpp"
 #include "operation_timing.hpp"
 #include "../windows_transfer_timing.hpp"
 #include "transfer_statistics_storage.hpp"
 #include "attachment_file_io.hpp"
+#include "android_group_attachment_history.hpp"
+#include "group_attachment_file_io.hpp"
+#include "android_group_attachment_application.hpp"
+template class peerchat::group_attachments::BasicApplication<peerchat::group_attachments::android::ApplicationPlatform>;
 #include "../protected_text_source.hpp"
 #include "android_voice_application.hpp"
 #include "android_group_voice_application.hpp"
@@ -45,6 +51,9 @@ struct Instance {
     std::mutex gate;
 #if defined(__ANDROID__)
     std::unique_ptr<peerchat::Storage> storage;
+    std::mutex historyGate;
+    std::unique_ptr<peerchat::Storage> historyStorage;
+    std::string historyPeer;
     peerchat::Profile profile;
     std::unique_ptr<peerchat::delivery::DeliveryManager> deliveries;
     const char* mailboxStage="not_requested";
@@ -56,6 +65,7 @@ struct Instance {
     std::unique_ptr<peerchat::portable::GroupPendingProjection> groupPending;
     std::set<std::string> groupScopeIds;
     void invalidateGroups(){
+        if(groupAttachments){peerchat::protocol::Writer w(peerchat::protocol::FileTransfer);w.string("PeerChat/AttachmentSession/v1");w.number(0);w.number(0);w.string("");groupAttachments->network(0,w.data);}
         if(groupVoice)groupVoice->invalidate();
         if(groups)for(const auto& id:groups->groups())groupScopeIds.insert(id);
         for(const auto& id:groupScopeIds)sessions.invalidateGroupControl({1},id,0);
@@ -64,9 +74,13 @@ struct Instance {
     std::shared_ptr<peerchat::transfer::posix::Cache> attachmentCache;
     std::unique_ptr<peerchat::transfer::ProtectedStorageJournal> transferJournal;
     std::unique_ptr<peerchat::transfer::DirectCacheJournal> directTransferJournal;
+    std::unique_ptr<peerchat::transfer::GroupCacheJournal> groupTransferJournal;
+    std::unique_ptr<peerchat::group_attachments::android::LocalState> groupAttachmentState;
+    bool groupAttachmentStorageUnavailable=false;
     std::unique_ptr<peerchat::transfer::ProtectedStatisticsStore> transferStatistics;
     std::unique_ptr<peerchat::transfer::TransferManager> transfers;
     std::unique_ptr<peerchat::dm_attachments::Application> dmAttachments;
+    std::unique_ptr<peerchat::group_attachments::android::Application> groupAttachments;
     std::optional<peerchat::mailbox::RecipientBinding> dmActiveBinding;
     bool dmStorageUnavailable=false;
     std::shared_ptr<peerchat::platform::RecordProtector> attachmentRecords;
@@ -117,12 +131,17 @@ struct Instance {
             directTransferJournal=std::make_unique<transfer::DirectCacheJournal>(*storage,profile.peerId,*transferJournal,
                 [cache](const transfer::DurableState& d){return transfer::posix::FileSource::reopen(cache,d);},
                 [cache](const transfer::DurableState& d){return transfer::posix::FileSink::reopen(cache,d);});
-            auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},directTransferJournal.get(),transferStatistics.get());
+            groupTransferJournal=std::make_unique<transfer::GroupCacheJournal>(*storage,profile.peerId,*directTransferJournal,
+                [cache](const transfer::DurableState& d){return transfer::posix::FileSource::reopen(cache,d);},
+                [cache](const transfer::DurableState& d){return transfer::posix::FileSink::reopen(cache,d);});
+            auto manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},groupTransferJournal.get(),transferStatistics.get());
             try{manager->restore(now);}catch(const std::exception&){
                 // Retain every cache byte/record. A cache-only corruption must
                 // not disable a separately valid legacy transfer journal.
-                manager.reset();directTransferJournal.reset();dmStorageUnavailable=true;
-                manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get(),transferStatistics.get());manager->restore(now);
+                manager.reset();groupTransferJournal.reset();groupAttachmentStorageUnavailable=true;
+                manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},directTransferJournal.get(),transferStatistics.get());
+                try{manager->restore(now);}catch(...){manager.reset();directTransferJournal.reset();dmStorageUnavailable=true;
+                manager=std::make_unique<transfer::TransferManager>([]{return std::make_unique<transfer::posix::Sha256>();},transferJournal.get(),transferStatistics.get());manager->restore(now);}
             }
             manager->defaults({transfer::ExtendedChunkBytes,16,10000000},10000000);transfers=std::move(manager);
         }
@@ -136,6 +155,30 @@ struct Instance {
     }
     std::uint64_t archiveGeneration=0;
     std::uint64_t attachmentServiceAt=0;
+    // A cache borrow may occur again inside the ordinary ten-ms cadence. Give
+    // its already-authorized cache entries one bounded turn so available native
+    // credit can fill, without advancing ordinary relay/file work or its clock.
+    void serviceCacheTransfers(std::uint64_t now){
+        if(!transfers)return;
+        try{
+            using namespace peerchat;
+            if(dmAttachments)dmAttachments->tick();
+            if(groupAttachments)groupAttachments->tick();
+            transfers->tickCacheScoped(now,[&](const transfer::Snapshot& row)->std::uint64_t{
+                if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments?dmAttachments->route(row):0;
+                if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->route(row):0;
+                return 0;
+            },[&](const transfer::Snapshot& row,const Blob& frame){
+                if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments&&dmAttachments->send(row,frame);
+                if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments&&groupAttachments->send(row,frame);
+                return false;
+            },[&](const transfer::Snapshot& row)->size_t{
+                if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments?dmAttachments->appendCredit(row):0;
+                if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->appendCredit(row):0;
+                return 0;
+            });
+        }catch(const peerchat::transfer::PersistenceError&){}
+    }
     // Existing native gate and relay output worker; no new route/retry owner.
     void serviceTransfers(std::uint64_t now){
         if(!transfers||now<attachmentServiceAt)return;
@@ -143,6 +186,7 @@ struct Instance {
         if(transfers)try{
             using namespace peerchat;
             if(dmAttachments)dmAttachments->tick();
+            if(groupAttachments)groupAttachments->tick();
             for(const auto& row:transfers->snapshots())if(row.purpose==transfer::Purpose::PeerFile&&(!archiveTransfers||!archiveTransfers->wasArchiveTransfer(row.metadata.id))&&friends.contains(row.peer)&&
                 (row.state==transfer::State::Preparing||row.state==transfer::State::Offered||row.state==transfer::State::Transferring||row.state==transfer::State::Recovering||transfers->hasPendingControl(row.metadata.id)))
                 sessions.demandLiveRoute(row.peer,now+2000,now);
@@ -150,8 +194,8 @@ struct Instance {
             auto routeFor=[&](const transfer::Snapshot& row){if(row.purpose!=transfer::Purpose::PeerFile)return decltype(sessions.snapshot(row.peer)){};auto scope=transferScope(row.metadata.id);
                 if(!scope&&!friends.contains(row.peer))return decltype(sessions.snapshot(row.peer)){};
                 return sessions.snapshot(scope?scope->continuityKey():row.peer);};
-            transfers->tickScoped(now,[&](const transfer::Snapshot& row)->std::uint64_t{if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments?dmAttachments->route(row):0;auto route=routeFor(row);if(!route||!route->connected)return 0;auto peer=peers.find(route->activeTransport.value);bool ready=peer!=peers.end()&&peer->second->ready();transfers->capability(row.peer,ready?route->activeTransport.value:0,ready&&!transferScope(row.metadata.id)&&peer->second->permitsTransferPipeline());return ready?route->activeTransport.value:0;},
-                [&](const transfer::Snapshot& row,const Blob& bytes){if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments&&dmAttachments->send(row,bytes);auto route=routeFor(row);if(!route)return false;auto peer=peers.find(route->activeTransport.value);if(peer==peers.end()||!peer->second->ready())return false;
+            transfers->tickScoped(now,[&](const transfer::Snapshot& row)->std::uint64_t{if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments?groupAttachments->route(row):0;if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments?dmAttachments->route(row):0;auto route=routeFor(row);if(!route||!route->connected)return 0;auto peer=peers.find(route->activeTransport.value);bool ready=peer!=peers.end()&&peer->second->ready();transfers->capability(row.peer,ready?route->activeTransport.value:0,ready&&!transferScope(row.metadata.id)&&peer->second->permitsTransferPipeline(),ready&&!transferScope(row.metadata.id)&&peer->second->permitsTransferPreparation());return ready?route->activeTransport.value:0;},
+                [&](const transfer::Snapshot& row,const Blob& bytes){if(row.purpose==transfer::Purpose::GroupCacheCiphertext)return groupAttachments&&groupAttachments->send(row,bytes);if(row.purpose==transfer::Purpose::DirectCacheCiphertext)return dmAttachments&&dmAttachments->send(row,bytes);auto route=routeFor(row);if(!route)return false;auto peer=peers.find(route->activeTransport.value);if(peer==peers.end()||!peer->second->ready())return false;
                     auto scope=transferScope(row.metadata.id);
                     try{if(scope){peer->second->sendArchiveControl(archiveTransfers->outgoing(*scope,bytes));return true;}
                         const auto began=transfer::windows::TransferTiming::now();const bool submitted=peer->second->sendTransfer(bytes);
@@ -294,10 +338,13 @@ void prepareDmAttachments(Instance& instance,std::uint64_t now){
     using namespace peerchat;
     instance.prepareAttachments(now);protocol::check(!instance.dmStorageUnavailable);if(instance.dmAttachments)return;
     auto cache=instance.attachmentCache;dm_attachments::Application::Platform io;
+    auto thumbnailContext=std::dynamic_pointer_cast<platform::android::Identity>(instance.profile.identity)->context;
+    io.thumbnail=[thumbnailContext](transfer::Source& source){auto file=dynamic_cast<transfer::posix::FileSource*>(&source);if(!file)return Blob{};auto name=file->cacheName();return thumbnailContext->transform("attachmentThumbnail",Blob(name.begin(),name.end()));};
     io.wall=mailboxNow;io.monotonic=runtimeNow;io.hash=[]{return std::make_unique<transfer::posix::Sha256>();};
     io.stage=io.receiveSink=[cache](const transfer::Metadata& m){cache->reserve(m.size);return std::make_unique<transfer::posix::FileSink>(cache,m,transfer::Purpose::DirectCacheCiphertext);};
     io.resumeStage=[cache](const transfer::Metadata& m,const Blob& token){return transfer::posix::resumeStage(cache,m,token);};
     io.reopenPlain=[cache](const Blob& token,const transfer::Metadata& m){transfer::DurableState d;d.metadata=m;d.location=token;return transfer::posix::FileSource::reopen(cache,d);};
+    io.discardCipher=[cache](const Blob& token,const transfer::Metadata& m){transfer::posix::discardCiphertext(cache,token,m,transfer::Purpose::DirectCacheCiphertext);};
     io.location=[](transfer::Sink& sink){return sink.resumeToken();};
     io.reopen=[cache](const Blob& token,const transfer::Metadata& m)->std::unique_ptr<transfer::Source>{
         transfer::DurableState d;d.metadata=m;d.location=token;d.purpose=transfer::Purpose::DirectCacheCiphertext;
@@ -353,10 +400,29 @@ void prepareDmAttachments(Instance& instance,std::uint64_t now){
     try{instance.dmAttachments=std::make_unique<dm_attachments::Application>(*instance.storage,instance.profile,*instance.transfers,std::move(io),std::move(evidence),std::move(keys));}
     catch(const std::exception&){instance.dmStorageUnavailable=true;throw;}
 }
-peerchat::transfer::State dmDisplayState(const peerchat::dm_attachments::Application::Snapshot& s){using namespace peerchat::transfer;
-    return s.state=="failed"?State::Failed:s.state=="canceled"?State::Cancelled:s.verified||(s.sending&&s.noticesStored)?State::Complete:!s.sending&&s.state=="available"?State::AwaitingAcceptance:s.state=="paused"?State::Recovering:s.state=="preflight"||s.state=="preparing"?State::Preparing:State::Transferring;
+void prepareGroupAttachments(Instance& instance){
+ using namespace peerchat;using App=group_attachments::android::Application;
+ instance.prepareAttachments(runtimeNow());protocol::check(!instance.groupAttachmentStorageUnavailable&&instance.groups&&mailboxScopeCurrent(instance));if(instance.groupAttachments)return;
+ auto context=[&instance](const std::string& group,const group_keys::RosterSnapshot* historical)->App::Context {
+  protocol::check(instance.groups&&mailboxScopeCurrent(instance));auto current=instance.groups->roster(group);
+  if(!current)for(const auto& id:instance.groups->groups()){auto row=instance.groups->roster(id);if(row&&row->legacyGroupId==group){current=row;break;}}
+  protocol::check(current&&group_keys::GroupKeyManager::currentMember(*current,instance.friends.localAccount(),instance.profile.peerId));auto ledger=instance.groups->ledger(current->legacyGroupId);
+  protocol::check(ledger&&group_keys::GroupKeyManager::matchesSignedLedger(*current,ledger->state()));if(!historical)return {*current,ledger->state()};
+  protocol::check(historical->serverGroupId==current->serverGroupId&&historical->legacyGroupId==current->legacyGroupId&&historical->generation&&historical->generation<=current->generation&&historical->creationProof==current->creationProof);
+  if(historical->generation==current->generation){protocol::check(group_keys::GroupKeyManager::matchesSignedLedger(*historical,ledger->state()));return {*historical,ledger->state()};}
+  GroupLedger prefix;size_t scanned=0,events=0;for(const auto& event:ledger->events()){if(++scanned>4096)break;if(!ledger->accepted(event.eventId)||event.kind==GroupEventKind::Message)continue;if(event.kind==GroupEventKind::AuthorizeDevice||event.kind==GroupEventKind::RevokeDevice||++events>256)break;protocol::check(prefix.append(event));if(group_keys::GroupKeyManager::matchesSignedLedger(*historical,prefix.state()))return {*historical,prefix.state()};}
+  throw std::runtime_error("Verified historical group roster evidence unavailable");
+ };
+ auto keys=[&instance](const auto& operation){protocol::check(mailboxScopeCurrent(instance));mailboxProviders(instance);operation(*instance.keys,*instance.hpke,*instance.profile.identity);};
+ auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance.profile.identity);protocol::check(bool(identity));auto path=identity->context->bytes("attachmentDirectory","()[B");
+ instance.groupAttachmentState=std::make_unique<group_attachments::android::LocalState>(*instance.storage,instance.profile.peerId);
+ instance.groupAttachments=std::make_unique<App>(*instance.storage,instance.profile,*instance.transfers,*instance.groupAttachmentState,unicode::decode(std::string(path.begin(),path.end())),std::move(context),std::move(keys));
+ auto thumbnailContext=identity->context;instance.groupAttachments->thumbnailer([thumbnailContext](transfer::Source& source){auto file=dynamic_cast<transfer::posix::FileSource*>(&source);if(!file)return Blob{};auto name=file->cacheName();return thumbnailContext->transform("attachmentThumbnail",Blob(name.begin(),name.end()));});
 }
-std::string dmDisplayPhase(const peerchat::dm_attachments::Application::Snapshot& s){return s.sending?(s.state=="complete"?"Recipients verified saved":s.noticesStored?"Notice stored; safe to disconnect":s.uploadComplete?"Upload complete; storing notices":"Uploading encrypted file"):s.verified?"Verified saved":s.state=="verifying"?"Downloaded; verifying":s.state=="available"?"Cached file offered":"Downloading encrypted file";}
+peerchat::transfer::State dmDisplayState(const peerchat::dm_attachments::Application::Snapshot& s){using namespace peerchat::transfer;
+    return s.state=="failed"?State::Failed:s.state=="canceled"?State::Cancelled:s.verified||(s.sending&&s.uploadComplete&&s.noticesStored)?State::Complete:!s.sending&&s.state=="available"?State::AwaitingAcceptance:s.state=="paused"?State::Recovering:s.state=="preflight"||s.state=="preparing"?State::Preparing:State::Transferring;
+}
+std::string dmDisplayPhase(const peerchat::dm_attachments::Application::Snapshot& s){return s.sending?(s.state=="preflight"?"Checking cached upload authorization":s.state=="preparing"?"Preparing encrypted file":s.state=="complete"?"Recipients verified saved":s.noticesStored&&s.uploadComplete?"Notice stored; safe to disconnect":s.noticesStored?"Offer delivered; uploading encrypted file":s.uploadComplete?"Upload complete; storing notices":"Uploading encrypted file"):s.verified?"Verified saved":s.state=="verifying"?"Downloaded; verifying":s.state=="available"?"Cached file offered":s.state=="waiting_for_upload"?"Accepted; sender is preparing the cached file":"Downloading encrypted file";}
 std::string dmCompletedPath(Instance& instance,const peerchat::dm_attachments::Application::Snapshot& s,const peerchat::Blob& token){
     using namespace peerchat;protocol::Reader r(token);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSink/v1");transfer::DurableState d;d.metadata={r.string(),s.name,s.size,{}};protocol::check(r.string()==s.name);d.location=token;d.done=s.size;
     auto sink=transfer::posix::FileSink::reopen(instance.attachmentCache,d);d.location=sink->sourceToken();auto source=transfer::posix::FileSource::reopen(instance.attachmentCache,d);
@@ -675,6 +741,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_MailboxBridge_receip
         std::lock_guard<std::mutex> lock(instance->gate);peerchat::mailbox::require(instance->deliveries!=nullptr);
         auto contact=mailboxContact(*instance,receipt.recipientDevice,receipt.recipientAccount);
         bool authenticated=false;instance->deliveries->acknowledgeMailbox(wire,receipt.recipientAccount,contact,&authenticated);
+        if(!authenticated&&instance->dmAttachments)authenticated=instance->dmAttachments->acknowledgeNoticeReceipt(wire,contact);
         return authenticated?PC_CORE_OK:PC_CORE_INVALID_ARGUMENT;
     });
 }
@@ -781,6 +848,18 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ArchiveBridge_
         return peerchat::platform::android::Context::input(env,output);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupAttachmentBridge_request(JNIEnv* env,jobject,jlong handle,jint operation,jbyteArray input){
+ try{using namespace peerchat;auto instance=lookup(static_cast<pc_core_handle>(handle));protocol::check(bool(instance));auto bytes=mailboxArgument(env,input,262144);protocol::Reader r(bytes);
+  protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/AndroidGroupAttachments/v1");auto account=r.number(),generation=r.number();std::lock_guard<std::mutex> lock(instance->gate);
+  protocol::check(account&&account==instance->friends.localAccount()&&generation&&generation==instance->friends.generation()&&mailboxScopeCurrent(*instance));prepareGroupAttachments(*instance);
+  protocol::Writer session(protocol::FileTransfer);session.string("PeerChat/AttachmentSession/v1");session.number(account);session.number(generation);session.string(Storage::publicKeyId(Blob(instance->mailboxScope.begin(),instance->mailboxScope.end())));instance->groupAttachments->network(0,session.data);
+  Blob result;if(operation==0){auto action=r.number();auto group=r.string(),id=r.string(),path=r.string();r.end();protocol::check(action==0||action==1||action==2||action==3||action==4||action==6||action==7||action==8);
+   if(action==2){auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance->profile.identity);protocol::check(bool(identity));auto directory=identity->context->bytes("attachmentDirectory","()[B");path=std::string(directory.begin(),directory.end());}
+   auto text=unicode::encode(instance->groupAttachments->command(static_cast<unsigned>(action),group,id,unicode::decode(path)));result=Blob(text.begin(),text.end());
+  }else{protocol::check(operation>=1&&operation<=3);Blob body(r.data.begin()+r.cursor,r.data.end());r.cursor=r.data.size();r.end();if(operation==1)instance->serviceCacheTransfers(runtimeNow());result=instance->groupAttachments->network(static_cast<unsigned>(operation),body);}
+  return platform::android::Context::input(env,result);
+ }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
 // Local-only group commands. Existing peer/server wire formats are untouched.
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_request(JNIEnv* env,jobject,jlong handle,jint operation,jbyteArray input){
     auto instance=lookup(static_cast<pc_core_handle>(handle));
@@ -827,7 +906,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_GroupBridge_re
                     auto body=group_text::decode(record.plaintext);out.string(e.messageId);out.string(e.senderDevice);out.number(e.senderAccount);out.number(body.time);out.number(body.order);out.number(record.sequence);out.string(record.status);out.text(body.text);platform::group_crypto::wipe(record.plaintext.data(),record.plaintext.size());}
                 out.string("PeerChat/GroupHistoryPage/v1");out.number(ready);
                 archive::GroupHistoryAccess referenceAccess(*instance->storage,instance->profile,account,[&groups](const std::string& server){return groups.historyContext(server);});
-                auto references=referenceAccess.visibleReferences(id,referenceAfter);out.string("PeerChat/GroupReferencePage/v1");out.number(references.next);out.number(!references.complete);out.number(references.records.size());for(const auto& item:references.records){auto d=group_attachments::parseDescriptor(item.envelope);out.string(d.message);out.string(d.attachment);out.string(d.sender);out.number(d.account);out.number(d.epoch);out.number(d.cipherSize);}
+                auto references=referenceAccess.visibleReferences(id,referenceAfter);references.records.erase(std::remove_if(references.records.begin(),references.records.end(),[&](const auto& item){auto d=group_attachments::parseDescriptor(item.envelope);return instance->storage->localMessageHidden(row->legacyGroupId,d.message,true)||instance->storage->localMessageHidden(row->legacyGroupId,d.attachment,true);}),references.records.end());out.string("PeerChat/GroupReferencePage/v1");out.number(references.next);out.number(!references.complete);out.number(references.records.size());for(const auto& item:references.records){auto d=group_attachments::parseDescriptor(item.envelope);out.string(d.message);out.string(d.attachment);out.string(d.sender);out.number(d.account);out.number(d.epoch);out.number(d.cipherSize);}
             }else if(operation==4){auto name=r.text(),user=r.text();r.end();out.bytes(groups.create(name,user,mailboxNow()));
             }else if(operation==5){auto id=r.string();auto text=r.text();r.end();auto created=groups.send(id,text,mailboxNow());out.string(group_messages::resultName(created.result));if(created.result==group_messages::Result::Accepted){if(instance->groupPending)instance->groupPending->changed();out.string(created.envelope.messageId);out.number(created.envelope.rosterGeneration);out.bytes(created.wire);}
             }else if(operation==6){auto expectedGroup=r.string(),expectedMessage=r.string();auto wire=r.bytes();r.end();group_messages::Envelope envelope;
@@ -1016,7 +1095,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ReliableBridge_deman
         return PC_CORE_OK;
     });
 }
-extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_requests(JNIEnv* env,jobject,jlong handle){
+static jbyteArray reliableRequests(JNIEnv* env,jlong handle,bool preparingVoice){
     try{
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         const auto waiting=peerchat::portable::OperationTiming::now();
@@ -1026,16 +1105,16 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         // Poll execution commands, not a Kotlin retry/session policy.
         auto now=runtimeNow();
         if(instance->voice)instance->voice->tick(now);
-        if(instance->archiveExecution){try{instance->prepareAttachments(now);instance->archiveTransfers->maintain(now);}catch(const std::exception&){}instance->archiveExecution->tick(now,instance->relayRequests->network());}
+        if(!preparingVoice&&instance->archiveExecution){try{instance->prepareAttachments(now);instance->archiveTransfers->maintain(now);}catch(const std::exception&){}instance->archiveExecution->tick(now,instance->relayRequests->network());}
         std::optional<std::vector<peerchat::Contact>> contactSnapshot;
         auto contacts=[&]() -> const std::vector<peerchat::Contact>& {
             if(!contactSnapshot)contactSnapshot=instance->storage->contacts();
             return *contactSnapshot;
         };
-        const bool demandDue=now>=instance->demandCheckAt;
+        const bool demandDue=!preparingVoice&&now>=instance->demandCheckAt;
         {
             peerchat::portable::OperationTiming::Scope scan(&instance->routeDemandTiming,peerchat::portable::OperationTiming::now());
-            if(!instance->outboxDemandLoaded){
+            if(!preparingVoice&&!instance->outboxDemandLoaded){
                 for(const auto& contact:contacts())if(instance->storage->pendingRouteDemand(contact.peerId))instance->liveOutboxPeers.insert(contact.peerId);
                 instance->outboxDemandLoaded=true;
             }
@@ -1078,7 +1157,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
                 }else if(instance->friends.contains(peer.second->expected())&&!instance->sessions.hasActiveWinner(peer.second->expected()))
                     instance->sessions.scheduleRelayRetry(peer.second->expected(),now,static_cast<std::uint32_t>(now));
             }
-            else if(auto scope=peer.second->archiveScope())if(peer.second->ready()&&instance->archiveExecution){
+            else if(auto scope=peer.second->archiveScope())if(!preparingVoice&&peer.second->ready()&&instance->archiveExecution){
                 try{auto request=instance->archiveTransfers?instance->archiveTransfers->request(*scope,peer.first):peerchat::Blob{};if(request.empty())request=instance->archiveExecution->request(*scope,now,peer.first,peer.second->permitsDeferredHistory(),peer.second->permitsGroupHistory());if(!request.empty())peer.second->sendArchiveControl(request);}
                 catch(...){instance->archiveExecution->disconnected(*scope,peer.first);peer.second->close(false);}
             }
@@ -1098,6 +1177,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
         return peerchat::platform::android::Context::input(env,value.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_requests(JNIEnv* env,jobject,jlong handle){return reliableRequests(env,handle,false);}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_voiceRequests(JNIEnv* env,jobject,jlong handle){return reliableRequests(env,handle,true);}
 extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open(JNIEnv* env,jobject,jlong handle,jlong attempt,jboolean incoming,jbyteArray pin){
     try{
         auto expected=peerArgument(env,pin);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 0;
@@ -1146,7 +1227,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_peerchat_android_ReliableBridge_open
                 std::string transferId;try{transferId=peerchat::transfer::packetId(frame);}catch(...){throw peerchat::transfer::ReceiveFailure("transfer_header");}
                 owner->receivingTransferPeer=peer;owner->receivingTransferId=transferId;
                 if(owner->archiveTransfers&&owner->archiveTransfers->wasArchiveTransfer(transferId))throw peerchat::transfer::ReceiveFailure("transfer_archive_identity");
-                auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline());
+                auto endpoint=owner->peers.find(id);peerchat::protocol::check(endpoint!=owner->peers.end());owner->transfers->capability(peer,id,endpoint->second->permitsTransferPipeline(),endpoint->second->permitsTransferPreparation());
                 const auto began=peerchat::transfer::windows::TransferTiming::now();owner->transfers->receive(peer,frame,now);
                 owner->transferTiming.received(frame,id,began,peerchat::transfer::windows::TransferTiming::now());
             },std::move(group),
@@ -1175,7 +1256,15 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge
             if(operation==0){endpoint.receive(peerchat::platform::android::Context::output(env,input),runtimeNow());retireEndpoints(*instance,endpoint);}
             else{
                 if(operation<=5&&env->GetArrayLength(input)!=0)return nullptr;
-                if(operation==1){instance->serviceTransfers(runtimeNow());output=endpoint.takeOutput();}
+                if(operation==1){
+                    // Handshake output and group-key control cannot carry file
+                    // payloads. Do not enumerate protected transfer state on
+                    // every 10ms poll of these lanes under the shared gate.
+                    // The ordinary tick and ready file-capable lanes still own
+                    // transfer progress, including archive attachment sessions.
+                    if(endpoint.ready()&&!endpoint.groupScope())instance->serviceTransfers(runtimeNow());
+                    output=endpoint.takeOutput();
+                }
                 else if(operation==2)output={static_cast<unsigned char>(endpoint.ready()),static_cast<unsigned char>(endpoint.closed())};
                 else if(operation==3){
                     peerchat::reliable::InitialPinDecision decision;
@@ -1260,8 +1349,8 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
         std::lock_guard<std::mutex> lock(instance->gate);
         stage="jni_input";length=input?static_cast<std::uint64_t>(env->GetArrayLength(input)):0;
-        protocol::check(input&&env->GetArrayLength(input)<=((operation==13||operation==14)?100000:4096));
-        if(operation>=11&&operation<=14){
+        protocol::check(input&&env->GetArrayLength(input)<=((operation==13||operation==14)?100000:(operation==10||operation==17||operation==18||operation==19)?70000:4096));
+        if((operation>=11&&operation<=14)||operation==19||operation==20){
             stage="cache_command_copy";
             auto data=platform::android::Context::output(env,input);protocol::Writer result(protocol::FileTransfer);
             if(operation==11){stage="cache_session_scope";protocol::Reader r(data);protocol::check(r.type()==protocol::FileTransfer);auto account=r.number(),generation=r.number();r.end();
@@ -1271,7 +1360,16 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
                 return platform::android::Context::input(env,result.data);
             }
             stage="cache_controller_lookup";protocol::check(bool(instance->dmAttachments));
-            if(operation==12){stage="cache_command_tick";protocol::check(data.empty());instance->dmAttachments->tick();return platform::android::Context::input(env,instance->dmAttachments->nextCommand());}
+            if(operation==20){stage="cache_local_preparation";protocol::check(data.empty()&&mailboxScopeCurrent(*instance));
+                const auto binding=Storage::publicKeyId(Blob(instance->mailboxScope.begin(),instance->mailboxScope.end()));
+                protocol::check(instance->dmAttachments->matchesSession(instance->friends.localAccount(),instance->friends.generation(),binding));
+                Blob command;if(instance->dmAttachments->continueLocalPreparation()){protocol::Writer local(protocol::FileTransfer);local.string("PeerChat/DMCacheLocalWork/v1");local.number(instance->friends.generation());command=std::move(local.data);}
+                return platform::android::Context::input(env,command);}
+            if(operation==12){stage="cache_command_tick";protocol::check(data.empty());instance->serviceCacheTransfers(runtimeNow());auto command=instance->dmAttachments->nextCommand();
+                if(command.empty()&&instance->dmAttachments->localPreparationPending()){protocol::Writer local(protocol::FileTransfer);local.string("PeerChat/DMCacheLocalWork/v1");local.number(instance->friends.generation());command=std::move(local.data);}
+                return platform::android::Context::input(env,command);}
+            if(operation==19){stage="cache_reply_window_validation_apply";protocol::Reader r(data);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DMCacheReplyWindow/v1");auto count=r.number();protocol::check(count>0&&count<=8);std::vector<Blob> replies;replies.reserve(static_cast<size_t>(count));while(count--){auto reply=r.bytes();protocol::check(reply.size()<=8192);replies.push_back(std::move(reply));}r.end();
+                const auto applied=instance->dmAttachments->replyWindow(replies);result.string("PeerChat/DMCacheWindowResult/v1");result.number(applied?1:0);return platform::android::Context::input(env,result.data);}
             stage=operation==13?"cache_reply_validation_apply":"cache_failure_apply";
             if(operation==13)instance->dmAttachments->reply(data);else instance->dmAttachments->failure(data);
             return platform::android::Context::input(env,Blob{});
@@ -1283,18 +1381,56 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             // Diagnostics must remain readable when initial cache/journal setup
             // failed before any transfer existed. Do not re-run that setup here.
             r.end();protocol::check(bool(instance->storage));
-            auto rows=instance->transfers?instance->transfers->diagnostics(now):std::vector<std::string>{};if(rows.size()>62)rows.resize(62);
-            w.number(rows.size()+2);w.string(instance->transferRequestFailure.line("native_transfer_request_failure")+" dm_cache_storage="+(instance->dmStorageUnavailable?"protected_recovery_unavailable;_legacy_journal_retained":"available"));
+            auto cacheRows=instance->dmAttachments?instance->dmAttachments->diagnostics():std::vector<std::string>{};
+            auto rows=instance->transfers?instance->transfers->diagnostics(now):std::vector<std::string>{};if(rows.size()>62-cacheRows.size())rows.resize(62-cacheRows.size());
+            w.number(rows.size()+cacheRows.size()+2);w.string(instance->transferRequestFailure.line("native_transfer_request_failure")+" dm_cache_storage="+(instance->dmStorageUnavailable?"protected_recovery_unavailable;_legacy_journal_retained":"available"));
             w.string(instance->reliableExchangeFailure.line("native_reliable_exchange_failure")+
                 instance->reliableReceiveTiming.line("native_receive")+instance->reliableOutputTiming.line("native_output")+
                 instance->mailboxQueryTiming.line("native_mailbox_query")+instance->mailboxFilterTiming.line("native_mailbox_filter")+
                 instance->reliableRequestsTiming.line("native_requests")+instance->routeDemandTiming.line("native_route_demand")+
                 instance->groupDemandTiming.line("native_group_demand"));
+            for(const auto& row:cacheRows)w.string(row);
             for(const auto& row:rows){const auto end=row.find(' ');const auto id=row.substr(std::string("transfer=").size(),end-std::string("transfer=").size());w.string(row+instance->transferTiming.diagnostics(id));}
             return platform::android::Context::input(env,w.data);
         }
         stage="attachment_prepare";instance->prepareAttachments(now);
         auto directory=[&]{auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance->profile.identity);protocol::check(bool(identity));auto bytes=identity->context->bytes("attachmentDirectory","()[B");return std::string(bytes.begin(),bytes.end());};
+        if(operation==18){
+            stage="initial_identity_scope";
+            auto account=r.number(),generation=r.number(),recipient=r.number();auto selected=r.string();auto wire=r.bytes();auto count=r.number();
+            protocol::check(account==instance->friends.localAccount()&&generation==instance->friends.generation()&&mailboxScopeCurrent(*instance)&&instance->friends.contains(selected)&&instance->friends.accountFor(selected)==recipient&&count<=32);
+            std::vector<Blob> proofs;while(count--)proofs.push_back(r.bytes());r.end();
+            stage="identity_audience";auto audience=dm_attachments::parseAudience(wire,account,instance->profile.peerId,recipient);
+            stage="identity_source_binding";protocol::check(mailbox::verifyBinding(audience.source,account,instance->profile.peerId,instance->profile.publicKey,verifyDevicePayload,Storage::publicKeyId));
+            stage="identity_revocation";for(const auto& binding:audience.recipients)protocol::check(!instance->friends.revoked(binding.device));
+            stage="identity_recipient_selection";
+            auto offered=audience;protocol::check(proofs.size()==offered.recipients.size());
+            audience=dm_attachments::selectKnownAudience(offered,selected,instance->storage->contacts(),
+                [&](const auto& peer){return instance->friends.accountFor(peer);},[&](const auto& binding){
+                    try{auto contact=mailboxContact(*instance,binding.device,recipient);return mailbox::verifyBinding(binding,recipient,binding.device,contact.publicKey,verifyDevicePayload,Storage::publicKeyId);}catch(const std::exception&){return false;}});
+            std::vector<Blob> selectedProofs;for(size_t i=0;i<offered.recipients.size();++i)
+                if(std::any_of(audience.recipients.begin(),audience.recipients.end(),[&](const auto& b){return b.device==offered.recipients[i].device;})){protocol::check(i<proofs.size());selectedProofs.push_back(proofs[i]);}
+            proofs=std::move(selectedProofs);
+            stage="identity_proofs";auto contacts=dm_attachments::initialIdentities(audience,proofs,instance->storage->contacts(),[&](const auto& peer){return instance->friends.accountFor(peer);},[&](const char* at){stage=at;});
+            stage="identity_persist";instance->storage->saveContactsAtomically(contacts);w.number(contacts.size());w.bytes(audience.wire);
+            return platform::android::Context::input(env,w.data);
+        }
+        if(operation==17){
+            // Read-only preflight: validate the full cached audience before any
+            // source import or durable job. No trust is created by server data.
+            auto account=r.number(),generation=r.number(),recipient=r.number();auto wire=r.bytes();r.end();
+            protocol::check(account==instance->friends.localAccount()&&generation==instance->friends.generation()&&mailboxScopeCurrent(*instance));
+            auto audience=dm_attachments::parseAudience(wire,account,instance->profile.peerId,recipient);
+            protocol::check(mailbox::verifyBinding(audience.source,account,instance->profile.peerId,instance->profile.publicKey,verifyDevicePayload,Storage::publicKeyId));
+            std::vector<std::string> missing;
+            for(const auto& binding:audience.recipients){
+                Blob key;try{key=mailboxContact(*instance,binding.device,recipient).publicKey;}
+                catch(const std::exception&){missing.push_back(binding.device);continue;}
+                protocol::check(mailbox::verifyBinding(binding,recipient,binding.device,key,verifyDevicePayload,Storage::publicKeyId));
+            }
+            w.number(missing.size());for(const auto& device:missing)w.string(device);
+            return platform::android::Context::input(env,w.data);
+        }
         if(operation==16){
             auto account=r.number(),generation=r.number(),recipient=r.number();auto peer=r.string();auto commit=r.number();auto path=r.string(),name=r.string();r.end();
             protocol::check(account&&account==instance->friends.localAccount()&&generation&&generation==instance->friends.generation()&&
@@ -1319,13 +1455,27 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             }
             rows.string("PeerChat/TransferStatisticsSnapshot/v1");rows.number(page.items.size());for(const auto& s:page.items){rows.string(s.id);for(unsigned n=0;n<5;++n)rows.number(0);}
             rows.string("PeerChat/DMCachePhases/v1");rows.number(page.items.size());for(const auto& s:page.items){rows.string(s.id);rows.string(dmDisplayPhase(s));}
-            protocol::check(rows.data.size()<=65536);w.string("PeerChat/DMLocalAttachmentPage/v1");w.string(page.cursor);w.number(page.more);w.bytes(rows.data);return platform::android::Context::input(env,w.data);
+            rows.string("PeerChat/AttachmentThumbnails/v1");rows.number(page.items.size());for(const auto& s:page.items){rows.string(s.id);rows.bytes(s.thumbnail);}
+            protocol::check(rows.data.size()<=131072);w.string("PeerChat/DMLocalAttachmentPage/v1");w.string(page.cursor);w.number(page.more);w.bytes(rows.data);return platform::android::Context::input(env,w.data);
         }
         if(operation==0){r.end();w.string(directory());}
         else if(operation==1||operation==10){
-            auto peer=r.string(),path=r.string(),name=r.string();r.end();stage="offer_friend_authorization";protocol::check(instance->friends.contains(peer));
+            auto peer=r.string(),path=r.string(),name=r.string();Blob audience;if(operation==10&&r.cursor<r.data.size())audience=r.bytes();r.end();stage="offer_friend_authorization";protocol::check(instance->friends.contains(peer));
+            if(operation==10&&!audience.empty()){
+                stage="offer_cache_audience_peer";const auto recipient=instance->friends.accountFor(peer);
+                auto approved=dm_attachments::parseAudience(audience,instance->friends.localAccount(),instance->profile.peerId,recipient);
+                protocol::check(!instance->friends.revoked(peer)&&mailbox::verifyBinding(approved.source,instance->friends.localAccount(),instance->profile.peerId,instance->profile.publicKey,verifyDevicePayload,Storage::publicKeyId));
+                const auto contacts=instance->storage->contacts();
+                peer=dm_attachments::verifiedAudiencePeer(approved,peer,recipient,[&](const auto& device){return instance->friends.accountFor(device);},[&](const auto& binding){
+                    if(instance->friends.revoked(binding.device))return false;
+                    auto pin=std::find_if(contacts.begin(),contacts.end(),[&](const auto& contact){return contact.peerId==binding.device;});
+                    if(pin==contacts.end()||!pin->verified||pin->publicKey.empty()||Storage::publicKeyId(pin->publicKey)!=binding.device)return false;
+                    const auto current=mailboxContact(*instance,binding.device,recipient);
+                    return current.publicKey==pin->publicKey&&mailbox::verifyBinding(binding,recipient,binding.device,pin->publicKey,verifyDevicePayload,Storage::publicKeyId);
+                });
+            }
             auto id=Storage::newMessageId();stage="offer_cache_source";auto source=std::make_unique<transfer::posix::FileSource>(instance->attachmentCache,path,name);
-            if(operation==10){prepareDmAttachments(*instance,now);stage="offer_cache_durable_queue";w.string(instance->dmAttachments->start(peer,instance->friends.accountFor(peer),std::move(source)));}
+            if(operation==10){prepareDmAttachments(*instance,now);stage="offer_cache_durable_queue";w.string(instance->dmAttachments->start(peer,instance->friends.accountFor(peer),std::move(source),audience));}
             else {stage="offer_durable_queue";instance->transfers->offer(peer,id,std::move(source),now);stage="offer_route_demand";instance->sessions.demandLiveRoute(peer,now+2000,now);w.string(id);}
         }else if(operation==2||operation==3){
             auto id=r.string();r.end();protocol::check(protocol::id(id,32));
@@ -1355,8 +1505,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             std::map<std::string,dm_attachments::Application::Snapshot> cached;
             std::map<std::string,std::string> cachedPaths;
             if(instance->dmAttachments)for(const auto& s:instance->dmAttachments->snapshots()){
+                if(instance->storage->localMessageHidden(s.peer,s.id)||(!s.message.empty()&&instance->storage->localMessageHidden(s.peer,s.message)))continue;
                 transfer::Snapshot row;row.metadata={s.id,s.name,s.size,{}};row.peer=s.peer;row.sending=s.sending;row.done=s.verified||(s.sending&&s.uploadComplete)?s.size:std::min(s.size,s.done);row.created=s.time;row.error=s.error;row.purpose=transfer::Purpose::DirectCacheCiphertext;
-                row.state=s.state=="failed"?transfer::State::Failed:s.state=="canceled"?transfer::State::Cancelled:s.verified||(s.sending&&s.noticesStored)?transfer::State::Complete:!s.sending&&s.state=="available"?transfer::State::AwaitingAcceptance:s.state=="paused"?transfer::State::Recovering:s.state=="preflight"||s.state=="preparing"?transfer::State::Preparing:transfer::State::Transferring;
+                row.state=s.state=="failed"?transfer::State::Failed:s.state=="canceled"?transfer::State::Cancelled:s.verified||(s.sending&&s.uploadComplete&&s.noticesStored)?transfer::State::Complete:!s.sending&&s.state=="available"?transfer::State::AwaitingAcceptance:s.state=="paused"?transfer::State::Recovering:s.state=="preflight"||s.state=="preparing"?transfer::State::Preparing:transfer::State::Transferring;
                 if(s.verified&&!s.sending)try{
                     auto token=instance->dmAttachments->completedLocation(s.id);protocol::Reader r(token);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSink/v1");
                     transfer::DurableState d;d.metadata={r.string(),s.name,s.size,{}};protocol::check(r.string()==s.name);d.location=token;d.done=s.size;
@@ -1365,6 +1516,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
                 cached.emplace(s.id,s);rows.push_back(std::move(row));
             }
             std::stable_sort(rows.begin(),rows.end(),[](const auto& a,const auto& b){auto active=[](const auto& row){return row.state!=transfer::State::Complete&&row.state!=transfer::State::Failed&&row.state!=transfer::State::Cancelled;};if(active(a)!=active(b))return active(a);return a.created>b.created;});
+            rows.erase(std::remove_if(rows.begin(),rows.end(),[&](const auto& row){return instance->storage->localMessageHidden(row.peer,row.metadata.id);}),rows.end());
             if(rows.size()>64)rows.resize(64);
             auto measured=instance->transfers->snapshots(now);for(auto& row:rows)if(row.purpose==transfer::Purpose::PeerFile){auto found=std::find_if(measured.begin(),measured.end(),[&](const auto& m){return m.metadata.id==row.metadata.id;});if(found!=measured.end())row=*found;}
             w.number(rows.size());
@@ -1381,9 +1533,9 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
             w.string("PeerChat/TransferStatisticsSnapshot/v1");w.number(rows.size());for(const auto& row:rows){w.string(row.metadata.id);w.number(row.statisticsKnown);w.number(row.statisticsBytes);w.number(row.durationMilliseconds);w.number(row.currentBitsPerSecond);w.number(row.etaReliable);}
             w.string("PeerChat/DMCachePhases/v1");w.number(std::count_if(rows.begin(),rows.end(),[&](const auto& row){return cached.count(row.metadata.id);}));
             for(const auto& row:rows)if(cached.count(row.metadata.id)){const auto& s=cached.at(row.metadata.id);w.string(s.id);
-                w.string(s.sending?(s.state=="complete"?"Recipients verified saved":s.noticesStored?"Notice stored; safe to disconnect":s.uploadComplete?"Upload complete; storing notices":"Uploading encrypted file"):
-                    s.verified?"Verified saved":s.state=="verifying"?"Downloaded; verifying":"Cached file offered");
+                w.string(dmDisplayPhase(s));
             }
+            w.string("PeerChat/AttachmentThumbnails/v1");w.number(std::count_if(rows.begin(),rows.end(),[&](const auto& row){return cached.count(row.metadata.id);}));for(const auto& row:rows)if(cached.count(row.metadata.id)){w.string(row.metadata.id);w.bytes(cached.at(row.metadata.id).thumbnail);}
         }else if(operation==6||operation==7){
             if(operation==7){transfer::Options value;auto chunk=r.number(),window=r.number();protocol::check((chunk==32768||chunk==65536)&&(window==1||window==4||window==8||window==16));value.chunkBytes=static_cast<size_t>(chunk);value.window=static_cast<size_t>(window);value.bitsPerSecond=r.number();auto download=r.number();r.end();protocol::check(value.valid()&&download<=10000000000ull);instance->transfers->configure("",value);instance->transfers->configureDownload(download);}
             else r.end();
@@ -1435,6 +1587,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         using namespace peerchat;protocol::check(input&&env->GetArrayLength(input)==32);
         auto bytes=platform::android::Context::output(env,input);std::string id(bytes.begin(),bytes.end());protocol::check(protocol::id(id,32));
         auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;std::lock_guard<std::mutex> lock(instance->gate);instance->prepareAttachments(runtimeNow());
+        if(instance->groupAttachments){auto groupText=instance->groupAttachments->textPreview(id,transfer::ProtectedTextSource::MaxBytes);if(groupText)return platform::android::Context::input(env,*groupText);}
         std::optional<transfer::DurableState> found;
         if(instance->dmAttachments)for(const auto& s:instance->dmAttachments->snapshots())if(s.id==id&&s.verified&&!s.sending){
             auto token=instance->dmAttachments->completedLocation(id);protocol::Reader r(token);protocol::check(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/CacheSink/v1");
@@ -1447,6 +1600,31 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_TransferBridge
         auto source=instance->openAttachment(*found);Blob plain;
         for(std::uint64_t offset=0;offset<source->size();offset+=transfer::ChunkBytes){auto part=source->read(offset,std::min<std::uint64_t>(transfer::ChunkBytes,source->size()-offset));plain.insert(plain.end(),part.begin(),part.end());}
         unicode::decode(std::string(plain.begin(),plain.end()));return platform::android::Context::input(env,plain);
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+// Dedicated local read connection. The live owner gate is never held during
+// protected-history scans, SQLite page reads or derived-cache persistence.
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_HistoryBridge_bind(JNIEnv* env,jobject,jlong handle,jobject facade){
+    try{
+        auto providers=peerchat::platform::android::platform(env,facade);
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return 1;
+        std::string expected;{std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return 1;expected=instance->profile.peerId;}
+        std::lock_guard<std::mutex> lock(instance->historyGate);if(instance->historyStorage)return 0;
+        auto storage=std::make_unique<peerchat::Storage>(providers);
+        peerchat::protocol::check(storage->profile().peerId==expected);
+        instance->historyPeer=expected;instance->historyStorage=std::move(storage);return 0;
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return 1;}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_HistoryBridge_read(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jlong before){
+    try{
+        if(before<=0)return nullptr;auto peer=peerArgument(env,destination);
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->historyGate);if(!instance->historyStorage)return nullptr;
+        auto& storage=*instance->historyStorage;auto history=storage.history(peer,8,static_cast<std::int64_t>(before));
+        peerchat::protocol::Writer record(peerchat::protocol::Text);record.number(history.size());
+        for(const auto& message:history){record.string(message.id);messageRecord(record,message);}
+        peerchat::delivery_status::append(record,peerchat::delivery_status::read(storage,instance->historyPeer,history));
+        return peerchat::platform::android::Context::input(env,record.data);
     }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ReliableBridge_history(JNIEnv* env,jobject,jlong handle,jbyteArray destination,jlong before){
@@ -1525,6 +1703,42 @@ pc_core_status pc_core_open_profile(pc_core_handle handle,const uint8_t* path,ui
 });}
 }
 #if defined(__ANDROID__)
+// A bounded exact-ID foreground lifetime query, independent of display history.
+// Input and output are newline-separated canonical transfer IDs; null is failure.
+extern "C" JNIEXPORT jbyteArray JNICALL Java_com_peerchat_android_ProfileBridge_activeTransfers(JNIEnv* env,jobject,jlong handle,jbyteArray idsBytes){
+    try{
+        if(!idsBytes||env->GetArrayLength(idsBytes)>2111)return nullptr;
+        auto input=peerchat::platform::android::Context::output(env,idsBytes);std::string wire(input.begin(),input.end());
+        std::vector<std::string> ids;std::set<std::string> unique;
+        for(size_t offset=0;offset<wire.size();){auto end=wire.find('\n',offset);if(end==std::string::npos)end=wire.size();auto id=wire.substr(offset,end-offset);peerchat::protocol::check(peerchat::protocol::id(id,32)&&ids.size()<64&&unique.insert(id).second);ids.push_back(std::move(id));offset=end+1;peerchat::protocol::check(end==wire.size()||offset<wire.size());}
+        auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return nullptr;
+        std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return nullptr;
+        auto rows=instance->transfers?instance->transfers->snapshots():std::vector<peerchat::transfer::Snapshot>{};std::string result;
+        for(const auto& id:ids){
+            bool active=(instance->dmAttachments&&instance->dmAttachments->hasActiveTransfer(id))||(instance->groupAttachments&&instance->groupAttachments->hasActiveTransfer(id));
+            if(!active&&instance->transfers){auto found=std::find_if(rows.begin(),rows.end(),[&](const auto& row){return row.metadata.id==id;});if(found!=rows.end())active=(found->state!=peerchat::transfer::State::Complete&&found->state!=peerchat::transfer::State::Cancelled&&found->state!=peerchat::transfer::State::Failed)||instance->transfers->hasPendingControl(id);}
+            if(active){if(!result.empty())result+='\n';result+=id;}
+        }
+        return peerchat::platform::android::Context::input(env,peerchat::Blob(result.begin(),result.end()));
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return nullptr;}
+}
+extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_deleteLocal(JNIEnv* env,jobject,jlong handle,jbyteArray scopeBytes,jbyteArray idBytes,jboolean group){
+    try{auto scopeWire=peerchat::platform::android::Context::output(env,scopeBytes),idWire=peerchat::platform::android::Context::output(env,idBytes);std::string scope(scopeWire.begin(),scopeWire.end()),id(idWire.begin(),idWire.end());auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return PC_CORE_INVALID_HANDLE;std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage)return PC_CORE_INVALID_ARGUMENT;
+        if(group){if(instance->groupAttachments)instance->groupAttachments->eraseLocalHistory(scope,id);else{
+            instance->prepareAttachments(runtimeNow());auto history=peerchat::group_attachments::android::openHistory(instance->profile,instance->attachmentCache);
+            auto hide=[&](const std::string& object){instance->storage->eraseGroupMessage(scope,object);if(peerchat::protocol::id(object,64))return;auto record=history->get(object);if(record&&record->binding.group==scope){peerchat::protocol::Reader r(record->payload.bytes);peerchat::protocol::check(r.type()==peerchat::protocol::FileTransfer);r.string();r.string();r.string();r.string();for(unsigned n=0;n<4;++n)r.string();for(unsigned n=0;n<9;++n)r.number();auto descriptor=r.bytes();if(!descriptor.empty())instance->storage->eraseGroupMessage(scope,peerchat::group_attachments::parseDescriptor(descriptor).message);}};
+            if(!id.empty())hide(id);else{std::uint64_t before=INT64_MAX;for(;;){auto page=history->page(scope,before,peerchat::group_attachments::PortableHistoryStore::MaxPage);for(const auto& row:page.items)hide(row.binding.id);if(!page.more)break;peerchat::protocol::check(page.cursor&&page.cursor<before);before=page.cursor;}}
+        }if(id.empty())instance->storage->eraseGroupHistory(scope);else instance->storage->eraseGroupMessage(scope,id);}else{if(instance->dmAttachments)instance->dmAttachments->eraseLocalHistory(scope,id);if(id.empty()){
+            instance->storage->eraseHistory(scope);
+            if(instance->dmAttachments)for(const auto& row:instance->dmAttachments->snapshots())if(row.peer==scope){instance->storage->eraseMessage(scope,row.id);if(!row.message.empty())instance->storage->eraseMessage(scope,row.message);}
+            if(instance->transfers)for(const auto& row:instance->transfers->snapshots())if(row.purpose==peerchat::transfer::Purpose::PeerFile&&row.peer==scope)instance->storage->eraseMessage(scope,row.metadata.id);
+            peerchat::archive::AttachmentCatalog catalog(*instance->storage);catalog.eraseLocalHistory(scope);
+        }else instance->storage->eraseMessageAndAliases(scope,id);}return PC_CORE_OK;
+    }catch(...){if(env->ExceptionCheck())env->ExceptionClear();return PC_CORE_INVALID_ARGUMENT;}
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_peerchat_android_ProfileBridge_localHidden(JNIEnv* env,jobject,jlong handle,jbyteArray scopeBytes,jbyteArray idBytes,jboolean group){
+    try{auto scopeWire=peerchat::platform::android::Context::output(env,scopeBytes),idWire=peerchat::platform::android::Context::output(env,idBytes);auto instance=lookup(static_cast<pc_core_handle>(handle));if(!instance)return JNI_FALSE;std::lock_guard<std::mutex> lock(instance->gate);return instance->storage&&instance->storage->localMessageHidden(std::string(scopeWire.begin(),scopeWire.end()),std::string(idWire.begin(),idWire.end()),group)?JNI_TRUE:JNI_FALSE;}catch(...){if(env->ExceptionCheck())env->ExceptionClear();return JNI_FALSE;}
+}
 extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_bind(JNIEnv* env,jobject,jlong handle,jobject facade){
     return guarded([&]()->pc_core_status{
         if(!facade)return PC_CORE_INVALID_ARGUMENT;
@@ -1622,6 +1836,44 @@ extern "C" JNIEXPORT jint JNICALL Java_com_peerchat_android_ProfileBridge_attach
         std::lock_guard<std::mutex> lock(instance->gate);if(!instance->storage||!instance->testProfile)return PC_CORE_INVALID_ARGUMENT;
         auto identity=std::dynamic_pointer_cast<platform::android::Identity>(instance->profile.identity);protocol::check(bool(identity));auto path=identity->context->bytes("attachmentDirectory","()[B");
         auto cache=std::make_shared<transfer::posix::Cache>(std::string(path.begin(),path.end()));
+        // Execute the shared protected group-history owner on Android SQLite,
+        // including cursor-producing PRAGMAs, CAS and provider reopen.
+        using History=group_attachments::PortableHistoryStore;
+        History::Binding binding{Storage::newMessageId(),std::string(32,'a'),std::string(64,'b'),1700000000000ull};
+        Blob privateBody{'p','r','i','v','a','t','e'};
+        {auto history=group_attachments::android::openHistory(instance->profile,cache);protocol::check(history->save(binding,{},privateBody,true)==1);
+         bool stale=false;try{history->save(binding,{},Blob{9},true);}catch(...){stale=true;}protocol::check(stale&&history->get(binding.id)->payload.bytes==privateBody);
+         protocol::check(history->save(binding,privateBody,privateBody,false,1)==2);}
+        {auto history=group_attachments::android::openHistory(instance->profile,cache);auto row=history->get(binding.id);protocol::check(row&&row->revision==2&&!row->active&&row->payload.bytes==privateBody);auto page=history->page(binding.group);protocol::check(!page.items.empty()&&page.items.front().binding.id==binding.id);}
+        // Group ciphertext file tokens cannot be reopened as ordinary or DM data.
+        {transfer::DurableState scoped;scoped.purpose=transfer::Purpose::GroupCacheCiphertext;scoped.metadata={Storage::newMessageId(),"ciphertext.peerchat",64,{}};
+         {transfer::posix::FileSink sink(cache,scoped.metadata,scoped.purpose);sink.append(Blob(32,7));sink.flush();scoped.location=sink.resumeToken();scoped.done=32;}
+         for(auto purpose:{transfer::Purpose::PeerFile,transfer::Purpose::DirectCacheCiphertext}){auto wrong=scoped;wrong.purpose=purpose;bool rejected=false;try{auto unused=transfer::posix::FileSink::reopen(cache,wrong);}catch(...){rejected=true;}protocol::check(rejected);}
+         auto sink=transfer::posix::FileSink::reopen(cache,scoped);protocol::check(sink->read(0,32)==Blob(32,7));sink->discard();}
+        // Real group AES-GCM / SHA-256 against Android-owned files. Reopen
+        // after staging, interrupted plaintext verification, and final commit.
+        {
+         using namespace group_attachments;
+         struct Pattern final:transfer::Source {
+          std::uint64_t size()const override{return 2*1024*1024+17;}
+          std::string name()const override{return u8"group-日本.bin";}
+          Blob read(std::uint64_t at,size_t n)override{protocol::check(at<=size()&&n<=transfer::ChunkBytes&&n<=size()-at);Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>((at+i)*29+71);return b;}
+         } input;
+         Binding groupBinding{Storage::newMessageId(),std::string(32,'a'),instance->profile.peerId,7,3};
+         transfer::Metadata cipherMeta{groupBinding.attachment,"ciphertext.peerchat",HeaderBytes+input.size()+((input.size()+BlockBytes-1)/BlockBytes)*TagBytes,{}};
+         transfer::posix::Sha256 ph,ch;transfer::posix::FileSink cipher(cache,cipherMeta,transfer::Purpose::GroupCacheCiphertext);
+         Sealer sealer(input,cipher,groupBinding,ph,ch);while(!sealer.step()){}auto manifest=sealer.takeManifest();
+         Staged staged{std::move(manifest),cipher.resumeToken(),1700000000000ull,1700000000000ull+transfer::RetentionMilliseconds};
+         StagingJournal journal(*instance->storage,instance->profile.peerId);auto rows=journal.load();rows.push_back(std::move(staged));journal.save(rows);cipher.commit();
+         History::Binding outputBinding{Storage::newMessageId(),groupBinding.group,std::string(64,'b'),1700000000001ull};
+         Blob intent;auto persist=[&](const Blob& old,const Blob& next){auto history=group_attachments::android::openHistory(instance->profile,cache);auto prior=history->get(outputBinding.id);protocol::check(prior?prior->payload.bytes==old:old.empty());history->save(outputBinding,old,next,true,prior?prior->revision:0);intent=next;};
+         {group_attachments::posix::ReceiverFinalizer output(cache,group_attachments::posix::stagedSource(cache,rows.back(),instance->profile.peerId),rows.back().manifest,intent,persist);for(unsigned n=0;n<5;++n)protocol::check(!output.step());}
+         auto verify=[&]{group_attachments::posix::ReceiverFinalizer output(cache,group_attachments::posix::stagedSource(cache,rows.back(),instance->profile.peerId),rows.back().manifest,intent,persist);while(!output.step()){}protocol::check(output.verified()&&output.processedBytes()==input.size());auto file=output.output();for(std::uint64_t at=0;at<input.size();at+=transfer::ChunkBytes){auto count=static_cast<size_t>(std::min<std::uint64_t>(transfer::ChunkBytes,input.size()-at));protocol::check(file->read(at,count)==input.read(at,count));}};
+         {auto history=group_attachments::android::openHistory(instance->profile,cache);intent=history->get(outputBinding.id)->payload.bytes;}verify();
+         {auto history=group_attachments::android::openHistory(instance->profile,cache);intent=history->get(outputBinding.id)->payload.bytes;}verify();
+         {auto history=group_attachments::android::openHistory(instance->profile,cache);auto row=history->get(outputBinding.id);history->save(outputBinding,intent,intent,false,row->revision);}
+         rows.pop_back();journal.save(rows);
+        }
         for(size_t size:{size_t(100000),size_t(1<<20),size_t(3<<20),size_t(10<<20),size_t(32<<20)}){
         Blob content(size);for(size_t n=0;n<content.size();++n)content[n]=static_cast<unsigned char>(n*17);
         transfer::posix::Sha256 hash;for(size_t n=0;n<content.size();n+=transfer::ChunkBytes)hash.update(content.data()+n,std::min(transfer::ChunkBytes,content.size()-n));

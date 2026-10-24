@@ -43,7 +43,7 @@ partial class AttachmentCacheRuntimeTest {
   using(var db=new AccountDatabase(Path.Combine(root,"accounts.sqlite")))using(var cache=new AttachmentCacheRuntime(options,()=>now)){
    Check(db.CreateAccountWithDevice("owner",new byte[16],new byte[32],actor)==1&&db.RegisterGroup(1,actor,proof)!=null,"Context storage roster");var admission=new AttachmentCacheAdmission(db,cache);var bytes=Payload(1);var descriptor=Descriptor(source,1,bytes,group:proof.ServerGroupId);
    AttachmentCacheRuntime.TestFault=stage=>{if(stage=="before_commit")throw new InvalidOperationException("cache_test_rollback");};try{Reject(()=>admission.Admit(1,actor,()=>true,descriptor.Wire),"cache_test_rollback");}finally{AttachmentCacheRuntime.TestFault=null;}
-   Reject(()=>cache.Describe(descriptor.Id),"cache_attachment_unavailable");admission.Admit(1,actor,()=>true,descriptor.Wire);Reject(()=>admission.Context(1,actor,()=>true,descriptor.Id),"cache_upload_incomplete");Upload(cache,descriptor,bytes);
+   Reject(()=>cache.Describe(descriptor.Id),"cache_attachment_unavailable");admission.Admit(1,actor,()=>true,descriptor.Wire);Check(admission.Context(1,actor,()=>true,descriptor.Id)!=null,"Early context missing");Reject(()=>admission.Acquire(1,actor,()=>true,descriptor.Id,false),"cache_upload_incomplete");Upload(cache,descriptor,bytes);
    var captured=admission.Context(1,actor,()=>true,descriptor.Id);long expires=Convert.ToInt64(captured["expiresUtc"]);Reject(()=>admission.Context(1,actor,()=>false,descriptor.Id),"cache_session_invalid");
    var receipt=VerificationWire(source,descriptor,1,now*1000);var rpc=new AttachmentCacheRequests(admission);Rpc(rpc,1,actor,"cache_verified","cache_recipient_ciphertext_incomplete","id",descriptor.Id,"receipt",AttachmentCacheRequests.Encode(receipt));
    var initial=(List<Dictionary<string,object>>)admission.VerificationReceipts(1,actor,()=>true,descriptor.Id,"")["items"];Check(initial.Count==1&&!(bool)initial[0]["plaintextVerified"]&&(string)initial[0]["receipt"]=="","Ciphertext complete fabricated plaintext verification");
@@ -89,11 +89,16 @@ partial class AttachmentCacheRuntimeTest {
   var bytes=Payload(300000);var descriptor=Descriptor(source,300000,bytes,group:proof.ServerGroupId,epoch:5);long expires=0;string staleLease=null;var keyDigests=new string[2];var verificationWires=new byte[2][];
   using(var server=new ContextServer(config)){
    using(var sender=new RpcClient(port,pin,tokens[0],devices[0])){
-    sender.Request("cache_admit","accepted","descriptor",Convert.ToBase64String(descriptor.Wire));sender.Request("cache_context","cache_upload_incomplete","id",descriptor.Id);string lease=(string)sender.Request("cache_acquire","accepted","id",descriptor.Id,"upload",true)["lease"];
-    for(int offset=0;offset<bytes.Length;){var block=bytes.Skip(offset).Take(65536).ToArray();sender.Request("cache_append","accepted","lease",lease,"offset",(long)offset,"data",AttachmentCacheRequests.Encode(block));offset+=block.Length;}
-    sender.Request("cache_complete","accepted","lease",lease);sender.Request("cache_release","accepted","lease",lease,"upload",true);var context=sender.Request("cache_context","accepted","id",descriptor.Id);expires=Convert.ToInt64(context["expiresUtc"]);ContextCheck(context,descriptor,devices[0],5,5,expires);
+    sender.Request("cache_admit","accepted","descriptor",Convert.ToBase64String(descriptor.Wire));var earlyContext=sender.Request("cache_context","accepted","id",descriptor.Id);expires=Convert.ToInt64(earlyContext["expiresUtc"]);string lease=(string)sender.Request("cache_acquire","accepted","id",descriptor.Id,"upload",true)["lease"];
     var recipients=((IEnumerable)sender.Request("cache_recipient_keys","accepted","id",descriptor.Id)["recipients"]).Cast<Dictionary<string,object>>().ToList();
     for(int i=1;i<=2;i++){var recipient=recipients.Single(x=>(string)x["device"]==devices[i]);var wire=KeyWire(source,descriptor,bindings[i-1],(string)recipient["sourceMembership"],(string)recipient["membership"],DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),expires*1000);keyDigests[i-1]=MailboxProtocol.Digest(wire);sender.Request("cache_publish_key","accepted","id",descriptor.Id,"envelope",AttachmentCacheRequests.Encode(wire));}
+    using(var earlyRecipient=new RpcClient(port,pin,tokens[1],devices[1])){
+     var pending=earlyRecipient.Request("cache_pending_keys","accepted","after","");Check(((IEnumerable)pending["items"]).Cast<object>().Count()==1,"Early encrypted group offer missing");
+     var receivingContext=earlyRecipient.Request("cache_context","accepted","id",descriptor.Id);long earlyHorizon=Convert.ToInt64(receivingContext["expiresUtc"]);Check(earlyHorizon>=expires,"Early context shortened signed offer lifetime");ContextCheck(receivingContext,descriptor,devices[1],5,5,earlyHorizon);
+     earlyRecipient.Request("cache_acquire","cache_upload_incomplete","id",descriptor.Id,"upload",false);
+    }
+    for(int offset=0;offset<bytes.Length;){var block=bytes.Skip(offset).Take(65536).ToArray();sender.Request("cache_append","accepted","lease",lease,"offset",(long)offset,"data",AttachmentCacheRequests.Encode(block));offset+=block.Length;}
+    sender.Request("cache_complete","accepted","lease",lease);sender.Request("cache_release","accepted","lease",lease,"upload",true);var context=sender.Request("cache_context","accepted","id",descriptor.Id);expires=Convert.ToInt64(context["expiresUtc"]);ContextCheck(context,descriptor,devices[0],5,5,expires);
     sender.Request("logout",null);
    }
    using(var recipient=new RpcClient(port,pin,tokens[1],devices[1])){

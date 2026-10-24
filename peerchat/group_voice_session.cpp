@@ -67,7 +67,7 @@ void GroupVoiceSession::stop(){
 GroupVoiceSession::Snapshot GroupVoiceSession::snapshot(){
     if(active_){auto error=device_->takeError();if(!error.empty())error_=std::move(error);}
     Snapshot result;result.binding=binding_;result.active=active_;result.muted=muted_;result.deafened=deafened_;
-    const auto& apm=source_.processing();
+    const auto& apm=source_.processing();result.noiseControl=apm.noiseControlDiagnostics();
     result.aecEnabled=apm.echoCancellation();result.referenceActive=apm.referenceActive();
     result.renderBlocks=apm.renderCalls();result.referenceUnderruns=apm.referenceUnderruns();result.aecResets=apm.resets();result.aecDelayMs=apm.delayMs();
     result.encodedPackets=source_.encodedPackets();result.fanoutCopies=copies_;result.captureBlocks=source_.processing().captureCalls();result.apmActive=source_.processing().active();result.apmFailure=source_.processing().failure();result.error=error_;

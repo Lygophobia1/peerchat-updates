@@ -34,11 +34,11 @@ internal fun nativeSqlStatements(sql:String):List<String> {
 // Platform execution/crypto only. Native Storage retains ALL schema, record,
 // history/outbox, ordering, dedupe and transaction policy.
 class AndroidStoragePlatform(context: Context, private val profile: String, private val registryOnly: Boolean = false,
-    private val identityDirectoryOnly:Boolean=false,private val registryDiagnostic:((String)->Unit)?=null) : AutoCloseable {
+    private val identityDirectoryOnly:Boolean=false,private val groupAttachmentHistoryOnly:Boolean=false,private val registryDiagnostic:((String)->Unit)?=null) : AutoCloseable {
     private val applicationContext = context.applicationContext
     private val state = ProfileSecurity(context.applicationContext, profile)
     private val directory = File(context.noBackupFilesDir, "profiles/" + state.id.joinToString("") { "%02x".format(it) })
-    private val file = File(directory, when { identityDirectoryOnly->"identity-directory.sqlite";registryOnly->"device-key-registry.sqlite";else->"peerchat.sqlite" })
+    private val file = File(directory, when { groupAttachmentHistoryOnly->"group-attachment-history.sqlite";identityDirectoryOnly->"identity-directory.sqlite";registryOnly->"device-key-registry.sqlite";else->"peerchat.sqlite" })
     private val recipient by lazy { AndroidRecipientKeyProvider(applicationContext, profile) }
     private val recipientEvidence=RecipientDiagnostic()
     val recipientDiagnostic:String get()=recipientEvidence.value
@@ -87,17 +87,28 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         if (!cache.isDirectory && !cache.mkdir()) throw ProviderFailure("ATTACHMENT_CACHE_OPEN_FAILED")
         return cache.absolutePath.toByteArray(Charsets.UTF_8)
     }
+    fun attachmentThumbnail(name:ByteArray):ByteArray {
+        checkOpen();val filename=text(name)
+        if(filename.length>300||filename.contains('/')||filename.contains('\\')||filename.contains('\u0000'))return byteArrayOf()
+        val directory=java.io.File(text(attachmentDirectory()))
+        return attachmentThumbnail(java.io.File(directory,filename))
+    }
     fun publicKey(): ByteArray = identity.publicRepresentation()
     fun sign(bytes: ByteArray): ByteArray = identity.sign(bytes)
     // Separate DB file avoids self-contention while a KeyManager lease spans
     // decryption and durable message acceptance on the normal profile database.
     fun keyRegistryProvider(): Any = recipientOperation("key_registry_provider") {
-        checkOpen(); invalid(!registryOnly&&!identityDirectoryOnly)
+        checkOpen(); invalid(!registryOnly&&!identityDirectoryOnly&&!groupAttachmentHistoryOnly)
         AndroidStoragePlatform(applicationContext, profile, true){recipientEvidence.record(it)}
     }
     fun identityDirectoryProvider():Any {
-        checkOpen();invalid(!registryOnly&&!identityDirectoryOnly)
+        checkOpen();invalid(!registryOnly&&!identityDirectoryOnly&&!groupAttachmentHistoryOnly)
         return AndroidStoragePlatform(applicationContext,profile,identityDirectoryOnly=true)
+    }
+    // Dedicated history DB: native owns its schema, encryption context and CAS.
+    fun groupAttachmentHistoryProvider():Any {
+        checkOpen();invalid(!registryOnly&&!identityDirectoryOnly&&!groupAttachmentHistoryOnly)
+        return AndroidStoragePlatform(applicationContext,profile,groupAttachmentHistoryOnly=true)
     }
     private fun <T> registryOperation(stage:String,operation:()->T):T {
         registryDiagnostic?.invoke("stage=$stage")
@@ -179,7 +190,7 @@ class AndroidStoragePlatform(context: Context, private val profile: String, priv
         val s = statement(id)
         if (!s.started) {
             s.started = true
-            if (s.sql.trimStart().startsWith("SELECT", ignoreCase = true)) {
+            if (s.sql.trimStart().startsWith("SELECT", ignoreCase = true) || s.sql.trimStart().startsWith("PRAGMA ", ignoreCase = true)) {
                 s.cursor = database.rawQueryWithFactory({ _, driver, editTable, query ->
                     bind(s, query); SQLiteCursor(driver, editTable, query)
                 }, s.sql, emptyArray(), "")

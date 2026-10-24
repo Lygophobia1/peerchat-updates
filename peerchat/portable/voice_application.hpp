@@ -148,7 +148,7 @@ public:
     // Only named measurements leave native media. Never forward candidate/SDP,
     // network identifiers, credentials, or arbitrary error text to the UI.
     static std::string safeMediaDiagnostics(const std::wstring& raw){
-        static constexpr std::array<std::wstring_view,43> numeric={
+        static constexpr std::array<std::wstring_view,55> numeric={
             L"capture_frames",L"encoded_frames",L"opus_submitted",L"send_api_accepted",L"remote_track_callback_packets",
             L"payload_delivered",L"received_packets",L"playback_frames",L"aec_render_blocks",L"aec_reference_underruns",
             L"aec_resets",L"aec_delay_ms",L"apm_capture_10ms_calls",L"apm_processed_20ms_frames",L"apm_raw_bypass_frames",
@@ -159,7 +159,7 @@ public:
             L"neteq_pulled_10ms_blocks",L"neteq_pull_failures",L"neteq_current_delay_ms",L"neteq_target_delay_ms",
             L"neteq_concealment_events",L"neteq_concealed_samples",L"neteq_fec_packets_received",
             L"neteq_fec_packets_discarded",L"neteq_secondary_decoded_rate_q14",L"neteq_packets_discarded",
-            L"neteq_buffer_flushes",L"media_anomaly_skipped_contention"};
+            L"neteq_buffer_flushes",L"media_anomaly_skipped_contention", L"automatic_noise_level", L"rnnoise_vad", L"noise_gate_open", L"noise_gate_background", L"noise_gate_gain", L"noise_gate_target", L"noise_gate_attenuation_db", L"noise_floor_dbfs", L"rnnoise_input_dbfs", L"rnnoise_output_dbfs", L"rnnoise_dry_mix", L"noise_control_outgoing_dbfs"};
         static constexpr std::array<std::wstring_view,9> timed={L"capture_interval",L"playback_interval",L"capture_work",
             L"apm_capture",L"apm_render",L"opus_encode",L"receive_pull",L"rtp_arrival_interval",L"screen_capture_wait"};
         std::string out;

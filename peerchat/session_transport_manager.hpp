@@ -96,9 +96,16 @@ public:
             if(count>=128u*256u)return false;
         }else if(found->second.authorization.rosterGeneration!=authorization.rosterGeneration)return false;
         auto& plan=plans_[key];bool changed=plan.networkRevision!=network||!plan.relayAvailable;
+        const auto previousRetry=plan.relayDueMilliseconds;
+        const bool retainBackoff=!changed&&plan.relayFailures&&previousRetry!=never();
         plan.authorization=authorization;plan.networkRevision=network;plan.relayAvailable=true;plan.suspended=false;
-        if(changed)plan.relayDueMilliseconds=now;
-        demandLiveRoute(key,until,now);return true;
+        if(changed){plan.relayFailures=0;plan.relayDelayMilliseconds=0;plan.relayDueMilliseconds=now;}
+        demandLiveRoute(key,until,now);
+        // Polling renews the same short group demand. Expiry during a busy
+        // native turn must not turn that renewal into a new failed-scope retry.
+        // Network changes and completed/revoked plans establish fresh demand.
+        if(retainBackoff)plan.relayDueMilliseconds=previousRetry;
+        return true;
     }
     std::vector<TransportInstanceId> finishArchiveRoute(const ReliableAuthorization& authorization){
         std::vector<TransportInstanceId> retired;

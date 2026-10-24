@@ -40,15 +40,15 @@ public sealed class DmAttachmentExecution {
         switch(operation){
         case "cache_dm_capability":break;
         case "cache_dm_register":payload["proof"]=Url(data);break;
-        case "cache_dm_prepare":payload["recipientAccountId"]=recipient;break;
+        case "cache_dm_prepare":payload["recipientAccountId"]=recipient;if(audience.Length>0)payload["audience"]=Url(audience);break;
         case "cache_dm_admit":payload["descriptor"]=Url(descriptor);payload["audience"]=Url(audience);break;
         case "cache_dm_status":case "cache_dm_context":payload["id"]=attachment;break;
         case "cache_dm_acquire":payload["id"]=attachment;payload["upload"]=upload;break;
         case "cache_dm_append":payload["lease"]=lease;payload["offset"]=offset;payload["data"]=Url(data);break;
-        case "cache_dm_complete":payload["lease"]=lease;break;
+        case "cache_dm_complete":payload["lease"]=lease;payload["bounded"]=true;break;
         case "cache_dm_read":payload["lease"]=lease;payload["offset"]=offset;payload["maximum"]=maximum;break;
         case "cache_dm_progress":payload["lease"]=lease;payload["offset"]=offset;break;
-        case "cache_dm_release":payload["lease"]=lease;payload["upload"]=upload;break;
+        case "cache_dm_release":Require(data.Length==0||upload&&data.Length==1&&data[0]==1);payload["lease"]=lease;payload["upload"]=upload;if(data.Length==1)payload["abandonUpload"]=true;break;
         case "cache_dm_publish":payload["id"]=attachment;payload["envelope"]=Url(data);break;
         case "cache_dm_verified":payload["id"]=attachment;payload["receipt"]=Url(data);break;
         case "cache_dm_receipts":payload["id"]=attachment;payload["after"]=utf8.GetString(data);break;
@@ -57,9 +57,18 @@ public sealed class DmAttachmentExecution {
         var reply=request(payload);string state=Text(reply,"state");Require(state.Length>0&&state.Length<=128);
         if(state=="accepted")Require(Text(reply,"type")=="cache_result"&&Text(reply,"operation")==operation&&Text(reply,"requestId")==id);
         var rows=new List<IDictionary<string,object>>();object raw;if(reply.TryGetValue("items",out raw)){var list=raw as IEnumerable;Require(list!=null);foreach(var item in list){Require(rows.Count<8&&item is IDictionary<string,object>);rows.Add((IDictionary<string,object>)item);}}
-        return Record("PeerChat/DMCacheReply/v1",w=>{w.Write(generation);Text(w,id);Text(w,state);w.Write(Number(reply,"cacheVersion"));w.Write(Number(reply,"dmAttachmentVersion"));w.Write(Number(reply,"durableOffset"));w.Write(Number(reply,"ciphertextSize"));w.Write(Number(reply,"expiresUtc"));w.Write(Flag(reply,"ciphertextComplete")?1UL:0UL);Text(w,Text(reply,"lease"));Bytes(w,Data(reply,"descriptor",2048));Bytes(w,Data(reply,"audience",32768));Bytes(w,Data(reply,"data",65536));w.Write(Flag(reply,"newNoticeStored")?1UL:0UL);w.Write((ulong)rows.Count);foreach(var row in rows){w.Write(Number(row,"accountId"));Text(w,Text(row,"device"));w.Write(Number(row,"durableOffset"));w.Write(Flag(row,"plaintextVerified")?1UL:0UL);Bytes(w,Data(row,"receipt",4096));}Text(w,Text(reply,"cursor"));w.Write(Flag(reply,"more")?1UL:0UL);});
+        ulong thumbnailBodyVersion=reply.ContainsKey("thumbnailBodyVersion")?Number(reply,"thumbnailBodyVersion"):1UL;Require(thumbnailBodyVersion>=1&&thumbnailBodyVersion<=2);
+        return Record("PeerChat/DMCacheReply/v1",w=>{w.Write(generation);Text(w,id);Text(w,state);w.Write(Number(reply,"cacheVersion"));w.Write(Number(reply,"dmAttachmentVersion"));w.Write(Number(reply,"durableOffset"));w.Write(Number(reply,"ciphertextSize"));w.Write(Number(reply,"expiresUtc"));w.Write(Flag(reply,"ciphertextComplete")?1UL:0UL);Text(w,Text(reply,"lease"));Bytes(w,Data(reply,"descriptor",2048));Bytes(w,Data(reply,"audience",32768));Bytes(w,Data(reply,"data",65536));w.Write(Flag(reply,"newNoticeStored")?1UL:0UL);w.Write((ulong)rows.Count);foreach(var row in rows){w.Write(Number(row,"accountId"));Text(w,Text(row,"device"));w.Write(Number(row,"durableOffset"));w.Write(Flag(row,"plaintextVerified")?1UL:0UL);Bytes(w,Data(row,"receipt",4096));}Text(w,Text(reply,"cursor"));w.Write(Flag(reply,"more")?1UL:0UL);Text(w,"PeerChat/AttachmentBodyVersion/v1");w.Write(thumbnailBodyVersion);});
     }
     public static byte[] Failure(byte[] command){using(var r=new Reader(command,"PeerChat/DMCacheCommand/v1")){ulong generation=r.Number();string id=r.Text();return Record("PeerChat/DMCacheFailure/v1",w=>{w.Write(generation);Text(w,id);Text(w,"network_unavailable");});}}
+    public bool ServiceBurst(Func<Dictionary<string,object>,Dictionary<string,object>> request){
+        var elapsed=System.Diagnostics.Stopwatch.StartNew();bool active=false;
+        for(int count=0;count<16;count++){
+            active=Service(request);
+            if(!active||LastState=="network_unavailable"||LastState=="native_reply_rejected"||elapsed.ElapsedMilliseconds>=100)break;
+        }
+        return active;
+    }
     public bool Service(Func<Dictionary<string,object>,Dictionary<string,object>> request){
         if(stopped)return false;string pending=native(25,"");if(String.IsNullOrEmpty(pending))return false;byte[] command=Convert.FromBase64String(pending);
         using(var r=new Reader(command,"PeerChat/DMCacheCommand/v1"))Require(r.Number()==generation);

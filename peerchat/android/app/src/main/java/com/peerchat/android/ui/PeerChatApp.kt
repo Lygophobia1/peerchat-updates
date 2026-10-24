@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import android.content.Intent
+import android.os.SystemClock
 
 private val Dark = darkColorScheme(primary = Color(0xFF85BBFF), onPrimary = Color(0xFF002F64),
     primaryContainer = Color(0xFF1E4773), onPrimaryContainer = Color(0xFFD6E6FF),
@@ -124,7 +125,54 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun PeerChatShell(state: PeerChatUiState, dispatch: (UiAction) -> Unit,
     login: (String, String) -> Unit = { _, _ -> }) {
-    BackHandler(enabled = state.route != Route.Welcome) { dispatch(UiAction.Back) }
+    // Ask once after sign-in, never while answering a call. Android's own
+    // permission dialog controls visibility; denial does not change delivery.
+    val notificationContext=androidx.compose.ui.platform.LocalContext.current
+    val notificationPermission=androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(state.account?.accountId,state.connection,state.voice.active,state.voiceBusy) {
+        if(!state.demo&&state.account!=null&&state.connection==ConnectionState.Online&&
+            !state.voice.active&&!state.voiceBusy&&android.os.Build.VERSION.SDK_INT>=33) {
+            val preferences=notificationContext.getSharedPreferences("notification_permission",android.content.Context.MODE_PRIVATE)
+            if(notificationContext.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED&&
+                !preferences.getBoolean("asked",false)) {
+                preferences.edit().putBoolean("asked",true).apply()
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+    val voice=state.voice
+    val target=voice.target
+    val timerIdentity=when {
+        target!=null -> listOf(target.owner,target.peer,target.id,target.lifetime.toString()).joinToString("|")
+        else -> ""
+    }
+    val callUiIdentity=state.voiceUiIdentity.ifBlank{timerIdentity}
+    var callMinimized by rememberSaveable(callUiIdentity){mutableStateOf(false)}
+    var connectedAtElapsed by rememberSaveable(timerIdentity){mutableLongStateOf(0L)}
+    var retryAfterEndConversation by rememberSaveable{mutableStateOf<String?>(null)}
+    var retryRoom by rememberSaveable{mutableStateOf("")}
+    LaunchedEffect(timerIdentity,voice.mediaState) {
+        if(timerIdentity.isEmpty())connectedAtElapsed=0L
+        else if(voice.mediaState==2L&&connectedAtElapsed==0L)connectedAtElapsed=SystemClock.elapsedRealtime()
+    }
+    LaunchedEffect(retryAfterEndConversation,voice.active,state.voiceBusy,state.voicePreparationToken) {
+        val conversation=retryAfterEndConversation ?: return@LaunchedEffect
+        if(!voice.active&&!state.voiceBusy&&state.voicePreparationToken==null) {
+            retryAfterEndConversation=null
+            if(conversation.startsWith("group:")){dispatch(UiAction.Select(conversation));dispatch(UiAction.JoinVoice(retryRoom))}else dispatch(UiAction.StartDmVoice(conversation))
+        }
+    }
+    val groupCall=voice.group.isNotEmpty()||state.voiceConversationId.startsWith("group:")||state.voicePendingConversationId.startsWith("group:")
+    val fullScreenCall=!state.demo&&(voice.active||state.voiceBusy||state.voiceError!=null)&&
+        (voice.active||state.voiceUiIdentity.isNotEmpty()||state.selected?.kind==ChatKind.Direct)
+    BackHandler(enabled=fullScreenCall&&!callMinimized||state.route!=Route.Welcome) {
+        if(fullScreenCall&&!callMinimized)callMinimized=true else dispatch(UiAction.Back)
+    }
+    fun returnToChat(){
+        if(state.voiceConversationId.isNotEmpty()&&(state.selectedId!=state.voiceConversationId||state.route!=Route.Conversation))dispatch(UiAction.Select(state.voiceConversationId))
+        callMinimized=true
+    }
     Surface(Modifier.fillMaxSize()) {
         state.attachmentCompatibility?.let { choice ->
             AlertDialog(onDismissRequest={if(!state.attachmentCompatibilityBusy)dispatch(UiAction.ResolveAttachmentCompatibility(choice.token,null))},
@@ -203,7 +251,12 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
             }
         }
         Column(Modifier.fillMaxSize()) {
-        if(!state.demo&&state.voice.active)VoiceCallCard(state,dispatch)
+        if(fullScreenCall&&callMinimized)Surface(Modifier.fillMaxWidth().testTag(if(groupCall)"group-call-return-bar" else "dm-call-return-bar"),color=Color(0xFF10202D)) {
+            TextButton(onClick={callMinimized=false},modifier=Modifier.fillMaxWidth().height(52.dp)) {
+                Text("Return to call · ${state.voicePeerName.ifBlank{"Voice call"}}"+
+                    when{voice.mediaState==2L->" · Connected";voice.mediaState in 3L..4L->" · Reconnecting";else->""},color=Color.White)
+            }
+        }
         Box(Modifier.weight(1f)) {
         if(state.startupStatus!=null) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
@@ -230,6 +283,17 @@ private val Light = lightColorScheme(primary = Color(0xFF125DB4), secondary = Co
         }
         }
         }
+        if(fullScreenCall&&!callMinimized)FullScreenDmCall(state,dispatch,connectedAtElapsed,
+            onMinimize={callMinimized=true},onChat={returnToChat()},onDiagnostics={callMinimized=true;dispatch(UiAction.Navigate(Route.Diagnostics))},onRetry={
+                val conversation=state.voiceConversationId.ifBlank{state.selectedId.orEmpty()}
+                if(conversation.isNotEmpty()){
+                    retryRoom=voice.room.ifBlank{state.voicePendingRoomId}
+                    if(voice.active&&target!=null){retryAfterEndConversation=conversation;dispatch(UiAction.ControlDmVoice(target,com.peerchat.android.application.VoiceControl.End))}
+                    else if(state.voiceBusy){retryAfterEndConversation=conversation;dispatch(UiAction.CancelVoicePreparation(state.voicePreparationToken,state.voiceUiIdentity))}
+                    else if(groupCall){dispatch(UiAction.Select(conversation));dispatch(UiAction.JoinVoice(retryRoom))}
+                    else dispatch(UiAction.StartDmVoice(conversation))
+                }
+            })
     }
 }
 

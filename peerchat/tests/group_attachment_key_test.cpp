@@ -1,4 +1,5 @@
 #include "../group_attachment_key_envelope.hpp"
+#include "attachment_thumbnail_fixture.hpp"
 #include "../windows_group_attachment_keys.hpp"
 #include "../windows_transfer_io.hpp"
 #include "../platform/windows_recipient_key.hpp"
@@ -61,6 +62,14 @@ static void run(const std::filesystem::path& root,bool sameAccount,const std::st
  group_attachments::Body body{1000,1,group_attachments::Presentation::Picture,"image/png",std::move(manifest)};auto descriptor=group_attachments::uploadDescriptor(body.manifest,Storage::newMessageId(),source.profile);
  keys::Header header{descriptor,authority.sourceMembership,authority.recipientMembership,binding,1000,601000};auto envelope=keys::seal(header,body,authority,source,*hpke);auto wire=keys::serialize(envelope);auto parsed=keys::parse(wire);
  check(recipientStore.groupKey(local,2).empty()&&recipientStore.groupKey(local,3).empty());auto received=keys::open(parsed,authority,binding.device,recipientAccount,manager,*hpke,1001);check(received.manifest.key==body.manifest.key&&received.manifest.name==file.name());
+ {
+  auto photo=group_attachments::decodeBody(group_attachments::encodeBody(body).bytes);photo.thumbnail=peerchat::tests::thumbnailFixture();auto capable=authority;capable.bodyVersion=2;
+  auto picture=keys::seal(header,photo,capable,source,*hpke);auto pictureWire=keys::serialize(picture);auto opened=keys::open(picture,capable,binding.device,recipientAccount,manager,*hpke,1001);
+  check(opened.thumbnail==photo.thumbnail&&opened.manifest.key==body.manifest.key&&picture.header.descriptor==header.descriptor);
+  check(std::search(pictureWire.begin(),pictureWire.end(),photo.thumbnail.begin(),photo.thumbnail.end())==pictureWire.end());
+  auto legacy=keys::seal(header,photo,authority,source,*hpke);check(keys::open(legacy,authority,binding.device,recipientAccount,manager,*hpke,1001).thumbnail.empty());
+  photo.thumbnail.resize(2049);rejects([&]{group_attachments::encodeBody(photo);});
+ }
  struct Encrypted:Source {explicit Encrypted(Blob value):Source(0){bytes=std::move(value);}} ciphertext(encrypted.bytes);Sink output;transfer::windows::Sha256 p2,c2;group_attachments::open(ciphertext,output,received.manifest,p2,c2);check(output.committed&&output.bytes==file.bytes);
  auto secret=group_attachments::encodeBody(body);check(std::search(wire.begin(),wire.end(),secret.bytes.begin(),secret.bytes.end())==wire.end());check(std::search(wire.begin(),wire.end(),body.manifest.key.begin(),body.manifest.key.end())==wire.end());
  for(size_t n=0;n<wire.size();++n)rejects([&]{keys::parse(Blob(wire.begin(),wire.begin()+n));});
@@ -85,6 +94,15 @@ static void run(const std::filesystem::path& root,bool sameAccount,const std::st
   Key nextKey;auto rotatedBinding=binding;rotatedBinding.keyId=Storage::newMessageId();rotatedBinding.predecessorId=binding.keyId;rotatedBinding.generation=2;rotatedBinding.createdUtc=1500;rotatedBinding.publicKey=nextKey.handle->publicKey();rotatedBinding.signature=recipient.sign(mailbox::bindingPayload(rotatedBinding));auto retry=header;retry.recipient=rotatedBinding;retry.created=2000;check(reopened.ensure(records[0],retry,body,authority,source,disabled,2001)==ready);
   body.order++;rejects([&]{reopened.ensure(records[0],header,body,authority,source,disabled,1001);});body.order--;check(reopened.ensure(records[0],header,body,authority,source,disabled,1001)==ready);
   rejects([&]{reopened.ensure(records[0],header,body,rejoined,source,disabled,1001);});rejects([&]{reopened.ensure(records[0],header,body,authority,source,disabled,601000);});
+  {
+   auto photo=group_attachments::decodeBody(secret.bytes);photo.thumbnail=peerchat::tests::thumbnailFixture();auto capable=authority;capable.bodyVersion=2;
+   auto photoRoot=root/L"photo-source";std::filesystem::create_directory(photoRoot);Blob frozen;
+   {group_attachments::windows::PreparedKeys prepared(photoRoot.wstring(),source.profile.peerId,std::string(64,'f'));frozen=prepared.ensure(records[0],header,photo,capable,source,*hpke,1001);check(prepared.ensure(records[0],header,photo,authority,source,disabled,1001)==frozen);}
+   {group_attachments::windows::PreparedKeys reopenedPhoto(photoRoot.wstring(),source.profile.peerId,std::string(64,'f'));check(reopenedPhoto.ensure(records[0],header,photo,authority,source,disabled,1001)==frozen);}
+   check(keys::open(keys::parse(frozen),capable,binding.device,recipientAccount,manager,*hpke,1001).thumbnail==photo.thumbnail);
+   // An already prepared legacy offer also stays byte-identical after upgrade.
+   check(reopened.ensure(records[0],header,photo,capable,source,disabled,1001)==ready);
+  }
   auto readyRoot=root/L"source"/L"group-attachment-keys";std::vector<std::filesystem::path> files;for(const auto& item:std::filesystem::directory_iterator(readyRoot))if(item.path().filename()!=L"owner.lock")files.push_back(item.path());check(files.size()==1);auto protectedBytes=read(files[0]);check(std::search(protectedBytes.begin(),protectedBytes.end(),ready.begin(),ready.end())==protectedBytes.end());
   auto copied=root/L"copied-profile";std::filesystem::create_directory(copied);std::filesystem::create_directory(copied/L"group-attachment-keys");std::filesystem::copy_file(files[0],copied/L"group-attachment-keys"/files[0].filename());{group_attachments::windows::PreparedKeys wrong(copied.wstring(),source.profile.peerId,std::string(64,'f'));rejects([&]{wrong.ensure(records[0],header,body,authority,source,disabled,1001);});}
   auto maintenance=[&](const std::set<std::string>& protectedObjects,std::uint64_t now){group_attachments::windows::PreparedKeys::Maintenance total;for(int i=0;i<16;++i){auto sample=reopened.expire(protectedObjects,now,1);check(sample.inspected<=1);total.inspected+=sample.inspected;total.removed+=sample.removed;total.protectedRecords+=sample.protectedRecords;total.unavailable+=sample.unavailable;}return total;};

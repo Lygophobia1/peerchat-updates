@@ -44,13 +44,43 @@ def identities(database, reference=None):
 def tree_hashes(directory):
     return {str(p.relative_to(directory)):digest(p) for p in sorted(directory.rglob('*')) if p.is_file()}
 
-def require_legacy_rollback_safe(database):
+def require_legacy_rollback_safe(database, rollback_version='4.0.2-dev.0'):
     # Older binaries do not enforce Device Manager tombstones. A database restore
     # would also erase newer messages; neither is a safe automatic rollback.
     with closing(sqlite3.connect('file:'+str(database)+'?mode=ro', uri=True)) as db:
-        exists=db.execute("select count(*) from sqlite_master where type='table' and name='device_authority'").fetchone()[0]
-        if exists and db.execute('select count(*) from device_authority where revoked=1').fetchone()[0]:
+        tables={row[0] for row in db.execute("select name from sqlite_master where type='table'")}
+        if 'device_authority' in tables and db.execute('select count(*) from device_authority where revoked=1').fetchone()[0]:
             raise RuntimeError('Automatic legacy rollback blocked: durable device revocations require a validated revocation-aware binary; preserve current database and cache')
+        prefix='4.0.2-dev.'
+        if not rollback_version.startswith(prefix) or not rollback_version[len(prefix):].isdigit():
+            raise RuntimeError('Automatic rollback blocked: unvalidated target version; preserve current database and cache')
+        if int(rollback_version[len(prefix):])>=229:
+            return
+        reason='Automatic rollback blocked: attachment identity-proof/capability compatibility requires 4.0.2-dev.229 or newer; preserve current database and cache'
+        # Schema presence is a conservative compatibility boundary, even before
+        # the first new registration. Never restore an older database to bypass it.
+        if 'attachment_dm_identity_proofs' in tables:
+            raise RuntimeError(reason)
+        # Also protect a database containing v2 capabilities written by an
+        # intermediate binary without the retained legacy identity-proof table.
+        if 'attachment_dm_capabilities' in tables:
+            for (proof,) in db.execute('select proof from attachment_dm_capabilities'):
+                try:
+                    at=4
+                    def number():
+                        nonlocal at
+                        if at+8>len(proof):raise ValueError('Truncated capability')
+                        value=int.from_bytes(proof[at:at+8],'little');at+=8;return value
+                    def field(maximum):
+                        nonlocal at
+                        count=number()
+                        if count>maximum or count>len(proof)-at:raise ValueError('Invalid capability field')
+                        value=proof[at:at+count];at+=count;return value
+                    if proof[:4]!=b'PT\x01\x1e' or field(64)!=b'PeerChat/dm-cache-device/v1':raise ValueError('Invalid capability domain')
+                    number();field(64);field(32);number()
+                    if number()!=1:raise ValueError('Unsupported legacy body version')
+                except (TypeError,ValueError):
+                    raise RuntimeError(reason) from None
 
 def backup_cache(directory, destination):
     # Called only after the checked server has stopped. Preserve ciphertext,
@@ -208,9 +238,10 @@ def main():
         newpid=ROOT/'data'/args.new/'server.pid'
         if newpid.exists(): run(['python3',helper,'stop','--version',args.new,'--port','7443'])
         try:
-            require_legacy_rollback_safe(database)
-        except RuntimeError:
-            report['result']='rollback_blocked_preserve_revocation_authority'
+            require_legacy_rollback_safe(database,args.old)
+        except RuntimeError as compatibility_error:
+            report['result']='rollback_blocked_database_compatibility'
+            report['rollback_compatibility_error']=str(compatibility_error)
             (backup/'manifest.json').write_text(json.dumps(report,indent=2))
             raise
         run(['python3',helper,'start','--version',args.old,'--port','7443'])

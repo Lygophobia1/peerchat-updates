@@ -17,6 +17,13 @@ class AttachmentParityTest {
     @get:Rule val compose=createComposeRule()
     private val peer="b".repeat(64)
     private fun row(state:Int=2,path:String="")=AttachmentSnapshot("c".repeat(32),peer,"résumé-日本.png",100000,state,false,0,1,"",path)
+    @Test fun unverifiedCacheAudienceExplainsRecoveryAndPausedPhaseIsInactive(){
+        val text=attachmentSendFailureText(com.peerchat.android.platform.AttachmentSendMode.Cached,
+            AttachmentRecipientVerificationRequired(listOf("a".repeat(64))))
+        assertTrue(text.contains("Verify the recipient's devices"));assertTrue(text.contains("No file was uploaded"))
+        assertEquals("Last recorded phase (inactive): Uploading encrypted file",
+            attachmentTransferPhaseText(row(7).copy(cachePhase="Uploading encrypted file")))
+    }
     @Test fun liveDmCallButtonShowsActualUnavailableReason(){
         val actions=mutableListOf<UiAction>()
         val direct=ConversationUi("account:8","Other",ChatKind.Direct,true,"","",hasOlder=false)
@@ -26,14 +33,32 @@ class AttachmentParityTest {
         compose.onNodeWithContentDescription("Voice call").performClick()
         compose.runOnIdle{assertEquals(listOf(UiAction.Notice(reason)),actions)}
     }
-    @Test fun groupComposerDoesNotAdvertiseAttachmentsAndRejectsOversizedText(){
+    @Test fun groupComposerOffersCachedAttachmentsAndRejectsOversizedText(){
         val actions=mutableListOf<UiAction>()
         val group=ConversationUi("group:"+"c".repeat(32),"Group",ChatKind.Group,true,"","",hasOlder=false)
         val state=PeerChatUiState(demo=false,route=Route.Conversation,selectedId=group.id,conversations=listOf(group),account=AccountUi("account:19","Test"))
         compose.setContent{PeerChatTheme(true){ConversationScreen(group,state,actions::add)}}
-        compose.onNodeWithContentDescription("Send picture or file").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Send picture or file").performClick()
+        compose.onNodeWithTag("send-cached").assertExists()
+        compose.onNodeWithTag("send-direct").assertDoesNotExist()
+        compose.onNodeWithTag("paste-attachment").assertExists()
+        compose.onNodeWithTag("composer").performClick()
         compose.onNodeWithTag("composer").performTextInput("x".repeat(4097))
         compose.runOnIdle{assertTrue(actions.none{it is UiAction.Draft})}
+    }
+    @Test fun pastedGroupPhotoUsesBoundAccountConversationAndCachedMode(){
+        val context=androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val clipboard=context.getSystemService(android.content.ClipboardManager::class.java)
+        val uri=android.net.Uri.parse("content://peerchat.test/picture.png")
+        clipboard.setPrimaryClip(android.content.ClipData("Picture",arrayOf("image/png"),android.content.ClipData.Item(uri)))
+        val actions=mutableListOf<UiAction>()
+        val group=ConversationUi("group:"+"c".repeat(32),"Group",ChatKind.Group,true,"","",hasOlder=false)
+        val state=PeerChatUiState(demo=false,route=Route.Conversation,selectedId=group.id,conversations=listOf(group),account=AccountUi("account:19","Test"),attachmentContextGeneration=7)
+        compose.setContent{PeerChatTheme(true){ConversationScreen(group,state,actions::add)}}
+        compose.onNodeWithContentDescription("Send picture or file").performClick()
+        compose.onNodeWithTag("paste-attachment").performClick()
+        compose.runOnIdle{assertEquals(listOf(UiAction.SendAttachment(uri,com.peerchat.android.platform.AttachmentSendMode.Cached,group.id,"account:19",7)),actions)}
+        clipboard.clearPrimaryClip()
     }
     @Test fun statisticsProjectConfirmedBytesWithoutInventingRates(){
         val current=row(3).copy(done=50000,statisticsKnown=true,statisticsBytes=50000,durationMs=2000,rateBits=80000,etaReliable=true)
@@ -70,7 +95,7 @@ class AttachmentParityTest {
         val a=attachmentSnapshots(record()).single()
         assertTrue(a.complete);assertEquals(row().name,a.name);assertFalse(a.outgoing)
         assertEquals(a,attachmentSnapshots(record()).single())
-        for(invalid in listOf(record(state=3),record(size=256L*1024*1024+1))){
+        for(invalid in listOf(record(state=3),record(size=5L*1024*1024*1024+1))){
             try{attachmentSnapshots(invalid);fail("Invalid native attachment accepted")}catch(_:IllegalArgumentException){}
         }
     }

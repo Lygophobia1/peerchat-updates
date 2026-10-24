@@ -16,11 +16,54 @@ partial class AttachmentCacheRuntimeTest {
  static long now=1000000;
  static void Check(bool b,string s){if(!b)throw new Exception(s);}
  static void Reject(Action a,string reason){try{a();throw new Exception("Unexpected success: "+reason);}catch(InvalidOperationException e){Check(e.Message==reason||reason=="*",e.Message+" != "+reason);}}
+ static void BlobEncoding(){
+  var encode=typeof(AttachmentCacheRuntime).GetMethod("Blob",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Static);
+  Check(encode!=null,"SQLite blob encoder missing");
+  foreach(int length in new[]{0,1,16,256,32768,65535,65536}){
+   var bytes=new byte[length];for(int i=0;i<length;i++)bytes[i]=(byte)i;
+   string expected="X'"+String.Concat(bytes.Select(x=>x.ToString("x2",System.Globalization.CultureInfo.InvariantCulture)))+"'";
+   Check((string)encode.Invoke(null,new object[]{bytes})==expected,"SQLite blob encoding changed at length "+length);
+  }
+  var random=new byte[65536];new Random(233).NextBytes(random);
+  string literal=(string)encode.Invoke(null,new object[]{random});
+  Check(literal=="X'"+BitConverter.ToString(random).Replace("-","").ToLowerInvariant()+"'","Random maximum chunk literal changed");
+  Console.WriteLine("PASS exact SQLite blob literals: empty, leading zero, every byte value, 32/64 KiB, partial final chunk and random ciphertext; bounded chunk allocations only");
+ }
+ static void AppendDiagnostics(string root){
+  Check(CacheAppendTimings.Current==null,"Append timing leaked before request");
+  using(var outer=new CacheAppendTimings()){
+   bool isolated=false;var worker=new Thread(()=>{isolated=CacheAppendTimings.Current==null;});worker.Start();Check(worker.Join(5000)&&isolated,"Append metrics crossed RPC workers");
+   CacheAppendTimings failed=null;
+   try{using(failed=new CacheAppendTimings()){AttachmentCacheStorage.Observe("");}}catch(InvalidOperationException){}
+   Check(CacheAppendTimings.Current==outer&&failed.Snapshot()[0]==1&&outer.Snapshot()[0]==0,"Failed storage inspection leaked timing scope or counters");
+  }
+  Check(CacheAppendTimings.Current==null,"Nested append timing was not restored");
+  using(var signer=new ECDsaCng(256)){
+   var options=Options(Fixture(root,"append-diagnostics"));var bytes=Payload(100000);var descriptor=Descriptor(signer,100000,bytes);string lease;
+   using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+    cache.Admit(descriptor,Readers());lease=cache.Acquire(descriptor.Id,descriptor.Sender,true);var block=bytes.Take(65536).ToArray();long[] metrics;
+    using(var capture=new CacheAppendTimings()){Check(cache.Append(lease,0,block)==65536,"Measured append durable offset");metrics=capture.Snapshot();}
+    Check(metrics[0]==4&&metrics[2]==1&&metrics[4]==1&&metrics.All(x=>x>=0),"Append storage checks, blob encoding or durable transaction omitted");
+    using(var capture=new CacheAppendTimings()){Check(cache.Append(lease,0,block)==65536,"Measured duplicate inflated offset");var duplicate=capture.Snapshot();Check(duplicate[0]==1&&duplicate[2]==0&&duplicate[4]==0,"Duplicate append performed a new durable transaction");}
+    AttachmentCacheRuntime.TestFault=stage=>{if(stage=="before_commit")throw new InvalidOperationException("cache_test_timing_rollback");};
+    try{using(var capture=new CacheAppendTimings()){try{cache.Append(lease,65536,bytes.Skip(65536).ToArray());throw new Exception("Append timing rollback not exercised");}catch(InvalidOperationException error){Check(error.Message=="cache_test_timing_rollback",error.Message);}Check(capture.Snapshot()[4]==1,"Failed durable transaction was not measured");}}
+    finally{AttachmentCacheRuntime.TestFault=null;}
+    Check(CacheAppendTimings.Current==null&&cache.Inspect(descriptor.Id).Offset==65536,"Failed append leaked metrics or advanced durable offset");
+    var diagnostics=new ServerTimingDiagnostics();string id=new string('a',32);long started=Stopwatch.GetTimestamp();
+    diagnostics.Record("cache_append_components","cache_dm_append",id,started,started,metrics);string row=diagnostics.Snapshot().Single();
+    Check(row.Contains("request_id="+id)&&row.Contains("storage_observe_count=4")&&row.Contains("blob_encode_count=1")&&row.Contains("append_transaction_count=1")&&!row.Contains(options.Directory)&&!row.Contains(lease),"Append timing correlation/counts/privacy");
+    for(int i=0;i<100;i++)diagnostics.Record("cache_append_components","cache_dm_append",id,started,started,metrics);
+    Check(diagnostics.Snapshot().Length==64,"Append diagnostic history is unbounded");
+   }
+   using(var cache=new AttachmentCacheRuntime(options,()=>now))Check(cache.Inspect(descriptor.Id).Offset==65536,"Timing instrumentation changed crash-recovered offset");
+  }
+  Console.WriteLine("PASS append numeric timing correlation, bounded history, storage-check count, duplicate behavior, worker isolation, failure cleanup and FULL transaction rollback/restart");
+ }
  static void Field(BinaryWriter w,byte[] value){w.Write((ulong)value.Length);w.Write(value);}
  static void Text(BinaryWriter w,string value){Field(w,Encoding.UTF8.GetBytes(value));}
- static AttachmentCacheDescriptor Descriptor(ECDsaCng key,int plainBytes,byte[] cipher,string id=null,string group=null,long epoch=1,long account=1){
+ static AttachmentCacheDescriptor Descriptor(ECDsaCng key,int plainBytes,byte[] cipher,string id=null,string group=null,long epoch=1,long account=1,long? declaredCipherBytes=null){
   using(var m=new MemoryStream())using(var w=new BinaryWriter(m)){
-   var publicKey=key.Key.Export(CngKeyBlobFormat.EccPublicBlob);w.Write(new byte[]{80,84,1,5});Text(w,"PeerChat/group-cache-upload/v1");Text(w,id??Guid.NewGuid().ToString("N"));Text(w,group??new string('1',32));Text(w,Guid.NewGuid().ToString("N"));Text(w,MailboxProtocol.Digest(publicKey));w.Write((ulong)account);w.Write((ulong)epoch);w.Write((ulong)plainBytes);w.Write((ulong)cipher.Length);using(var sha=SHA256.Create())Field(w,sha.ComputeHash(cipher));Field(w,publicKey);using(var sha=SHA256.Create())Field(w,key.SignHash(sha.ComputeHash(m.ToArray())));return AttachmentCacheDescriptor.Parse(m.ToArray());
+   var publicKey=key.Key.Export(CngKeyBlobFormat.EccPublicBlob);w.Write(new byte[]{80,84,1,5});Text(w,"PeerChat/group-cache-upload/v1");Text(w,id??Guid.NewGuid().ToString("N"));Text(w,group??new string('1',32));Text(w,Guid.NewGuid().ToString("N"));Text(w,MailboxProtocol.Digest(publicKey));w.Write((ulong)account);w.Write((ulong)epoch);w.Write((ulong)plainBytes);w.Write((ulong)(declaredCipherBytes??cipher.Length));using(var sha=SHA256.Create())Field(w,sha.ComputeHash(cipher));Field(w,publicKey);using(var sha=SHA256.Create())Field(w,key.SignHash(sha.ComputeHash(m.ToArray())));return AttachmentCacheDescriptor.Parse(m.ToArray());
   }
  }
  static byte[] Payload(int plain){int size=checked(20+plain+Math.Max(1,(plain+32767)/32768)*16);var bytes=new byte[size];new Random(plain).NextBytes(bytes);return bytes;}
@@ -46,6 +89,83 @@ partial class AttachmentCacheRuntimeTest {
   Check(Convert.ToString(response["state"])==state,"RPC "+operation+" state="+Convert.ToString(response["state"]));
   var wire=json.Serialize(response);Check(wire.Length<100000&&!wire.Contains("private attachment key")&&!wire.Contains("plaintext filename"),"RPC response bounds/privacy");return response;
  }
+ static void CanceledUpload(string root){using(var signer=new ECDsaCng(256)){
+  var options=Options(Fixture(root,"canceled-upload"));options.MaximumBytes=48L*1024*1024;options.PartialIdleSeconds=300;
+  const int plain=32*1024*1024;long length=20L+plain+((plain+32767L)/32768)*16;
+  var block=new byte[32768];new Random(17).NextBytes(block);var d=Descriptor(signer,plain,block,declaredCipherBytes:length);string lease;
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   long empty=cache.ChargedBytes;cache.Admit(d,Readers());lease=cache.Acquire(d.Id,d.Sender,true);
+   for(int i=0;i<64;++i)cache.Append(lease,i*32768L,block);
+   long held=cache.ChargedBytes;cache.Release(lease,true);
+   Check(cache.ChargedBytes<held-30L*1024*1024,"Canceled future reservation retained");
+   Check(cache.ChargedBytes>empty,"Canceled physical chunks no longer charged");
+   Reject(()=>cache.Inspect(d.Id),"cache_attachment_unavailable");Reject(()=>cache.Append(lease,64*32768L,block),"cache_lease_expired");
+  }
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   Reject(()=>cache.Inspect(d.Id),"cache_attachment_unavailable");
+   var replacement=Descriptor(signer,plain,block,declaredCipherBytes:length);cache.Admit(replacement,Readers());cache.Release(cache.Acquire(replacement.Id,replacement.Sender,true),true);cache.Cleanup(32);
+   var bytes=Payload(70001);var complete=Descriptor(signer,70001,bytes);cache.Admit(complete,Readers());var upload=cache.Acquire(complete.Id,complete.Sender,true);
+   for(long offset=0;offset<bytes.Length;){int n=(int)Math.Min(32768,bytes.Length-offset);cache.Append(upload,offset,bytes.Skip((int)offset).Take(n).ToArray());offset+=n;}
+   cache.Complete(upload);cache.Release(upload,true);Check(cache.Inspect(complete.Id).Complete,"Cancel removed completed recipient file");
+   var download=cache.Acquire(complete.Id,new string('b',64),false);Reject(()=>cache.Release(download,true),"cache_lease_expired");Check(cache.Read(download,0,32768).SequenceEqual(bytes.Take(32768)),"Read lease cancel attempt damaged completed file");cache.Release(download);
+  }
+  Console.WriteLine("PASS canceled upload: future reservation released, stored chunks charged, restart/replacement admission, read-lease rejection and completed file preserved");
+ }}
+ static void LargeAdmission(string root){using(var signer=new ECDsaCng(256)){
+  const int limit=1536*1024*1024;const long quota=10L*1024*1024*1024;
+  Func<long,long> cipherSize=n=>20+n+Math.Max(1L,(n+32767)/32768)*16;
+  var opaque=new byte[36];var options=Options(Fixture(root,"large-reservations"));options.MaximumBytes=quota;
+  Reject(()=>Descriptor(signer,limit+1,opaque,declaredCipherBytes:cipherSize((long)limit+1)),"Invalid signed encrypted attachment descriptor.");
+  var descriptors=Enumerable.Range(0,6).Select(_=>Descriptor(signer,limit,opaque,declaredCipherBytes:cipherSize(limit))).ToArray();
+  int accepted=0,rejected=0;
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   System.Threading.Tasks.Parallel.ForEach(descriptors,d=>{try{cache.Admit(d,Readers());Interlocked.Increment(ref accepted);}catch(InvalidOperationException error){Check(error.Message=="cache_quota_or_free_space_protected",error.Message);Interlocked.Increment(ref rejected);}});
+   Check(accepted==5&&rejected==1&&cache.ChargedBytes<=quota&&cache.ChargedBytes>9L*1024*1024*1024,"1.5 GiB reservations did not include temporary/metadata overhead");
+  }
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   Check(cache.ChargedBytes>9L*1024*1024*1024&&cache.ChargedBytes<=quota,"Restart lost large reservations");
+   now+=31;cache.Cleanup(64);Check(cache.ChargedBytes<8L*1024*1024,"Expired partial reservations were not released");
+   Check(!cache.Admit(Descriptor(signer,limit,opaque,declaredCipherBytes:cipherSize(limit)),Readers()).Complete,"Admission reported file completion");
+  }
+  Console.WriteLine("PASS exact 1.5 GiB admission, limit+1 rejection, concurrent 10 GiB quota including overhead, restart reservations and expiry reclamation (metadata-only large-size fixture)");
+ }}
+ static void BatchQuota(string root){using(var signer=new ECDsaCng(256)){
+  var options=Options(Fixture(root,"batch-quota"));options.MaximumBytes=9L*1024*1024;
+  var payload=Payload(2*1024*1024);var d=Descriptor(signer,2*1024*1024,payload);
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   cache.Admit(d,Readers());string lease=cache.Acquire(d.Id,d.Sender,true);
+   var chunks=new List<KeyValuePair<long,byte[]>>();for(int i=0;i<8;i++)chunks.Add(new KeyValuePair<long,byte[]>(i*65536L,payload.Skip(i*65536).Take(65536).ToArray()));
+   var offsets=cache.AppendBatch(lease,chunks);Check(offsets.Length==8&&offsets[7]==524288&&cache.ChargedBytes<=options.MaximumBytes,"Batch exceeded narrow reserved quota");
+  }
+  using(var cache=new AttachmentCacheRuntime(options,()=>now))Check(cache.Inspect(d.Id).Offset==524288&&cache.ChargedBytes<=options.MaximumBytes,"Batch narrow-quota ledger failed restart");
+  Console.WriteLine("PASS eight-chunk FULL commit under 9 MiB quota, 4 MiB journal headroom and restart ledger");
+ }}
+
+ static void BoundedCompletion(string root){using(var signer=new ECDsaCng(256)){
+  var options=Options(Fixture(root,"bounded-completion"));var bytes=Payload(10*1024*1024);var d=Descriptor(signer,10*1024*1024,bytes);string lease;
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   cache.Admit(d,Readers());lease=cache.Acquire(d.Id,d.Sender,true);long offset=0;
+   while(offset<bytes.Length)offset=cache.Append(lease,offset,bytes.Skip((int)offset).Take(65536).ToArray());
+   Check(cache.VerifyCompletionStep(lease)==null&&!cache.Inspect(d.Id).Complete,"Bounded finalization prematurely completed");
+   cache.Release(lease);Reject(()=>cache.VerifyCompletionStep(lease),"cache_lease_expired");
+   lease=cache.Acquire(d.Id,d.Sender,true);Check(cache.VerifyCompletionStep(lease)==null,"Replacement lease reused old hash state");
+  }
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   lease=cache.Acquire(d.Id,d.Sender,true);Check(cache.VerifyCompletionStep(lease)==null,"Restart skipped ciphertext verification");
+   now+=100;var evidence=cache.VerifyCompletionStep(lease);Check(evidence!=null&&!cache.Inspect(d.Id).Complete,"Hash verification published without authorization commit");
+   cache.CommitCompletion(lease,evidence);Check(cache.Inspect(d.Id).Complete,"Bounded completion commit missing");
+   cache.CommitCompletion(lease,cache.VerifyCompletionStep(lease));cache.Release(lease);
+  }
+  var bad=(byte[])bytes.Clone();bad[bad.Length-1]^=1;var corrupt=Descriptor(signer,10*1024*1024,bytes);
+  using(var cache=new AttachmentCacheRuntime(options,()=>now)){
+   cache.Admit(corrupt,Readers());lease=cache.Acquire(corrupt.Id,corrupt.Sender,true);long offset=0;
+   while(offset<bad.Length)offset=cache.Append(lease,offset,bad.Skip((int)offset).Take(65536).ToArray());
+   Check(cache.VerifyCompletionStep(lease)==null,"Corrupt fixture should require a second step");
+   Reject(()=>cache.VerifyCompletionStep(lease),"cache_ciphertext_digest_mismatch");Check(!cache.Inspect(corrupt.Id).Complete,"Corrupted tail accepted");cache.Release(lease);
+  }
+  Console.WriteLine("PASS bounded finalization: multi-step, released lease, process restart, separate commit, repeated completion and corrupt tail");
+ }}
+
  static void RoundTrips(string root){using(var signer=new ECDsaCng(256)){
   var path=Fixture(root,"roundtrips");var options=Options(path);
   foreach(int size in new[]{0,1,32768,1024*1024,3*1024*1024,10*1024*1024}){
@@ -92,9 +212,14 @@ partial class AttachmentCacheRuntimeTest {
   Console.WriteLine("PASS actual process kill before SQLite commit during "+mode+"; durable restart recovery");
  }}
  static int Child(string[] args){string path=args[1],file=args[2],mode=args[3];now=Int64.Parse(args[4]);var d=AttachmentCacheDescriptor.Parse(File.ReadAllBytes(file));using(var cache=new AttachmentCacheRuntime(Options(path),()=>now)){
-  string lease=mode=="upload"?cache.Acquire(d.Id,d.Sender,true):null;if(mode=="cleanup")now+=11;
+  string lease=mode=="upload"||mode=="batch-upload"?cache.Acquire(d.Id,d.Sender,true):null;if(mode=="cleanup")now+=11;
   AttachmentCacheRuntime.TestFault=stage=>{if(stage=="before_commit"){File.WriteAllText(file+".ready","ready");Thread.Sleep(Timeout.Infinite);}};
-  if(mode=="upload")cache.Append(lease,32768,Payload(1024*1024).Skip(32768).Take(32768).ToArray());else cache.Cleanup(1);
+  if(mode=="upload")cache.Append(lease,32768,Payload(1024*1024).Skip(32768).Take(32768).ToArray());
+  else if(mode=="batch-upload"){
+   var payload=Payload(1024*1024);var chunks=new List<KeyValuePair<long,byte[]>>();long offset=32768;
+   for(int i=0;i<8;i++){int length=i==0?32768:65536;chunks.Add(new KeyValuePair<long,byte[]>(offset,payload.Skip((int)offset).Take(length).ToArray()));offset+=length;}
+   cache.AppendBatch(lease,chunks);
+  }else cache.Cleanup(1);
  }return 2;}
  static void Pressure(string root){using(var signer=new ECDsaCng(256)){
   var path=Fixture(root,"pressure");var options=Options(path);var bytes=Payload(3*1024*1024);var retained=new List<AttachmentCacheDescriptor>();
@@ -197,6 +322,20 @@ partial class AttachmentCacheRuntimeTest {
   byte[] Exact(int count){var bytes=new byte[count];int offset=0;while(offset<count){int read=tls.Read(bytes,offset,count-offset);if(read==0)throw new EndOfStreamException();offset+=read;}return bytes;}
   Dictionary<string,object> Read(){var header=Exact(4);int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];Check(length>0&&length<=100000,"Response bound");return json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(Exact(length)));}
   internal Dictionary<string,object> Request(string operation,string expected,params object[] fields){string id=Guid.NewGuid().ToString("N");var request=new Dictionary<string,object>{{"version",1},{"type",operation},{"rpcRequestId",id},{"requestId",id},{"sessionToken",token},{"publicIdentity",device}};for(int n=0;n<fields.Length;n+=2)request[(string)fields[n]]=fields[n+1];Write(request);var response=Read();Check((string)response["type"]=="rpc_result"&&(string)response["operation"]==operation&&(string)response["rpcRequestId"]==id,"RPC correlation");var body=(Dictionary<string,object>)response["body"];if(expected!=null)Check(Convert.ToString(body["state"])==expected,"Network "+operation+" "+Convert.ToString(body["state"]));return body;}
+  internal List<Dictionary<string,object>> DirectBatch(IList<Dictionary<string,object>> fields,string expected,bool partial=false){
+   Check(fields.Count>=2&&fields.Count<=8,"Network batch bound");var ids=new List<string>();
+   for(int i=0;i<(partial?1:fields.Count);i++){
+    string id=Guid.NewGuid().ToString("N");ids.Add(id);
+    var request=new Dictionary<string,object>{{"version",1},{"type","cache_dm_append"},{"rpcRequestId",id},{"requestId",id},{"sessionToken",token},{"publicIdentity",device}};
+    foreach(var field in fields[i])if(field.Key!="requestId"&&field.Key!="type")request[field.Key]=field.Value;if(i==0)request["batchCount"]=fields.Count;
+    Write(request);
+   }
+   if(partial)return new List<Dictionary<string,object>>();
+   var replies=new List<Dictionary<string,object>>();for(int i=0;i<ids.Count;i++){
+    var response=Read();Check((string)response["type"]=="rpc_result"&&(string)response["operation"]=="cache_dm_append"&&(string)response["rpcRequestId"]==ids[i],"Batch RPC correlation/order");
+    var body=(Dictionary<string,object>)response["body"];Check((string)body["requestId"]==ids[i]&&Convert.ToString(body["state"])==expected,"Batch response state/correlation");replies.Add(body);
+   }return replies;
+  }
   public void Dispose(){if(tls!=null)tls.Dispose();tcp.Dispose();}
  }
  static void Network(string root,bool enabled,string shippingAssembly=null){Directory.CreateDirectory(root);using(var signer=new ECDsaCng(256))using(var readerSigner=new ECDsaCng(256)){
@@ -360,5 +499,5 @@ partial class AttachmentCacheRuntimeTest {
   using(var cache=new AttachmentCacheRuntime(options,()=>now)){if(announcement!=null)Check(cache.ReadAnnouncement(descriptor.Id).Wire.SequenceEqual(announcement),"Native group signature/announcement restart binding");var lease=cache.Acquire(descriptor.Id,descriptor.Sender,false);using(var output=File.Create(Path.Combine(source,"cache-return.bin"))){long offset=0;while(offset<descriptor.CipherBytes){var chunk=cache.Read(lease,offset,65536);output.Write(chunk,0,chunk.Length);offset+=chunk.Length;cache.RecipientProgress(lease,offset,false);}output.Flush(true);}cache.Release(lease);}
   Console.WriteLine("PASS native signed descriptor, ciphertext integrity, managed FULL cache upload/restart/read and signature tamper rejection; separate roster/TLS tests cover admission");
  }
- static int Main(string[] args){try{if(args.Length==2&&args[0]=="--keys"){KeyAdmission(args[1]);return 0;}if(args.Length==3&&args[0]=="--native-keys"){NativeKeys(args[1],args[2]);return 0;}if(args.Length==2&&args[0]=="--ownership"){OwnershipBeforeSchema(args[1]);return 0;}if(args.Length==2&&args[0]=="--ledger"){LedgerRecovery(args[1]);return 0;}if(args.Length==2&&args[0]=="--announcements"){Announcements(args[1]);return 0;}if(args.Length==2&&args[0]=="--completion"){CompletionScheduling(Path.Combine(args[1],"scheduling"));CompletionRecheck(Path.Combine(args[1],"recheck"));return 0;}if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==3&&args[0]=="--native-object"){NativeObject(args[1],args[2]);return 0;}if(args.Length==3&&args[0]=="--production-gate"){Network(args[1],true,args[2]);return 0;}if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--admission"){Admission(Path.GetFullPath(args[1]));ConcurrentReservations(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--network"){Network(Path.Combine(args[1],"disabled"),false);Network(Path.Combine(args[1],"enabled"),true);return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);RoundTrips(root);CorruptionAndExpiry(root);Pressure(root);Admission(root);ConcurrentReservations(root);Announcements(Path.Combine(root,"announcements"));LedgerRecovery(Path.Combine(root,"ledger"));OwnershipBeforeSchema(Path.Combine(root,"ownership"));CompletionScheduling(Path.Combine(root,"scheduling"));CompletionRecheck(Path.Combine(root,"recheck"));KeyAdmission(Path.Combine(root,"keys"));Crash(root,"upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime and authoritative admission; client integration remains gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
+ static int Main(string[] args){try{if(args.Length==2&&args[0]=="--append-diagnostics"){BlobEncoding();AppendDiagnostics(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--keys"){KeyAdmission(args[1]);return 0;}if(args.Length==3&&args[0]=="--native-keys"){NativeKeys(args[1],args[2]);return 0;}if(args.Length==2&&args[0]=="--ownership"){OwnershipBeforeSchema(args[1]);return 0;}if(args.Length==2&&args[0]=="--ledger"){LedgerRecovery(args[1]);return 0;}if(args.Length==2&&args[0]=="--announcements"){Announcements(args[1]);return 0;}if(args.Length==2&&args[0]=="--completion"){CompletionScheduling(Path.Combine(args[1],"scheduling"));CompletionRecheck(Path.Combine(args[1],"recheck"));return 0;}if(args.Length>0&&args[0]=="--crash-child")return Child(args);if(args.Length==3&&args[0]=="--native-object"){NativeObject(args[1],args[2]);return 0;}if(args.Length==3&&args[0]=="--production-gate"){Network(args[1],true,args[2]);return 0;}if(args.Length==2&&args[0]=="--pressure"){Pressure(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--admission"){Admission(Path.GetFullPath(args[1]));ConcurrentReservations(Path.GetFullPath(args[1]));return 0;}if(args.Length==2&&args[0]=="--network"){Network(Path.Combine(args[1],"disabled"),false);Network(Path.Combine(args[1],"enabled"),true);return 0;}string root=Path.GetFullPath(args[0]);Directory.CreateDirectory(root);BlobEncoding();AppendDiagnostics(root);RoundTrips(root);CanceledUpload(root);LargeAdmission(root);BoundedCompletion(root);CorruptionAndExpiry(root);Pressure(root);Admission(root);ConcurrentReservations(root);Announcements(Path.Combine(root,"announcements"));LedgerRecovery(Path.Combine(root,"ledger"));OwnershipBeforeSchema(Path.Combine(root,"ownership"));CompletionScheduling(Path.Combine(root,"scheduling"));CompletionRecheck(Path.Combine(root,"recheck"));KeyAdmission(Path.Combine(root,"keys"));Crash(root,"upload");Crash(root,"batch-upload");Crash(root,"cleanup");Console.WriteLine("PASS cache runtime and authoritative admission; client integration remains gated");return 0;}catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }

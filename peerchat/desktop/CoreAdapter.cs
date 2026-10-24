@@ -10,15 +10,17 @@ using System.Web.Script.Serialization;
 namespace PeerChatDesktop {
 public sealed class FileTooLargeException : InvalidOperationException {
     public const string Title="File Too Large";
-    public const string Explanation="This file exceeds PeerChat's current maximum transfer size of 256 MiB (approximately 268 MB). Please select a smaller file.";
+    public const string Explanation="This file exceeds PeerChat's current maximum transfer size of 5 GiB. Please select a smaller file.";
     public FileTooLargeException():base(Explanation){}
 }
 public static class SelectedTransferFile {
     // Presentation preflight only. Native validation remains authoritative, including file-change races.
-    public const long MaximumBytes=256L*1024*1024;
-    public static void ValidateSize(string path){
+    public const long MaximumBytes=5L*1024*1024*1024;
+    public const long MaximumCachedBytes=1536L*1024*1024;
+    public static void ValidateSize(string path,bool cached=false){
         long length;try{if(!File.Exists(path))return;length=new FileInfo(path).Length;}catch(IOException){return;}catch(UnauthorizedAccessException){return;}catch(ArgumentException){return;}
         if(length>MaximumBytes)throw new FileTooLargeException();
+        if(cached&&length>MaximumCachedBytes)throw new InvalidOperationException("Direct-only: files over 1.5 GiB cannot use the cache. Choose Direct Transfer.");
     }
 }
 // This is the only managed/native boundary. Returned strings belong to the DLL
@@ -35,10 +37,10 @@ public sealed partial class CoreAdapter : IDisposable {
     }return result+"\n"+MailboxIssueDiagnostics();}}
     const string Library = "PeerChat.Core.dll";
     readonly object mailboxGate=new object();
-    public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer,saveState,savePath,saveError,dmState;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable,dmCache,uploadComplete,noticesStored,plaintextVerified;}
+    public sealed class FileTransferData {public string id,peer,name,error,path,logicalId,conversationPeer,senderPeer,saveState,savePath,saveError,dmState,thumbnail;public long size,done,time,account,statisticsBytes,durationMs,rateBits;public int state;public bool sending,isArchive,originalSending,protectedSource,statisticsKnown,etaReliable,dmCache,uploadComplete,noticesStored,plaintextVerified;}
     public sealed class DmAttachmentSnapshot {public bool supported;public string reason;public FileTransferData[] items;}
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)] static extern IntPtr ui_file_transfer(IntPtr handle,uint operation,string peer,string id,string path);
-    public string FileTransfer(uint operation,string peer="",string id="",string path=""){if(operation==1||operation==21)SelectedTransferFile.ValidateSize(path);lock(mailboxGate){
+    public string FileTransfer(uint operation,string peer="",string id="",string path=""){if(operation==1||operation==21)SelectedTransferFile.ValidateSize(path,operation==21);lock(mailboxGate){
         if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
         var result=ui_file_transfer(handle,operation,peer,id,path);
         if(result==IntPtr.Zero)throw new InvalidOperationException("File operation failed. Check that the recipient is verified, the offer is current, and the selected file/folder is accessible.");
@@ -141,6 +143,7 @@ public sealed partial class CoreAdapter : IDisposable {
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_devices(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_devices_select(IntPtr handle,int input,int output);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_levels(IntPtr handle,int input,int output);
+    [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_processing_v4(IntPtr handle,int enabled,int noiseSuppression,int automaticGain,uint noiseStrength,uint gainStrength,int echoCancellation,int automaticNoiseControl,uint automaticNoiseControlLevel);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_processing_v2(IntPtr handle,int enabled,int noiseSuppression,int automaticGain,uint noiseStrength,uint gainStrength,int echoCancellation);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern IntPtr ui_voice_diagnostics(IntPtr handle);
     [DllImport(Library, CallingConvention=CallingConvention.Cdecl)] static extern int ui_voice_telemetry(IntPtr handle,out float input,out float output,out uint flags);
@@ -267,7 +270,7 @@ public sealed partial class CoreAdapter : IDisposable {
     public VoiceDevices VoiceDevices(){return serializer.Deserialize<VoiceDevices>(Marshal.PtrToStringUni(ui_voice_devices(handle)));}
     public bool SelectVoiceDevices(int input,int output){return ui_voice_devices_select(handle,input,output)!=0;}
     public bool SetVoiceVolumes(int input,int output){return ui_voice_levels(handle,input,output)!=0;}
-    public bool SetVoiceProcessing(bool enabled,bool noiseSuppression,bool automaticGain,int noiseStrength,int gainStrength,bool echoCancellation=false){return ui_voice_processing_v2(handle,enabled?1:0,noiseSuppression?1:0,automaticGain?1:0,(uint)noiseStrength,(uint)gainStrength,echoCancellation?1:0)!=0;}
+    public bool SetVoiceProcessing(bool enabled,bool noiseSuppression,bool automaticGain,int noiseStrength,int gainStrength,bool echoCancellation=false,bool automaticNoiseControl=true,int automaticNoiseControlLevel=1){return ui_voice_processing_v4(handle,enabled?1:0,noiseSuppression?1:0,automaticGain?1:0,(uint)noiseStrength,(uint)gainStrength,echoCancellation?1:0,automaticNoiseControl?1:0,(uint)automaticNoiseControlLevel)!=0;}
     public string VoiceDiagnostics(){return Marshal.PtrToStringUni(ui_voice_diagnostics(handle));}
     public VoiceTelemetry VoiceTelemetry(){float input,output;uint flags;if(ui_voice_telemetry(handle,out input,out output,out flags)==0)return new VoiceTelemetry();return new VoiceTelemetry{input=Math.Max(0,Math.Min(1,input)),output=Math.Max(0,Math.Min(1,output)),active=(flags&1)!=0,inputAvailable=(flags&2)!=0,outputAvailable=(flags&4)!=0};}
     public string Share(string host,ushort port,string peer){return Marshal.PtrToStringUni(ui_share(handle,host,port,peer));}

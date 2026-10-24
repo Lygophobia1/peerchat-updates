@@ -5,7 +5,8 @@
 #include <deque>
 using namespace peerchat;
 using namespace peerchat::transfer;
-void check(bool b){if(!b)throw std::runtime_error("Restart assertion failed");}
+void checked(bool b,int line){if(!b)throw std::runtime_error("Restart assertion failed at line "+std::to_string(line));}
+#define check(b) checked((b),__LINE__)
 template<class F> void rejected(F f){bool bad=false;try{f();}catch(...){bad=true;}check(bad);}
 Blob bytes(size_t n){Blob b(n);for(size_t i=0;i<n;++i)b[i]=static_cast<unsigned char>(i*31);return b;}
 struct FaultStore:StateStore{
@@ -193,7 +194,7 @@ int main(int argc,char** argv){
             restored.receive(h.a,offer.data,h.now+280);restored.tick(h.now+281,[](const std::string&){return 1;},[&](const std::string&,const Blob&){++sends;return true;});check(sends==1);
         }
         {
-            Harness h(root/L"preparation-journal-backoff");write(h.source,bytes(100001));
+            Harness h(root/L"preparation-journal-backoff");write(h.source,bytes(4*1024*1024));
             FaultStore fault(*h.ja);TransferManager manager([]{return std::make_unique<windows::Sha256>();},&fault);
             manager.offer(h.b,h.id,std::make_unique<windows::FileSource>(h.source.wstring()),h.now);
             check(manager.hasPreparationWork(h.now));fault.broken=true;unsigned sends=0;

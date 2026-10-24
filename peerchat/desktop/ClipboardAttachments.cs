@@ -11,6 +11,17 @@ using System.Windows.Media.Imaging;
 namespace PeerChatDesktop {
 public static class ClipboardAttachments {
     public const int MaximumPixels=16*1024*1024,MaximumPngBytes=16*1024*1024;
+    public static bool HasFiles(IDataObject data){return data!=null&&data.GetDataPresent(DataFormats.FileDrop);}
+    public static string[] ReadFiles(IDataObject data){
+        var files=HasFiles(data)?data.GetData(DataFormats.FileDrop) as string[]:null;
+        if(files==null||files.Length==0||files.Length>4)throw new InvalidDataException("Paste up to four regular files at a time.");
+        var result=(string[])files.Clone();
+        foreach(var path in result){if(String.IsNullOrWhiteSpace(path)||!Path.IsPathRooted(path)||!File.Exists(path)||
+            (File.GetAttributes(path)&(FileAttributes.Directory|FileAttributes.ReparsePoint))!=0)
+            throw new InvalidDataException("Paste regular files, not folders or shortcuts to files.");}
+        return result;
+    }
+    public static bool HasAttachment(IDataObject data){return HasFiles(data)||HasImage(data);}
     public static bool HasImage(IDataObject data){return data!=null&&!data.GetDataPresent(DataFormats.UnicodeText)&&!data.GetDataPresent(DataFormats.Text)&&(data.GetDataPresent(DataFormats.Bitmap)||data.GetDataPresent(DataFormats.Dib));}
     public static BitmapSource ReadImage(IDataObject data){
         if(data==null)throw new InvalidDataException("Clipboard image unavailable.");
@@ -27,7 +38,7 @@ public static class ClipboardAttachments {
         Validate(image);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));
         using(var output=new MemoryStream()){encoder.Save(output);if(output.Length>MaximumPngBytes)throw new InvalidDataException("Clipboard images are limited to 16 MiB. Save the image and attach the file instead.");return output.ToArray();}
     }
-    public static BitmapSource Preview(BitmapSource image){double scale=Math.Min(1,Math.Min(320.0/image.PixelWidth,160.0/image.PixelHeight));var preview=new TransformedBitmap(image,new ScaleTransform(scale,scale));preview.Freeze();return preview;}
+    public static BitmapSource Preview(BitmapSource image){double scale=Math.Min(1,Math.Min(360.0/image.PixelWidth,480.0/image.PixelHeight));var preview=new TransformedBitmap(image,new ScaleTransform(scale,scale));preview.Freeze();return preview;}
     static void Validate(BitmapSource image){if(image==null||image.PixelWidth<=0||image.PixelHeight<=0||image.PixelWidth>16384||image.PixelHeight>16384||(long)image.PixelWidth*image.PixelHeight>MaximumPixels)throw new InvalidDataException("Clipboard images are limited to 16 million pixels.");}
     static BitmapSource ReadDib(byte[] dib){
         if(dib.Length<40||dib.Length>64L*1024*1024)throw new InvalidDataException("Clipboard DIB is invalid or too large.");
@@ -51,13 +62,23 @@ public partial class DesktopApplication {
     void BindClipboardAttachments(){
         var composer=Find<TextBox>("Composer");
         composer.PreviewKeyDown+=(s,e)=>{
-            if(e.Key!=Key.V||(Keyboard.Modifiers&ModifierKeys.Control)==0||(Keyboard.Modifiers&ModifierKeys.Alt)!=0)return;
+            if(!((e.Key==Key.V&&(Keyboard.Modifiers&ModifierKeys.Control)!=0)||(e.Key==Key.Insert&&(Keyboard.Modifiers&ModifierKeys.Shift)!=0))||(Keyboard.Modifiers&ModifierKeys.Alt)!=0)return;
             IDataObject data;try{data=Clipboard.GetDataObject();}catch(System.Runtime.InteropServices.COMException){return;}
-            if(!ClipboardAttachments.HasImage(data))return;
-            e.Handled=true;_ = PrepareClipboardImage(data);
+            if(!ClipboardAttachments.HasAttachment(data))return;
+            e.Handled=true;_ = PasteClipboardAttachment(data);
         };
-        DataObject.AddPastingHandler(composer,(s,e)=>{if(!ClipboardAttachments.HasImage(e.DataObject))return;e.CancelCommand();_ = PrepareClipboardImage(e.DataObject);});
+        DataObject.AddPastingHandler(composer,(s,e)=>{if(!ClipboardAttachments.HasAttachment(e.DataObject))return;e.CancelCommand();_ = PasteClipboardAttachment(e.DataObject);});
         window.Closed+=(s,e)=>directImageDraft=null;
+    }
+    async Task PasteClipboardAttachment(IDataObject data){
+        try{
+            if(!ClipboardAttachments.HasFiles(data)){await PrepareClipboardImage(data);return;}
+            var files=ClipboardAttachments.ReadFiles(data);
+            // Capture the selected recipient before the delivery chooser awaits.
+            // Both send paths retain their existing profile and recipient checks.
+            if(model.Groups)await SendGroupFiles(model.SelectedGroup,files);
+            else await SendChatFiles(model.Selected,files);
+        }catch(Exception error){if(!closing)Notify("Files could not be pasted: "+error.Message);}
     }
     async Task PrepareClipboardImage(IDataObject data){
             if(model.Groups){await PrepareGroupClipboardImage(data);return;}
@@ -70,26 +91,12 @@ public partial class DesktopApplication {
             finally{directImageDraftPreparing=false;if(!closing)RefreshGroupImageDraft();}
     }
     bool DirectDraftVisible(){return directImageDraft!=null&&!model.Groups&&model.Selected!=null&&model.Selected.Contact!=null&&directImageDraft.Matches(model.Selected.ConversationId,model.Selected.Contact.peer,profileSessionGeneration,discovery);}
-    async Task<bool> SendDirectImageDraft(){
-        if(model.Groups)return false;
-        if(directImageDraftPreparing||directImageDraftSending)return true;
-        var draft=directImageDraft;if(draft==null||!DirectDraftVisible())return false;
-        if(localProfile==null||profileManager==null){Notify("Image source storage is unavailable. Your draft was kept.");return true;}
-        var conversation=model.Selected;bool accountConversation=conversation.AccountId>0;var mode=DmAttachmentDeliveryMode.Cancel;
-        if(accountConversation){directImageDraftSending=true;RefreshGroupImageDraft();try{mode=await SelectDmAttachmentDelivery(conversation);}finally{directImageDraftSending=false;RefreshGroupImageDraft();}if(mode==DmAttachmentDeliveryMode.Cancel||draft!=directImageDraft||!DirectDraftVisible())return true;}
-        ulong generation=profileSessionGeneration;var owner=discovery;string profileId=localProfile.Id;
-        directImageDraftSending=true;RefreshGroupImageDraft();string path=null,sourceDirectory=null;bool accepted=false;
-        try{
-            sourceDirectory=Path.Combine(profileManager.ProfilePath(profileId),"ClipboardAttachments",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(sourceDirectory);
-            path=Path.Combine(sourceDirectory,draft.Name);
-            using(var file=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)){await file.WriteAsync(draft.Png,0,draft.Png.Length);file.Flush(true);}
-            if(closing||generation!=profileSessionGeneration||owner!=discovery||localProfile.Id!=profileId)return true;
-            await Task.Run(()=>core.FileTransfer(accountConversation?21u:1u,draft.Peer,accountConversation?DmAttachmentDelivery.Target(mode,conversation.AccountId):"",path));accepted=true;
-            if(directImageDraft==draft){directImageDraft=null;RefreshGroupImageDraft();}
-            await RefreshChatAttachments();
-        }catch(Exception error){if(!closing)Notify("Image could not be durably queued. Your draft was kept. "+error.Message);}
-        finally{if(!accepted){if(path!=null)try{File.Delete(path);}catch{}if(sourceDirectory!=null)try{Directory.Delete(sourceDirectory);}catch{}}directImageDraftSending=false;if(!closing)RefreshGroupImageDraft();}
-        return true;
+    Task<bool> SendDirectImageDraft(){
+        if(model.Groups)return Task.FromResult(false);
+        var draft=directImageDraft;if(draft==null||!DirectDraftVisible())return Task.FromResult(false);
+        var conversation=model.Selected;directImageDraft=null;RefreshGroupImageDraft();
+        BeginDirectAttachment(conversation,new LocalAttachmentSource(draft.Name,draft.Png,draft.Preview));
+        return Task.FromResult(true);
     }
 }
 }

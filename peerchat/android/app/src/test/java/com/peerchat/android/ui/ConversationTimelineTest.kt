@@ -57,11 +57,11 @@ class ConversationTimelineTest {
         compose.setContent{PeerChatTheme(true){ConversationScreen(value.value,PeerChatUiState(connection=ConnectionState.Online),{})}}
         compose.runOnIdle{value.value=value.value.copy(messages=value.value.messages+text("Reply after picture",300,2))}
         val first=compose.onNodeWithText("Before picture").fetchSemanticsNode().boundsInRoot
-        val picture=compose.onNodeWithText(f.name).fetchSemanticsNode().boundsInRoot
+        val picture=compose.onNodeWithTag("attachment-footer-${f.id}").fetchSemanticsNode().boundsInRoot
         val reply=compose.onNodeWithText("Reply after picture").fetchSemanticsNode().boundsInRoot
         assertTrue(first.top<picture.top&&picture.top<reply.top)
         compose.runOnIdle{value.value=value.value.copy(attachments=listOf(f.copy(state=3,done=500)))}
         compose.onNodeWithText("Reply after picture").assertExists()
-        assertTrue(compose.onNodeWithText(f.name).fetchSemanticsNode().boundsInRoot.top<compose.onNodeWithText("Reply after picture").fetchSemanticsNode().boundsInRoot.top)
+        assertTrue(compose.onNodeWithTag("attachment-footer-${f.id}").fetchSemanticsNode().boundsInRoot.top<compose.onNodeWithText("Reply after picture").fetchSemanticsNode().boundsInRoot.top)
     }
 }

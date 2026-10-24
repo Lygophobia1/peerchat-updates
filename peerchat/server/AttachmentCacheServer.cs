@@ -8,6 +8,17 @@ sealed partial class DiscoveryServer {
  AttachmentCacheRuntime attachmentCache;
  AttachmentCacheRequests attachmentCacheRequests;
  long attachmentCacheCleanupAt;
+ partial void ProcessAttachmentCacheBatch(long account,string device,Func<bool> current,IList<Dictionary<string,object>> requests,ref List<Dictionary<string,object>> replies,ref long[] components){
+  using(var appendTiming=new CacheAppendTimings())try{lock(attachmentCacheGate){
+   if(!config.AttachmentCache.Enabled||!AttachmentCacheTransportReady||!DirectCacheTransportReady)return;
+   if(attachmentCache==null){
+    try{var opened=new AttachmentCacheRuntime(config.AttachmentCache,()=>DateTimeOffset.UtcNow.ToUnixTimeSeconds());try{attachmentCacheRequests=new AttachmentCacheRequests(new AttachmentCacheAdmission(accounts,opened),DirectCacheTransportReady);attachmentCache=opened;}catch{opened.Dispose();throw;}}
+    catch(Exception error){if(error is OutOfMemoryException)throw;return;}
+   }
+   replies=attachmentCacheRequests.ExecuteDirectAppendBatch(account,device,current,requests);
+   MaintainAttachmentCache();
+  }}finally{components=appendTiming.Snapshot();}
+ }
  // Ordinary shipping builds stay closed. The explicitly built candidate is
  // usable only with administrator-enabled, ownership-checked cache storage.
  // It includes no PEERCHAT_CACHE_TESTS fault injection.
@@ -32,8 +43,12 @@ sealed partial class DiscoveryServer {
      catch{opened.Dispose();throw;}
     }catch(Exception error){if(error is OutOfMemoryException)throw;reply["state"]="cache_storage_unavailable";return;}
    }
-   reply=attachmentCacheRequests.Execute(account,device,current,request);
-   MaintainAttachmentCache();
+   string operation=Text(request,"type");
+   using(var appendTiming=operation=="cache_append"||operation=="cache_dm_append"?new CacheAppendTimings():null){
+    long started=appendTiming==null?0:Stopwatch.GetTimestamp();
+    try{reply=attachmentCacheRequests.Execute(account,device,current,request);MaintainAttachmentCache();}
+    finally{if(appendTiming!=null)RecordTiming("cache_append_components",operation,Text(request,"rpcRequestId"),started,appendTiming.Snapshot());}
+   }
   }
   // Dispatch outside the storage gate and only after authenticated publication
   // committed. Rejected requests cannot wake or acknowledge a recipient.

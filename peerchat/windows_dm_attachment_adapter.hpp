@@ -1,5 +1,6 @@
 #pragma once
 #include "dm_attachment_application.hpp"
+#include "windows_attachment_thumbnail.hpp"
 #include "windows_download_save.hpp"
 #include "portable/dm_attachment_transfer_storage.hpp"
 
@@ -48,9 +49,10 @@ public:
   return std::make_unique<CipherSource>(std::move(source),location);
  }
  std::unique_ptr<transfer::Sink> receive(const transfer::DurableState& d){protocol::check(d.purpose==transfer::Purpose::DirectCacheCiphertext&&!d.sending);confined(d.location,received_);return FileSink::reopen(d);}
- Application::Platform platform(){Application::Platform io;
+ Application::Platform platform(){Application::Platform io;io.thumbnail=[](transfer::Source& source){return attachment_thumbnails::create(source);};
   io.wall=[](){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());};io.monotonic=[](){return static_cast<std::uint64_t>(GetTickCount64());};io.hash=[](){return std::make_unique<transfer::windows::Sha256>();};
   io.stage=[this](const transfer::Metadata& m){return std::make_unique<StagingSink>(std::make_unique<FileSink>(cipher_,m,nullptr,true));};io.receiveSink=[this](const transfer::Metadata& m){return std::make_unique<FileSink>(received_,m,nullptr,true);};io.location=[](transfer::Sink& sink){return sink.resumeToken();};io.reopen=[this](const Blob& token,const transfer::Metadata& m){return reopen(token,m);};
+  io.discardCipher=[this](const Blob& location,const transfer::Metadata& m){auto token=unwrap(location);protocol::Reader tag(location);confined(token,tag.string()==Domain?cipher_:received_);transfer::windows::discardCiphertext(token,m);};
   io.reopenPlain=[](const Blob& token,const transfer::Metadata& m){transfer::DurableState d;d.purpose=transfer::Purpose::PeerFile;d.metadata=m;d.location=token;auto source=transfer::windows::reopenSource(d);protocol::check(source&&source->name()==m.name&&source->size()==m.size);return source;};
   io.resumeStage=[this](const transfer::Metadata& m,const Blob& wrapped)->std::unique_ptr<transfer::Sink>{protocol::check(protocol::id(m.id,32)&&m.name=="ciphertext.peerchat"&&m.size>=36&&m.size<=transfer::MaxCacheCipherBytes);protocol::Reader wrapper(wrapped);protocol::check(wrapper.type()==protocol::FileTransfer&&wrapper.string()==Domain);auto token=wrapper.bytes();wrapper.end();confined(token,cipher_);protocol::Reader paths(token);auto partial=paths.text(),final=paths.text();protocol::check(std::filesystem::path(partial).filename()==unicode::decode(m.id+".peerchat-part")&&std::filesystem::path(final).filename()==unicode::decode(m.id+"-ciphertext.peerchat"));
    auto attrs=GetFileAttributesW(partial.c_str());if(attrs==INVALID_FILE_ATTRIBUTES){transfer::windows::require(GetLastError()==ERROR_FILE_NOT_FOUND);transfer::windows::require(GetFileAttributesW(final.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);return std::make_unique<StagingSink>(std::make_unique<FileSink>(cipher_,m,nullptr,true));}

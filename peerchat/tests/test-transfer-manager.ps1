@@ -12,4 +12,8 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Transfer restart build failed'}
     & "$OutputDirectory\transfer-restart-test.exe"
     if($LASTEXITCODE -ne 0){throw 'Transfer restart regression failed'}
+    & g++ -std=c++17 -O2 -Wall -Wextra -Werror -I. tests/transfer_large_preparation_test.cpp -o "$OutputDirectory\transfer-large-preparation-test.exe" -lbcrypt -lcrypt32 -lpsapi
+    if($LASTEXITCODE -ne 0){throw 'Large transfer build failed'}
+    & "$OutputDirectory\transfer-large-preparation-test.exe"
+    if($LASTEXITCODE -ne 0){throw 'Large transfer regression failed'}
 } finally {Pop-Location}

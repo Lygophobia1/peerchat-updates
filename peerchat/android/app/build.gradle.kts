@@ -11,6 +11,10 @@ apply(from = "../hpke-dependency.gradle.kts")
 val uiOnly = false
 // Isolated emulator package cannot replace the user's signed application/data.
 val voiceIntegrationTest = providers.gradleProperty("peerchatVoiceIntegrationTest").orNull == "true"
+// Separate fresh default profiles for cold/background runtime tests. Never
+// replace the production app or the retained voice/attachment fixture profiles.
+val backgroundIntegrationTest = providers.gradleProperty("peerchatBackgroundIntegrationTest").orNull == "true"
+require(!backgroundIntegrationTest || voiceIntegrationTest)
 val voiceEnabled = providers.gradleProperty("peerchatVoiceEnabled").orNull == "true"
 val nativeAbi = providers.gradleProperty("peerchatTestAbi").orElse("arm64-v8a").get()
 require(nativeAbi == "arm64-v8a" || (voiceIntegrationTest && nativeAbi == "x86_64"))
@@ -62,7 +66,7 @@ android {
     buildToolsVersion = "34.0.0"
     ndkVersion = "27.0.12077973"
     defaultConfig {
-        applicationId = if(voiceIntegrationTest) "com.peerchat.android.voiceintegration" else "com.peerchat.android"
+        applicationId = if(backgroundIntegrationTest) "com.peerchat.android.backgroundintegration" else if(voiceIntegrationTest) "com.peerchat.android.voiceintegration" else "com.peerchat.android"
         minSdk = 26
         targetSdk = 35
         versionCode = 2

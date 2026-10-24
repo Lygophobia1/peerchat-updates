@@ -4,6 +4,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalHistoryProjectionTest {
+    @Test fun lateBackgroundPageCannotOverwriteLiveMessagesOrLocalDeletion(){
+        val cache=LocalHistoryProjection();val f=friend(1)
+        val ticket=cache.ticket(f)
+        val row=MessageSnapshot("c".repeat(32),f.peerId,"b".repeat(64),1,1,1,2,"live")
+        cache.observeNativeMessage(f,row,1)
+        assertEquals(listOf(row),cache.rows(f))
+        assertFalse(cache.putIfCurrent(f,emptyList(),2,ticket))
+        val beforeDelete=cache.ticket(f);cache.invalidateUrgent(f)
+        assertFalse(cache.putIfCurrent(f,listOf(row),3,beforeDelete))
+        val beforeClose=cache.ticket(f);cache.clear()
+        assertFalse(cache.putIfCurrent(f,listOf(row),4,beforeClose))
+    }
+    @Test fun unrelatedConversationDoesNotInvalidateBackgroundResult(){
+        val cache=LocalHistoryProjection();val f=friend(1);val ticket=cache.ticket(f)
+        cache.invalidateUrgent(friend(2))
+        assertTrue(cache.putIfCurrent(f,emptyList(),1,ticket))
+    }
+    @Test fun cachedTransfersRefreshWithoutDirectPeerConnections(){
+        val cadence=OwnerProjectionCadence()
+        cadence.published(100,false,true)
+        assertFalse(cadence.due(1099));assertTrue(cadence.due(1100))
+        cadence.published(1100,false,false)
+        assertFalse(cadence.due(2100))
+        cadence.remainingDirty(1500) // A cache reply received while otherwise idle.
+        assertFalse(cadence.due(2499));assertTrue(cadence.due(2500))
+    }
+
     @Test fun idleSnapshotsAreReusedButEventsNeverWaitForReconciliation(){
         val projection=LocalHistoryProjection();val f=friend(1);var reads=0
         repeat(60){projection.refreshOne(listOf(f),it*1000L){reads++;emptyList()}}
@@ -99,5 +126,19 @@ class OwnerProjectionCadenceTest {
         cadence.published(100,true)
         assertFalse(cadence.due(1099))
         assertTrue(cadence.due(1100))
+    }
+    @Test fun localDeletionDropsCachedRowsAndRejectsStaleIncrementalReinsertionUntilReload(){
+        val cache=LocalHistoryProjection();val target=FriendIdentity(1,"target","a".repeat(64),false);val other=target.copy(accountId=2)
+        val deleted=MessageSnapshot("c".repeat(32),target.peerId,"b".repeat(64),1,1,1,2,"fixture")
+        val retained=deleted.copy(id="d".repeat(32))
+        cache.put(target,listOf(deleted,retained),0);cache.put(other,listOf(retained),0)
+        cache.discardLocal(target,setOf(deleted.id))
+        assertEquals(listOf(retained),cache.rows(target));assertEquals(listOf(retained),cache.rows(other))
+        assertFalse(cache.applyNativeMessage(target,deleted,1))
+        val reads=mutableListOf<Long>()
+        cache.refreshOne(listOf(other,target),2){reads+=it.accountId;listOf(retained)}
+        assertEquals(listOf(target.accountId),reads)
+        cache.discardLocal(target,null);assertTrue(cache.rows(target).isEmpty())
+        assertEquals(listOf(retained),cache.rows(other))
     }
 }

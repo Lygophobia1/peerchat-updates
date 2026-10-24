@@ -16,12 +16,17 @@ internal class VoiceConsentRegistry<T>(private val now:()->Long=System::nanoTime
         return consent
     }
     fun valid(token:String):Boolean= pending?.let{it.consent.token==token&&now()<it.expires}==true
+    fun preparing():Boolean=pending?.let{now()<it.expires}==true
     fun claim(token:String):Pair<VoiceConsent,T> {
         val value=checkNotNull(pending?.takeIf{valid(token)&&!it.claimed}){"Call action expired or already used"}
         value.claimed=true
         return value.consent to value.binding
     }
     fun current(token:String,binding:T)=valid(token)&&pending?.binding===binding
+    /** A call's explicit lease outlives incidental UI and wake leases. Keep
+     * consent plus exact authentication checks, without borrowing a UI epoch. */
+    fun operationScope(gate:Any,token:String,binding:T,authorized:()->Boolean):ScopedBackendWork =
+        ScopedBackendWork(gate){current(token,binding)&&authorized()}
     fun clear(token:String){if(pending?.consent?.token==token)pending=null}
     fun reset(){pending=null}
 }

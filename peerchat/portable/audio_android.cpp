@@ -1,5 +1,6 @@
 #include "../audio.hpp"
 #include "audio_android_buffer.hpp"
+#include "../rnnoise_capture.hpp"
 #include <jni.h>
 #include <array>
 #include <atomic>
@@ -120,3 +121,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_peerchat_android_platform_audio_Andro
 }
 extern "C" JNIEXPORT void JNICALL Java_com_peerchat_android_platform_audio_AndroidAudioDevice_failed(JNIEnv*,jclass,jlong token){auto state=find(token);if(state){std::lock_guard<std::mutex> lock(state->mutex);state->active=false;state->telemetry={};state->error=L"Android audio device disconnected or permission revoked.";}}
 }
+
+extern "C" JNIEXPORT void JNICALL Java_com_peerchat_android_platform_audio_AndroidAudioDevice_automaticNoiseControl(JNIEnv*,jclass,jboolean enabled){peerchat::androidAutomaticNoiseControl=enabled==JNI_TRUE;}
+
+extern "C" JNIEXPORT void JNICALL Java_com_peerchat_android_platform_audio_AndroidAudioDevice_noiseControlLevel(JNIEnv*,jclass,jint level){peerchat::androidAutomaticNoiseControlLevel=static_cast<unsigned>(std::clamp(level,0,2));}

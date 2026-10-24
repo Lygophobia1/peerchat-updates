@@ -56,7 +56,7 @@ struct Side {
         endpoint=std::make_unique<portable::ReliableEndpoint>(profile,store,*sessions,*deliveries,friends,session::SessionEpoch{1},session::TransportInstanceId{1},std::move(tls),remote,route,now,std::nullopt,
             [&](const std::string& peer,const Blob& frame,std::uint64_t time){
                 stage="transfer_receive";++frames;maxPlainFrame=std::max<std::uint64_t>(maxPlainFrame,frame.size());
-                transfers.capability(peer,1,endpoint->permitsTransferPipeline());transfers.receive(peer,frame,time);
+                transfers.capability(peer,1,endpoint->permitsTransferPipeline(),endpoint->permitsTransferPreparation());transfers.receive(peer,frame,time);
             });
         // Same accepted defaults, with the existing unchanged cap and bounds.
         transfers.defaults({transfer::ExtendedChunkBytes,16,10000000},10000000);
@@ -73,7 +73,7 @@ struct Side {
             protocol::check(endpoint->permitsTransferPipeline());
             if(!offered){stage="local_offer";transfers.offer(remote,Storage::newMessageId(),std::make_unique<transfer::windows::FileSource>(sourcePath),now);offered=true;}
             for(const auto& row:transfers.snapshots())if(row.state==transfer::State::AwaitingAcceptance){stage="local_accept";transfers.accept(row.metadata.id,std::make_unique<Sink>(received),now);}
-            for(unsigned i=0;i<10;++i){now+=10;stage="transfer_tick";transfers.capability(remote,1,endpoint->permitsTransferPipeline());
+            for(unsigned i=0;i<10;++i){now+=10;stage="transfer_tick";transfers.capability(remote,1,endpoint->permitsTransferPipeline(),endpoint->permitsTransferPreparation());
                 transfers.tick(now,[](const std::string&){return 1;},[&](const std::string&,const Blob& bytes){return endpoint->sendTransfer(bytes);});}
         }
         stage="opaque_output";auto output=endpoint->takeOutput();protocol::check(output.size()<=65536);maxEncryptedOutput=std::max<std::uint64_t>(maxEncryptedOutput,output.size());return output;

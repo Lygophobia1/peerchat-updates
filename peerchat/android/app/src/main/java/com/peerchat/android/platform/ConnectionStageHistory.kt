@@ -13,6 +13,11 @@ internal class ConnectionStageHistory(private val wall:()->Long=System::currentT
         if(nativeRequestId.isNotEmpty()&&!nativeRequestId.matches(Regex("[0-9a-f]{32}")))return
         add("network_rpc operation=$operation monotonic_ms=${monotonic()/1_000_000} elapsed_ms=${elapsedMilliseconds.coerceAtLeast(0)} rpc_request_id=$rpcRequestId native_request_id=${nativeRequestId.ifEmpty{"none"}}")
     }
+    internal fun channelFailure(label:String,phase:String,failure:Exception){
+        val channel=if(label in setOf("cache_rpc","delivery_rpc","rpc"))label else "other"
+        val stage=if(phase in setOf("opening","tls_context_ready","server_tcp_connected","server_tls_ready"))phase else "other"
+        add("network_channel_failed channel=$channel stage=$stage reason=${reason(failure)}")
+    }
     fun <T> measure(operation:String,block:()->T):T {
         val op=operation(operation);val id=synchronized(this){++sequence};val started=monotonic()
         add("network_event=$id utc_ms=${wall()} operation=$op stage=started")

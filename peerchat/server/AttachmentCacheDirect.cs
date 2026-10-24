@@ -37,6 +37,7 @@ sealed partial class AccountDatabase {
  internal void EnsureDirectCacheRelationships(){lock(gate){Execute("BEGIN IMMEDIATE;");try{
   Execute("CREATE TABLE IF NOT EXISTS attachment_dm_relationships(account_low INTEGER NOT NULL,account_high INTEGER NOT NULL,binding TEXT NOT NULL,PRIMARY KEY(account_low,account_high));"+
    "CREATE TABLE IF NOT EXISTS attachment_dm_capabilities(account INTEGER NOT NULL,device TEXT NOT NULL,key_id TEXT NOT NULL,generation INTEGER NOT NULL,proof BLOB NOT NULL,PRIMARY KEY(device,key_id));"+
+   "CREATE TABLE IF NOT EXISTS attachment_dm_identity_proofs(account INTEGER NOT NULL,device TEXT NOT NULL,key_id TEXT NOT NULL,generation INTEGER NOT NULL,proof BLOB NOT NULL,PRIMARY KEY(device,key_id));"+
    "CREATE TRIGGER IF NOT EXISTS attachment_dm_friend_insert AFTER INSERT ON friendships BEGIN INSERT INTO attachment_dm_relationships VALUES(NEW.account_low,NEW.account_high,lower(hex(randomblob(16)))) ON CONFLICT(account_low,account_high) DO UPDATE SET binding=excluded.binding; END;"+
    "CREATE TRIGGER IF NOT EXISTS attachment_dm_friend_delete AFTER DELETE ON friendships BEGIN DELETE FROM attachment_dm_relationships WHERE account_low=OLD.account_low AND account_high=OLD.account_high; END;"+
    "CREATE TRIGGER IF NOT EXISTS attachment_dm_block_insert AFTER INSERT ON account_blocks BEGIN UPDATE attachment_dm_relationships SET binding=lower(hex(randomblob(16))) WHERE account_low=MIN(NEW.blocker_id,NEW.blocked_id) AND account_high=MAX(NEW.blocker_id,NEW.blocked_id); END;"+
@@ -47,26 +48,66 @@ sealed partial class AccountDatabase {
  string DirectCacheRelationship(long sender,long recipient){return ScalarText(database,"SELECT binding FROM attachment_dm_relationships WHERE account_low="+Low(sender,recipient)+" AND account_high="+High(sender,recipient));}
  bool DirectCacheKeyAvailable(MailboxProtocol.Binding binding,bool retired){return AttachmentKeyAvailable(binding,retired)&&AttachmentRecipientKey(binding.Account,binding.Device)!=null;}
  bool DirectCacheCapable(MailboxProtocol.Binding binding){return ScalarLong(database,"SELECT count(*) FROM attachment_dm_capabilities WHERE account="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation)==1;}
+ // Capability metadata never establishes device authority. Missing registration
+ // means the legacy body, including after a client downgrade on the same key.
+ internal long AttachmentBodyVersion(MailboxProtocol.Binding binding){lock(gate){
+  if(ScalarLong(database,"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='attachment_dm_capabilities'")==0)return 1;
+  var proof=MailboxBlob("SELECT proof FROM attachment_dm_capabilities WHERE account="+binding.Account+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation);
+  if(proof==null)return 1;
+  int at=4;GroupRosterProof.Text(proof,ref at,64);GroupRosterProof.Number(proof,ref at);GroupRosterProof.Text(proof,ref at,64);GroupRosterProof.Text(proof,ref at,32);GroupRosterProof.Number(proof,ref at);
+  return (long)GroupRosterProof.Number(proof,ref at);
+ }}
+ internal long DirectThumbnailBodyVersion(long account,string device,long recipient,Func<bool> current,byte[] audience){lock(gate){
+  var parsed=DirectCacheAudience.Parse(PrepareDirectCache(account,device,recipient,current,audience),account,device,recipient);
+  return parsed.Recipients.Concat(new[]{parsed.Source}).All(b=>AttachmentBodyVersion(b)>=2)?2:1;
+ }}
  internal bool RegisterDirectCache(long account,string device,Func<bool> current,byte[] wire){lock(cacheAuthorityGate)lock(gate){
   try{
    if(!current()||wire==null||wire.Length>1024||wire.Length<4||wire[0]!=80||wire[1]!=84||wire[2]!=1||wire[3]!=30)throw new InvalidOperationException();
    int at=4;if(GroupRosterProof.Text(wire,ref at,64)!="PeerChat/dm-cache-device/v1")throw new InvalidOperationException();
    ulong owner=GroupRosterProof.Number(wire,ref at);string who=GroupRosterProof.Text(wire,ref at,64),keyId=GroupRosterProof.Text(wire,ref at,32);ulong generation=GroupRosterProof.Number(wire,ref at),body=GroupRosterProof.Number(wire,ref at),codec=GroupRosterProof.Number(wire,ref at);var identity=GroupRosterProof.Bytes(wire,ref at,72);int end=at;var signature=GroupRosterProof.Bytes(wire,ref at,64);
    var key=AttachmentRecipientKey(account,device);if(key==null)throw new InvalidOperationException();var binding=MailboxProtocol.Binding.Parse(key);
-   if(at!=wire.Length||owner!=(ulong)account||who!=device||binding.Key!=keyId||generation!=(ulong)binding.Generation||body!=1||codec!=1||!MailboxProtocol.Verify(wire.Take(end).ToArray(),signature,identity,device))throw new InvalidOperationException();
+   if(at!=wire.Length||owner!=(ulong)account||who!=device||binding.Key!=keyId||generation!=(ulong)binding.Generation||(body!=1&&body!=2)||codec!=1||!MailboxProtocol.Verify(wire.Take(end).ToArray(),signature,identity,device))throw new InvalidOperationException();
    var previous=MailboxBlob("SELECT proof FROM attachment_dm_capabilities WHERE device="+Quote(device)+" AND key_id="+Quote(keyId));
+   var legacy=MailboxBlob("SELECT proof FROM attachment_dm_identity_proofs WHERE account="+account+" AND device="+Quote(device)+" AND key_id="+Quote(keyId)+" AND generation="+binding.Generation);
+   if(legacy==null){
+    var identityProof=body==1?wire:previous!=null&&AttachmentBodyVersion(binding)==1?previous:null;
+    if(identityProof==null)throw new InvalidOperationException("cache_dm_legacy_identity_required");
+    Execute("INSERT INTO attachment_dm_identity_proofs VALUES("+account+","+Quote(device)+","+Quote(keyId)+","+binding.Generation+","+MailboxData(identityProof)+");");
+   }
    // Different valid ECDSA retry signatures do not change capability semantics.
+   // A current authenticated app version may upgrade OR downgrade optional bodies.
    if(previous==null)Execute("INSERT INTO attachment_dm_capabilities VALUES("+account+","+Quote(device)+","+Quote(keyId)+","+binding.Generation+","+MailboxData(wire)+");");
+   else if(AttachmentBodyVersion(binding)!=(long)body)Execute("UPDATE attachment_dm_capabilities SET proof="+MailboxData(wire)+" WHERE account="+account+" AND device="+Quote(device)+" AND key_id="+Quote(keyId)+" AND generation="+binding.Generation);
    return true;
   }catch(Exception error){if(error is OutOfMemoryException)throw;throw new InvalidOperationException("cache_dm_capability_binding_invalid");}
  }}
- internal byte[] PrepareDirectCache(long account,string device,long recipient,Func<bool> current){lock(gate){
+ internal byte[] PrepareDirectCache(long account,string device,long recipient,Func<bool> current,byte[] selected=null){lock(gate){
   if(!current()||!MailboxFriendScope(account,device,recipient))throw new InvalidOperationException("cache_dm_not_authorized");
   string relationship=DirectCacheRelationship(account,recipient);var source=AttachmentRecipientKey(account,device);var recipients=EligibilityBindings(recipient);
   if(!MailboxProtocol.Id(relationship,32)||source==null||recipients.Count==0)throw new InvalidOperationException("cache_dm_verified_keys_required");
   if(!DirectCacheCapable(MailboxProtocol.Binding.Parse(source)))throw new InvalidOperationException("cache_dm_source_upgrade_required");
-  if(recipients.Any(x=>!DirectCacheCapable(MailboxProtocol.Binding.Parse(x.Binding))))throw new InvalidOperationException("cache_dm_recipient_upgrade_required");
+  // Freeze only devices with a signed capability for their CURRENT key.
+  // Legacy devices remain account members but cannot block eligible devices
+  // or receive envelopes/leases for an object outside this frozen audience.
+  recipients=recipients.Where(x=>DirectCacheCapable(MailboxProtocol.Binding.Parse(x.Binding))).ToList();
+  if(recipients.Count==0)throw new InvalidOperationException("cache_dm_recipient_upgrade_required");
+  if(selected!=null){
+   var requested=DirectCacheAudience.Parse(selected,account,device,recipient);
+   if(requested.Relationship!=relationship||!requested.Source.Wire.SequenceEqual(source)||
+      requested.Recipients.Any(b=>!recipients.Any(r=>r.Binding.SequenceEqual(b.Wire))))throw new InvalidOperationException("cache_dm_audience_changed");
+   return requested.Wire;
+  }
   var bytes=DirectCacheAudience.Encode(relationship,source,recipients.Select(x=>x.Binding));DirectCacheAudience.Parse(bytes,account,device,recipient);return bytes;
+ }}
+ internal byte[][] DirectCacheIdentityProofs(long account,string device,long recipient,Func<bool> current,byte[] audience){lock(gate){
+  if(!PrepareDirectCache(account,device,recipient,current,audience).SequenceEqual(audience))throw new InvalidOperationException("cache_dm_audience_changed");
+  var parsed=DirectCacheAudience.Parse(audience,account,device,recipient);
+  return parsed.Recipients.Select(binding=>{
+   var proof=MailboxBlob("SELECT proof FROM attachment_dm_identity_proofs WHERE account="+recipient+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation);
+   if(proof==null&&AttachmentBodyVersion(binding)==1)proof=MailboxBlob("SELECT proof FROM attachment_dm_capabilities WHERE account="+recipient+" AND device="+Quote(binding.Device)+" AND key_id="+Quote(binding.Key)+" AND generation="+binding.Generation);
+   if(proof==null||proof.Length>1024)throw new InvalidOperationException("cache_dm_verified_keys_required");return proof;
+  }).ToArray();
  }}
  // Historical uploader proof is not current request authority. Only a completed,
  // already stored object may use it, and only for its still-active original recipient.
@@ -87,7 +128,7 @@ sealed partial class AccountDatabase {
      DirectCacheRelationship(descriptor.Account,descriptor.RecipientAccount)!=audience.Relationship||
      audience.Source.Account!=descriptor.Account||audience.Source.Device!=descriptor.Sender)throw new InvalidOperationException("cache_dm_authority_stale");
   if(account==descriptor.Account&&device==descriptor.Sender){
-   if(admission&&!PrepareDirectCache(account,device,descriptor.RecipientAccount,current).SequenceEqual(audience.Wire))throw new InvalidOperationException("cache_dm_audience_changed");
+   if(admission&&!PrepareDirectCache(account,device,descriptor.RecipientAccount,current,audience.Wire).SequenceEqual(audience.Wire))throw new InvalidOperationException("cache_dm_audience_changed");
   }else{
    var local=audience.Recipients.FirstOrDefault(x=>x.Account==account&&x.Device==device);
    if(account!=descriptor.RecipientAccount||local==null||!DirectCacheKeyAvailable(local,true))throw new InvalidOperationException("cache_dm_original_recipient_required");
@@ -109,8 +150,10 @@ internal sealed partial class AttachmentCacheRuntime {
 internal sealed partial class AttachmentCacheAdmission {
  internal void EnableDirect(){accounts.EnsureDirectCacheRelationships();}
  internal bool RegisterDirect(long account,string device,Func<bool> current,byte[] proof){return accounts.RegisterDirectCache(account,device,current,proof);}
- internal byte[] PrepareDirect(long account,string device,Func<bool> current,long recipient){return accounts.PrepareDirectCache(account,device,recipient,current);}
+ internal byte[] PrepareDirect(long account,string device,Func<bool> current,long recipient,byte[] selected=null){return accounts.PrepareDirectCache(account,device,recipient,current,selected);}
  internal long DirectPreparationExpires(){return cache.DirectPreparationExpires();}
+ internal long DirectThumbnailBodyVersion(long account,string device,Func<bool> current,long recipient,byte[] audience){return accounts.DirectThumbnailBodyVersion(account,device,recipient,current,audience);}
+ internal byte[][] DirectIdentityProofs(long account,string device,Func<bool> current,long recipient,byte[] audience){return accounts.DirectCacheIdentityProofs(account,device,recipient,current,audience);}
  internal AttachmentCacheRuntime.Status AdmitDirect(long account,string device,Func<bool> current,byte[] wire,byte[] audienceWire){
   var d=AttachmentCacheDescriptor.Parse(wire);Require(d.Direct&&d.Account==account&&d.Sender==device,"cache_scope_or_sender_mismatch");
   var audience=DirectCacheAudience.Parse(audienceWire,d.Account,d.Sender,d.RecipientAccount);
@@ -127,23 +170,24 @@ internal sealed partial class AttachmentCacheAdmission {
   },cache.Inspect(id).Complete);
  }
  internal Dictionary<string,object> DirectContext(long account,string device,Func<bool> current,string id){return AuthorizedDirect(account,device,current,id,d=>{
-  var status=cache.Inspect(id);return new Dictionary<string,object>{{"id",id},{"descriptor",AttachmentCacheRequests.Encode(d.Wire)},{"audience",AttachmentCacheRequests.Encode(cache.DirectAudience(id).Wire)},{"expiresUtc",cache.ContextExpires(id)},{"ciphertextSize",status.Size},{"durableOffset",status.Offset},{"ciphertextComplete",status.Complete},{"dataEncoding","base64url"}};
+  var status=cache.Inspect(id);return new Dictionary<string,object>{{"id",id},{"descriptor",AttachmentCacheRequests.Encode(d.Wire)},{"audience",AttachmentCacheRequests.Encode(cache.DirectAudience(id).Wire)},{"expiresUtc",cache.ContextExpires(id,false)},{"ciphertextSize",status.Size},{"durableOffset",status.Offset},{"ciphertextComplete",status.Complete},{"dataEncoding","base64url"}};
  });}
  internal AttachmentCacheRuntime.Status InspectDirectUpload(long account,string device,Func<bool> current,string lease){return InspectDirect(account,device,current,cache.LeaseObject(lease,device,true));}
  internal string AcquireDirect(long account,string device,Func<bool> current,string id,bool upload){return AuthorizedDirect(account,device,current,id,d=>{Require(!upload||d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");return cache.Acquire(id,device,upload);});}
  internal AttachmentCacheRuntime.Status InspectDirect(long account,string device,Func<bool> current,string id){return AuthorizedDirect(account,device,current,id,d=>cache.Inspect(id));}
  internal long AppendDirect(long account,string device,Func<bool> current,string lease,long offset,byte[] bytes){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,true),d=>cache.Append(lease,offset,bytes));}
- internal bool CompleteDirect(long account,string device,Func<bool> current,string lease){
-  string id=cache.LeaseObject(lease,device,true);AuthorizedDirect(account,device,current,id,d=>true);var evidence=cache.VerifyCompletion(lease);
-  return AuthorizedDirect(account,device,current,id,d=>{Require(cache.LeaseObject(lease,device,true)==id,"cache_completion_evidence_mismatch");cache.CommitCompletion(lease,evidence);return true;});
+ internal long[] AppendDirectBatch(long account,string device,Func<bool> current,string lease,IList<KeyValuePair<long,byte[]>> chunks){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,true),d=>cache.AppendBatch(lease,chunks));}
+ internal bool CompleteDirect(long account,string device,Func<bool> current,string lease,bool bounded=false){
+  string id=cache.LeaseObject(lease,device,true);AuthorizedDirect(account,device,current,id,d=>true);var evidence=bounded?cache.VerifyCompletionStep(lease):cache.VerifyCompletion(lease);
+  return AuthorizedDirect(account,device,current,id,d=>{Require(cache.LeaseObject(lease,device,true)==id,"cache_completion_evidence_mismatch");if(evidence==null)return false;cache.CommitCompletion(lease,evidence);return true;});
  }
  internal byte[] ReadDirect(long account,string device,Func<bool> current,string lease,long offset,int maximum){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,false),d=>cache.Read(lease,offset,maximum));}
- internal bool ReleaseDirect(long account,string device,Func<bool> current,string lease,bool upload){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,upload),d=>{cache.Release(lease);return true;},true);}
+ internal bool ReleaseDirect(long account,string device,Func<bool> current,string lease,bool upload,bool abandonUpload=false){Require(!abandonUpload||upload,"cache_upload_lease_required");return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,upload),d=>{cache.Release(lease,abandonUpload);return true;},true);}
  internal bool ProgressDirect(long account,string device,Func<bool> current,string lease,long offset){return AuthorizedDirect(account,device,current,cache.LeaseObject(lease,device,false),d=>{cache.RecipientProgress(lease,offset,false);return true;});}
  internal bool PublishDirect(long account,string device,Func<bool> current,string id,byte[] wire){return AuthorizedDirect(account,device,current,id,d=>{
-  Require(account==d.Account&&device==d.Sender,"cache_sender_binding_mismatch");cache.ContextExpires(id);
+  Require(account==d.Account&&device==d.Sender,"cache_sender_binding_mismatch");cache.ContextExpires(id,false);
   var envelope=MailboxProtocol.Envelope.Parse(wire);var audience=cache.DirectAudience(id);var recipient=audience.Recipients.FirstOrDefault(x=>x.Device==envelope.RecipientDevice);
-  Require(recipient!=null&&envelope.Sender==d.Account&&envelope.SenderDevice==d.Sender&&envelope.Recipient==d.RecipientAccount&&envelope.Message==d.Message&&envelope.Key==recipient.Key&&envelope.Generation==recipient.Generation&&envelope.Expires<=checked(cache.ContextExpires(id)*1000),"cache_dm_notice_binding_invalid");
+  Require(recipient!=null&&envelope.Sender==d.Account&&envelope.SenderDevice==d.Sender&&envelope.Recipient==d.RecipientAccount&&envelope.Message==d.Message&&envelope.Key==recipient.Key&&envelope.Generation==recipient.Generation&&envelope.Expires<=checked(cache.ContextExpires(id,false)*1000),"cache_dm_notice_binding_invalid");
   // Recheck the intended recipient, including revocation, under the account
   // lock through the existing mailbox FULL transaction. Lost replies retry the
   // exact immutable envelope, never retarget or regenerate it.

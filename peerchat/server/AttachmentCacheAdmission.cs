@@ -43,15 +43,15 @@ internal sealed partial class AttachmentCacheAdmission {
  internal string Acquire(long account,string device,Func<bool> current,string id,bool upload){return Authorized(account,device,current,id,d=>{Require(!upload||d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");return cache.Acquire(id,device,upload);});}
  internal AttachmentCacheRuntime.Status Inspect(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>cache.Inspect(id));}
  internal long Append(long account,string device,Func<bool> current,string lease,long offset,byte[] bytes){string id=cache.LeaseObject(lease,device,true);return Authorized(account,device,current,id,d=>cache.Append(lease,offset,bytes));}
- internal bool Complete(long account,string device,Func<bool> current,string lease){
+ internal bool Complete(long account,string device,Func<bool> current,string lease,bool bounded=false){
   string id=cache.LeaseObject(lease,device,true);Authorized(account,device,current,id,d=>true);
-  var evidence=cache.VerifyCompletion(lease);
+  var evidence=bounded?cache.VerifyCompletionStep(lease):cache.VerifyCompletion(lease);
   // Recheck authority through the final durable commit. A revoked member or
   // superseded session cannot complete after verification began.
-  return Authorized(account,device,current,id,d=>{Require(cache.LeaseObject(lease,device,true)==id,"cache_completion_evidence_mismatch");cache.CommitCompletion(lease,evidence);return true;});
+  return Authorized(account,device,current,id,d=>{Require(cache.LeaseObject(lease,device,true)==id,"cache_completion_evidence_mismatch");if(evidence==null)return false;cache.CommitCompletion(lease,evidence);return true;});
  }
  internal byte[] Read(long account,string device,Func<bool> current,string lease,long offset,int maximum){string id=cache.LeaseObject(lease,device,false);return Authorized(account,device,current,id,d=>cache.Read(lease,offset,maximum));}
- internal bool Release(long account,string device,Func<bool> current,string lease,bool upload){string id=cache.LeaseObject(lease,device,upload);return Authorized(account,device,current,id,d=>{cache.Release(lease);return true;});}
+ internal bool Release(long account,string device,Func<bool> current,string lease,bool upload,bool abandonUpload=false){Require(!abandonUpload||upload,"cache_upload_lease_required");string id=cache.LeaseObject(lease,device,upload);return Authorized(account,device,current,id,d=>{cache.Release(lease,abandonUpload);return true;});}
  internal bool Progress(long account,string device,Func<bool> current,string lease,long offset){string id=cache.LeaseObject(lease,device,false);return Authorized(account,device,current,id,d=>{cache.RecipientProgress(lease,offset,false);return true;});}
  internal bool Publish(long account,string device,Func<bool> current,string id,byte[] wire){return Authorized(account,device,current,id,d=>{Require(d.Account==account&&d.Sender==device,"cache_sender_binding_mismatch");cache.Publish(id,wire);return true;});}
  internal AttachmentCacheRuntime.Announcement Announcement(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>cache.ReadAnnouncement(id));}

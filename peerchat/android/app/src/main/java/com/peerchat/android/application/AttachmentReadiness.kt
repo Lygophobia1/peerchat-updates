@@ -16,13 +16,19 @@ internal fun <T:Any> attachmentModeReadiness(mode:AttachmentSendMode,scope:()->T
  * It must not perform network I/O or fabricate authorization while waiting. */
 internal suspend fun <T:Any> awaitAttachmentReadiness(
     probe:()->T?,clock:()->Long=System::nanoTime,
-    wait:suspend()->Unit={kotlinx.coroutines.delay(100)},timeoutNanos:Long=30_000_000_000L
+    wait:suspend()->Unit={kotlinx.coroutines.delay(100)},timeoutNanos:Long=30_000_000_000L,
+    progress:()->Long={0L},maximumNanos:Long=timeoutNanos
 ):T {
-    val began=clock()
+    require(timeoutNanos>0&&maximumNanos>=timeoutNanos)
+    val began=clock();var advancedAt=began;var observed=progress()
     while(true){
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
         probe()?.let{return it}
-        if(clock()-began>=timeoutNanos)throw AttachmentReadinessUnavailable()
+        val now=clock();val current=progress()
+        // Successful enrollment steps may span a busy cold start. Mere polling,
+        // receipt traffic and repeated network failures cannot extend the wait.
+        if(current!=observed){observed=current;advancedAt=now}
+        if(now-began>=maximumNanos||now-advancedAt>=timeoutNanos)throw AttachmentReadinessUnavailable()
         wait()
     }
 }

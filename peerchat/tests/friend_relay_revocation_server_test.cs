@@ -42,6 +42,27 @@ internal static class FriendRelayRevocationServerTest {
             return new Relay{Tcp=tcp,Tls=tls,Session=(string)result["sessionId"]};
         }catch{tls.Dispose();tcp.Close();throw;}
     }
+    static void ObserveLateDemand(DiscoveryServer server,int port,string pin,string token,string local,string remote){
+        var flags=System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance;
+        var gate=typeof(DiscoveryServer).GetField("relayGate",flags).GetValue(server);
+        var waiting=(System.Collections.IList)typeof(DiscoveryServer).GetField("waitingRelays",flags).GetValue(server);
+        bool retained=false;var until=DateTime.UtcNow.AddSeconds(2);
+        while(DateTime.UtcNow<until){lock(gate)retained=waiting.Count>0;if(retained)break;Thread.Sleep(10);}
+        Check(retained,"Caller relay was not waiting before receiver woke");
+        using(var tcp=new TcpClient()){
+            tcp.Connect(IPAddress.Loopback,port);
+            using(var tls=new SslStream(tcp.GetStream(),false,(sender,cert,chain,errors)=>{
+                using(var sha=SHA256.Create())return cert!=null&&BitConverter.ToString(sha.ComputeHash(cert.GetRawCertData())).Replace("-","")==pin;
+            })){
+                tls.AuthenticateAsClient("localhost");tls.ReadTimeout=2000;tls.WriteTimeout=2000;
+                Write(tls,Encoding.UTF8.GetBytes(Json.Serialize(new Dictionary<string,object>{{"version",1},{"type","events"},{"sessionToken",token},{"publicIdentity",local},{"clientHeartbeats",true}})));
+                var ready=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(Read(tls)));
+                Check((string)ready["type"]=="events_ready","Wake must authenticate before receiving retained demand");
+                var hint=Json.Deserialize<Dictionary<string,object>>(Encoding.UTF8.GetString(Read(tls)));
+                Check((string)hint["event"]=="relay_demand"&&(string)hint["purpose"]=="friend"&&(string)hint["publicIdentity"]==remote&&(string)hint["targetPublicIdentity"]==local,"Late subscriber missed exact authorized pending relay");
+            }
+        }
+    }
     static void Send(Relay relay,string text){Write(relay.Tls,Encoding.ASCII.GetBytes(relay.Session+text));}
     static void Case(string root,string certificate,string pin,string name,Action<AccountDatabase,string,string,string> revoke,bool boundRecipient=false,bool pending=false){
         string folder=Path.Combine(root,name);Directory.CreateDirectory(folder);
@@ -65,6 +86,7 @@ internal static class FriendRelayRevocationServerTest {
                 while(DateTime.UtcNow<deadline&&!ready){try{using(var tcp=new TcpClient()){tcp.Connect(IPAddress.Loopback,port);ready=true;}}catch(SocketException){Thread.Sleep(20);}}
                 Check(ready,"Local test server did not start.");
                 var leftTask=Task.Run(()=>Open(port,pin,senderToken,a,8,b));
+                ObserveLateDemand(server,port,pin,recipientToken,b,a);
                 var rightTask=Task.Run(()=>Open(port,pin,recipientToken,b,7,a));
                 Check(Task.WaitAll(new Task[]{leftTask,rightTask},10000),"Relay pair timed out.");
                 using(var left=leftTask.Result)using(var right=rightTask.Result){
@@ -97,6 +119,6 @@ internal static class FriendRelayRevocationServerTest {
         Case(args[0],certificate,pin,"device-removed",(db,a,b,hash)=>db.Execute("DELETE FROM devices WHERE account_id=8 AND public_identity='"+b+"';"));
         Case(args[0],certificate,pin,"credential-superseded",(db,a,b,hash)=>db.RememberDevice(8,b,"replacement-test-credential"),true);
         Case(args[0],certificate,pin,"pending-request-cancelled",(db,a,b,hash)=>db.Execute("DELETE FROM friend_requests WHERE sender_id=7 AND recipient_id=8;"),false,true);
-        Console.WriteLine("PASS: genuine paired friend relay forwards for friends and legacy pending requests, then refuses frames after session revocation, relationship removal/block, device removal, remembered-credential supersession, or pending-request cancellation.");return 0;
+        Console.WriteLine("PASS: late authenticated event subscriber recovers exact pending relay; genuine paired friend relay forwards for friends and legacy pending requests, then refuses frames after session revocation, relationship removal/block, device removal, remembered-credential supersession, or pending-request cancellation.");return 0;
     }catch(Exception e){Console.Error.WriteLine(e);return 1;}}
 }

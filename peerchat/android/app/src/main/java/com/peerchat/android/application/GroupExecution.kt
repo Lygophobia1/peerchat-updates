@@ -11,7 +11,7 @@ internal val groupMessageOrder=compareBy<GroupMessageSnapshot>{it.timestamp}.the
 internal fun groupHistoryBefore(messages:List<GroupMessageSnapshot>):Long=messages.filter{it.sequence>0}.minWithOrNull(groupMessageOrder)?.sequence?:Long.MAX_VALUE
 data class GroupMemberSnapshot(val account:Long,val device:String,val role:Long,val invited:Boolean)
 data class GroupConversationSnapshot(val id:String,val legacyId:String,val epoch:Long,val name:String,val ready:Boolean,val members:Long,
-    val messages:List<GroupMessageSnapshot> = emptyList(),val unread:Int=0,val memberRows:List<GroupMemberSnapshot> = emptyList(),val hasOlder:Boolean=true)
+    val messages:List<GroupMessageSnapshot> = emptyList(),val unread:Int=0,val memberRows:List<GroupMemberSnapshot> = emptyList(),val hasOlder:Boolean=true,val attachments:List<AttachmentSnapshot> = emptyList())
 data class GroupInvitationSnapshot(val id:String,val group:String,val inviter:String)
 
 /** Execution of existing server RPCs and opaque native group commands. No
@@ -158,6 +158,10 @@ internal class GroupExecution(private val native:(Long,Int,ByteArray)->ByteArray
                 status(handle,account,generation,id,message,"Awaiting server acceptance (online recipients only)",0)}
             return more
         }catch(failure:Exception){try{resetPending(handle,account,generation)}catch(_:Exception){};throw failure}
+    }
+    fun discardLocalHistory(id:String,ids:Set<String>?,hidden:(String)->Boolean={false}) {
+        if(ids==null){history.remove(id);unread[id]=0}else history[id]=history[id].orEmpty().filter{it.id !in ids&&!hidden(it.id)}
+        referenceCursors.remove(id);older[id]=true;historyRefresh.add(id)
     }
     fun reset(){invitations=emptyList();history.clear();unread.clear();older.clear();referenceCursors.clear();historyRefresh.clear();historyRevision=-1;diagnostic="Group authorization not loaded"}
     fun controlSettled(handle:Long,account:Long,generation:Long,attempt:Long):Boolean{

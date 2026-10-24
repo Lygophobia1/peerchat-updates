@@ -6,6 +6,16 @@ import org.junit.Test
 import org.junit.Assert.*
 
 class RememberedAuthenticationTest {
+    @Test fun certificateExpiryExplainsServerRepairWithoutDiscardingCredentials(){
+        val error=javax.net.ssl.SSLHandshakeException("private exception text")
+        error.initCause(java.security.cert.CertificateExpiredException("private expiry"))
+        assertTrue(rememberedFailureStatus(error).contains("certificate expired"))
+        assertTrue(rememberedFailureStatus(error).contains("saved sign-in is retained"))
+        assertFalse(rememberedFailureStatus(error).contains("private"))
+        assertFalse(isRememberedCredentialRejected(error))
+        assertFalse(isRememberedNetworkFailure(error))
+    }
+
     @Test fun transportFailureRetainsCredentialAndOnlyTransportIsRetried() {
         assertTrue(isRememberedNetworkFailure(java.net.ConnectException()))
         assertTrue(isRememberedNetworkFailure(java.net.SocketTimeoutException()))

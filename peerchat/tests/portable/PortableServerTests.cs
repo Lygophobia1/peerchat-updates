@@ -7,6 +7,7 @@ using PeerChat.Server;
 using PeerChat.ServerShared;
 class PortableServerTests {
     public static int Main(string[] args){try{
+        if(args.Length==2&&args[0]=="--presence")return ServerPresenceTest.Main(new[]{args[1]});
         if(args.Length==3&&args[0]=="--auth-contention")return AccountAuthenticationConcurrencyTests.Run(args[1],args[2]=="baseline");
         if(args.Length==3&&args[0]=="--worker-burst")return ServerWorkerBurstTests.Run(args[1],args[2]=="baseline");
         if(args.Length==2&&args[0]=="--lifecycle"){Directory.CreateDirectory(args[1]);ServerLifecycleTests.Run(args[1]);return 0;}

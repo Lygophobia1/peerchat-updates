@@ -89,6 +89,25 @@ public:
     void update(const unsigned char* bytes,size_t size)override{require(hash_&&size<=ChunkBytes&&BCryptHashData(hash_,const_cast<PUCHAR>(bytes),static_cast<ULONG>(size),0)>=0);}
     Digest finish()override{Digest result{};require(hash_&&BCryptFinishHash(hash_,result.data(),32,0)>=0);BCryptDestroyHash(hash_);hash_=nullptr;return result;}
 };
+inline void discardCiphertext(const Blob& token,const Metadata& metadata){
+    require(protocol::id(metadata.id,32)&&metadata.name=="ciphertext.peerchat"&&metadata.size<=MaxCacheCipherBytes);
+    protocol::Reader r(token);require(r.type()==protocol::FileTransfer);auto partial=std::filesystem::path(r.text()),final=std::filesystem::path(r.text());
+    auto identityAt=r.cursor;for(unsigned i=0;i<3;++i)r.number();r.end();
+    require(partial.is_absolute()&&final.is_absolute()&&partial.parent_path()==final.parent_path()&&
+        partial.filename()==unicode::decode(metadata.id+".peerchat-part")&&final.filename()==unicode::decode(metadata.id+"-ciphertext.peerchat"));
+    HANDLE directory=CreateFileW(partial.parent_path().c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    require(directory!=INVALID_HANDLE_VALUE);
+    try{BY_HANDLE_FILE_INFORMATION info{};require(GetFileInformationByHandle(directory,&info)&&(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));
+        for(const auto& path:{partial,final}){
+            HANDLE file=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|DELETE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+            if(file==INVALID_HANDLE_VALUE){require(GetLastError()==ERROR_FILE_NOT_FOUND);continue;}
+            try{protocol::Reader expected(token);expected.cursor=identityAt;checkIdentity(expected,file,false);
+                require(GetFileInformationByHandle(file,&info)&&info.nNumberOfLinks==1);
+                FILE_DISPOSITION_INFO disposition{TRUE};require(SetFileInformationByHandle(file,FileDispositionInfo,&disposition,sizeof(disposition))!=0);
+            }catch(...){CloseHandle(file);throw;}CloseHandle(file);
+        }
+    }catch(...){CloseHandle(directory);throw;}CloseHandle(directory);
+}
 class FileSource final:public Source {
     HANDLE handle_=INVALID_HANDLE_VALUE;
     std::uint64_t size_=0;

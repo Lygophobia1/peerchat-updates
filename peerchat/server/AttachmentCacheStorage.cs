@@ -6,6 +6,22 @@ using System.Text;
 using PeerChat.ServerShared;
 
 namespace PeerChat.Server {
+// Numeric append diagnostics only, scoped to the existing synchronous RPC
+// worker. No paths, requests, identities, payloads or transfer state retained.
+internal sealed class CacheAppendTimings : IDisposable {
+ [ThreadStatic] static CacheAppendTimings current;
+ readonly CacheAppendTimings previous;
+ long observeCount,observeTicks,encodeCount,encodeTicks,transactionCount,transactionTicks;
+ bool disposed;
+ internal static CacheAppendTimings Current {get{return current;}}
+ internal CacheAppendTimings(){previous=current;current=this;}
+ static long Elapsed(long started){return Math.Max(0,System.Diagnostics.Stopwatch.GetTimestamp()-started);}
+ internal void RecordObserve(long started){observeCount++;observeTicks+=Elapsed(started);}
+ internal void RecordEncode(long started){encodeCount++;encodeTicks+=Elapsed(started);}
+ internal void RecordTransaction(long started){transactionCount++;transactionTicks+=Elapsed(started);}
+ internal long[] Snapshot(){return new[]{observeCount,observeTicks,encodeCount,encodeTicks,transactionCount,transactionTicks};}
+ public void Dispose(){if(disposed)return;current=previous;disposed=true;}
+}
 // Read-only storage binding probe. This is NOT permission to write through a
 // pathname: the eventual cache adapter must anchor and revalidate open handles.
 internal sealed class CacheStorageEvidence {
@@ -36,6 +52,8 @@ internal static class AttachmentCacheStorage {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool GetVolumeNameForVolumeMountPoint(string mount,StringBuilder name,uint length);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool GetDiskFreeSpaceEx(string path,out ulong available,out ulong total,out ulong free);
  internal static CacheStorageEvidence Observe(string directory){
+  var timing=CacheAppendTimings.Current;long started=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
+  try{
   if(String.IsNullOrEmpty(directory)||!Path.IsPathRooted(directory))throw new InvalidOperationException("Cache directory is not configured.");
   directory=Canonical(directory);if(!System.IO.Directory.Exists(directory))throw new InvalidOperationException("Cache directory is unavailable.");NoLinks(directory);
   var marker=Path.Combine(directory,Marker);if((File.GetAttributes(marker)&FileAttributes.ReparsePoint)!=0)throw new InvalidOperationException("Cache marker is a link.");
@@ -56,6 +74,7 @@ internal static class AttachmentCacheStorage {
   var volume=new StringBuilder(1024);var identity=new StringBuilder(1024);ulong available,total,free;
   if(!GetVolumePathName(directory,volume,1024)||!GetVolumeNameForVolumeMountPoint(volume.ToString(),identity,1024)||!GetDiskFreeSpaceEx(directory,out available,out total,out free)||available>(ulong)Int64.MaxValue||total>(ulong)Int64.MaxValue)throw new InvalidOperationException("Cache filesystem statistics are unavailable.");
   result.MountPoint=Canonical(volume.ToString());result.Filesystem=identity.ToString();result.MountGeneration=result.Filesystem;result.FilesystemBytes=(long)total;result.AvailableBytes=(long)available;return result;
+  }finally{if(timing!=null)timing.RecordObserve(started);}
  }
  internal static string Rejection(AttachmentCacheConfiguration options,CacheStorageEvidence observed){
   options.Validate();if(observed==null)return "cache_storage_unavailable";

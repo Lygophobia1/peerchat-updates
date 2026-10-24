@@ -8,6 +8,10 @@ import com.peerchat.android.platform.AndroidStoragePlatform
 object ProfileBridge {
     init { System.loadLibrary("peerchat_messaging") }
     external fun bind(handle: Long, platform: AndroidStoragePlatform): Int
+    // Device-local presentation deletion only; never recalls messages or cancels transfers.
+    external fun deleteLocal(handle:Long,scope:ByteArray,id:ByteArray,group:Boolean):Int
+    external fun activeTransfers(handle:Long,ids:ByteArray):ByteArray?
+    external fun localHidden(handle:Long,scope:ByteArray,id:ByteArray,group:Boolean):Boolean
     external fun publicKey(handle: Long): ByteArray?
     external fun sign(handle: Long, payload: ByteArray): ByteArray?
     // Export exists only in the debug build and rejects non-test profiles.

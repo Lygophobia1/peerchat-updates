@@ -17,8 +17,9 @@ class GroupAttachmentUiTest {
     static void Rejected(Action action,string why){try{action();}catch(InvalidDataException){return;}throw new Exception(why);}
     static string Text(BinaryReader reader){return new UTF8Encoding(false,true).GetString(reader.ReadBytes(checked((int)reader.ReadUInt64())));}
     static object Value(BinaryReader reader){switch(reader.ReadByte()){case 0:return null;case 1:return false;case 2:return true;case 3:return reader.ReadUInt64();case 4:return Text(reader);case 5:{var values=new List<object>();ulong count=reader.ReadUInt64();while(count-->0)values.Add(Value(reader));return values;}case 6:{var values=new Dictionary<string,object>();ulong count=reader.ReadUInt64();while(count-->0)values.Add(Text(reader),Value(reader));return values;}default:throw new Exception("bad value tag");}}
-    static string[] Actions(GroupAttachmentCard card){return card.Children.OfType<WrapPanel>().SelectMany(panel=>panel.Children.OfType<Button>()).Select(button=>(string)button.Content).ToArray();}
-    static string[] DirectActions(AttachmentCard card){return card.Children.OfType<WrapPanel>().SelectMany(panel=>panel.Children.OfType<Button>()).Select(button=>(string)button.Content).ToArray();}
+    static IEnumerable<T> Descendants<T>(DependencyObject root) where T:DependencyObject {if(root is T)yield return (T)root;foreach(var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())foreach(var value in Descendants<T>(child))yield return value;}
+    static string[] Actions(GroupAttachmentCard card){return Descendants<Button>(card).Select(button=>(string)button.Content).ToArray();}
+    static string[] DirectActions(AttachmentCard card){return Descendants<Button>(card).Select(button=>(string)button.Content).ToArray();}
     static void Codec(){
         var expected=new Dictionary<string,object>{{"zero",0},{"large",UInt64.MaxValue},{"unicode","日本 👩🏽‍💻"},{"flags",new object[]{null,false,true}},{"nested",new Dictionary<string,object>{{"offset",65536L}}}};
         var bytes=AttachmentNetworkCodec.Response(44,new string('a',32),expected);
@@ -54,6 +55,11 @@ class GroupAttachmentUiTest {
     }
     [STAThread] static int Main(string[] args){try{
         Directory.CreateDirectory(args[0]);var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};Codec();
+        var thumbnailPixels=new byte[16*16*3];var thumbnailBitmap=BitmapSource.Create(16,16,96,96,PixelFormats.Bgr24,null,thumbnailPixels,16*3);
+        var thumbnailEncoder=new JpegBitmapEncoder();thumbnailEncoder.Frames.Add(BitmapFrame.Create(thumbnailBitmap));
+        string thumbnail;using(var stream=new MemoryStream()){thumbnailEncoder.Save(stream);thumbnail=Convert.ToBase64String(stream.ToArray());}
+        var earlyGroupCard=new GroupAttachmentCard{Attachment=new CoreAdapter.GroupAttachmentData{id="early",state="available",name="photo.jpg",thumbnail=thumbnail}};
+        Check(Descendants<Image>(earlyGroupCard).Any()&&Actions(earlyGroupCard).Contains("Download…"),"encrypted group photo preview hidden before download");
         var download=AttachmentDownloadTarget.Dialog("cat.png");Check(download.FileName==AttachmentDownloadTarget.FirstAvailableName(download.InitialDirectory,"cat.png")&&download.DefaultExt.TrimStart('.')=="png"&&download.AddExtension&&!download.OverwritePrompt,"download default original filename/extension changed");
         string fixture=Path.GetFullPath(args[0]);
         var occupied=new HashSet<string>(StringComparer.OrdinalIgnoreCase){Path.Combine(fixture,"cat.png"),Path.Combine(fixture,"cat (1).png")};
@@ -76,7 +82,7 @@ class GroupAttachmentUiTest {
             Check(GroupAttachmentProjection.Apply(group,row)&&group.Messages.Count==1,"retry duplicate bubble");Check(!GroupAttachmentProjection.Apply(group,row),"unchanged snapshot redraw");Check(group.Messages[0].TextVisibility==Visibility.Collapsed,"attachment showed extra text bubble");
             var card=new GroupAttachmentCard{Attachment=row};Check(!Actions(card).Contains("Preview")&&!Actions(card).Contains("Save As…"),"unverified local content exposed");
             if(state=="uploading"||state=="downloading"){
-                Check(card.Children.OfType<ProgressBar>().Single().Maximum==200,"progress used plaintext size for ciphertext ACKs");
+                Check(Descendants<ProgressBar>(card).Single().Maximum==200,"progress used plaintext size for ciphertext ACKs");
                 var details=card.Children.OfType<StackPanel>().Single();Check(details.Visibility==Visibility.Collapsed,"ciphertext ACK diagnostics were exposed in the collapsed attachment bubble");
                 card.DetailsExpanded=true;
                 Check(Object.ReferenceEquals(details,card.Children.OfType<StackPanel>().Single()),"expansion repeated group attachment projection or filesystem work");
@@ -106,7 +112,7 @@ class GroupAttachmentUiTest {
         var changedSave=new CoreAdapter.FileTransferData{id="dm",state=4,name="original.txt",saveState="complete",savePath=chosen};Check(ChatAttachmentProjection.Apply(dm,changedSave),"save-only state change did not refresh bubble");
         var image=BitmapSource.Create(800,600,96,96,PixelFormats.Bgr32,null,new byte[800*600*4],800*4);image.Freeze();
         var draft=GroupImageDraft.Create(group.Id,9,image);Check(draft.Matches(group.Id,9)&&!draft.Matches(group.Id,10)&&!draft.Matches("other",9),"draft crossed group/profile");
-        Check(draft.Preview.IsFrozen&&draft.Preview.PixelWidth<=320&&draft.Preview.PixelHeight<=160&&draft.Name.EndsWith(".png")&&Convert.FromBase64String(draft.Base64).Take(8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"clipboard draft format/bounds");
+        Check(draft.Preview.IsFrozen&&draft.Preview.PixelWidth<=360&&draft.Preview.PixelHeight<=480&&draft.Name.EndsWith(".png")&&Convert.FromBase64String(draft.Base64).Take(8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"clipboard draft format/bounds");
         string file=Path.Combine(args[0],"drop.txt");File.WriteAllText(file,"drop");
         var selected=GroupFileDraft.Create(group.Id,9,new[]{file});Check(selected.Matches(group.Id,9)&&!selected.Matches("another",9)&&selected.Files.Length==1&&selected.Files[0].Name=="drop.txt"&&selected.Files[0].Size==4&&selected.Files[0].Unchanged(),"selected file draft metadata/scope");
         Rejected(()=>GroupFileDraft.Create(group.Id,9,new[]{file,file}),"duplicate file draft accepted");

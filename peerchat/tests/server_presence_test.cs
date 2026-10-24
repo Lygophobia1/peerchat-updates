@@ -14,6 +14,9 @@ class ServerPresenceTest {
         now=149001;var expired=state.Expire((a,d)=>true);Check(expired.Count==1&&state.Snapshot(1).Count==0,"unclean loss expiry");
         Check(state.Observe(1,"a","fresh",false)==null,"late heartbeat resurrected expired lease");
         state.Observe(1,"a","new",true);Check(state.Expire((a,d)=>false).Count==1&&state.Get("a")==null,"revocation");
+        Check(state.LastIdentity(1)=="a"&&state.Get("a")==null,"offline routing hint must not invent presence");
+        for(int account=10;account<4110;account++)state.Observe(account,"bounded"+account,"owner",true);
+        Check(state.LastIdentity(1)==null&&state.LastIdentity(4109)=="bounded4109","last-device hints must remain bounded");
         var restart=new ServerPresence(()=>now);Check(restart.Epoch!=state.Epoch&&restart.Snapshot(1).Count==0,"restart epoch");
         var order=new PeerChatDesktop.PresenceSequence();order.Reset(state.Epoch);
         Check(order.Accept(state.Epoch,1,10)&&!order.Accept(state.Epoch,1,9)&&!order.Accept(state.Epoch,1,10),"reordered/duplicate event rejection");
@@ -29,9 +32,24 @@ class ServerPresenceTest {
                 db.CreateSession(new string('b',64),account,DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds());
                 for(int i=0;i<1000;i++)db.TouchPresence(account,new string('a',64),"",0,"",0,"test","test",session:new string('b',64));
                 Check(db.IsPresent(account),"production memory authority");
+                var phone=new string('c',64);Check(db.AddDevice(account,phone),"second test device");
+                db.TouchPresence(account,phone,"",0,"",0,"test","test",owner:"phone",replace:true,session:new string('b',64));
+                db.ClearPresence(account,new string('a',64));db.ClearPresence(account,phone);
+                var offline=db.Search("presence-test",99);
+                Check(!(bool)offline["online"]&&(string)offline["publicIdentity"]==phone,"sleep changed canonical device to oldest profile");
+                db.Execute("DELETE FROM devices WHERE public_identity='"+phone+"';");
+                Check((string)db.Search("presence-test",99)["publicIdentity"]==new string('a',64),"removed last device remained selectable");
+
                 using(var reopened=new AccountDatabase(path)){
                     Check(!reopened.IsPresent(account)&&!(bool)reopened.Search("presence-test",99)["online"],"durable presence leaked across epoch");
                     Check(reopened.OwnsDevice(account,new string('a',64)),"durable device lost on presence restart");
+                    Check(reopened.AddDevice(account,phone),"recreate isolated phone fixture");
+                    reopened.RememberDevice(account,phone,"test-remembered-hash");
+                    Check(reopened.RegisterPush(account,phone,"test-only-push-token"),"register isolated push");
+                    Check((string)reopened.Search("presence-test",99)["publicIdentity"]==phone&&!reopened.IsPresent(account),"restart must retain eligible offline push route without claiming presence");
+                    reopened.RemovePush(account,phone);
+                    Check((string)reopened.Search("presence-test",99)["publicIdentity"]==new string('a',64),"removed push route remained preferred after restart");
+
                 }
                 var field=typeof(AccountDatabase).GetField("database",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic);
                 IntPtr statement;Check(PeerChat.Server.SqliteNative.prepare((IntPtr)field.GetValue(db),"SELECT count(*) FROM main.presence",out statement)==0,"presence row inspection");

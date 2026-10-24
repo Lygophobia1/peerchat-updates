@@ -6,7 +6,7 @@ namespace PeerChat.Server {
 // Public signed routing/integrity evidence only. No filename, plaintext digest,
 // MIME type, attachment key or encrypted-manifest plaintext reaches the server.
 internal sealed class AttachmentCacheDescriptor {
- internal const long MaximumPlainBytes=256L*1024*1024;
+ internal const long MaximumPlainBytes=1536L*1024*1024;
  internal string Id {get;private set;}
  internal string Group {get;private set;}
  internal string Message {get;private set;}

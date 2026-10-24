@@ -9,7 +9,7 @@ struct PublicDescriptor {
 inline PublicDescriptor parseDescriptor(const Blob& wire){
  protocol::check(wire.size()<=2048);protocol::Reader r(wire);protocol::check(r.type()==protocol::GroupEvent&&r.string()=="PeerChat/group-cache-upload/v1");PublicDescriptor d;
  d.attachment=r.string();d.group=r.string();d.message=r.string();d.sender=r.string();d.account=r.number();d.epoch=r.number();d.plainSize=r.number();d.cipherSize=r.number();d.cipherDigest=r.bytes();d.identity=r.bytes();auto signedEnd=r.cursor;auto signature=r.bytes();r.end();
- protocol::check(protocol::id(d.attachment,32)&&protocol::id(d.group,32)&&protocol::id(d.message,32)&&protocol::id(d.sender)&&d.account&&d.account<=INT64_MAX&&d.epoch&&d.epoch<=INT64_MAX&&d.plainSize<=transfer::MaxFileBytes&&d.cipherSize==HeaderBytes+d.plainSize+std::max<std::uint64_t>(1,(d.plainSize+BlockBytes-1)/BlockBytes)*TagBytes&&d.cipherDigest.size()==32&&d.identity.size()==72&&Storage::publicKeyId(d.identity)==d.sender&&verifyDevicePayload(Blob(wire.begin(),wire.begin()+signedEnd),signature,d.identity));
+ protocol::check(protocol::id(d.attachment,32)&&protocol::id(d.group,32)&&protocol::id(d.message,32)&&protocol::id(d.sender)&&d.account&&d.account<=INT64_MAX&&d.epoch&&d.epoch<=INT64_MAX&&d.plainSize<=transfer::MaxCachedFileBytes&&d.cipherSize==HeaderBytes+d.plainSize+std::max<std::uint64_t>(1,(d.plainSize+BlockBytes-1)/BlockBytes)*TagBytes&&d.cipherDigest.size()==32&&d.identity.size()==72&&Storage::publicKeyId(d.identity)==d.sender&&verifyDevicePayload(Blob(wire.begin(),wire.begin()+signedEnd),signature,d.identity));
  d.wire=wire;return d;
 }
 // Public upload evidence only. The original filename, plaintext hash, key and

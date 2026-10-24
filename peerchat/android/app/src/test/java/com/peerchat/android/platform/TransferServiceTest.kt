@@ -31,12 +31,18 @@ class TransferServiceTest {
     }
     @Test fun notificationProgressAndCancellationAreVisibleWithoutContents(){
         val controller=Robolectric.buildService(PeerChatTransferService::class.java).create()
-        val method=PeerChatTransferService::class.java.getDeclaredMethod("notification",Long::class.javaPrimitiveType,Long::class.javaPrimitiveType,Int::class.javaPrimitiveType).also{it.isAccessible=true}
-        val notification=method.invoke(controller.get(),50L,100L,1) as Notification
+        val method=PeerChatTransferService::class.java.getDeclaredMethod("notification",Long::class.javaPrimitiveType,Long::class.javaPrimitiveType,Int::class.javaPrimitiveType,Boolean::class.javaPrimitiveType,Boolean::class.javaPrimitiveType).also{it.isAccessible=true}
+        val notification=method.invoke(controller.get(),50L,100L,1,false,false) as Notification
         assertEquals(50,notification.extras.getInt(Notification.EXTRA_PROGRESS))
         assertFalse(notification.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE))
         assertEquals("Cancel transfers",notification.actions.single().title.toString())
         assertEquals(Notification.VISIBILITY_PRIVATE,notification.visibility)
+        val preparing=method.invoke(controller.get(),0L,100L,1,true,false) as Notification
+        assertTrue(preparing.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE))
+        assertEquals("1 transfer(s) Â· Preparing upload",preparing.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        val hidden=method.invoke(controller.get(),0L,0L,1,true,true) as Notification
+        assertEquals("1 transfer(s) · Sending in background",hidden.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        assertTrue(hidden.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE))
         controller.destroy()
     }
 }

@@ -68,6 +68,36 @@ class NativeGroupApplicationTest {
                     assertEquals(1L,meta.number());assertEquals("Native group 🚀",meta.text());assertEquals(1L,meta.number());assertEquals(1L,meta.number())
                     assertEquals(account,meta.number());assertEquals(peer,meta.text());assertEquals(3L,meta.number());assertEquals(0L,meta.number())
                     assertEquals("PeerChat/GroupHistoryRevision/v1",meta.text());assertTrue(meta.number()>=0);meta.end()
+                    assertEquals(0,MailboxBridge.configureEnrollment(handle,account,1,"fixture.invalid:7443".toByteArray(),"a".repeat(64).toByteArray()))
+                    val files=com.peerchat.android.application.GroupAttachmentExecution()
+                    val before=org.json.JSONObject(files.command(handle,account,1,0,legacy))
+                    if(cycle==0){
+                        val transport=com.peerchat.android.application.DmAttachmentExecution()
+                        transport.serviceOutsideGate(Any()){
+                            files.borrow(handle,account,1,{operation,request->
+                                assertEquals("cache_pending_keys",operation)
+                                org.json.JSONObject().put("type","cache_result").put("requestId",request.getString("requestId"))
+                                    .put("operation",operation).put("cacheVersion",1).put("state","accepted")
+                                    .put("items",org.json.JSONArray()).put("cursor","").put("more",false)
+                            },{true},{},{throw it})
+                        }
+                        assertTrue(org.json.JSONObject(files.command(handle,account,1,0,legacy)).getBoolean("supported"))
+                        val location=NativeRecord(checkNotNull(TransferBridge.request(handle,0,NativeRecordWriter(30).bytes())),30)
+                        val root=File(location.text());location.end()
+                        val source=File(root,UUID.randomUUID().toString().replace("-","")+"-photo-日本.png")
+                        source.outputStream().use{out->val block=ByteArray(32768){(it%251).toByte()};repeat(65){out.write(block)}}
+                        val attachment=files.command(handle,account,1,1,legacy,path=source.path)
+                        val preparing=org.json.JSONObject(files.command(handle,account,1,0,legacy)).getJSONArray("items").getJSONObject(0)
+                        assertEquals("preparing",preparing.getString("state"));assertEquals(source.length(),preparing.getLong("size"))
+                        assertEquals("ok",files.command(handle,account,1,3,legacy,attachment))
+                        assertTrue(source.exists());assertFalse(root.listFiles()!!.any{it.name=="$attachment.part"})
+                        val oversized=File(root,UUID.randomUUID().toString().replace("-","")+"-direct-only.bin")
+                        java.io.RandomAccessFile(oversized,"rw").use{it.setLength(1536L*1024*1024+1)}
+                        var refused=false;try{files.command(handle,account,1,1,legacy,path=oversized.path)}catch(_:IllegalStateException){refused=true}
+                        assertTrue(refused);assertTrue(oversized.delete())
+                    }else{
+                        assertEquals("canceled",before.getJSONArray("items").getJSONObject(0).getString("state"))
+                    }
                     if(cycle==0){
                         val sent=command(handle,5){it.text(group);it.text(text)};assertEquals("accepted",sent.text())
                         message=sent.text();assertEquals(1L,sent.number());wire=sent.bytes();sent.end()

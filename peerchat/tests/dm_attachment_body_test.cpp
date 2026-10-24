@@ -2,6 +2,7 @@
 #include "mailbox_protocol_test.cpp"
 #undef main
 #include "../dm_attachment_receipt.hpp"
+#include "attachment_thumbnail_fixture.hpp"
 #include "../dm_attachment_finalizer.hpp"
 #include "../dm_attachment_application.hpp"
 #include "../group_attachment_body.hpp"
@@ -19,18 +20,59 @@ struct UniqueRecipientFixture {
 };
 #include "dm_attachment_application_fixture.hpp"
 #include "dm_attachment_storage_fixture.hpp"
+#include "dm_attachment_preflight_fixture.hpp"
 int main(int argc,char** argv){try{
  check(argc==2);auto root=std::filesystem::path(argv[1]);Storage senderStore((root/L"sender").wstring()),receiverStore((root/L"receiver").wstring()),siblingStore((root/L"sibling").wstring());Signing sender(senderStore.profile()),receiver(receiverStore.profile()),sibling(siblingStore.profile());UniqueRecipientFixture sourceKey,targetKey,siblingKey;auto hpke=platform::createShippingHpke();
  auto binding=[](Signing& s,UniqueRecipientFixture& k,std::uint64_t account,char id){mailbox::RecipientBinding b;b.accountId=account;b.device=s.profile.peerId;b.keyId=std::string(32,id);b.generation=1;b.createdUtc=100;b.publicKey=k.key->publicKey();b.storageAllowed=true;b.signature=s.sign(mailbox::bindingPayload(b));return b;};
  auto source=binding(sender,sourceKey,7,'a'),target=binding(receiver,targetKey,8,'b'),other=binding(sibling,siblingKey,8,'d');std::string relationship(32,'c');protocol::Writer audience(protocol::FileTransfer);audience.string("PeerChat/dm-cache-audience/v1");audience.string(relationship);audience.bytes(mailbox::serializeBinding(source));std::vector<mailbox::RecipientBinding> frozen{target,other};std::sort(frozen.begin(),frozen.end(),[](const auto& a,const auto& b){return a.device<b.device;});audience.number(frozen.size());for(const auto& b:frozen)audience.bytes(mailbox::serializeBinding(b));
  mailbox::Header header;header.senderAccount=7;header.senderDevice=sender.profile.peerId;header.recipientAccount=8;header.recipientDevice=receiver.profile.peerId;header.keyId=target.keyId;header.keyGeneration=1;header.messageId=Storage::newMessageId();header.createdUtc=1000;header.expiresUtc=2000;header.logicalOrder=9;header.storageAllowed=true;
- // Sibling was frozen at send time, then revoked: its original signature is
- // still checked, but it cannot block this eligible recipient's download.
+ // Sibling was frozen at send time, then revoked: sender validation retains
+ // its signature check; receiver authorization concerns source + local target.
  dm_attachments::Evidence evidence;evidence.identity=[&](std::uint64_t a,const std::string& d){if(a==7&&d==sender.profile.peerId)return sender.publicKey();if(a==8&&d==receiver.profile.peerId)return receiver.publicKey();if(a==8&&d==sibling.profile.peerId)return sibling.publicKey();return Blob{};};evidence.current=[&](const auto& b,const std::string& rel,std::uint64_t otherAccount){return rel==relationship&&((b.accountId==7&&otherAccount==8&&mailbox::serializeBinding(b)==mailbox::serializeBinding(source))||(b.accountId==8&&otherAccount==7&&mailbox::serializeBinding(b)==mailbox::serializeBinding(target)));};
  group_attachments::Binding context;context.attachment=Storage::newMessageId();context.sender=sender.profile.peerId;context.account=7;context.direct=true;context.recipientAccount=8;context.relationship=relationship;context.audienceDigest=Storage::publicKeyId(audience.data);
  MemorySource plain(Blob(70001,73));MemorySink cipher;transfer::windows::Sha256 ph,ch;auto manifest=group_attachments::seal(plain,cipher,context,ph,ch);
  auto signedDescriptor=dm_attachments::descriptor(manifest,header.messageId,sender.profile);dm_attachments::Body body{990,9,"image/png",std::move(manifest),signedDescriptor,audience.data,mailbox::headerPayload(header)};
  auto privateBody=dm_attachments::encodeBody(body,header);auto envelope=mailbox::seal(header,privateBody.bytes,target,receiver.publicKey(),verifyDevicePayload,Storage::publicKeyId,sender,*hpke);auto wire=mailbox::serialize(envelope);auto recovered=dm_attachments::openBody(mailbox::parse(wire),target,evidence,targetKey.key,*hpke,1100);check(recovered.manifest.name==plain.name());
+ // A fresh recipient need not trust another device in the sender's frozen
+ // audience. No sibling identity is imported, looked up or authorized here.
+ {
+  auto fresh=evidence;unsigned siblingLookups=0;
+  fresh.identity=[&](std::uint64_t account,const std::string& device){
+   if(account==8&&device==sibling.profile.peerId){++siblingLookups;return Blob{};}
+   return evidence.identity(account,device);
+  };
+  auto opened=dm_attachments::openBody(envelope,target,fresh,targetKey.key,*hpke,1100);
+  check(opened.manifest.key==body.manifest.key&&siblingLookups==0);
+  dm_attachments::validateReceivedBody(opened,header,fresh);check(siblingLookups==0);
+  // Sender validation remains strict, including every sibling identity.
+  rejects([&]{dm_attachments::validateBody(opened,header,&fresh);});check(siblingLookups>0);
+  for(const auto& missing:{source.device,target.device}){
+   auto denied=fresh;denied.identity=[&,missing](auto account,const auto& device){return device==missing?Blob{}:fresh.identity(account,device);};
+   rejects([&]{dm_attachments::openBody(envelope,target,denied,targetKey.key,*hpke,1100);});
+   denied.identity=[&,missing](auto account,const auto& device){return device==missing?sibling.publicKey():fresh.identity(account,device);};
+   rejects([&]{dm_attachments::openBody(envelope,target,denied,targetKey.key,*hpke,1100);});
+   denied=fresh;denied.current=[&,missing](const auto& binding,const auto& rel,auto counterpart){return binding.device!=missing&&fresh.current(binding,rel,counterpart);};
+   rejects([&]{dm_attachments::openBody(envelope,target,denied,targetKey.key,*hpke,1100);});
+  }
+  rejects([&]{dm_attachments::openBody(envelope,target,fresh,targetKey.key,*hpke,2001);});
+  rejects([&]{dm_attachments::openBody(envelope,other,fresh,siblingKey.key,*hpke,1100);});
+  auto altered=dm_attachments::decodeStoredBody(privateBody.bytes,header);altered.audience.back()^=1;rejects([&]{dm_attachments::validateReceivedBody(altered,header,fresh);});
+  auto alteredDescriptor=dm_attachments::decodeStoredBody(privateBody.bytes,header);alteredDescriptor.descriptor.back()^=1;rejects([&]{dm_attachments::validateReceivedBody(alteredDescriptor,header,fresh);});
+  auto wrong=header;wrong.recipientAccount=9;rejects([&]{dm_attachments::validateReceivedBody(opened,wrong,fresh);});
+  wrong=header;wrong.keyGeneration++;rejects([&]{dm_attachments::validateReceivedBody(opened,wrong,fresh);});
+  std::cout<<"PASS exact cached recipient accepts unknown sibling without weakening sender, local key, audience or expiry checks\n";
+ }
+ {
+  auto photo=dm_attachments::decodeStoredBody(privateBody.bytes,header);photo.thumbnail=peerchat::tests::thumbnailFixture();check(attachment_thumbnails::valid(photo.thumbnail));
+  auto encoded=dm_attachments::encodeBody(photo,header);protocol::Reader version(encoded.bytes);version.type();check(version.string()=="PeerChat/dm-attachment-private/v2");
+  auto sealed=mailbox::seal(header,encoded.bytes,target,receiver.publicKey(),verifyDevicePayload,Storage::publicKeyId,sender,*hpke);auto ciphertext=mailbox::serialize(sealed);
+  check(std::search(ciphertext.begin(),ciphertext.end(),photo.thumbnail.begin(),photo.thumbnail.end())==ciphertext.end());
+  auto opened=dm_attachments::openBody(sealed,target,evidence,targetKey.key,*hpke,1100);check(opened.thumbnail==photo.thumbnail&&opened.manifest.key==body.manifest.key);
+  auto restart=dm_attachments::decodeStoredBody(encoded.bytes,header);check(restart.thumbnail==photo.thumbnail);dm_attachments::validateBody(restart,header,&evidence);
+  photo.thumbnail.resize(2049);rejects([&]{dm_attachments::encodeBody(photo,header);});photo.thumbnail=Blob{1,2,3};rejects([&]{dm_attachments::encodeBody(photo,header);});
+  photo.thumbnail.clear();check(dm_attachments::encodeBody(photo,header).bytes==privateBody.bytes);
+  sealed.encrypted.ciphertext.back()^=1;rejects([&]{dm_attachments::openBody(sealed,target,evidence,targetKey.key,*hpke,1100);});
+ }
  MemorySource encrypted(cipher.bytes);MemorySink output;transfer::windows::Sha256 p2,c2;group_attachments::open(encrypted,output,recovered.manifest,p2,c2);check(output.committed&&output.bytes==plain.bytes);
  auto stored=dm_attachments::decodeStoredBody(privateBody.bytes,header);check(stored.manifest.key==body.manifest.key);dm_attachments::validateBody(stored,header,&evidence);
  {MemorySource input(cipher.bytes);MemorySink sink;transfer::windows::Sha256 p,c;dm_attachments::Finalizer finalizer(input,sink,stored.manifest,p,c);check(!finalizer.completion()&&finalizer.processedBytes()==0);std::size_t steps=0;while(!finalizer.completion()){auto before=sink.bytes.size();bool done=finalizer.step();check(sink.bytes.size()-before<=group_attachments::BlockBytes);check(done==finalizer.completion());if(!done)check(!sink.committed);++steps;}check(steps==stored.manifest.blocks()+2&&sink.committed&&sink.bytes==plain.bytes&&finalizer.processedBytes()==plain.size());check(finalizer.step());rejects([&]{finalizer.cancel();});check(sink.committed&&sink.bytes==plain.bytes);}
@@ -54,5 +96,6 @@ int main(int argc,char** argv){try{
  group_attachments::Binding group{Storage::newMessageId(),Storage::newMessageId(),sender.profile.peerId,7,1};MemorySink gc;transfer::windows::Sha256 gp,gh;auto gm=group_attachments::seal(plain,gc,group,gp,gh);group_attachments::Body gb{990,9,group_attachments::Presentation::Picture,"image/png",std::move(gm)};auto encodedGroup=group_attachments::encodeBody(gb);auto decodedGroup=group_attachments::decodeBody(encodedGroup.bytes);check(!decodedGroup.manifest.binding.direct&&decodedGroup.manifest.name==plain.name());rejects([&]{dm_attachments::decodeBody(encodedGroup.bytes,header,evidence);});
  applicationFixture(senderStore,receiverStore,sender,receiver,source,target,targetKey.key,*hpke,evidence);
  storageFixture(root);
+ preflightAudienceFixture(root,sender,receiver,sibling,source,target,other,*hpke,evidence);
  hpke->shutdown();std::cout<<"PASS DM private HPKE body, real blob roundtrip, Unicode, exact audience/header, current evidence, signature/scope tamper, distinct verified receipt, legacy group codec\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

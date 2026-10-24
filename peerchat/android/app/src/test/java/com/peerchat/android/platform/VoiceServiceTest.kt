@@ -14,6 +14,14 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[34])
 class VoiceServiceTest {
+    @Test fun echoCancellationIsIndependentOfNoiseSuppression(){
+        val defaults=com.peerchat.android.platform.audio.AndroidCallAudio.Processing()
+        assertTrue(defaults.echoCancellation)
+        assertTrue(defaults.copy(automaticNoiseControl=false).echoCancellation)
+        assertTrue(defaults.copy(automaticNoiseControlLevel=2).echoCancellation)
+        assertFalse(defaults.copy(echoCancellation=false).echoCancellation)
+    }
+
     @Test fun processRestartCannotRecreateMicrophoneConsent(){
         val controller=Robolectric.buildService(PeerChatVoiceService::class.java).create()
         assertEquals(Service.START_NOT_STICKY,controller.get().onStartCommand(null,0,1))

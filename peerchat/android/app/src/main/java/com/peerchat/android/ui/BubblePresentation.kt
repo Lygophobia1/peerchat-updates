@@ -41,7 +41,7 @@ internal fun messageStatusDetail(status: MessageStatus): String = when (status) 
     MessageStatus.Received -> "Received"
 }
 
-internal fun attachmentCompactStatus(row: AttachmentSnapshot): String = when (row.state) {
+internal fun attachmentCompactStatus(row: AttachmentSnapshot): String = if(row.awaitingUploadStart) "Preparing upload" else if(row.error=="Sender is preparing file") { if(row.awaitingAcceptance) "Preparing · accept now" else "Accepted · sender preparing" } else when (row.state) {
     0 -> "Preparing"
     1 -> "Waiting for recipient"
     2 -> if (row.awaitingAcceptance) "File offered" else "Offer sent"
@@ -53,17 +53,36 @@ internal fun attachmentCompactStatus(row: AttachmentSnapshot): String = when (ro
     else -> "Suspended"
 }
 
-internal fun attachmentCompactSummary(row: AttachmentSnapshot): String = when (row.state) {
-    3 -> "${humanFileSize(row.size)} · ${if(row.size>0)(100.0*row.done/row.size).roundToInt().coerceIn(0,100) else 0}% · Transferring"
-    else -> "${humanFileSize(row.size)} · ${attachmentCompactStatus(row)}"
+internal fun attachmentCompactSummary(row: AttachmentSnapshot): String = when {
+    row.awaitingUploadStart -> "${humanFileSize(row.size)} · Preparing upload"
+    row.state==3 -> "${humanFileSize(row.size)} · ${if(row.size>0)(100.0*row.done/row.size).roundToInt().coerceIn(0,100) else 0}% · Transferring"
+    else -> "${humanFileSize(row.size)} · ${attachmentCompactStatus(row)}" + if(row.size>com.peerchat.android.platform.MAX_CACHED_FILE_BYTES) " · Direct-only" else ""
 }
 
-internal fun attachmentShowsCompactProgress(row: AttachmentSnapshot): Boolean = row.state == 3 && row.size > 0
+internal fun attachmentIsImage(name:String,hasPicture:Boolean):Boolean = hasPicture ||
+    name.substringAfterLast('.',"").lowercase(java.util.Locale.ROOT) in setOf("jpg","jpeg","png","webp","gif","bmp","heic","heif","avif")
+
+internal fun imageAttachmentStage(row:AttachmentSnapshot):String = when {
+    !row.outgoing->attachmentCompactStatus(row)
+    row.state==5->"Cancelled"
+    row.state==6||row.state==8->"Failed"
+    row.state==7->"Paused"
+    row.complete||row.cachePhase=="Notice stored; safe to disconnect"||row.cachePhase=="Recipients verified saved"->"Sent"
+    row.cachePhase.contains("storing notices",ignoreCase=true)->"Finalizing"
+    row.state==3&&row.size>0&&row.done>=row.size->"Finalizing"
+    row.cachePhase.startsWith("Checking ")->"Preparing"
+    row.cachePhase.startsWith("Preparing ")->"Preparing"
+    row.cachePhase.contains("uploadING encrypted file",ignoreCase=true)||row.state==3->"Uploading"
+    row.state==2||row.state==1->"Sending"
+    else->"Preparing"
+}
+
+internal fun attachmentShowsCompactProgress(row: AttachmentSnapshot): Boolean = row.state == 3 && row.size > 0 && !row.awaitingUploadStart
 
 internal fun attachmentHasCurrentTransferPhase(row:AttachmentSnapshot):Boolean = row.state in setOf(0,1,2,3,4,7)
 
 internal fun attachmentTransferPhaseText(row:AttachmentSnapshot):String? = row.cachePhase.takeIf{it.isNotEmpty()}?.let{phase->
-    if(row.state in setOf(5,6,8))"Last recorded phase (inactive): $phase" else phase
+    if(row.state in setOf(5,6,7,8))"Last recorded phase (inactive): $phase" else phase
 }
 
 private fun humanFileSize(bytes:Long):String = when {

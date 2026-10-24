@@ -298,43 +298,100 @@ struct Storage::Impl {
             return std::tie(time,sender,id)<std::tie(other.time,other.sender,other.id);
         }
     };
-    struct HistoryCache {std::string conversation;std::int64_t watermark=0,count=0;std::vector<HistoryKey> keys;};
-    // Ordering keys live only in memory: never persist decrypted timestamps.
+    struct HistoryCache {std::string conversation;std::int64_t watermark=0,count=0;std::vector<HistoryKey> keys;bool complete=true;std::string persistedDigest;};
+    // Ordering keys are bounded in memory. A protected recent suffix accelerates
+    // reopening; timestamps and ordering keys are never persisted in plaintext.
     // Cache at most 128 conversations / 32768 keys. The Android publisher reads
     // up to 128 contacts per pass; a smaller conversation count would thrash
     // even small histories on every publication. Key memory remains bounded.
     // Larger conversations use
     // a bounded top-page scan. Payloads are always read from protected storage.
     std::vector<HistoryCache> historyCaches;
+    void loadHistoryCache(const std::string& conversation,std::int64_t watermark,std::int64_t count){
+        if(std::any_of(historyCaches.begin(),historyCaches.end(),[&](const auto& c){return c.conversation==conversation;}))return;
+        // Derived, encrypted display acceleration only. Invalid/stale cache data
+        // falls back to authenticating source records; it never admits messages.
+        try{
+            Secret plain{get("history-order-cache/v1/"+conversation)};if(plain.data.empty()||plain.data.size()>65536)return;
+            Reader r(plain.data);require(r.string()=="PeerChat/ProtectedHistorySuffix/v1"&&r.string()==conversation,"History cache scope mismatch");
+            HistoryCache c;c.conversation=conversation;auto high=r.number(),total=r.number(),complete=r.number(),n=r.number();
+            require(high<=static_cast<std::uint64_t>(watermark)&&total<=static_cast<std::uint64_t>(count)&&count-total<=2048&&complete<=1&&n<=256&&n<=total,"History cache revision mismatch");
+            c.watermark=high;c.count=total;c.complete=complete!=0;
+            std::set<std::string> ids;
+            while(n--){HistoryKey k;auto time=r.number();k.sender=r.string();k.id=r.string();auto sequence=r.number();
+                require(time<=INT64_MAX&&sequence>0&&sequence<=INT64_MAX&&identifier(k.sender)&&identifier(k.id,32)&&ids.insert(k.id).second,"Invalid protected history key");
+                k.time=time;k.sequence=sequence;require(c.keys.empty()||c.keys.back()<k,"Unordered protected history suffix");c.keys.push_back(std::move(k));}
+            r.end();c.persistedDigest=Storage::publicKeyId(plain.data);
+            // No new budget: normal page admission below still enforces 32768.
+            if(historyCaches.size()>=128)historyCaches.erase(historyCaches.begin());
+            historyCaches.push_back(std::move(c));
+        }catch(...){/* Optional derived cache; original protected records remain authoritative. */}
+    }
+    void persistHistoryCache(HistoryCache& c){
+        if(c.conversation.rfind("dm/",0)!=0)return;
+        try{
+            const auto n=std::min<size_t>(256,c.keys.size());Writer w;
+            w.string("PeerChat/ProtectedHistorySuffix/v1");w.string(c.conversation);w.number(c.watermark);w.number(c.count);w.number(c.complete&&n==c.keys.size());w.number(n);
+            for(auto it=c.keys.end()-n;it!=c.keys.end();++it){w.number(it->time);w.string(it->sender);w.string(it->id);w.number(it->sequence);}
+            auto digest=Storage::publicKeyId(w.data);if(digest==c.persistedDigest)return;
+            put("history-order-cache/v1/"+c.conversation,w.data);c.persistedDigest=std::move(digest);
+        }catch(...){/* Cache persistence failure must not hide a readable page. */}
+    }
     std::vector<HistoryKey> historyPageKeys(const std::string& conversation,std::int64_t watermark,std::int64_t count,
         int limit,const std::optional<HistoryKey>& before,
         const std::function<void(const std::function<void(HistoryKey)>&)>& scan){
+        auto visiblePage=[&](std::vector<HistoryKey>& keys){
+            auto end=before?std::lower_bound(keys.begin(),keys.end(),*before):keys.end();
+            std::vector<HistoryKey> page;std::set<std::string> hidden;
+            // Recheck only candidate rows, including deletes from another handle.
+            // Remove observed hidden keys without rebuilding unrelated
+            // histories; continue backwards to fill the requested visible page.
+            while(end!=keys.begin()&&page.size()<static_cast<size_t>(limit)){
+                const auto& key=*--end;
+                if(get("local-hidden/v1/"+conversation+"/"+key.id).empty())page.push_back(key);else hidden.insert(key.id);
+            }
+            if(!hidden.empty())keys.erase(std::remove_if(keys.begin(),keys.end(),[&](const auto& key){return hidden.count(key.id)!=0;}),keys.end());
+            std::reverse(page.begin(),page.end());return page;
+        };
         auto cached=std::find_if(historyCaches.begin(),historyCaches.end(),[&](const HistoryCache& c){return c.conversation==conversation;});
-        std::vector<HistoryKey> keys;
-        if(cached!=historyCaches.end()&&cached->watermark==watermark&&cached->count==count){
-            keys=std::move(cached->keys);historyCaches.erase(cached);
-        }else{
-            if(cached!=historyCaches.end())historyCaches.erase(cached);
+        std::vector<HistoryKey> keys,page;bool complete=true,hit=false;std::string persistedDigest;
+        if(cached!=historyCaches.end()){
+            if(cached->watermark==watermark&&cached->count==count){
+                page=visiblePage(cached->keys);
+                // A truncated suffix can answer recent pages. Older pages or
+                // deleted suffixes must rescan instead of falsely ending history.
+                hit=cached->complete||page.size()==static_cast<size_t>(limit);
+                if(hit){keys=std::move(cached->keys);complete=cached->complete;persistedDigest=std::move(cached->persistedDigest);}
+            }
+            historyCaches.erase(cached);
+        }
+        if(!hit){
             const bool cacheable=count<=32768;
             scan([&](HistoryKey key){
                 if(cacheable)keys.push_back(std::move(key));
-                else if(!before||key<*before){
+                else if((!before||key<*before)&&get("local-hidden/v1/"+conversation+"/"+key.id).empty()){
                     auto position=std::lower_bound(keys.begin(),keys.end(),key);keys.insert(position,std::move(key));
                     if(keys.size()>static_cast<size_t>(limit))keys.erase(keys.begin());
                 }
             });
             std::sort(keys.begin(),keys.end());
             if(!cacheable)return keys;
+            page=visiblePage(keys);
         }
-        auto end=before?std::lower_bound(keys.begin(),keys.end(),*before):keys.end();
-        const auto available=static_cast<size_t>(end-keys.begin());
-        std::vector<HistoryKey> page(end-std::min(available,static_cast<size_t>(limit)),end);
         size_t total=keys.size();for(const auto& c:historyCaches)total+=c.keys.size();
+        // Preserve a recent suffix for older conversations before evicting them.
+        // Nine large chats must not cyclically evict each other's entire index.
+        // The existing total key budget remains unchanged.
+        for(auto& c:historyCaches){
+            if(total<=32768)break;
+            if(c.keys.size()>1024){auto removed=c.keys.size()-1024;c.keys.erase(c.keys.begin(),c.keys.begin()+removed);c.complete=false;total-=removed;}
+        }
         while(!historyCaches.empty()&&(historyCaches.size()>=128||total>32768)){
             total-=historyCaches.front().keys.size();historyCaches.erase(historyCaches.begin());
         }
-        historyCaches.push_back({conversation,watermark,count,std::move(keys)});return page;
+        historyCaches.push_back({conversation,watermark,count,std::move(keys),complete,std::move(persistedDigest)});persistHistoryCache(historyCaches.back());return page;
     }
+
     std::shared_ptr<platform::SqlDatabase> database;
     std::shared_ptr<platform::RecordProtector> records;
     std::shared_ptr<platform::IdentityProvider> identity;
@@ -465,6 +522,10 @@ void Storage::saveContact(const Contact& c) {
     for(const auto& e:c.endpoints){require(!e.host.empty()&&unicode::utf16Units(e.host)<=253&&e.port,"Invalid endpoint");w.text(e.host);w.number(e.port);}
     impl_->put("contact/"+c.peerId,w.data);
 }
+void Storage::saveContactsAtomically(const std::vector<Contact>& values) {
+    require(values.size()<=32,"Too many initial friend devices");
+    Transaction transaction(impl_->sql);for(const auto& value:values)saveContact(value);transaction.commit();
+}
 void Storage::removeContact(const std::string& peerId) {
     require(identifier(peerId),"Invalid contact identity");
     impl_->erase("contact/"+peerId);
@@ -545,6 +606,8 @@ std::optional<StoredMessage> Storage::message(const std::string& id){
 }
 std::optional<StoredMessage> Storage::historyMessage(const std::string& id){
     auto result=message(id);if(!result)return {};
+    Statement scope(impl_->sql,"SELECT peer FROM messages WHERE id=?");scope.text(1,id);require(scope.row(),"History scope unavailable");
+    if(localMessageHidden(scope.text(0),id))return {};
     Statement cursor(impl_->sql,"SELECT rowid FROM messages WHERE id=?");cursor.text(1,id);
     require(cursor.row(),"History message disappeared");result->sequence=cursor.number(0);
     require(result->sequence>0,"Invalid history message cursor");return result;
@@ -641,6 +704,20 @@ void Storage::saveDirectAttachmentJob(const std::string& device,const std::strin
 void Storage::saveDirectAttachmentTransfers(const std::string& device,const Blob& expected,const Blob& next){
     require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid DM attachment transfers");Transaction transaction(impl_->sql);Secret previous{directAttachmentTransfers(device)};
     require(previous.data==expected,"DM attachment transfers changed concurrently");if(previous.data!=next)impl_->put("dm-attachment-transfers/v1/"+device,next);transaction.commit();
+}
+Blob Storage::groupAttachmentLocal(const std::string& device,const std::string& key){require(identifier(device)&&identifier(key),"Invalid group local record");return impl_->get("group-attachment-local/v1/"+device+"/"+key);}
+void Storage::saveGroupAttachmentLocal(const std::string& device,const std::string& key,const Blob& expected,const Blob& next){
+ require(identifier(device)&&identifier(key)&&expected.size()<=16384&&next.size()<=16384,"Invalid group local record");Transaction transaction(impl_->sql);Secret old{groupAttachmentLocal(device,key)};require(old.data==expected,"Group local record changed concurrently");auto prefix="group-attachment-local/v1/"+device+"/";
+ if(!next.empty()&&old.data.empty()){Statement count(impl_->sql,"SELECT COUNT(*) FROM objects WHERE k LIKE ?");count.text(1,prefix+"%");require(count.row()&&count.number(0)<16384,"Group local record capacity exhausted");}
+ if(next.empty())impl_->erase(prefix+key);else if(old.data!=next)impl_->put(prefix+key,next);transaction.commit();
+}
+std::vector<std::string> Storage::groupAttachmentLocalKeys(const std::string& device,const std::string& after,int limit){
+ require(identifier(device)&&(after.empty()||identifier(after))&&limit>0&&limit<=64,"Invalid group local page");auto prefix="group-attachment-local/v1/"+device+"/";Statement query(impl_->sql,"SELECT k FROM objects WHERE k LIKE ? AND k>? ORDER BY k LIMIT ?");query.text(1,prefix+"%");query.text(2,prefix+after);query.number(3,limit);std::vector<std::string> rows;while(query.row()){auto key=query.text(0).substr(prefix.size());require(identifier(key),"Invalid group local key");rows.push_back(key);}return rows;
+}
+Blob Storage::groupAttachmentTransfers(const std::string& device){require(identifier(device),"Invalid group transfer device");return impl_->get("group-attachment-transfers/v1/"+device);}
+void Storage::saveGroupAttachmentTransfers(const std::string& device,const Blob& expected,const Blob& next){
+    require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid group attachment transfers");Transaction transaction(impl_->sql);Secret previous{groupAttachmentTransfers(device)};
+    require(previous.data==expected,"Group attachment transfers changed concurrently");if(previous.data!=next)impl_->put("group-attachment-transfers/v1/"+device,next);transaction.commit();
 }
 void Storage::saveGroupAttachmentStaging(const std::string& device,const Blob& expected,const Blob& next){
     require(identifier(device)&&!next.empty()&&next.size()<=262144,"Invalid group attachment staging");
@@ -996,6 +1073,7 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
     // An append-only index lets a warm DM ordering cache authenticate only new
     // rows. A deletion/replacement makes the delta count disagree and falls back
     // to the full protected scan below. Never persist plaintext ordering keys.
+    impl_->loadHistoryCache("dm/"+conversation,revision.number(0),revision.number(1));
     auto cached=std::find_if(impl_->historyCaches.begin(),impl_->historyCaches.end(),[&](const auto& c){return c.conversation=="dm/"+conversation;});
     const auto watermark=revision.number(0),count=revision.number(1);
     if(cached!=impl_->historyCaches.end()&&watermark>cached->watermark&&count>cached->count&&count<=32768){
@@ -1007,6 +1085,7 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
             require(m.id==id,"Stored message ID mismatch");added.push_back({m.utcMilliseconds,m.sender,m.id,{},delta.number(0)});
         }
         if(static_cast<std::int64_t>(added.size())==count-cached->count){
+            if(!cached->complete&&!cached->keys.empty()){const auto floor=cached->keys.front();added.erase(std::remove_if(added.begin(),added.end(),[&](const auto& key){return key<floor;}),added.end());}
             cached->keys.insert(cached->keys.end(),added.begin(),added.end());std::sort(cached->keys.begin(),cached->keys.end());
             cached->watermark=watermark;cached->count=count;
         }
@@ -1022,14 +1101,48 @@ std::vector<StoredMessage> Storage::history(const std::string& conversation,int 
     for(const auto& key:keys){auto m=message(key.id);require(m.has_value(),"History message disappeared");m->sequence=key.sequence;result.push_back(std::move(*m));}
     return result;
 }
+bool Storage::localMessageHidden(const std::string& conversation,const std::string& id,bool group) {
+    require(identifier(conversation,group?32:64)&&(identifier(id,32)||(group&&identifier(id,64))),"Invalid local history identity");
+    return !impl_->get("local-hidden/v1/"+std::string(group?"group/":"dm/")+conversation+"/"+id).empty();
+}
+void Storage::eraseMessage(const std::string& conversation,const std::string& id) {
+    require(identifier(conversation)&&identifier(id,32),"Invalid local history identity");
+    impl_->put("local-hidden/v1/dm/"+conversation+"/"+id,Blob{1});
+}
+void Storage::eraseMessageAndAliases(const std::string& conversation,const std::string& id) {
+    require(identifier(conversation)&&identifier(id,32),"Invalid local history identity");
+    Transaction transaction(impl_->sql);eraseMessage(conversation,id);
+    Statement jobs(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'dm-attachment-job/v1/%'");
+    while(jobs.row()){
+        Secret saved{impl_->get(jobs.text(0))};protocol::Reader r(saved.data);
+        require(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DMCacheJob/v2","Invalid local attachment record");
+        r.string();auto transfer=r.string(),message=r.string(),peer=r.string();
+        if(peer==conversation&&(transfer==id||message==id)){eraseMessage(conversation,transfer);eraseMessage(conversation,message);}
+    }
+    transaction.commit();
+}
 void Storage::eraseHistory(const std::string& conversation) {
-    require(identifier(conversation),"Invalid conversation identity");
-    Transaction transaction(impl_->sql);
-    Statement mailboxRecords(impl_->sql,"DELETE FROM objects WHERE EXISTS(SELECT 1 FROM messages m WHERE m.peer=? AND (objects.k LIKE 'mailbox-envelope/'||m.id||'/%' OR objects.k LIKE 'mailbox-uploaded/'||m.id||'/%' OR objects.k LIKE 'mailbox-receipt/'||m.id||'/%' OR objects.k LIKE 'delivery-target-retry/v1/'||m.id||'/%' OR objects.k='archive-history-proof/'||m.id OR objects.k='delivery-targets/v1/'||m.id))");
-    mailboxRecords.text(1,conversation);mailboxRecords.row();
-    Statement removeTargetRoutes(impl_->sql,"DELETE FROM delivery_target_outbox WHERE id IN (SELECT id FROM messages WHERE peer=?)");removeTargetRoutes.text(1,conversation);removeTargetRoutes.row();
-    Statement removeOutbox(impl_->sql,"DELETE FROM outbox WHERE peer=?");removeOutbox.text(1,conversation);removeOutbox.row();
-    Statement removeMessages(impl_->sql,"DELETE FROM messages WHERE peer=?");removeMessages.text(1,conversation);removeMessages.row();
+    require(identifier(conversation),"Invalid conversation identity");Transaction transaction(impl_->sql);
+    Statement rows(impl_->sql,"SELECT id FROM messages WHERE peer=?");rows.text(1,conversation);
+    while(rows.row())eraseMessage(conversation,rows.text(0));
+    // Read only the protected job identity prefix: no application/transport
+    // initialization is needed to clear unloaded attachment history offline.
+    Statement jobs(impl_->sql,"SELECT k FROM objects WHERE k LIKE 'dm-attachment-job/v1/%'");
+    while(jobs.row()){
+        Secret saved{impl_->get(jobs.text(0))};protocol::Reader r(saved.data);require(r.type()==protocol::FileTransfer&&r.string()=="PeerChat/DMCacheJob/v2","Invalid local attachment record");r.string();auto id=r.string(),message=r.string(),peer=r.string();
+        if(peer==conversation){eraseMessage(conversation,id);eraseMessage(conversation,message);}
+    }
+    transaction.commit();
+}
+void Storage::eraseGroupMessage(const std::string& conversation,const std::string& id) {
+    require(identifier(conversation,32)&&(identifier(id,32)||identifier(id,64)),"Invalid local group history identity");
+    impl_->put("local-hidden/v1/group/"+conversation+"/"+id,Blob{1});
+}
+void Storage::eraseGroupHistory(const std::string& conversation) {
+    require(identifier(conversation,32),"Invalid local group identity");Transaction transaction(impl_->sql);
+    Statement rows(impl_->sql,"SELECT message_id FROM group_message_index WHERE local_group=? UNION SELECT message_id FROM group_reference_index_v1 WHERE local_group=?");rows.text(1,conversation);rows.text(2,conversation);
+    while(rows.row())eraseGroupMessage(conversation,rows.text(0));
+    for(const auto& event:groupEvents(conversation))if(event.kind==GroupEventKind::Message)eraseGroupMessage(conversation,event.eventId);
     transaction.commit();
 }
 std::vector<StoredMessage> Storage::pending(const std::string& conversation,int limit,std::int64_t afterSequence,bool newest,const std::vector<std::string>& excluded) {
@@ -1197,7 +1310,7 @@ std::vector<AuthenticatedGroupMessage> Storage::authenticatedGroupHistory(const 
         // body types have no timestamp; never invent one from local arrival.
         try{protocol::Reader reader(row.plaintext);auto kind=reader.type();auto type=reader.string();
             if((kind==protocol::Text&&type=="PeerChat.GroupText.v1")||
-                (kind==protocol::FileTransfer&&type=="PeerChat.GroupAttachment.v1"))key.time=reader.number();}
+                (kind==protocol::FileTransfer&&(type=="PeerChat.GroupAttachment.v1"||type=="PeerChat.GroupAttachment.v2")))key.time=reader.number();}
         catch(const std::exception&){}
         constexpr size_t senderOffset=4+2+32+8+8+32+8;
         if(row.envelope.size()>=senderOffset+64)key.sender.assign(row.envelope.begin()+senderOffset,row.envelope.begin()+senderOffset+64);

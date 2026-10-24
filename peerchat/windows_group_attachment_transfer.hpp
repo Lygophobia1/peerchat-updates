@@ -136,6 +136,7 @@ public:
   outputPath_=plaintext_->path();outputToken_=plaintext_->resumeToken();
  }
  ReceiverFinalizer(const ReceiverFinalizer&)=delete;ReceiverFinalizer& operator=(const ReceiverFinalizer&)=delete;
+ void cancel(){if(!verified_){if(plaintext_)plaintext_->discard();plaintext_.reset();ciphertext_.reset();failed_=true;}}
  // Normal shutdown preserves the exact protected intent/partial for recovery.
  bool verified()const{return verified_;}bool failed()const{return failed_;}const std::string& error()const{return error_;}
  std::uint64_t processedBytes()const{return processed_;}std::uint64_t size()const{return manifest_.size;}

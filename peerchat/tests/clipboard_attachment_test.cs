@@ -23,6 +23,18 @@ class ClipboardAttachmentTest {
                 try{ClipboardAttachments.ReadImage(malformed);}catch(InvalidDataException){refused=true;}
                 Check(refused,"malformed or truncated DIB accepted");
             }
+            string fixture=Path.Combine(Path.GetTempPath(),"PeerChat-paste-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(fixture);
+            try{
+                string path=Path.Combine(fixture,"photo-彩色.png");File.WriteAllBytes(path,png);
+                var files=new DataObject();files.SetData(DataFormats.FileDrop,new[]{path});
+                Check(ClipboardAttachments.HasAttachment(files)&&ClipboardAttachments.ReadFiles(files).Single()==path,"file/photo paste unavailable");
+                foreach(var paths in new[]{new[]{fixture},new[]{path+"missing"},Enumerable.Repeat(path,5).ToArray(),new string[0]}){
+                    var invalid=new DataObject();invalid.SetData(DataFormats.FileDrop,paths);bool refused=false;
+                    try{ClipboardAttachments.ReadFiles(invalid);}catch(InvalidDataException){refused=true;}
+                    Check(refused,"invalid pasted file selection accepted");
+                }
+                files.SetData(DataFormats.Bitmap,image);Check(ClipboardAttachments.ReadFiles(files).Single()==path,"file identity lost with bitmap fallback");
+            }finally{Directory.Delete(fixture,true);}
             var draft=DirectImageDraft.Create("conversation-a","peer-a",4,new object(),decoded);
             Check(draft.Preview.IsFrozen&&draft.Png.Length>0&&draft.Name.EndsWith(".png"),"DM draft preview/PNG missing");
             Check(!draft.Matches("conversation-b","peer-a",4,draft.Owner)&&!draft.Matches("conversation-a","peer-b",4,draft.Owner)&&!draft.Matches("conversation-a","peer-a",5,draft.Owner)&&!draft.Matches("conversation-a","peer-a",4,new object()),"DM draft escaped scope");

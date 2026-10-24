@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -75,8 +75,8 @@ class VoiceUiSmoke {
             model.VoiceState="Connected · Direct WebRTC";model.VoiceStateCode=5;model.VoiceMediaState=2;model.VoiceMediaRoute=2;model.VoiceMediaGeneration=4;model.VoiceControlAvailable=true;model.VoiceCallId="ui-call";model.VoiceCallLifetime=4;refresh.Invoke(desktop,null);
             Require(voiceCard.Visibility==Visibility.Visible&&((TextBlock)window.FindName("VoiceState")).Text=="Connected","Active call did not expand into the header strip");
             Require(((TextBlock)window.FindName("MediaConnectionMethod")).Text=="Connection: Direct ICE / NAT traversal"&&((TextBlock)window.FindName("MediaSecurityMode")).Text=="Security: DTLS-SRTP"&&((TextBlock)window.FindName("MediaConnectionState")).Text=="State: Connected","Authoritative voice route/security state was not rendered separately");
-            model.VoiceMediaState=4;refresh.Invoke(desktop,null);Require(((TextBlock)window.FindName("VoiceState")).Text.StartsWith("Voice connection interrupted · Reconnecting")&&((TextBlock)window.FindName("MediaConnectionMethod")).Text=="Connection: Recovering","Media recovery state was inferred or hidden instead of rendered explicitly");model.VoiceMediaState=2;refresh.Invoke(desktop,null);
-            Press(window,"VoiceDetails");Require(inline.Visibility==Visibility.Visible&&connectionContext.Visibility==Visibility.Visible&&!advanced.IsExpanded,"Call Details did not open inline while preserving the contextual side panel");
+            model.VoiceMediaState=4;refresh.Invoke(desktop,null);Require(((TextBlock)window.FindName("VoiceState")).Text.StartsWith("Reconnecting")&&((TextBlock)window.FindName("MediaConnectionMethod")).Text=="Connection: Recovering","Media recovery state was inferred or hidden instead of rendered explicitly");model.VoiceMediaState=2;refresh.Invoke(desktop,null);
+            Press(window,"VoiceAudio");Require(inline.Visibility==Visibility.Visible&&connectionContext.Visibility==Visibility.Visible&&!advanced.IsExpanded,"Call Details did not open inline while preserving the contextual side panel");
             advanced.IsExpanded=true;await Task.Delay(150);window.UpdateLayout();
             var diagnosticsScroll=advanced.Content as ScrollViewer;
             Require(diagnosticsScroll!=null&&diagnosticsScroll.MaxHeight<=300&&diagnosticsScroll.VerticalScrollBarVisibility==ScrollBarVisibility.Auto,"Inline diagnostics are not height-capped with internal scrolling");

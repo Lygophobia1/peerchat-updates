@@ -20,6 +20,8 @@ class VoiceMedia {
 public:
     struct ProcessingOptions {
         bool enabled = true;
+        bool automaticNoiseControl = true;
+        unsigned automaticNoiseControlLevel = 1;
         bool noiseSuppression = true;
         bool automaticGain = true;
         bool echoCancellation = false;

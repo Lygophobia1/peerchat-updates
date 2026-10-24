@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -76,7 +76,7 @@ public static class AttachmentDownloadTarget {
 public sealed partial class CoreAdapter {
     public sealed class GroupAttachmentRecipient {public long account,done;public string device,name,state,error;}
     public sealed class GroupAttachmentData {
-        public string id,logicalId,group,name,path,error,senderPeer,state,exportState,exportPath,exportError;
+        public string id,logicalId,group,name,path,error,senderPeer,state,exportState,exportPath,exportError,thumbnail;
         public long size,transferSize,done,time;
         public bool sending,plaintextVerified,sourceVerified,canRetry,canCancel,canOpen,outputPending,preparationRequired;
         public GroupAttachmentRecipient[] recipients;
@@ -85,7 +85,7 @@ public sealed partial class CoreAdapter {
     [DllImport(Library,CallingConvention=CallingConvention.Cdecl,CharSet=CharSet.Unicode)]
     static extern IntPtr ui_group_attachment(IntPtr handle,uint operation,string group,string id,string path);
     public string GroupAttachment(uint operation,string group="",string id="",string path=""){
-        if(operation==1||operation==4&&!String.IsNullOrEmpty(path))SelectedTransferFile.ValidateSize(path);
+        if(operation==1||operation==4&&!String.IsNullOrEmpty(path))SelectedTransferFile.ValidateSize(path,true);
         lock(mailboxGate){
             if(handle==IntPtr.Zero)throw new ObjectDisposedException("CoreAdapter");
             IntPtr result;
@@ -150,16 +150,17 @@ public static class GroupAttachmentProjection {
             return total>0?(row.state=="uploading"?"Uploading":"Downloading")+" · "+Math.Min(100,Math.Max(0,100.0*row.done/total)).ToString("0")+"%":row.state=="uploading"?"Uploading":"Downloading";
         }
         if(row.state=="complete")return row.sending?"Uploaded":row.plaintextVerified?"Downloaded":"Verifying";
+        if(row.state=="verifying_offer")return "Verifying encrypted offer";
         if(row.state=="available")return row.sending?"Available":"Ready to download";
         if(row.state=="paused")return "Paused";
         if(row.state=="expired")return "Expired";
         return "Preparing";
     }
     public static bool Apply(GroupModel group,CoreAdapter.GroupAttachmentData row){
-        if(row==null||String.IsNullOrEmpty(row.id)||String.IsNullOrEmpty(LogicalId(row))||row.group!=group.Id||row.size<0||row.transferSize<0||row.done<0)return false;
-        var message=group.Messages.FirstOrDefault(item=>(item.GroupAttachment!=null&&LogicalId(item.GroupAttachment)==LogicalId(row))||(item.Data.id==LogicalId(row)&&item.Data.status=="attachment_reference"));
+        if(row==null||group.LocalDeletions.Hidden(row.id,row.logicalId)||String.IsNullOrEmpty(row.id)||String.IsNullOrEmpty(LogicalId(row))||row.group!=group.Id||row.size<0||row.transferSize<0||row.done<0)return false;
+        var message=group.Messages.FirstOrDefault(item=>(item.GroupAttachment!=null&&(LogicalId(item.GroupAttachment)==LogicalId(row)||item.GroupAttachment.id==row.id||item.PendingAttachment!=null&&item.PendingAttachment.AcceptedId==row.id))||(item.Data.id==LogicalId(row)&&item.Data.status=="attachment_reference"));
         string revision=new JavaScriptSerializer().Serialize(row);
-        if(message!=null){if(message.GroupAttachmentRevision==revision)return false;if(message.Data.status=="attachment_reference"){message.Data.time=row.time;message.Data.logical=row.time;message.Data.status="";message.Data.sender=row.senderPeer??"";message.Outgoing=row.sending;}message.SetGroupAttachment(row,revision);group.Refresh();return true;}
+        if(message!=null){if(message.PendingAttachment!=null){message.PendingAttachment=null;message.Data.id=LogicalId(row);message.Data.time=row.time;message.Data.logical=row.time;}if(message.GroupAttachmentRevision==revision)return false;if(message.Data.status=="attachment_reference"){message.Data.time=row.time;message.Data.logical=row.time;message.Data.status="";message.Data.sender=row.senderPeer??"";message.Outgoing=row.sending;}message.SetGroupAttachment(row,revision);group.Refresh();return true;}
         message=new MessageModel{Data=new MessageData{id=LogicalId(row),sender=row.senderPeer??"",text="",time=row.time,logical=row.time},Outgoing=row.sending};
         message.SetGroupAttachment(row,revision);
         int at=0;while(at<group.Messages.Count&&(group.Messages[at].Data.time<=row.time||row.time==0))at++;
@@ -178,12 +179,19 @@ public sealed class GroupAttachmentCard:StackPanel {
     public bool DetailsExpanded{get{return (bool)GetValue(DetailsExpandedProperty);}set{SetValue(DetailsExpandedProperty,value);}}
     StackPanel detailsPanel;
     void UpdateDetailsVisibility(){if(detailsPanel!=null)detailsPanel.Visibility=DetailsExpanded?Visibility.Visible:Visibility.Collapsed;}
-    public GroupAttachmentCard(){MaxWidth=360;Visibility=Visibility.Collapsed;}
+    MessageModel messageModel;
+    public GroupAttachmentCard(){MaxWidth=360;Visibility=Visibility.Collapsed;DataContextChanged+=(s,e)=>{if(messageModel!=null)messageModel.PropertyChanged-=PresentationChanged;messageModel=DataContext as MessageModel;if(messageModel!=null)messageModel.PropertyChanged+=PresentationChanged;Render();};Loaded+=(s,e)=>{if(messageModel!=null){messageModel.PropertyChanged-=PresentationChanged;messageModel.PropertyChanged+=PresentationChanged;}Render();};Unloaded+=(s,e)=>{if(messageModel!=null)messageModel.PropertyChanged-=PresentationChanged;};}
+    void PresentationChanged(object sender,System.ComponentModel.PropertyChangedEventArgs args){if(args.PropertyName=="IsExpanded"||args.PropertyName=="GroupAttachment"||args.PropertyName=="BubbleWidth"&&messageModel!=null&&messageModel.IsPhotoAttachment)Render();}
     void AddAction(WrapPanel actions,string title,string action){var button=new Button{Content=title,Padding=new Thickness(8,4,8,4),Margin=new Thickness(0,4,6,0)};button.Click+=(s,e)=>RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,Attachment,action));actions.Children.Add(button);}
     void Render(){
         Children.Clear();var row=Attachment;Visibility=row==null?Visibility.Collapsed:Visibility.Visible;if(row==null)return;
+        var message=DataContext as MessageModel;var pending=message==null?null:message.PendingAttachment;
+        if(pending!=null){if(pending.Source.IsPhoto)detailsPanel=PhotoAttachmentPresentation.Render(this,message,pending.Source.Preview,row.name,row.size,pending.Status,()=>PhotoAttachmentPresentation.Open(pending.Source),panel=>PhotoAttachmentPresentation.PendingDetails(panel,pending),panel=>PhotoAttachmentPresentation.PendingActions(panel,pending),DetailsExpanded,()=>DetailsExpanded=!DetailsExpanded);else{Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold});var panel=new StackPanel();PhotoAttachmentPresentation.PendingDetails(panel,pending);Children.Add(panel);var buttons=new WrapPanel();PhotoAttachmentPresentation.PendingActions(buttons,pending);Children.Add(buttons);}return;}
+        if((message!=null&&message.IsPhotoAttachment)||LocalAttachmentSource.PhotoName(row.name)||!String.IsNullOrEmpty(row.thumbnail)){RenderPhoto(row,message);return;}
         Children.Add(new TextBlock{Text=row.name,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap});
         Children.Add(new TextBlock{Text=ChatAttachmentProjection.CompactSize(row.size)+" · "+GroupAttachmentProjection.CompactStatus(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap,FontSize=12});
+        var earlyImage=EarlyAttachmentThumbnail.Decode(row.thumbnail);
+        if(earlyImage!=null){var image=new Image{Source=earlyImage,MaxWidth=128,MaxHeight=128,HorizontalAlignment=HorizontalAlignment.Left,Margin=new Thickness(0,8,0,0),Cursor=Cursors.Hand,ToolTip="Encrypted photo preview — select to download or view the original"};image.MouseLeftButtonUp+=(s,e)=>{e.Handled=true;if(!row.sending&&row.state=="available"&&!row.plaintextVerified)RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,row,"accept"));else if(GroupAttachmentProjection.CanRequestOpen(row))RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,row,"preview"));};Children.Add(image);}
         if(row.state=="uploading"||row.state=="downloading"){
             if(row.transferSize>0)Children.Add(new ProgressBar{Height=4,Maximum=row.transferSize,Value=Math.Min(row.done,row.transferSize),Margin=new Thickness(0,6,0,2)});
         }
@@ -212,6 +220,24 @@ public sealed class GroupAttachmentCard:StackPanel {
             else if(row.exportState!="copying"&&row.exportState!="pending")AddAction(actions,"Retry Save…","retry-save");
         }
     }
+    void RenderPhoto(CoreAdapter.GroupAttachmentData row,MessageModel message){var local=message==null?null:message.LocalAttachment;var image=local!=null&&local.Preview!=null?local.Preview:EarlyAttachmentThumbnail.Decode(row.thumbnail);
+        detailsPanel=PhotoAttachmentPresentation.Render(this,message,image,row.name,row.size,GroupAttachmentProjection.CompactStatus(row),()=>{if(local!=null)PhotoAttachmentPresentation.Open(local);else if(!row.sending&&row.state=="available"&&!row.plaintextVerified)RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,row,"accept"));else if(GroupAttachmentProjection.CanRequestOpen(row))RaiseEvent(new GroupAttachmentActionEventArgs(ActionEvent,row,"preview"));},panel=>{
+            panel.Children.Add(new TextBlock{Text=row.size.ToString("N0")+" file bytes · "+GroupAttachmentProjection.Status(row),Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+            if(row.transferSize>0&&(row.state=="uploading"||row.state=="downloading"))panel.Children.Add(new ProgressBar{Height=4,Maximum=row.transferSize,Value=Math.Min(row.done,row.transferSize),Margin=new Thickness(0,6,0,6)});
+            panel.Children.Add(new TextBlock{Text=Math.Max(0,row.done).ToString("N0")+" confirmed encrypted bytes",Foreground=Brushes.LightGray,FontSize=12});
+            if(!String.IsNullOrEmpty(row.error))panel.Children.Add(new TextBlock{Text=row.error,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+            if(!String.IsNullOrEmpty(row.exportError))panel.Children.Add(new TextBlock{Text="Save failed: "+row.exportError,Foreground=Brushes.LightSalmon,TextWrapping=TextWrapping.Wrap});
+            foreach(var recipient in row.recipients??new CoreAdapter.GroupAttachmentRecipient[0])panel.Children.Add(new TextBlock{Text=(String.IsNullOrEmpty(recipient.name)?"Account "+recipient.account:recipient.name)+" · "+(recipient.device??"")+" · "+GroupAttachmentProjection.State(recipient.state,false),FontSize=12,Foreground=Brushes.LightGray,TextWrapping=TextWrapping.Wrap});
+        },buttons=>{
+            if(!row.sending&&row.state=="available"&&!row.plaintextVerified)AddAction(buttons,"Download…","accept");
+            if(row.canRetry&&row.state!="expired")AddAction(buttons,row.preparationRequired?"Prepare again…":row.state=="paused"?"Resume":"Retry","retry");
+            if(row.canCancel)AddAction(buttons,"Cancel","cancel");
+            if(GroupAttachmentProjection.CanRequestOpen(row)&&!row.outputPending)AddAction(buttons,"Preview","preview");
+            if(!row.sending&&row.plaintextVerified&&row.exportState!="complete"&&row.exportState!="pending"&&row.exportState!="copying")AddAction(buttons,"Retry Save…","retry-save");
+            if(!row.sending&&row.plaintextVerified&&row.exportState=="complete"&&!String.IsNullOrWhiteSpace(row.exportPath)&&File.Exists(row.exportPath)){AddAction(buttons,"Open File","open-saved");AddAction(buttons,"Open Folder","folder-saved");}
+        },DetailsExpanded,()=>DetailsExpanded=!DetailsExpanded);
+    }
+
 }
 // A clipboard draft stays in memory until native durably accepts its source.
 public sealed class GroupImageDraft {
@@ -244,7 +270,7 @@ public sealed class GroupFileDraft {
             var path=Path.GetFullPath(selected);if(!seen.Add(path))throw new InvalidDataException("A file was selected more than once.");
             var info=new FileInfo(path);
             if(!info.Exists||(info.Attributes&FileAttributes.ReparsePoint)!=0)throw new InvalidDataException("Choose regular files, not links or folders.");
-            SelectedTransferFile.ValidateSize(path);entries.Add(new Entry(path,info));
+            SelectedTransferFile.ValidateSize(path,true);entries.Add(new Entry(path,info));
         }
         return new GroupFileDraft(group,profile,entries.ToArray());
     }
@@ -279,11 +305,11 @@ public partial class DesktopApplication {
         if(closing||groupAttachmentRefreshing||groupAttachmentOperating||!model.Groups||model.SelectedGroup==null)return;
         var group=model.SelectedGroup;var state=AttachmentHistoryState(group.Id);
         if(!state.More||state.Loading||!GroupAttachmentHistoryCursor.Valid(state.Cursor))return;
-        string before=state.Cursor;ulong generation=profileSessionGeneration;var owner=discovery;
+        string before=state.Cursor;ulong generation=profileSessionGeneration;long deletionRevision=group.LocalDeletions.Revision;var owner=discovery;
         state.Loading=true;RefreshGroupAttachmentHistoryButton();
         try{
             var page=await Task.Run(()=>core.GroupAttachmentHistory(group.Id,before));
-            if(closing||generation!=profileSessionGeneration||owner!=discovery||state!=AttachmentHistoryState(group.Id))return;
+            if(closing||generation!=profileSessionGeneration||owner!=discovery||state!=AttachmentHistoryState(group.Id)||deletionRevision!=group.LocalDeletions.Revision)return;
             var items=page.items??new CoreAdapter.GroupAttachmentData[0];
             if(items.Length>32||items.Any(row=>row==null||row.group!=group.Id)||page.historyMore&&!GroupAttachmentHistoryCursor.Advances(before,page.historyCursor)||items.Length==0&&page.historyMore)throw new InvalidDataException("Attachment history page is invalid.");
             var viewer=Find<ScrollViewer>("MessageScroll");double offset=viewer.VerticalOffset,extent=viewer.ExtentHeight;
@@ -330,25 +356,15 @@ public partial class DesktopApplication {
         Find<TextBlock>("GroupImageDraftName").Text=imageVisible?groupImageDraft.Name+" · Image draft — Send to share":fileVisible?String.Join("\n",groupFileDraft.Files.Skip(groupFileDraftNext).Select(file=>file.Name+" · "+file.Size.ToString("N0")+" bytes"))+"\nFile draft — Send to share":directVisible?directImageDraft.Name+" · Image draft — Send to share":"";
         Find<Button>("RemoveGroupImageDraft").IsEnabled=!groupAttachmentOperating&&!groupImageDraftPreparing&&!directImageDraftPreparing&&!directImageDraftSending;
     }
-    async Task<bool> SendGroupImageDraft(){
-        if(model.Groups&&groupImageDraftPreparing)return true;
+    Task<bool> SendGroupImageDraft(){
+        var group=model.Groups?model.SelectedGroup:null;if(group==null)return Task.FromResult(false);
         var files=groupFileDraft;
-        if(files!=null&&model.Groups&&model.SelectedGroup!=null&&files.Matches(model.SelectedGroup.Id,profileSessionGeneration)){
-            if(groupAttachmentOperating)return true;
-            while(groupFileDraft==files&&groupFileDraftNext<files.Files.Length){
-                var entry=files.Files[groupFileDraftNext];
-                if(!entry.Unchanged()){Notify("The selected file changed. Remove this draft and select it again.");return true;}
-                int index=groupFileDraftNext;
-                if(!await GroupAttachmentOperation(1,files.Group,path:entry.Path,accepted:result=>{if(groupFileDraft==files&&groupFileDraftNext==index&&!String.IsNullOrEmpty(result))groupFileDraftNext++;}))return true;
-                if(groupFileDraft==files)RefreshGroupImageDraft();
-            }
-            if(groupFileDraft==files){groupFileDraft=null;groupFileDraftNext=0;RefreshGroupImageDraft();}
-            return true;
+        if(files!=null&&files.Matches(group.Id,profileSessionGeneration)){
+            var entries=files.Files.Skip(groupFileDraftNext).ToArray();groupFileDraft=null;groupFileDraftNext=0;RefreshGroupImageDraft();
+            foreach(var entry in entries)BeginGroupAttachment(group,new LocalAttachmentSource(entry.Path,entry.Size,entry.Name,entry.ModifiedUtc));return Task.FromResult(true);
         }
-        var draft=groupImageDraft;if(draft==null||!model.Groups||model.SelectedGroup==null||!draft.Matches(model.SelectedGroup.Id,profileSessionGeneration))return false;
-        if(groupAttachmentOperating)return true;
-        if(await GroupAttachmentOperation(7,draft.Group,draft.Name,draft.Base64))if(groupImageDraft==draft){groupImageDraft=null;RefreshGroupImageDraft();}
-        return true;
+        var draft=groupImageDraft;if(draft==null||!draft.Matches(group.Id,profileSessionGeneration))return Task.FromResult(false);
+        groupImageDraft=null;RefreshGroupImageDraft();BeginGroupAttachment(group,new LocalAttachmentSource(draft.Name,Convert.FromBase64String(draft.Base64),draft.Preview));return Task.FromResult(true);
     }
     async Task<bool> GroupAttachmentOperation(uint operation,string group,string id="",string path="",Action<string> accepted=null){
         if(groupAttachmentOperating){Notify("Please wait for the current attachment operation.");return false;}
@@ -444,9 +460,10 @@ public partial class DesktopApplication {
     }
     bool PendingGroupActionCurrent(PendingGroupAttachmentAction pending){return !closing&&pending.Profile==profileSessionGeneration&&pending.Owner==discovery&&model.Groups&&model.SelectedGroup!=null&&model.SelectedGroup.Id==pending.Group;}
     async Task ShowVerifiedGroupAttachment(CoreAdapter.GroupAttachmentData row,PendingGroupAttachmentAction pending,string path){
-            if(!PendingGroupActionCurrent(pending))return;
+            if(!PendingGroupActionCurrent(pending)||model.SelectedGroup.LocalDeletions.Hidden(row.id,row.logicalId))return;
             if(String.IsNullOrWhiteSpace(path)||!Path.IsPathRooted(path))throw new IOException("Verified local file unavailable.");
             if(pending.Action=="open"){System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path){UseShellExecute=true});return;}
+            if(LocalAttachmentSource.PhotoName(row.name)){PhotoAttachmentPresentation.Open(new LocalAttachmentSource(path,row.size,row.name));return;}
             var preview=await SafeAttachmentPreview.ReadAsync(path,row.size);if(!PendingGroupActionCurrent(pending))return;
             if(preview.Image!=null)new Window{Title=row.name+" — read-only preview",Owner=window,Width=760,Height=520,Content=new Image{Source=preview.Image,Stretch=Stretch.Uniform},Background=Brushes.Black}.Show();
             else if(String.IsNullOrEmpty(preview.Error))BoundedTextView.ShowFull(preview.Text,true,row.name+(preview.Truncated?" — limited preview":""));
@@ -454,7 +471,7 @@ public partial class DesktopApplication {
     }
     async Task ContinueGroupAttachmentActions(CoreAdapter.GroupAttachmentData[] rows){
         foreach(var pair in pendingGroupAttachmentActions.ToArray()){
-            var pending=pair.Value;if(!PendingGroupActionCurrent(pending)){pendingGroupAttachmentActions.Remove(pair.Key);continue;}
+            var pending=pair.Value;if(!PendingGroupActionCurrent(pending)||model.SelectedGroup.LocalDeletions.Hidden(pair.Key)){pendingGroupAttachmentActions.Remove(pair.Key);continue;}
             if(pending.Busy)continue;
             var row=rows.FirstOrDefault(item=>item!=null&&item.id==pair.Key&&item.group==pending.Group);if(row==null)continue;
             try{
@@ -477,11 +494,13 @@ public partial class DesktopApplication {
         }
     }
     async Task RefreshGroupAttachments(){
-        if(closing||groupAttachmentRefreshing||groupAttachmentOperating||!model.Listening)return;groupAttachmentRefreshing=true;
+        if(closing||groupAttachmentRefreshing||groupAttachmentOperating||PendingNativeAttachmentAdmission||!model.Listening)return;groupAttachmentRefreshing=true;
         var owner=discovery;ulong generation=profileSessionGeneration,session=discoverySessionGeneration;
+        var deletionRevisions=model.GroupChats.Values.ToDictionary(value=>value,value=>value.LocalDeletions.Revision);
         try{
             string selected=model.Groups&&model.SelectedGroup!=null?model.SelectedGroup.Id:"";
             var snapshot=await Task.Run(()=>core.GroupAttachments(selected));if(closing||generation!=profileSessionGeneration||session!=discoverySessionGeneration||owner!=discovery)return;
+            if(PendingNativeAttachmentAdmission)return;
             RecordAttachmentCapability(snapshot);
             if(!String.IsNullOrEmpty(selected)){
                 var history=AttachmentHistoryState(selected);
@@ -491,7 +510,7 @@ public partial class DesktopApplication {
                 }
             }
             groupAttachmentState=new GroupAttachmentSnapshotState{Supported=snapshot.supported,Profile=generation,Owner=owner,Reason=String.IsNullOrEmpty(snapshot.reason)?"Group attachments are unavailable on this connection.":snapshot.reason};
-            bool changed=false;foreach(var row in snapshot.items??new CoreAdapter.GroupAttachmentData[0]){GroupModel group;if(row!=null&&row.group!=null&&model.GroupChats.TryGetValue(row.group,out group))changed|=GroupAttachmentProjection.Apply(group,row);}
+            bool changed=false;foreach(var row in snapshot.items??new CoreAdapter.GroupAttachmentData[0]){GroupModel group;if(row!=null&&row.group!=null&&model.GroupChats.TryGetValue(row.group,out group)){long deletionRevision;if(deletionRevisions.TryGetValue(group,out deletionRevision)&&deletionRevision==group.LocalDeletions.Revision)changed|=GroupAttachmentProjection.Apply(group,row);}}
             if(changed){Refresh();SizeBubbles();}
             await ContinueGroupAttachmentActions(snapshot.items??new CoreAdapter.GroupAttachmentData[0]);
         }catch{if(generation==profileSessionGeneration&&owner==discovery)groupAttachmentState=new GroupAttachmentSnapshotState{Profile=generation,Owner=owner,Reason="Group attachment status unavailable. Reconnect and try again."};}

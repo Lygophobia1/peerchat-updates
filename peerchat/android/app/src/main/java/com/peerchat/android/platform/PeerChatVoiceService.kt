@@ -35,9 +35,12 @@ class PeerChatVoiceService:Service() {
                     intent.getStringExtra("call")==current.id&&intent.getLongExtra("lifetime",0)==current.lifetime&&
                     intent.getStringExtra("group").orEmpty()==current.group&&intent.getStringExtra("room").orEmpty()==current.room&&
                     intent.getStringExtra("epoch").orEmpty()==current.epoch&&intent.getStringExtra("participation").orEmpty()==current.participation&&!stopping){
+                    val hasRoute=intent.hasExtra("deviceId")
+                    val deviceId=intent.getIntExtra("deviceId",-1)
                     val enabled=intent.getBooleanExtra("speaker",false)
-                    val accepted=audio?.setSpeaker(enabled)==true
-                    scope.launch{runCatching{lease?.voicePlatformState(checkNotNull(token),if(accepted)"" else "Audio route unavailable",if(accepted)enabled else lease?.state?.value?.voice?.speaker==true)}}
+                    val accepted=if(hasRoute)audio?.setRoute(deviceId)==true else audio?.setSpeaker(enabled)==true
+                    val speaker=if(hasRoute)audio?.speakerActive()==true else enabled
+                    scope.launch{runCatching{lease?.voicePlatformState(checkNotNull(token),if(accepted)"" else "Audio route unavailable",if(accepted)speaker else lease?.state?.value?.voice?.speaker==true)}}
                 }else if(token==null)stopSelf(startId)
                 return START_NOT_STICKY
             }
@@ -62,22 +65,37 @@ class PeerChatVoiceService:Service() {
             // Android 15 requires a top app or foreground service for focus.
             work=scope.launch {
                 var acquired:MessagingApplication?=null
+                var preparationStage="runtime_lease"
                 try {
                     // Runtime acquisition may briefly await native ownership;
                     // never block the main looper or foreground-start deadline.
                     withContext(Dispatchers.IO){acquired=AndroidMessagingRuntime.acquireVoice(this@PeerChatVoiceService,requested)}
                     ensureActive();lease=acquired
+                    android.util.Log.i("PeerChatVoice","stage=runtime_lease result=ready")
+                    preparationStage="audio_prepare"
                     audio=AndroidCallAudio(this@PeerChatVoiceService){finish("Audio focus or device unavailable")}
-                    check(audio!!.prepare()){"Audio focus or device unavailable"}
+                    val automaticNoiseControl=getSharedPreferences("voice-processing",MODE_PRIVATE).getBoolean("automatic-noise-control",true)
+                    check(audio!!.prepare(AndroidCallAudio.Processing(echoCancellation=true,automaticNoiseControl=automaticNoiseControl,automaticNoiseControlLevel=getSharedPreferences("voice-processing",MODE_PRIVATE).getInt("automatic-noise-level",1).coerceIn(0,2)))){"Audio focus or device unavailable"}
+                    android.util.Log.i("PeerChatVoice","stage=audio_prepare result=ready")
+                    preparationStage="activate"
                     val started=withTimeout(30_000){checkNotNull(lease).activateVoice(requested)}
                     target=checkNotNull(started.target)
+                    android.util.Log.i("PeerChatVoice","stage=activate result=ready")
                     // Counter updates must not repeatedly republish the OS notification.
                     checkNotNull(lease).state.map{Triple(it.authenticated,it.voice.target,it.voice.diagnostic)}.distinctUntilChanged().collectLatest { (authenticated,current,status)->
-                        if(!authenticated||current!=target){finish();return@collectLatest}
+                        if(!authenticated||current!=target){
+                            android.util.Log.w("PeerChatVoice","stage=owner_watch result=call_target_changed")
+                            finish(if(!authenticated)"owner_changed" else "call_target_changed");return@collectLatest
+                        }
                         manager.notify(NOTIFICATION,notification(status))
                     }
-                }catch(_:CancellationException){if(!stopping)finish("Call preparation failed")}
-                catch(_:Exception){finish("Call preparation failed")}
+                }catch(failure:CancellationException){
+                    android.util.Log.w("PeerChatVoice","stage=$preparationStage result="+failure.javaClass.simpleName)
+                    if(!stopping)finish("Call preparation failed")
+                }catch(failure:Exception){
+                    android.util.Log.w("PeerChatVoice","stage=$preparationStage result="+failure.javaClass.simpleName)
+                    finish("Call preparation failed")
+                }
                 finally{if(lease!==acquired)acquired?.close()}
             }
         }catch(_:Exception){finish("Audio focus or device unavailable")}
@@ -85,6 +103,15 @@ class PeerChatVoiceService:Service() {
     }
     private fun finish(diagnostic:String="") {
         if(stopping)return
+        val reason=when(diagnostic){
+            ""->"call_target_changed"
+            "Audio focus or device unavailable"->"audio_focus_or_device_unavailable"
+            "Call preparation failed"->"call_preparation_failed"
+            "owner_changed"->"owner_changed"
+            "call_target_changed"->"call_target_changed"
+            else->"explicit_finish"
+        }
+        android.util.Log.i("PeerChatVoice","stage=finish reason=$reason")
         stopping=true
         // Stop capture immediately; deferred cleanup cannot operate a newer call.
         audio?.close();audio=null
@@ -92,7 +119,7 @@ class PeerChatVoiceService:Service() {
         val owner=lease;val expected=token
         scope.launch {
             try{if(owner!=null&&expected!=null){
-                if(diagnostic.isNotEmpty())runCatching{owner.voicePlatformState(expected,diagnostic)}
+                if(diagnostic.isNotEmpty()&&diagnostic!="owner_changed"&&diagnostic!="call_target_changed")runCatching{owner.voicePlatformState(expected,diagnostic)}
                 runCatching{owner.releaseVoice(expected)}
             }}finally{stopSelf()}
         }
@@ -134,6 +161,16 @@ class PeerChatVoiceService:Service() {
                 .putExtra("owner",target.owner).putExtra("peer",target.peer).putExtra("call",target.id)
                 .putExtra("lifetime",target.lifetime).putExtra("group",target.group).putExtra("room",target.room)
                 .putExtra("epoch",target.epoch).putExtra("participation",target.participation).putExtra("speaker",enabled));true
+        }catch(_:RuntimeException){false}
+        fun route(context:Context,target:VoiceCallTarget,deviceId:Int):Boolean=try {
+            context.startService(Intent(context,PeerChatVoiceService::class.java).setAction(ROUTE)
+                .putExtra("owner",target.owner).putExtra("peer",target.peer).putExtra("call",target.id)
+                .putExtra("lifetime",target.lifetime).putExtra("group",target.group).putExtra("room",target.room)
+                .putExtra("epoch",target.epoch).putExtra("participation",target.participation).putExtra("deviceId",deviceId));true
+        }catch(_:RuntimeException){false}
+        fun cancel(context:Context,token:String):Boolean=try {
+            context.startService(Intent(context,PeerChatVoiceService::class.java).setAction(END)
+                .setData(android.net.Uri.parse("peerchat-call:$token")).putExtra(TOKEN,token));true
         }catch(_:RuntimeException){false}
     }
 }

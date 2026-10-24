@@ -7,30 +7,37 @@ import java.util.function.Predicate;
 
 /** One profile's serialized request resource. No retry, sessions or delivery state. */
 public final class BoundedRpc<T extends AutoCloseable> implements AutoCloseable {
+    public static final int MAX_WINDOW=8;
     public interface Factory<T> {T open() throws Exception;}
     public interface Operation<T,R> {R run(T channel) throws Exception;}
     private final ReentrantLock gate=new ReentrantLock();
     private final Factory<T> factory;
     private final Predicate<T> available;
     private final LongSupplier clock;
+    private final int maxRequests;
     private T resource;
     private String binding="";
     private long opened,used;
     private int count;
-    public BoundedRpc(Factory<T> factory,Predicate<T> available){this(factory,available,System::nanoTime);}
-    public BoundedRpc(Factory<T> factory,Predicate<T> available,LongSupplier clock){
-        this.factory=factory;this.available=available;this.clock=clock;
+    public BoundedRpc(Factory<T> factory,Predicate<T> available){this(factory,available,System::nanoTime,60);}
+    public BoundedRpc(Factory<T> factory,Predicate<T> available,int maxRequests){this(factory,available,System::nanoTime,maxRequests);}
+    public BoundedRpc(Factory<T> factory,Predicate<T> available,LongSupplier clock){this(factory,available,clock,60);}
+    public BoundedRpc(Factory<T> factory,Predicate<T> available,LongSupplier clock,int maxRequests){
+        if(maxRequests<MAX_WINDOW||maxRequests>64)throw new IllegalArgumentException("RPC request bound exceeds server limit");
+        this.factory=factory;this.available=available;this.clock=clock;this.maxRequests=maxRequests;
     }
     private void retire(){if(resource!=null)try{resource.close();}catch(Exception ignored){}resource=null;binding="";}
-    public <R> R run(String identity,Operation<T,R> operation)throws Exception {
+    public <R> R run(String identity,Operation<T,R> operation)throws Exception {return run(identity,1,operation);}
+    public <R> R run(String identity,int requests,Operation<T,R> operation)throws Exception {
+        if(requests<1||requests>MAX_WINDOW)throw new IllegalArgumentException("RPC window exceeds bound");
         if(!gate.tryLock(10,TimeUnit.SECONDS))throw new java.net.SocketTimeoutException("RPC serialization deadline");
         try{
             long now=clock.getAsLong();
             if(resource!=null&&(!binding.equals(identity)||now-used>=10_000_000_000L||
-                now-opened>=100_000_000_000L||count>=60||!available.test(resource)))retire();
+                now-opened>=100_000_000_000L||count+requests>maxRequests||!available.test(resource)))retire();
             try{
                 if(resource==null){resource=factory.open();binding=identity;opened=clock.getAsLong();count=0;}
-                R result=operation.run(resource);used=clock.getAsLong();count++;return result;
+                R result=operation.run(resource);used=clock.getAsLong();count+=requests;return result;
             }catch(Exception error){retire();throw error;} // No ambiguous replay.
         }finally{gate.unlock();}
     }

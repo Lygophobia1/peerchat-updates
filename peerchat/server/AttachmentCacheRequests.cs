@@ -22,6 +22,28 @@ internal sealed class AttachmentCacheRequests {
  static Dictionary<string,object> Announcement(AttachmentCacheRuntime.Announcement value){return new Dictionary<string,object>{{"id",value.Id},{"messageId",value.Message},{"digest",value.Digest},{"envelope",Encode(value.Wire)},{"descriptor",Encode(value.Descriptor)},{"dataEncoding","base64url"}};}
  static Dictionary<string,object> Key(AttachmentCacheRuntime.KeyEnvelope value){return new Dictionary<string,object>{{"id",value.Id},{"device",value.Device},{"digest",value.Digest},{"envelope",Encode(value.Wire)},{"dataEncoding","base64url"}};}
  static void Status(Dictionary<string,object> reply,AttachmentCacheRuntime.Status value){reply["ciphertextSize"]=value.Size;reply["durableOffset"]=value.Offset;reply["ciphertextComplete"]=value.Complete;reply["expiresUtc"]=value.Expires;}
+ internal List<Dictionary<string,object>> ExecuteDirectAppendBatch(long account,string device,Func<bool> current,IList<Dictionary<string,object>> requests){
+  var replies=new List<Dictionary<string,object>>();
+  foreach(var request in requests)replies.Add(new Dictionary<string,object>{{"state","cache_malformed_request"},{"cacheVersion",2},{"dmAttachmentVersion",directReady?1:0},{"type","cache_result"},{"operation","cache_dm_append"},{"requestId",request.ContainsKey("requestId")?request["requestId"]:""}});
+  try{
+   Require(directReady&&requests.Count>=2&&requests.Count<=8&&current!=null&&account>0&&MailboxProtocol.Id(device,64));
+   var chunks=new List<KeyValuePair<long,byte[]>>();string lease=null;long total=0;
+   foreach(var request in requests){
+    Require(Text(request,"type",32)=="cache_dm_append");Id(request,"requestId");
+    string itemLease=Id(request,"lease");if(lease==null)lease=itemLease;Require(lease==itemLease);
+    byte[] bytes=Decode(Text(request,"data",87382));Require(bytes.Length>0);total=checked(total+bytes.Length);Require(total<=8L*65536);
+    chunks.Add(new KeyValuePair<long,byte[]>(Number(request,"offset"),bytes));
+   }
+   long[] offsets=admission.AppendDirectBatch(account,device,current,lease,chunks);
+   for(int i=0;i<replies.Count;i++){replies[i]["state"]="accepted";replies[i]["durableOffset"]=offsets[i];}
+  }catch(Exception error){
+   if(error is OutOfMemoryException)throw;
+   string state=error is InvalidOperationException&&Regex.IsMatch(error.Message??"","^cache_[a-z_]{1,80}$")?error.Message:
+    error is FormatException?"cache_malformed_request":"cache_storage_or_validation_unavailable";
+   foreach(var reply in replies)reply["state"]=state;
+  }
+  return replies;
+ }
  internal Dictionary<string,object> Execute(long account,string device,Func<bool> current,Dictionary<string,object> request){
   var reply=new Dictionary<string,object>{{"state","cache_malformed_request"},{"cacheVersion",1}};
   try{
@@ -32,9 +54,9 @@ internal sealed class AttachmentCacheRequests {
     if(!directReady)throw new InvalidOperationException("cache_dm_feature_gated");
    }
    switch(operation){
-    case "cache_dm_capability":break;
+    case "cache_dm_capability":reply["thumbnailBodyVersion"]=2;reply["dmAppendBatchMaxChunks"]=8;break;
     case "cache_dm_register":reply["deviceCapabilityRegistered"]=admission.RegisterDirect(account,device,current,Decode(Text(request,"proof",1366),1024));break;
-    case "cache_dm_prepare":reply["audience"]=Encode(admission.PrepareDirect(account,device,current,Number(request,"recipientAccountId")));reply["expiresUtc"]=admission.DirectPreparationExpires();reply["dataEncoding"]="base64url";break;
+    case "cache_dm_prepare":{long recipient=Number(request,"recipientAccountId");var audience=admission.PrepareDirect(account,device,current,recipient,request.ContainsKey("audience")?Decode(Text(request,"audience",43691),32768):null);reply["audience"]=Encode(audience);reply["thumbnailBodyVersion"]=admission.DirectThumbnailBodyVersion(account,device,current,recipient,audience);var proofs=admission.DirectIdentityProofs(account,device,current,recipient,audience);var encoded=new List<string>();foreach(var proof in proofs)encoded.Add(Encode(proof));reply["recipientIdentityProofs"]=encoded;reply["expiresUtc"]=admission.DirectPreparationExpires();reply["dataEncoding"]="base64url";break;}
     case "cache_dm_admit":Status(reply,admission.AdmitDirect(account,device,current,Decode(Text(request,"descriptor",2731),2048),Decode(Text(request,"audience",43691),32768)));break;
     case "cache_dm_status":Status(reply,admission.InspectDirect(account,device,current,Id(request,"id")));break;
     case "cache_dm_context":foreach(var item in admission.DirectContext(account,device,current,Id(request,"id")))reply[item.Key]=item.Value;break;
@@ -43,10 +65,10 @@ internal sealed class AttachmentCacheRequests {
     case "cache_dm_receipts":foreach(var item in admission.DirectReceipts(account,device,current,Id(request,"id"),Text(request,"after",64)))reply[item.Key]=item.Value;break;
     case "cache_dm_acquire":reply["lease"]=admission.AcquireDirect(account,device,current,Id(request,"id"),Flag(request,"upload"));break;
     case "cache_dm_append":{byte[] bytes=Decode(Text(request,"data",87382));Require(bytes.Length>0);reply["durableOffset"]=admission.AppendDirect(account,device,current,Id(request,"lease"),Number(request,"offset"),bytes);break;}
-    case "cache_dm_complete":admission.CompleteDirect(account,device,current,Id(request,"lease"));Status(reply,admission.InspectDirectUpload(account,device,current,Id(request,"lease")));break;
+    case "cache_dm_complete":admission.CompleteDirect(account,device,current,Id(request,"lease"),request.ContainsKey("bounded")&&Flag(request,"bounded"));Status(reply,admission.InspectDirectUpload(account,device,current,Id(request,"lease")));break;
     case "cache_dm_read":{long maximum=Number(request,"maximum");Require(maximum>0&&maximum<=65536);reply["data"]=Encode(admission.ReadDirect(account,device,current,Id(request,"lease"),Number(request,"offset"),(int)maximum));reply["dataEncoding"]="base64url";break;}
     case "cache_dm_progress":{long offset=Number(request,"offset");admission.ProgressDirect(account,device,current,Id(request,"lease"),offset);reply["durableOffset"]=offset;break;}
-    case "cache_dm_release":admission.ReleaseDirect(account,device,current,Id(request,"lease"),Flag(request,"upload"));break;
+    case "cache_dm_release":admission.ReleaseDirect(account,device,current,Id(request,"lease"),Flag(request,"upload"),request.ContainsKey("abandonUpload")&&Flag(request,"abandonUpload"));break;
     case "cache_admit":Status(reply,admission.Admit(account,device,current,MailboxProtocol.Decode(Text(request,"descriptor",2732),2048)));break;
     case "cache_status":Status(reply,admission.Inspect(account,device,current,Id(request,"id")));break;
     case "cache_context":foreach(var item in admission.Context(account,device,current,Id(request,"id")))reply[item.Key]=item.Value;break;
@@ -57,13 +79,13 @@ internal sealed class AttachmentCacheRequests {
      byte[] bytes=Decode(Text(request,"data",87382));Require(bytes.Length>0);
      reply["durableOffset"]=admission.Append(account,device,current,Id(request,"lease"),Number(request,"offset"),bytes);break;
     }
-    case "cache_complete":admission.Complete(account,device,current,Id(request,"lease"));reply["ciphertextComplete"]=true;break;
+    case "cache_complete":reply["ciphertextComplete"]=admission.Complete(account,device,current,Id(request,"lease"),request.ContainsKey("bounded")&&Flag(request,"bounded"));break;
     case "cache_read":{
      long maximum=Number(request,"maximum");Require(maximum>0&&maximum<=65536);
      byte[] bytes=admission.Read(account,device,current,Id(request,"lease"),Number(request,"offset"),(int)maximum);reply["data"]=Encode(bytes);reply["dataEncoding"]="base64url";break;
     }
     case "cache_progress":admission.Progress(account,device,current,Id(request,"lease"),Number(request,"offset"));break;
-    case "cache_release":admission.Release(account,device,current,Id(request,"lease"),Flag(request,"upload"));break;
+    case "cache_release":admission.Release(account,device,current,Id(request,"lease"),Flag(request,"upload"),request.ContainsKey("abandonUpload")&&Flag(request,"abandonUpload"));break;
     case "cache_publish":admission.Publish(account,device,current,Id(request,"id"),Decode(Text(request,"envelope",87720),GroupCiphertextFanout.MaxEnvelope));break;
     case "cache_announcement":reply["announcement"]=Announcement(admission.Announcement(account,device,current,Id(request,"id")));break;
     case "cache_announcement_ack":reply["newAnnouncementReceipt"]=admission.AcknowledgeAnnouncement(account,device,current,Id(request,"id"),Text(request,"digest",64));break;

@@ -17,8 +17,10 @@ class AndroidVoiceApplication {
     std::uint64_t networkObserved_=0;
     bool authorized(const std::string& peer){
         if(!friends_.localAccount()||!friends_.contains(peer))return false;
-        for(const auto& contact:store_.contacts())if(contact.peerId==peer&&contact.verified&&Storage::publicKeyId(contact.publicKey)==peer)return true;
-        return false;
+        // A live call rechecks authorization frequently. Decrypt only this
+        // contact, not every historical contact in an older profile.
+        const auto contact=store_.contact(peer);
+        return contact&&contact->verified&&Storage::publicKeyId(contact->publicKey)==peer;
     }
     ReliableEndpoint* endpoint(const std::string& peer){
         auto state=sessions_.snapshot(peer);if(!state||!state->connected)return nullptr;

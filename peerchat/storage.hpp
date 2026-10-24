@@ -101,6 +101,7 @@ public:
     std::vector<Contact> contacts();
     std::optional<Contact> contact(const std::string& peerId);
     void saveContact(const Contact& contact);
+    void saveContactsAtomically(const std::vector<Contact>& contacts);
     void removeContact(const std::string& peerId);
     // False means an identical ID/payload is already durable; mismatched reuse throws.
     bool append(const std::string& conversation, const StoredMessage& message);
@@ -146,6 +147,12 @@ public:
     void saveDirectAttachmentIndexPage(const std::string& device,const std::string& page,const Blob& bytes);
     void saveDirectAttachmentJob(const std::string& device,const std::string& id,const Blob& expectedJob,const Blob& nextJob,const Blob& expectedIndex,const Blob& nextIndex);
     Blob directAttachmentTransfers(const std::string& device);
+    Blob groupAttachmentTransfers(const std::string& device);
+    Blob groupAttachmentLocal(const std::string& device,const std::string& key);
+    void saveGroupAttachmentLocal(const std::string& device,const std::string& key,const Blob& expected,const Blob& next);
+    std::vector<std::string> groupAttachmentLocalKeys(const std::string& device,const std::string& after,int limit);
+
+    void saveGroupAttachmentTransfers(const std::string& device,const Blob& expected,const Blob& next);
     void saveDirectAttachmentTransfers(const std::string& device,const Blob& expected,const Blob& next);
     void saveArchiveSyncState(const std::string& contextId,const Blob& expected,const Blob& next);
     Blob attachmentMetadata(const std::string& id);
@@ -172,9 +179,16 @@ public:
     // A cold ordering cache scans protected records; no timestamp index on disk.
     std::vector<StoredMessage> history(const std::string& conversation,
         int limit=100, std::int64_t beforeSequence=INT64_MAX);
-    // Removes only this local DM's encrypted message/outbox records. Contact, trust and account
-    // identity remain intact so a later message starts a fresh conversation safely.
+    // Profile-local timeline suppression preserves delivery, replay and authentication records.
+    // Tombstones apply to canonical IDs, including attachment IDs, without canceling sends.
     void eraseHistory(const std::string& conversation);
+    void eraseMessage(const std::string& conversation,const std::string& id);
+    // Single-delete boundary: atomically suppress a persisted attachment's
+    // transfer and logical IDs without initializing its protocol application.
+    void eraseMessageAndAliases(const std::string& conversation,const std::string& id);
+    void eraseGroupHistory(const std::string& conversation);
+    void eraseGroupMessage(const std::string& conversation,const std::string& id);
+    bool localMessageHidden(const std::string& conversation,const std::string& id,bool group=false);
     std::vector<StoredMessage> pending(const std::string& conversation,int limit=100,std::int64_t afterSequence=0,bool newest=false,const std::vector<std::string>& excluded={});
     // Index-only, conservative hint for live route scheduling. Never authorizes a send.
     bool pendingRouteDemand(const std::string& device);

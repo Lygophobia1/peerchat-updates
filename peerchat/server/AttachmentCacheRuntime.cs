@@ -23,7 +23,16 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
  internal sealed class Status {internal long Offset,Size,Expires;internal bool Complete;}
  static void Require(bool value,string reason){if(!value)throw new InvalidOperationException(reason);}
  static string Quote(string value){return "'"+value.Replace("'","''")+"'";}
- static string Blob(byte[] value){return "X'"+String.Concat(value.Select(x=>x.ToString("x2",CultureInfo.InvariantCulture)))+"'";}
+ static string Blob(byte[] value){
+  var timing=CacheAppendTimings.Current;long started=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
+  try{
+   // Only the supplied bounded field/chunk is encoded. Avoid one temporary
+   // string per byte while preserving the exact lowercase SQLite literal.
+   const string digits="0123456789abcdef";var text=new char[checked(value.Length*2+3)];text[0]='X';text[1]='\'';
+   for(int i=0;i<value.Length;i++){text[2+i*2]=digits[value[i]>>4];text[3+i*2]=digits[value[i]&15];}
+   text[text.Length-1]='\'';return new string(text);
+  }finally{if(timing!=null)timing.RecordEncode(started);}
+ }
  static long Number(string value){long n;Require(Int64.TryParse(value,NumberStyles.Integer,CultureInfo.InvariantCulture,out n),"cache_index_invalid");return n;}
  void Execute(string sql){IntPtr error;if(Sqlite.sqlite3_exec(database,sql,IntPtr.Zero,IntPtr.Zero,out error)!=0){if(error!=IntPtr.Zero)Sqlite.sqlite3_free(error);throw new InvalidOperationException("cache_transaction_failed");}}
  List<string[]> Rows(string sql,int limit,int columns=1){var result=new List<string[]>();IntPtr statement=IntPtr.Zero;try{
@@ -91,7 +100,7 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
    InitializeReservationLedger();Transaction(()=>Execute("DELETE FROM leases;"));Reconcile();
   }catch{if(database!=IntPtr.Zero){Sqlite.sqlite3_close(database);database=IntPtr.Zero;}directory.Dispose();throw;}
  }
- void Reconcile(){ReconcileKeyEnvelopes();Require(Scalar("SELECT count(*) FROM objects WHERE size<36 OR durable_offset<0 OR durable_offset>size OR budget<size OR complete NOT IN (0,1) OR deleting NOT IN (0,1) OR (complete=1 AND durable_offset<>size)")==0,"cache_index_bounds_invalid");
+ void Reconcile(){ReconcileKeyEnvelopes();Require(Scalar("SELECT count(*) FROM objects WHERE size<36 OR durable_offset<0 OR durable_offset>size OR (deleting=0 AND budget<size) OR complete NOT IN (0,1) OR deleting NOT IN (0,1) OR (complete=1 AND durable_offset<>size)")==0,"cache_index_bounds_invalid");
   Require(Reserved()==CalculatedReservations(),"cache_reservation_ledger_mismatch");
   Require(Scalar("SELECT count(*) FROM announcements a JOIN objects o ON o.id=a.object_id WHERE o.complete<>1 OR length(a.wire)<254 OR length(a.wire)>65790 OR length(a.digest)<>64")==0,"cache_announcement_index_invalid");
   Require(Scalar("SELECT count(*) FROM announcement_acks a WHERE NOT EXISTS(SELECT 1 FROM announcements n WHERE n.object_id=a.object_id AND n.digest=a.digest) OR NOT EXISTS(SELECT 1 FROM recipients r WHERE r.object_id=a.object_id AND r.device=a.device)")==0,"cache_announcement_receipt_invalid");
@@ -119,16 +128,83 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
   string lease=Guid.NewGuid().ToString("N");Space(0);Execute("INSERT INTO leases VALUES("+Quote(lease)+","+Quote(id)+","+Quote(device)+","+(upload?1:0)+","+checked(now+seconds)+");");return lease;
  }}
  string Lease(string lease,bool upload){Require(MailboxProtocol.Id(lease,32),"cache_lease_invalid");var rows=Rows("SELECT object_id FROM leases WHERE id="+Quote(lease)+" AND upload="+(upload?1:0)+" AND expires>"+Now(),1);Require(rows.Count==1,"cache_lease_expired");string id=rows[0][0];Descriptor(id);return id;}
- internal void Release(string lease){lock(gate){Check();Require(MailboxProtocol.Id(lease,32),"cache_lease_invalid");Execute("DELETE FROM leases WHERE id="+Quote(lease));}}
+ internal void Release(string lease,bool abandonUpload=false){lock(gate){Check();Require(MailboxProtocol.Id(lease,32),"cache_lease_invalid");
+  if(abandonUpload){string id=Lease(lease,true);
+   // Completed immutable objects can already have recipients. Canceling the
+   // sender's local action must not revoke another device's retained file.
+   if(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==0){
+    var held=Rows("SELECT id FROM leases WHERE object_id="+Quote(id),256);
+    // Release only future reservation. Existing SQLite pages, WAL and chunks
+    // remain physically charged until bounded cleanup actually reclaims them.
+    ReservedMutation(id,()=>Execute("DELETE FROM leases WHERE object_id="+Quote(id)+";UPDATE objects SET deleting=1,budget=durable_offset+(durable_offset/32768)*8192 WHERE id="+Quote(id)+";"));
+    foreach(var row in held)ForgetCompletion(row[0]);CleanupLocked(1,false);return;
+   }
+  }
+  Execute("DELETE FROM leases WHERE id="+Quote(lease));ForgetCompletion(lease);
+ }}
  internal long Append(string lease,long offset,byte[] bytes){lock(gate){Check();Require(bytes!=null&&bytes.Length>0&&bytes.Length<=65536&&offset>=0,"cache_chunk_invalid");string id=Lease(lease,true);var d=Descriptor(id);long durable=Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id));
   Require(offset<=durable&&offset<=d.CipherBytes&&bytes.Length<=d.CipherBytes-offset&&offset%32768==0&&(bytes.Length==32768||bytes.Length==65536||offset+bytes.Length==d.CipherBytes),"cache_chunk_out_of_order");
   if(offset<durable){var old=Binary("SELECT data FROM chunks WHERE object_id="+Quote(id)+" AND offset="+offset);Require(old!=null&&old.SequenceEqual(bytes),"cache_conflicting_chunk");return durable;}
   Require(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==0,"cache_immutable_object");Space(0);long next=checked(offset+bytes.Length),now=Now();
-  ReservedMutation(id,()=>{Execute("INSERT INTO chunks VALUES("+Quote(id)+","+offset+","+Blob(bytes)+","+Quote(MailboxProtocol.Digest(bytes))+");");Execute("UPDATE objects SET durable_offset="+next+",expires="+checked(now+options.PartialIdleSeconds)+" WHERE id="+Quote(id)+";UPDATE leases SET expires="+checked(now+120)+" WHERE id="+Quote(lease)+";");});return next;
+  var timing=CacheAppendTimings.Current;long started=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
+  try{ReservedMutation(id,()=>{Execute("INSERT INTO chunks VALUES("+Quote(id)+","+offset+","+Blob(bytes)+","+Quote(MailboxProtocol.Digest(bytes))+");");Execute("UPDATE objects SET durable_offset="+next+",expires="+checked(now+options.PartialIdleSeconds)+" WHERE id="+Quote(id)+";UPDATE leases SET expires="+checked(now+120)+" WHERE id="+Quote(lease)+";");});}
+  finally{if(timing!=null)timing.RecordTransaction(started);}return next;
+ }}
+ // A bounded RPC window is one durable acknowledgement unit. Keep individual
+ // chunk rows so legacy reads, completion verification and recovery are unchanged.
+ internal long[] AppendBatch(string lease,IList<KeyValuePair<long,byte[]>> chunks){lock(gate){
+  Check();Require(chunks!=null&&chunks.Count>=2&&chunks.Count<=8,"cache_chunk_invalid");
+  // The existing admission reserves the entire ciphertext plus per-chunk
+  // overhead. Retain at least four times the maximum window for the rollback
+  // journal, SQLite page rounding and the final ledger/object updates.
+  Require(OperationHeadroom>=8L*65536*4,"cache_quota_or_free_space_protected");
+  string id=Lease(lease,true);var d=Descriptor(id);
+  long durable=Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id));
+  long cursor=chunks[0].Key,original=durable;var offsets=new long[chunks.Count];
+  Require(cursor>=0&&cursor<=durable,"cache_chunk_out_of_order");
+  for(int i=0;i<chunks.Count;i++){
+   long offset=chunks[i].Key;byte[] bytes=chunks[i].Value;
+   Require(bytes!=null&&bytes.Length>0&&bytes.Length<=65536,"cache_chunk_invalid");
+   Require(offset==cursor&&offset<=d.CipherBytes&&bytes.Length<=d.CipherBytes-offset&&offset%32768==0&&
+    (bytes.Length==32768||bytes.Length==65536||offset+bytes.Length==d.CipherBytes),"cache_chunk_out_of_order");
+   long next=checked(offset+bytes.Length);offsets[i]=next;cursor=next;
+   if(offset<original){Require(next<=original,"cache_conflicting_chunk");var old=Binary("SELECT data FROM chunks WHERE object_id="+Quote(id)+" AND offset="+offset);Require(old!=null&&old.SequenceEqual(bytes),"cache_conflicting_chunk");}
+  }
+  if(cursor<=original)return offsets;
+  Require(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==0,"cache_immutable_object");
+  Space(0);long now=Now();var timing=CacheAppendTimings.Current;long started=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
+  try{ReservedMutation(id,()=>{
+   foreach(var chunk in chunks)if(chunk.Key>=original)Execute("INSERT INTO chunks VALUES("+Quote(id)+","+chunk.Key+","+Blob(chunk.Value)+","+Quote(MailboxProtocol.Digest(chunk.Value))+");");
+   Execute("UPDATE objects SET durable_offset="+cursor+",expires="+checked(now+options.PartialIdleSeconds)+" WHERE id="+Quote(id)+";UPDATE leases SET expires="+checked(now+120)+" WHERE id="+Quote(lease)+";");
+  });}finally{if(timing!=null)timing.RecordTransaction(started);}return offsets;
  }}
  internal sealed class CompletionEvidence {
   internal readonly string Lease,Id,Digest;internal readonly long Size;
   internal CompletionEvidence(string lease,AttachmentCacheDescriptor descriptor){Lease=lease;Id=descriptor.Id;Digest=descriptor.CipherDigest;Size=descriptor.CipherBytes;}
+ }
+ sealed class CompletionProgress {internal string Id,Digest;internal long Size,Offset;internal bool Busy;internal SHA256 Hash=SHA256.Create();}
+ readonly Dictionary<string,CompletionProgress> completionProgress=new Dictionary<string,CompletionProgress>();
+ void ForgetCompletion(string lease){CompletionProgress item;if(completionProgress.TryGetValue(lease,out item)){completionProgress.Remove(lease);if(!item.Busy)item.Hash.Dispose();}}
+ // Optional bounded finalization for updated clients. State is advisory only:
+ // restart/lease replacement rehashes the immutable ciphertext from zero.
+ internal CompletionEvidence VerifyCompletionStep(string lease){
+  AttachmentCacheDescriptor descriptor;CompletionProgress progress;
+  lock(gate){Check();string id=Lease(lease,true);descriptor=Descriptor(id);Require(Scalar("SELECT durable_offset FROM objects WHERE id="+Quote(id))==descriptor.CipherBytes,"cache_upload_incomplete");
+   if(Scalar("SELECT complete FROM objects WHERE id="+Quote(id))==1)return new CompletionEvidence(lease,descriptor);
+   foreach(var old in completionProgress.Keys.ToArray())if(Scalar("SELECT count(*) FROM leases WHERE id="+Quote(old)+" AND expires>"+Now())==0)ForgetCompletion(old);
+   if(!completionProgress.TryGetValue(lease,out progress)){Require(completionProgress.Count<16,"cache_completion_capacity");progress=new CompletionProgress{Id=id,Digest=descriptor.CipherDigest,Size=descriptor.CipherBytes};completionProgress.Add(lease,progress);}
+   Require(!progress.Busy&&progress.Id==id&&progress.Digest==descriptor.CipherDigest&&progress.Size==descriptor.CipherBytes,"cache_completion_evidence_mismatch");progress.Busy=true;
+  }
+  try{long end=Math.Min(descriptor.CipherBytes,checked(progress.Offset+8L*1024*1024));
+   while(progress.Offset<end){byte[] chunk;lock(gate){Check();Require(Lease(lease,true)==descriptor.Id,"cache_completion_evidence_mismatch");chunk=ReadChunk(descriptor.Id,progress.Offset);}
+    progress.Hash.TransformBlock(chunk,0,chunk.Length,null,0);progress.Offset=checked(progress.Offset+chunk.Length);
+   }
+   lock(gate){Check();Require(Lease(lease,true)==descriptor.Id,"cache_completion_evidence_mismatch");Execute("UPDATE leases SET expires="+checked(Now()+120)+" WHERE id="+Quote(lease));}
+   if(progress.Offset<descriptor.CipherBytes)return null;
+   progress.Hash.TransformFinalBlock(new byte[0],0,0);Require(String.Concat(progress.Hash.Hash.Select(x=>x.ToString("x2")))==descriptor.CipherDigest,"cache_ciphertext_digest_mismatch");
+   lock(gate){ForgetCompletion(lease);}return new CompletionEvidence(lease,descriptor);
+  }catch{lock(gate){ForgetCompletion(lease);}throw;}
+  finally{lock(gate){progress.Busy=false;if(!completionProgress.ContainsKey(lease))progress.Hash.Dispose();}}
  }
  internal CompletionEvidence VerifyCompletion(string lease){
   AttachmentCacheDescriptor descriptor;
@@ -173,6 +249,6 @@ internal sealed partial class AttachmentCacheRuntime : IDisposable {
  }
  internal void Cleanup(int operations=16){lock(gate){Check();Require(operations>0&&operations<=256,"cache_cleanup_bound");CleanupLocked(operations,false);}}
  internal long ChargedBytes {get{lock(gate){Check();return checked(directory.AllocatedBytes()+Reserved()+OperationHeadroom);}}}
- public void Dispose(){lock(gate){if(disposed)return;disposed=true;if(database!=IntPtr.Zero){Sqlite.sqlite3_close(database);database=IntPtr.Zero;}directory.Dispose();}}
+ public void Dispose(){lock(gate){if(disposed)return;disposed=true;foreach(var lease in completionProgress.Keys.ToArray())ForgetCompletion(lease);if(database!=IntPtr.Zero){Sqlite.sqlite3_close(database);database=IntPtr.Zero;}directory.Dispose();}}
 }
 }

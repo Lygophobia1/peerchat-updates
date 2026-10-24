@@ -38,9 +38,26 @@ int main(){try{
     auto retained=sender.retainedRecords();for(auto& d:retained){d.statisticsKnown=false;d.statisticsBytes=0;d.durationMilliseconds=0;}
     {Storage reopened((root/"a").wstring());ProtectedStatisticsStore restored(reopened,pa.peerId);restored.load(retained);check(retained[0].statisticsKnown&&retained[0].statisticsBytes==sent.metadata.size&&retained[0].durationMilliseconds==duration);}
     check(writes()==1);
+    // Retained completed history must not be encoded again for every active
+    // chunk, duplicate save or adapter tick. One live row keeps the real bound64.
+    std::vector<DurableState> history;for(unsigned n=0;n<63;++n){auto d=sender.retainedRecords().front();auto suffix=std::to_string(n);d.metadata.id=std::string(32-suffix.size(),'e')+suffix;history.push_back(std::move(d));}
+    auto active=sender.retainedRecords().front();active.metadata.id=std::string(32,'d');active.state=State::Transferring;active.done=0;active.statisticsBytes=0;history.push_back(active);
+    sa.save(history);auto historyWrites=writes();auto historyEncodes=sa.encodingCalls();auto began=std::chrono::steady_clock::now();
+    for(unsigned n=0;n<1000;++n){history.back().done=n;history.back().statisticsBytes=n;history.back().durationMilliseconds=n;sa.save(history);}
+    auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-began).count();
+    std::cout<<"HOST COMPLETED STATISTICS: completed_rows=63 active_progress_saves=1000 unchanged_encodes="<<(sa.encodingCalls()-historyEncodes)<<" elapsed_us="<<elapsed<<'\n';
+    check(sa.encodingCalls()==historyEncodes&&writes()==historyWrites);
+    {ProtectedStatisticsStore restored(a,pa.peerId);auto loaded=history;restored.load(loaded);restored.save(loaded);check(restored.encodingCalls()==0&&writes()==historyWrites);}
+    auto changed=history;changed.front().durationMilliseconds++;sa.save(changed);check(sa.encodingCalls()==historyEncodes+1&&writes()==historyWrites+1);sa.save(changed);check(sa.encodingCalls()==historyEncodes+1);
+    // Every encoded identity/direction/size/count field participates in the
+    // cache key, even if an adapter caller reuses an existing transfer ID.
+    for(unsigned field=0;field<4;++field){auto variant=changed;if(field==0)variant.front().peer=pa.peerId;if(field==1)variant.front().sending=!variant.front().sending;if(field==2)variant.front().metadata.size++;if(field==3)variant.front().statisticsBytes--;auto before=sa.encodingCalls();sa.save(variant);check(sa.encodingCalls()==before+1);sa.save(changed);check(sa.encodingCalls()==before+2);}
+    std::cout<<"PASS bounded completed-statistics cache: active progress and reload reuse exact summaries; duration, peer, direction, size and confirmed bytes invalidate correctly\n";
     // Missing/foreign/corrupted supplemental summaries never alter core rows.
     {ProtectedStatisticsStore foreign(a,pb.peerId);auto rows=retained;rows[0].statisticsKnown=false;foreign.load(rows);check(!rows[0].statisticsKnown&&rows[0].done==sent.done);}
+    ProtectedStatisticsStore repeatedLoad(a,pa.peerId);auto repeatedRows=retained;repeatedLoad.load(repeatedRows);check(repeatedRows.front().statisticsKnown);
     audit->execute("UPDATE objects SET b=X'00' WHERE k LIKE 'archive-sync/%'");
+    repeatedLoad.load(repeatedRows);check(!repeatedRows.front().statisticsKnown);repeatedRows.front().statisticsKnown=true;bool rejected=false;try{repeatedLoad.save(repeatedRows);}catch(...){rejected=true;}check(rejected&&repeatedLoad.encodingCalls()==1);
     {ProtectedStatisticsStore damaged(a,pa.peerId);auto rows=retained;damaged.load(rows);check(!rows[0].statisticsKnown&&rows[0].state==State::Complete&&rows[0].done==sent.done);}
     TransferManager unaffected([]{return std::make_unique<windows::Sha256>();},nullptr,&broken);unaffected.offer(pb.peerId,Storage::newMessageId(),std::make_unique<File>(),1);unaffected.tick(2,[](const auto&){return 0;},[](const auto&,const auto&){return false;});check(unaffected.snapshots()[0].state==State::Preparing);
     std::cout<<"PASS: confirmed bytes, stalled zero, conservative ETA, retry high-water dedupe, integrity/completion, frozen duration, protected reopen and optional telemetry failure isolation\n";

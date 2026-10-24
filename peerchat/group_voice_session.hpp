@@ -47,7 +47,7 @@ public:
         unsigned apmFailure=0;
         VoiceReceiveEngine::Snapshot receive;
         std::vector<VoiceRouteSnapshot> routes;
-        std::wstring error;
+        std::wstring error,noiseControl;
     };
     Snapshot snapshot();
 private:

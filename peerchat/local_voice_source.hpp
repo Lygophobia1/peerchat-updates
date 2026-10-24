@@ -24,7 +24,7 @@ public:
         if(opus_encoder_ctl(encoder_,OPUS_SET_BITRATE(24000))!=OPUS_OK||
             opus_encoder_ctl(encoder_,OPUS_SET_COMPLEXITY(5))!=OPUS_OK||
             opus_encoder_ctl(encoder_,OPUS_SET_INBAND_FEC(1))!=OPUS_OK){close();return false;}
-        if(options_.enabled)apm_.open(options_.noiseSuppression,options_.automaticGain,options_.noiseSuppressionStrength,options_.automaticGainStrength,options_.echoCancellation);
+        if(options_.enabled)apm_.open(options_.noiseSuppression,options_.automaticGain,options_.noiseSuppressionStrength,options_.automaticGainStrength,options_.echoCancellation,options_.automaticNoiseControl,options_.automaticNoiseControlLevel);
         muted_=false;frames_=0;encoded_=0;timestamp_=0;return true;
     }
     // Lifecycle is serialized by the session/device owner. Only the capture

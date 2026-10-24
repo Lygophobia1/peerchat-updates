@@ -109,6 +109,7 @@ public:
     std::wstring fileTransfer(unsigned operation,const std::string& peer={},const std::string& id={},const std::wstring& path={});
     void loadHistory(const std::string& peerId,std::int64_t before=INT64_MAX);
     bool eraseHistory(const std::string& peerId);
+    bool deleteLocalHistory(const std::string& conversation,const std::string& id={},bool group=false);
     void setName(const std::wstring& name);
     void setGroupAccount(std::uint64_t accountId,const std::wstring& accountName);
     bool setAuthenticatedGroupRoster(std::uint64_t localAccountId,std::uint64_t discoveryGeneration,group_keys::RosterSnapshot roster);
@@ -139,7 +140,7 @@ public:
     bool setVoiceVolumes(int inputPercent, int outputPercent);
     bool setVoiceProcessing(bool enabled, bool noiseSuppression, bool automaticGain,
                             std::uint32_t noiseSuppressionStrength,
-                            std::uint32_t automaticGainStrength, bool echoCancellation=false);
+                            std::uint32_t automaticGainStrength, bool echoCancellation=false, bool automaticNoiseControl=true, unsigned automaticNoiseControlLevel=1);
     bool setMediaIceConfiguration(MediaIceConfiguration configuration);
     bool setScreenShareBackend(screen::Backend backend);
     std::wstring voiceDiagnostics();

@@ -4,6 +4,58 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VoiceConsentRegistryTest {
+    @Test fun preparationPriorityIsBoundedAndEndsOnCompletionCancellationOrReset(){
+        var now=0L;val registry=VoiceConsentRegistry<Any>{now}
+        assertFalse(registry.preparing())
+        val first=registry.create("a".repeat(64),"1".repeat(32),true,Any())
+        assertTrue(registry.preparing());registry.claim(first.token);assertTrue(registry.preparing())
+        registry.clear(first.token);assertFalse(registry.preparing())
+        registry.create("a".repeat(64),"2".repeat(32),false,Any())
+        now=60_000_000_000L;assertFalse(registry.preparing())
+        registry.create("a".repeat(64),"3".repeat(32),false,Any())
+        assertTrue(registry.preparing());registry.reset();assertFalse(registry.preparing())
+    }
+    @Test fun preparingCallSurvivesUiAndWakeLeaseChangesWhileItsOwnLeaseRemains(){
+        val gate=Any();val registry=VoiceConsentRegistry<Any>{0L};val binding=Any()
+        val consent=registry.create("a".repeat(64),"1".repeat(32),false,binding)
+        registry.claim(consent.token)
+        val voiceLease=Long.MAX_VALUE to true
+        var leases:List<Pair<Long?,Boolean>> = listOf(null to false,voiceLease)
+        val scope=registry.operationScope(gate,consent.token,binding){backendLeasePolicy(leases).peerWork}
+        assertEquals("ready",scope.network{
+            leases=listOf(voiceLease,1000L to false) // UI stops, bounded push work starts.
+            scope.local{}
+            leases=listOf(voiceLease) // Push completes without replacing the call.
+            scope.local{}
+            leases=listOf(null to false,voiceLease) // UI returns.
+            "ready"
+        })
+        registry.clear(consent.token)
+        assertThrows(ScopedBackendWork.Superseded::class.java){scope.local{fail("Ended call resumed")}}
+    }
+    @Test fun preparingCallRejectsLateResultsAfterAuthenticationReplacementOrConsentRelease(){
+        for(change in listOf("account","generation","session","profile","stop","consent")){
+            val gate=Any();val registry=VoiceConsentRegistry<Any>{0L};val binding=Any()
+            val consent=registry.create("a".repeat(64),"1".repeat(32),false,binding)
+            registry.claim(consent.token)
+            var profile:Any=Any();val owner=Any();var session:Any=Any();var account=7L;var generation=11L;var allowed=true
+            val identity=ScopedBackendWork.Identity(profile,owner,session,account,generation)
+            val scope=registry.operationScope(gate,consent.token,binding){allowed&&identity.matches(profile,owner,session,account,generation)}
+            assertThrows(change,ScopedBackendWork.Superseded::class.java){scope.network{
+                when(change){
+                    "account"->account++
+                    "generation"->generation++
+                    "session"->session=Any()
+                    "profile"->profile=Any()
+                    "stop"->allowed=false
+                    "consent"->registry.clear(consent.token)
+                }
+                "late voice credentials"
+            }}
+            assertFalse(scope.finish{fail("Stale call applied")})
+        }
+    }
+
     private val peer = "a".repeat(64)
     private val id = "1".repeat(32)
 

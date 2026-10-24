@@ -22,6 +22,17 @@ class ChatAttachmentTest {
     static string Put(string root,string name,byte[] bytes){string path=Path.Combine(root,name);File.WriteAllBytes(path,bytes);return path;}
     [STAThread] static int Main(string[] args){try{
         var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};string root=args[0];Directory.CreateDirectory(root);
+        var pixels=new byte[16*16*3];var thumbnailSource=BitmapSource.Create(16,16,96,96,PixelFormats.Bgr24,null,pixels,16*3);
+        var thumbnailEncoder=new JpegBitmapEncoder();thumbnailEncoder.Frames.Add(BitmapFrame.Create(thumbnailSource));
+        byte[] thumbnailBytes;using(var stream=new MemoryStream()){thumbnailEncoder.Save(stream);thumbnailBytes=stream.ToArray();}
+        string thumbnail=Convert.ToBase64String(thumbnailBytes);
+        Check(EarlyAttachmentThumbnail.Decode(thumbnail)!=null,"valid early JPEG thumbnail unavailable");
+        Check(EarlyAttachmentThumbnail.Decode(Convert.ToBase64String(new byte[2049]))==null&&EarlyAttachmentThumbnail.Decode("%%%") == null,"invalid early thumbnail accepted");
+        var oversizedThumbnail=(byte[])thumbnailBytes.Clone();bool foundDimensions=false;
+        for(int at=0;at+8<oversizedThumbnail.Length;at++)if(oversizedThumbnail[at]==255&&oversizedThumbnail[at+1]==192){oversizedThumbnail[at+7]=8;oversizedThumbnail[at+8]=0;foundDimensions=true;break;}
+        Check(foundDimensions&&EarlyAttachmentThumbnail.Decode(Convert.ToBase64String(oversizedThumbnail))==null,"oversized JPEG dimensions reached the pixel decoder");
+        var earlyCard=new AttachmentCard{Transfer=new CoreAdapter.FileTransferData{id="early-image",state=2,name="photo.png",thumbnail=thumbnail}};
+        Check(earlyCard.Children.OfType<Grid>().Any(grid=>grid.Children.OfType<Image>().Any()),"encrypted direct photo preview hidden before download");
         var preferencePath=Path.Combine(root,"sending-preferences");
         var preferences=new AttachmentSendPreferenceStore(preferencePath);
         Check(preferences.Load()==DmAttachmentDeliveryMode.OnlineDevice,"new profile did not default to Direct");
@@ -157,7 +168,7 @@ class ChatAttachmentTest {
         foreach(var bytes in new[]{new byte[]{0,1,2},new byte[]{255,255,255},new byte[]{137,80,78,71,13,10,26,10}}){var path=Put(root,"fake.txt",bytes);Check(SafeAttachmentPreview.Read(path,bytes.Length).Error.Length>0,"malformed/binary accepted");}
         foreach(bool jpeg in new[]{false,true}){
             var bitmap=BitmapSource.Create(800,600,96,96,PixelFormats.Bgr32,null,new byte[800*600*4],800*4);BitmapEncoder encoder=jpeg?(BitmapEncoder)new JpegBitmapEncoder():new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));string path=Path.Combine(root,jpeg?"jpeg.wrong":"png.wrong");using(var stream=File.Create(path))encoder.Save(stream);
-            var value=SafeAttachmentPreview.Read(path,new FileInfo(path).Length);Check(value.Image!=null&&value.Image.PixelWidth<=320&&value.Image.PixelHeight<=240,"image content detection/bounds");
+            var value=SafeAttachmentPreview.Read(path,new FileInfo(path).Length);Check(value.Image!=null&&value.Image.PixelWidth<=360&&value.Image.PixelHeight<=480,"image content detection/bounds");
         }
         Check(ChatAttachmentProjection.ValidDrop("account:1","account:1",false,new[]{large}),"correct drop rejected");
         Check(!ChatAttachmentProjection.ValidDrop(null,null,false,new[]{large}),"no conversation drop accepted");

@@ -48,13 +48,16 @@ internal sealed partial class AttachmentCacheRuntime {
   Require(digest.Count==1&&digest[0][0]==MailboxProtocol.Digest(bytes),"cache_context_index_invalid");
   return AttachmentCacheContext.Parse(bytes,descriptor,true);
  }}
- internal long ContextExpires(string id){lock(gate){Check();var status=Inspect(id);
-  Require(status.Complete,"cache_upload_incomplete");Require(status.Expires>Now(),"cache_attachment_expired");return status.Expires;
+ internal long ContextExpires(string id,bool requireComplete=true){lock(gate){Check();var status=Inspect(id);
+  Require(!requireComplete||status.Complete,"cache_upload_incomplete");Require(status.Expires>Now(),"cache_attachment_expired");
+  // Early encrypted offers use the retention horizon, not the moving partial
+  // idle deadline. The object itself still expires/reclaims on idle timeout.
+  return status.Complete?status.Expires:checked(Now()+options.RetentionSeconds);
  }}
 }
 internal sealed partial class AttachmentCacheAdmission {
  internal Dictionary<string,object> Context(long account,string device,Func<bool> current,string id){return Authorized(account,device,current,id,d=>{
-  long expires=cache.ContextExpires(id);
+  long expires=cache.ContextExpires(id,false);
   var original=cache.OriginalRoster(id);
   var latest=AttachmentCacheContext.Parse(AttachmentCacheContext.Snapshot(accounts.GroupRoster(d.Group,account,device,false)),d,false);
   Require(Convert.ToString(original["legacyGroupId"])==Convert.ToString(latest["legacyGroupId"]),"cache_context_binding_invalid");

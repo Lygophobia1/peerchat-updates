@@ -71,8 +71,9 @@ sealed interface LoginResult {
 data class PeerChatUiState(
     val demo: Boolean = true, val diagnostics: String = "UI demo — no live diagnostics",
     val voiceAvailable:Boolean=false,val voiceDiagnostic:String="Voice calls are unavailable in this build.",
-    val voice:VoiceSnapshot=VoiceSnapshot(),val voicePeerName:String="",val voiceBusy:Boolean=false,
-    val voiceConsent:VoiceConsent?=null,val voiceError:String?=null,
+    val voice:VoiceSnapshot=VoiceSnapshot(),val voicePeerName:String="",val voiceConversationId:String="",val voiceBusy:Boolean=false,
+    val voiceConsent:VoiceConsent?=null,val voicePreparationToken:String?=null,val voicePendingConversationId:String="",
+    val voiceUiIdentity:String="",val voiceError:String?=null,val voicePendingRoomId:String="",
     val sendBusy: Boolean = false, val sendCompletion: Long = 0, val sendAccepted: Boolean = false,val localSendCount:Int=0,
     val incomingRequests:List<MemberUi> = emptyList(),
     val outgoingRequests:List<MemberUi> = emptyList(),
@@ -103,6 +104,8 @@ data class PeerChatUiState(
     val ownDevices:com.peerchat.android.application.OwnDeviceInventory?=null,
     val localDeviceFingerprint:String="",val identityDirectoryStatus:String="Identity directory not checked",val identityBusy:Boolean=false,
     val attachmentPreviews:Map<String,String> = emptyMap(),
+    val localAttachmentPreviews:Map<String,android.net.Uri> = emptyMap(),
+    val localAttachmentIdentityKeys:Map<String,String> = emptyMap(),
     val attachmentCompatibility:com.peerchat.android.application.AttachmentCompatibilityChoice?=null,val attachmentCompatibilityBusy:Boolean=false,
     val notice: String? = null, val serverReturn: Route = Route.Welcome, val account: AccountUi? = null,
     val diagnosticsReturn: Route = Route.Details,
@@ -173,6 +176,11 @@ sealed interface UiAction {
     data class PreviewMessage(val text: String) : UiAction
     data class SendAttachment(val uri:android.net.Uri,val mode:AttachmentSendMode=AttachmentSendMode.Direct,
         val conversationId:String?=null,val accountId:String?=null,val contextGeneration:Long?=null):UiAction
+    data class CancelLocalAttachment(val token:String):UiAction
+    data class DismissLocalAttachment(val token:String):UiAction
+    data class RetryLocalAttachment(val token:String):UiAction
+    data class DeleteLocalMessage(val conversationId:String,val id:String,val attachment:Boolean=false):UiAction
+    data class DeleteLocalConversation(val conversationId:String,val localAccount:Long?=null):UiAction
     data class ResolveAttachmentCompatibility(val token:String,val mode:AttachmentSendMode?):UiAction
     data class AttachmentAction(val id:String,val accept:Boolean):UiAction
     data class AttachmentPreview(val id:String):UiAction
@@ -188,6 +196,8 @@ sealed interface UiAction {
     data class AnswerDmVoice(val target:VoiceCallTarget):UiAction
     data class ControlDmVoice(val target:VoiceCallTarget,val control:VoiceControl,val value:Boolean=false):UiAction
     data class SpeakerDmVoice(val target:VoiceCallTarget,val enabled:Boolean):UiAction
+    data class AudioRouteDmVoice(val target:VoiceCallTarget,val deviceId:Int):UiAction
+    data class CancelVoicePreparation(val token:String?,val uiIdentity:String):UiAction
     data class JoinVoice(val roomId: String) : UiAction
     data class LeaveVoice(val roomId: String) : UiAction
     data class ToggleMute(val roomId: String) : UiAction
@@ -247,7 +257,9 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.NotificationSettings -> state.copy(notificationsEnabled=action.enabled,notificationPreview=action.preview)
         is UiAction.MailboxStorage -> state.copy(mailboxStorageAllowed=action.allowed)
         UiAction.ArchiveRefresh, is UiAction.ArchiveConsent, is UiAction.HistorySync, is UiAction.ArchiveSynchronize,
-        is UiAction.SendAttachment,is UiAction.ResolveAttachmentCompatibility,is UiAction.AttachmentAction,is UiAction.AttachmentPreview,is UiAction.SaveAttachmentSendMode -> state // Real application commands only, never demo trust.
+        is UiAction.SendAttachment,is UiAction.CancelLocalAttachment,is UiAction.DismissLocalAttachment,is UiAction.RetryLocalAttachment,
+        is UiAction.DeleteLocalMessage,is UiAction.DeleteLocalConversation,
+        is UiAction.ResolveAttachmentCompatibility,is UiAction.AttachmentAction,is UiAction.AttachmentPreview,is UiAction.SaveAttachmentSendMode -> state // Real application commands only, never demo trust.
         is UiAction.PreviewMessage -> if (state.selected == null || state.connection != ConnectionState.Online ||
             action.text.isBlank() || action.text.length > 4096) state else updateSelected { c ->
                 c.copy(preview = action.text, messages = c.messages + MessageUi(
@@ -262,7 +274,7 @@ fun reduceUi(state: PeerChatUiState, action: UiAction): PeerChatUiState {
         is UiAction.PreviewLoginFailure -> state.copy(loginError = "Preview only: " + loginFailureText(action.failure))
         is UiAction.VerifyDevice,is UiAction.ReenrollMailbox -> state
         UiAction.PreviewIncomingCall -> state.copy(incomingCallPreview = !state.incomingCallPreview)
-        is UiAction.StartDmVoice,is UiAction.AnswerDmVoice,is UiAction.ControlDmVoice,is UiAction.SpeakerDmVoice -> state
+        is UiAction.StartDmVoice,is UiAction.AnswerDmVoice,is UiAction.ControlDmVoice,is UiAction.SpeakerDmVoice,is UiAction.AudioRouteDmVoice,is UiAction.CancelVoicePreparation -> state
         // These commands exercise local UI fixtures ONLY. A real presenter delegates to application owners.
         is UiAction.JoinVoice -> updateSelected { c -> c.copy(voiceRooms = c.voiceRooms.map { room ->
             if (room.id == action.roomId) room.copy(joined = true, participants = (room.participants + "You").distinct())

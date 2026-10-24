@@ -109,3 +109,29 @@ if(PEERCHAT_ANDROID_VOICE_ENABLED)
     target_compile_definitions(peerchat_android_voice PRIVATE PEERCHAT_ANDROID_VOICE_ENABLED)
 endif()
 target_link_libraries(peerchat_android_media_probe PRIVATE peerchat_android_voice)
+
+# Pinned RNNoise includes its model and needs no runtime download.
+add_library(peerchat_rnnoise STATIC
+    ../../third_party/rnnoise/src/denoise.c
+    ../../third_party/rnnoise/src/rnn.c
+    ../../third_party/rnnoise/src/rnn_data.c
+    ../../third_party/rnnoise/src/pitch.c
+    ../../third_party/rnnoise/src/kiss_fft.c
+    ../../third_party/rnnoise/src/celt_lpc.c
+)
+target_include_directories(peerchat_rnnoise PRIVATE ../../third_party/rnnoise/include)
+target_compile_definitions(peerchat_rnnoise PRIVATE RNNOISE_BUILD)
+target_compile_options(peerchat_rnnoise PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/../../rnnoise_symbols.h")
+target_link_libraries(peerchat_android_voice PUBLIC peerchat_rnnoise)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/rnnoise/PINNED.json" rnnoise_manifest)
+string(JSON rnnoise_files LENGTH "${rnnoise_manifest}" files)
+math(EXPR rnnoise_last "${rnnoise_files}-1")
+foreach(index RANGE 0 ${rnnoise_last})
+    string(JSON filename MEMBER "${rnnoise_manifest}" files ${index})
+    string(JSON expected GET "${rnnoise_manifest}" files "${filename}")
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/rnnoise/${filename}" actual)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR "RNNoise source hash mismatch: ${filename}")
+    endif()
+endforeach()

@@ -29,6 +29,8 @@ object AndroidAudioDevice {
     private var session: Session? = null
     private val main = Handler(Looper.getMainLooper())
 
+    @JvmStatic private external fun automaticNoiseControl(enabled: Boolean)
+    @JvmStatic private external fun noiseControlLevel(level: Int)
     @JvmStatic private external fun install(): Boolean
     @JvmStatic private external fun capture(token: Long, pcm: ShortArray)
     @JvmStatic private external fun playout(token: Long, pcm: ShortArray)
@@ -41,6 +43,8 @@ object AndroidAudioDevice {
         if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
         val installed = try { install() } catch (_: UnsatisfiedLinkError) { false }
         if (!installed) return false
+        automaticNoiseControl(options.automaticNoiseControl)
+        noiseControlLevel(options.automaticNoiseControlLevel.coerceIn(0,2))
         context = app; processing = options; onFailure = failure
         return true
     }
@@ -151,9 +155,9 @@ object AndroidAudioDevice {
                 if (instance == null) false else { effects += instance; instance.enabled = enabled; enabled && instance.enabled }
             } catch (_: RuntimeException) { false }
             val aec = effect({ if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(input.audioSessionId) else null }, options.echoCancellation)
-            val ns = effect({ if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(input.audioSessionId) else null }, options.noiseSuppression)
+            val ns = effect({ if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(input.audioSessionId) else null }, options.noiseSuppression && !options.automaticNoiseControl) // Native RNNoise replaces device NS when enabled.
             val agc = effect({ if (AutomaticGainControl.isAvailable()) AutomaticGainControl.create(input.audioSessionId) else null }, options.automaticGain)
-            diagnostics = "Android platform processing: AEC=$aec NS=$ns AGC=$agc; strength presets unsupported; WebRTC APM not loaded"
+            diagnostics = "Android platform processing: AEC=$aec AEC_requested=${options.echoCancellation} AEC_status=${if(aec) "enabled" else if(options.echoCancellation) "unavailable" else "off"} NS=$ns AGC=$agc; strength presets unsupported; WebRTC APM not loaded"
             capturing = true
             input.startRecording()
             check(input.recordingState == AudioRecord.RECORDSTATE_RECORDING)

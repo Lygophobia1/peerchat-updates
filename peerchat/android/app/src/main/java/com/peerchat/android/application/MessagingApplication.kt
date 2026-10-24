@@ -35,6 +35,8 @@ interface MessagingApplication:AutoCloseable {
     suspend fun releaseVoice(token:String) {}
     suspend fun controlVoice(target:VoiceCallTarget,action:VoiceControl,value:Boolean=false) { error("Voice unavailable") }
     suspend fun voicePlatformState(token:String,diagnostic:String,speaker:Boolean=false) {}
+    suspend fun deleteLocalMessage(localAccount:Long,conversation:String,messageId:String,transferId:String?=null) { error("Local deletion unavailable") }
+    suspend fun deleteLocalConversation(localAccount:Long,conversation:String) { error("Local deletion unavailable") }
     suspend fun older(peerId:String,before:Long):List<MessageSnapshot>
     suspend fun createGroup(name:String){error("Group creation unavailable")}
     suspend fun inviteGroup(id:String,target:Long){error("Group invitation unavailable")}
@@ -42,8 +44,10 @@ interface MessagingApplication:AutoCloseable {
     suspend fun sendGroup(id:String,text:String):String=error("Group send unavailable")
     suspend fun retryGroup(id:String,message:String){error("Group retry unavailable")}
     suspend fun groupHistory(id:String,before:Long=Long.MAX_VALUE):List<GroupMessageSnapshot> = error("Group history unavailable")
+    suspend fun sendGroupAttachment(groupId:String,uri:android.net.Uri):String = error("Group file sharing unavailable")
     suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:AttachmentSendMode):String = error("File sharing unavailable")
     suspend fun resolveAttachmentCompatibility(token:String,mode:AttachmentSendMode?):String? = error("File sharing unavailable")
+    suspend fun activeAttachmentTransfers(ids:Set<String>):Set<String> = emptySet()
     suspend fun attachmentAction(id:String,accept:Boolean) { error("File sharing unavailable") }
     suspend fun attachmentText(id:String):String = error("Text preview unavailable")
     suspend fun requestFriend(username:String)

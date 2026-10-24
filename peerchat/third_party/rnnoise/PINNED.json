@@ -1,0 +1,29 @@
+{
+  "upstream": "https://github.com/xiph/rnnoise",
+  "release": "v0.1",
+  "commit": "cdf196b1e9de2f8ff1003328ebf9a4316477429d",
+  "files": {
+    "AUTHORS": "ae8f426951c50df22b7403312b475abe50baef1bef62bbcf2978346acb3d103a",
+    "COPYING": "0bb95d752b966f69fea022227297ad49fdb4464eb45f1c1fff494a435bfbeaa5",
+    "include/rnnoise.h": "85bed1d32f381745e5784d5c830ac8db0af5a9f4c1fa26ed46d10a3b315341e8",
+    "README": "20d8efe1b479e2641d9245d9813894b86c5b764c5589f3d8bacfda4754caf431",
+    "src/_kiss_fft_guts.h": "43578f37345e81b12b269865c83bde93b0b2a5bccb3a1e2acafb7542b9e0ed9a",
+    "src/arch.h": "322c51649a7491af6f07c33a37f7438353d0028a1d9cca5030c683f3e9212efd",
+    "src/celt_lpc.c": "67248537a032d85df73f90025c1b9e5260d0c8dbd4c1333a30555db999723f9e",
+    "src/celt_lpc.h": "3ada2ff9c3a872ec8a5cf320ad435398f5290d334b0992f4d7311cda9484d96c",
+    "src/common.h": "fa5d43359973261066dbdfc14b24f3cdf5b63dc024f51b7ec5564c8408cc471d",
+    "src/compile.sh": "91b84ef8ef72b728e3981259733030a28fb80d0f202f547ebc25e8ebb3ed0cbf",
+    "src/denoise.c": "625c636891945b52c5dedadc250e5636e627d19cdc0fd854a1828a63a60febde",
+    "src/kiss_fft.c": "d9131b28144e8ca2649211fee839fb6f9addc0693e31c28f20ccbb0256db5be2",
+    "src/kiss_fft.h": "0bb97ce736ab272fab7a53377debe8f54c4c32849879bd52848b345d7f939156",
+    "src/opus_types.h": "38d99313f07d74e5a01b165e6b41642d98cb2af00604ab681afd695da26cc86a",
+    "src/pitch.c": "8c434d23be484727af48e569a59cb8258a66c9684c345b96fb7bc508dfb53b7d",
+    "src/pitch.h": "1d7a286196447ff5e63c1a974d4bb2305981265fb14d3d0b49edc4a883c1f0af",
+    "src/rnn.c": "3973cd50c8a17f37d76fd858308a03c3052b3d86db174f3fa9d6650db667e8d9",
+    "src/rnn.h": "a655a2d0d8f2db03a4aec0c8935be04a971636a5943480e9f088226ee4f0a6f4",
+    "src/rnn_data.c": "44f26d6527ef6ec327162d880123aa09fcb9745ced2f88063dfc00741e997329",
+    "src/rnn_data.h": "64bf36cbaeff8195aac2bc0d4075eb131a737c882530de8b7a34e7af6f1e3ded",
+    "src/rnn_train.py": "863076d0137bc1ac0bf21d3db4e6f769b5f85f09baea348f7d377cde9631d41d",
+    "src/tansig_table.h": "f469ef2388605ed0b687b1e69ec1b19a0ed59d3abd6e4c70612014ad78642873"
+  }
+}

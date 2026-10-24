@@ -46,6 +46,11 @@ internal class ForegroundEvents(accounts:ServerAccounts,private val onChange:(Fo
     },"PeerChat authenticated server events").apply{isDaemon=true;start()}}
     fun poll():JSONObject?=queue.poll()
     fun hasPending():Boolean=queue.isNotEmpty()
+    // Scheduling hint only. The owner still checks current account/device
+    // authority before admitting any route; queue capacity is bounded at 128.
+    fun hasIncomingFriendDemand():Boolean=queue.any{
+        it.optString("type")=="friend_event"&&it.optString("event")=="relay_demand"&&it.optString("purpose")=="friend"
+    }
     fun queueGroup(value:JSONObject):Boolean {
         require(value.optString("type") in setOf("group_send","group_ack","group_room","group_media"))
         return connected&&!closed&&output?.offer(value.toString().toByteArray(Charsets.UTF_8))==true

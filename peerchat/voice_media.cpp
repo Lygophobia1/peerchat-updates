@@ -220,7 +220,7 @@ struct VoiceMedia::Impl {
         apmWarningSent = false;
         unprocessedFrames = 0;
         if (processing.enabled && !apm.open(processing.noiseSuppression, processing.automaticGain,
-                processing.noiseSuppressionStrength, processing.automaticGainStrength, processing.echoCancellation) && !apmWarningSent.exchange(true))
+                processing.noiseSuppressionStrength, processing.automaticGainStrength, processing.echoCancellation, processing.automaticNoiseControl, processing.automaticNoiseControlLevel) && !apmWarningSent.exchange(true))
             push(EventKind::AudioProcessingError, processingUnavailableMessage());
         audio = std::make_unique<Audio>();
         audio->setDevices(inputDevice,outputDevice);

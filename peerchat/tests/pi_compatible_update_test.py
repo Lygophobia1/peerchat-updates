@@ -57,6 +57,45 @@ class CacheBackupTests(unittest.TestCase):
 
 
 class StartupHealthTests(unittest.TestCase):
+    def test_pre229_rollback_blocks_new_identity_schema_without_mutation(self):
+        with tempfile.TemporaryDirectory(prefix='peerchat-identity-rollback-') as tmp:
+            root=pathlib.Path(tmp);path=root/'isolated.sqlite'
+            cache=root/'cache';cache.mkdir();(cache/'ciphertext').write_bytes(b'newer durable ciphertext')
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('create table messages(id text)')
+                db.execute("insert into messages values('newer durable message')")
+                db.execute('create table attachment_dm_identity_proofs(account integer,device text,key_id text,generation integer,proof blob)')
+                db.commit()
+            before=update.tree_hashes(root)
+            for target in ('4.0.2-dev.190','4.0.2-dev.225','4.0.2-dev.228'):
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(RuntimeError,'requires 4.0.2-dev.229 or newer; preserve current database and cache'):
+                        update.require_legacy_rollback_safe(path,target)
+                    self.assertEqual(before,update.tree_hashes(root))
+            update.require_legacy_rollback_safe(path,'4.0.2-dev.229')
+            self.assertEqual(before,update.tree_hashes(root))
+
+    def test_pre229_rollback_checks_capability_data_without_new_schema(self):
+        def proof(body):
+            def number(value):return value.to_bytes(8,'little')
+            def field(value):return number(len(value))+value
+            return b'PT\x01\x1e'+field(b'PeerChat/dm-cache-device/v1')+number(1)+field(b'a'*64)+field(b'b'*32)+number(1)+number(body)+number(1)+field(b'c'*72)+field(b'd'*64)
+        with tempfile.TemporaryDirectory(prefix='peerchat-capability-rollback-') as tmp:
+            path=pathlib.Path(tmp)/'isolated.sqlite'
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('create table attachment_dm_capabilities(proof blob)')
+                db.execute('insert into attachment_dm_capabilities values(?)',(proof(1),));db.commit()
+            update.require_legacy_rollback_safe(path,'4.0.2-dev.225')
+            for capability in (proof(2),b'truncated'):
+                with closing(sqlite3.connect(path)) as db:
+                    db.execute('update attachment_dm_capabilities set proof=?',(capability,));db.commit()
+                before=update.digest(path)
+                with self.assertRaisesRegex(RuntimeError,'attachment identity-proof/capability compatibility'):
+                    update.require_legacy_rollback_safe(path,'4.0.2-dev.225')
+                self.assertEqual(before,update.digest(path))
+                update.require_legacy_rollback_safe(path,'4.0.2-dev.229')
+                self.assertEqual(before,update.digest(path))
+
     def test_rollback_cannot_resurrect_revoked_device(self):
         with tempfile.TemporaryDirectory(prefix='peerchat-revocation-rollback-') as tmp:
             path=pathlib.Path(tmp)/'isolated.sqlite'

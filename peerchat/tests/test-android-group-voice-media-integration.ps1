@@ -16,6 +16,7 @@ Copy-Item -LiteralPath $ReceiveDll,$ProcessingDll -Destination $output
 Copy-Item -LiteralPath 'C:\TDM-GCC-64\bin\libssp_64-0.dll' -Destination $output
 Push-Location $root
 try{
+ & (Join-Path $root 'scripts/build-rnnoise.ps1') -OutputDirectory $output
  $exe=Join-Path $output 'group-voice-media.exe'
  $ErrorActionPreference='Continue'
  & 'C:\TDM-GCC-64\bin\g++.exe' -std=c++17 -O2 -Wall -Wextra -Werror -Wno-cast-function-type -static-libgcc -static-libstdc++ -I. "-I$NativeDependencyRoot/include" tests/android_group_voice_media_integration.cpp tests/android_voice_media_integration_audio.cpp group_voice_session.cpp voice_media_topology.cpp voice_media.cpp voice_receive_engine.cpp "-L$NativeDependencyRoot/lib" -ldatachannel -lopus -lsrtp2 -ljuice -lusrsctp -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m '-Wl,-Bstatic' -lssp '-Wl,-Bdynamic' -o $exe -lws2_32 -lsecur32 -lcrypt32 -lbcrypt -lncrypt -liphlpapi 2> (Join-Path $output 'compile.stderr.txt')

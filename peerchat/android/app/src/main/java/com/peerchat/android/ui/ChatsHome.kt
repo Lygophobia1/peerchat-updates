@@ -1,6 +1,8 @@
 package com.peerchat.android.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,6 +22,7 @@ import androidx.compose.ui.tooling.preview.Preview
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun Home(state: PeerChatUiState, dispatch: (UiAction) -> Unit) {
     var menu by remember { mutableStateOf(false) }
+    var deleteConversation by remember(state.account?.accountId,state.attachmentContextGeneration) { mutableStateOf<ConversationUi?>(null) }
     var newGroup by remember {mutableStateOf("")}
     Scaffold(topBar = {
         TopAppBar(title = { Text("PeerChat") }, actions = {
@@ -43,7 +46,8 @@ import androidx.compose.ui.tooling.preview.Preview
         NavigationBar {
             Tab.entries.forEach { tab -> NavigationBarItem(selected = state.tab == tab,
                 onClick = { dispatch(UiAction.SelectTab(tab)) }, label = { Text(tab.name) }, icon = {
-                    BadgedBox(badge={if(tab==Tab.Chats&&(state.incomingRequests.size+state.groupInvitations.size)>0)Badge{Text((state.incomingRequests.size+state.groupInvitations.size).toString())}}){
+                    val chatsBadgeCount=state.conversations.sumOf{it.unread}+state.incomingRequests.size+state.groupInvitations.size
+                    BadgedBox(badge={if(tab==Tab.Chats&&chatsBadgeCount>0)Badge(containerColor=MaterialTheme.colorScheme.primary,contentColor=MaterialTheme.colorScheme.onPrimary){Text(chatsBadgeCount.toString())}}){
                         Icon(when (tab) { Tab.Chats -> Icons.Default.Email; Tab.Calls -> Icons.Default.Call; Tab.You -> Icons.Default.Person }, null)
                     }
                 }) }
@@ -83,7 +87,7 @@ import androidx.compose.ui.tooling.preview.Preview
                         LoadState.Empty -> StatusPanel("No conversations yet", "Your conversations will appear here.") {}
                         LoadState.Ready -> if (state.visible.isEmpty()) StatusPanel("No matches", "Try a different search.") {} else
                             LazyColumn(Modifier.fillMaxSize().testTag("conversation-list"),contentPadding=PaddingValues(bottom=88.dp)) {
-                                items(state.visible, key = { it.id }) { ConversationRow(it) { dispatch(UiAction.Select(it.id)) } }
+                                items(state.visible, key = { it.id }) { c -> ConversationRow(c,{dispatch(UiAction.Select(c.id))},{if(!state.demo)deleteConversation=c}) }
                             }
                     }
                 }
@@ -91,6 +95,14 @@ import androidx.compose.ui.tooling.preview.Preview
                 Tab.You -> YouPage(state, dispatch)
             }
         }
+    }
+    deleteConversation?.let{conversation->
+        val capturedAccount=state.account?.accountId?.removePrefix("account:")?.toLongOrNull()
+        AlertDialog(onDismissRequest={deleteConversation=null},
+        title={Text("Delete conversation history from this device?")},
+        text={Text("Messages and files in ${conversation.name} will be removed from this conversation on this device. The chat remains. Saved files are kept, sending items continue, and this does not delete them for anyone else.")},
+        confirmButton={TextButton({deleteConversation=null;dispatch(UiAction.DeleteLocalConversation(conversation.id,capturedAccount))},Modifier.testTag("confirm-delete-conversation")){Text("Delete from this device")}},
+        dismissButton={TextButton({deleteConversation=null}){Text("Cancel")}})
     }
 }
 
@@ -106,8 +118,9 @@ import androidx.compose.ui.tooling.preview.Preview
         }
     }
 }
-@Composable private fun ConversationRow(c: ConversationUi, open: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = open).padding(horizontal = 16.dp, vertical = 14.dp),
+@OptIn(ExperimentalFoundationApi::class)
+@Composable private fun ConversationRow(c: ConversationUi, open: () -> Unit,delete:()->Unit) {
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = open,onLongClick=delete).testTag("conversation-row-${c.id}").padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Avatar(c.name, c.kind == ChatKind.Group)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -120,7 +133,7 @@ import androidx.compose.ui.tooling.preview.Preview
         }
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(c.time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (c.unread > 0) Badge { Text(c.unread.toString()) }
+            if (c.unread > 0) Badge(containerColor=MaterialTheme.colorScheme.primary,contentColor=MaterialTheme.colorScheme.onPrimary) { Text(c.unread.toString()) }
             else if (c.messages.lastOrNull()?.outgoing == true) Text(when (c.messages.last().status) {
                 MessageStatus.Failed -> "Failed"; MessageStatus.Read -> "✓✓"; MessageStatus.Delivered -> "✓";
                 MessageStatus.Stored -> "Stored"; MessageStatus.Queued -> "Queued";

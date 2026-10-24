@@ -14,6 +14,7 @@ Copy-Item -LiteralPath 'C:\TDM-GCC-64\bin\libssp_64-0.dll' -Destination $output
 Get-FileHash -LiteralPath $ReceiveDll,$ProcessingDll | Format-List | Out-File -LiteralPath (Join-Path $output 'dependency-hashes.txt')
 Push-Location $root
 try{
+ & (Join-Path $root 'scripts/build-rnnoise.ps1') -OutputDirectory $output
  $exe=Join-Path $output 'voice-media-integration.exe'
  # No audio.cpp/portable/audio_android.cpp: only the explicit synthetic device
  # port is substituted. All call, signaling, TLS, media and receiver code is real.

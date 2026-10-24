@@ -5,6 +5,7 @@
 #else
 
 #include "audio_processing/peerchat_audio_processing.h"
+#include "rnnoise_capture.hpp"
 #include "voice_processing_presets.hpp"
 #include "media_performance.hpp"
 #include <windows.h>
@@ -30,7 +31,7 @@ public:
     bool open(bool noiseSuppression = true, bool automaticGain = true,
               NoiseSuppressionStrength noiseStrength = NoiseSuppressionStrength::Medium,
               AutomaticGainStrength gainStrength = AutomaticGainStrength::Balanced,
-              bool echoCancellation = false) {
+              bool echoCancellation = false, bool automaticNoiseControl = true, unsigned automaticNoiseControlLevel = 1) {
         close();
         performance_.reset();
         captureCalls_ = 0;
@@ -60,7 +61,12 @@ public:
         config.struct_size = sizeof(config);
         config.sample_rate_hz = PC_APM_SAMPLE_RATE_HZ;
         config.channels = PC_APM_CHANNELS;
-        config.noise_suppression_enabled = noiseSuppression ? 1u : 0u;
+        automaticNoiseControl_=automaticNoiseControl;
+        // If the optional RNNoise module is unavailable, retain the working
+        // WebRTC path and expose the fallback in diagnostics.
+        rnnoiseFallback_=automaticNoiseControl_ && !rnnoise_.open(automaticNoiseControlLevel);
+        automaticNoiseControl_=automaticNoiseControl_&&!rnnoiseFallback_;
+        config.noise_suppression_enabled = !automaticNoiseControl_ && noiseSuppression ? 1u : 0u;
         config.automatic_gain_enabled = automaticGain ? 1u : 0u;
         config.echo_cancellation_enabled = echoCancellation ? 1u : 0u;
         config.noise_suppression_strength = static_cast<std::uint32_t>(noiseStrength);
@@ -108,6 +114,7 @@ public:
                 return false;
             }
         }
+        if(automaticNoiseControl_ && !rnnoise_.processFrame(processed_.data())){failure_=6;active_=false;++bypassedFrames_;return false;}
         const auto after = measure(processed_.data());
         const auto smooth = [this](std::atomic<float>& destination, float sample) {
             destination = measuredFrames_ == 0 ? sample : destination.load() * 0.9f + sample * 0.1f;
@@ -135,14 +142,16 @@ public:
         }
         lastRenderMs_=nowMs();return true;
     }
-    void requestReset(){if(echoCancellation_)resetPending_=true;}
+    void requestReset(){resetPending_=true;}
     bool echoCancellation()const{return echoCancellation_;}
     bool referenceActive()const{auto last=lastRenderMs_.load();return active_&&last&&nowMs()-last<200;}
     std::uint64_t renderCalls()const{return renderCalls_;}
     std::uint64_t referenceUnderruns()const{return referenceUnderruns_;}
     std::uint64_t resets()const{return resets_;}
-    std::wstring performanceText()const{return performance_.text()+L"\napm_component_cost=AEC/NS/AGC bundled by pinned APM; split timing unavailable";}
+    std::wstring performanceText()const{return performance_.text()+L"\nautomatic_noise_control="+(automaticNoiseControl_?L"RNNoise + adaptive soft gate":L"off; original WebRTC processing")+L"\nrnnoise_fallback="+(rnnoiseFallback_?L"true":L"false")+L"\nrnnoise_added_signal_delay_ms=11.292 when enabled"+noiseControlDiagnostics();}
     unsigned delayMs()const{return delayMs_;}
+    NoiseTrace noiseTrace()const{return rnnoise_.trace();}
+    std::wstring noiseControlDiagnostics()const{return automaticNoiseControl_?rnnoise_.diagnostics():L"\nautomatic_noise_control_active=false";}
     bool active() const { return active_; }
     unsigned failure() const { return failure_; }
     std::uint64_t captureCalls() const { return captureCalls_; }
@@ -159,6 +168,7 @@ public:
     AutomaticGainStrength gainStrength() const { return gainStrength_; }
 
     void close() {
+        rnnoise_.close();
         if (instance_ && destroy_) destroy_(instance_);
         instance_ = nullptr;
         if (module_) FreeLibrary(module_);
@@ -170,6 +180,8 @@ public:
     }
 
 private:
+    bool automaticNoiseControl_=true,rnnoiseFallback_=false;
+    RnNoiseCapture rnnoise_;
     MediaPerformance performance_;
     static std::int64_t nowMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();}
@@ -177,7 +189,7 @@ private:
     bool applyReset(){
         if(!resetPending_.exchange(false))return true;
         auto result=reset_(instance_);if(result!=PC_APM_OK){fail(result);return false;}
-        ++resets_;lastRenderMs_=0;return true;
+        rnnoise_.reset();if(echoCancellation_)++resets_;lastRenderMs_=0;return true;
     }
     static std::pair<float,float> measure(const std::int16_t* pcm) {
         std::uint64_t squares = 0;

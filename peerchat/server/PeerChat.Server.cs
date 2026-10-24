@@ -555,7 +555,15 @@ namespace PeerChat.Server {
             if(endpoints){profile["revokedPublicIdentities"]=RevokedContactIdentities(account);profile["deviceAuthorityRevision"]=DeviceAuthorityRevision(account);}
             var selected=devices.FirstOrDefault();profile["online"]=selected!=null;profile["serverEpoch"]=Live.Epoch;profile["presenceRevision"]=Live.Revision;
             profile["devicesOnline"]=devices.Select(d=>(object)new Dictionary<string,object>{{"publicIdentity",d.Identity},{"generation",d.Generation},{"revision",d.Revision}}).ToArray();
-            if(profile.ContainsKey("publicIdentity"))profile["publicIdentity"]=selected!=null?selected.Identity:ScalarText(database,"SELECT d.public_identity FROM devices d WHERE d.account_id="+account+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=d.public_identity AND a.revoked=1) ORDER BY d.id LIMIT 1")??"";
+            // Sleeping is not a change of device identity. Keep the last live
+            // device as an offline routing hint, after current revocation checks.
+            // A server restart can prefer an eligible remembered push recipient;
+            // neither hint grants trust or marks a device online.
+            var last=Live.LastIdentity(account);
+            if(last!=null&&!ActiveDevice(account,last))last=null;
+            if(profile.ContainsKey("publicIdentity"))profile["publicIdentity"]=selected!=null?selected.Identity:last??
+                ScalarText(database,"SELECT p.public_identity FROM device_push p JOIN remembered_devices r ON r.account_id=p.account_id AND r.public_identity=p.public_identity WHERE p.account_id="+account+" AND p.expires_utc>="+UnixNow()+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=p.public_identity AND a.revoked=1) ORDER BY p.expires_utc DESC,p.public_identity LIMIT 1")??
+                ScalarText(database,"SELECT d.public_identity FROM devices d WHERE d.account_id="+account+" AND NOT EXISTS(SELECT 1 FROM device_authority a WHERE a.public_identity=d.public_identity AND a.revoked=1) ORDER BY d.id LIMIT 1")??"";
             if(endpoints){profile["endpointHost"]=selected==null?"":selected.Host;profile["endpointPort"]=selected==null?0:selected.Port;profile["publicEndpointHost"]=selected==null?"":selected.PublicHost;profile["publicEndpointPort"]=selected==null?0:selected.PublicPort;profile["candidateSeenUtc"]=selected==null?0:UnixNow();profile["publicCandidateSource"]=selected==null?"":selected.Source;profile["observedAddressClassification"]=selected==null?"":selected.Classification;}
             return profile;
         }
@@ -737,17 +745,28 @@ namespace PeerChat.Server {
                 case "mailbox_store":case "mailbox_ack":case "mailbox_fetch":case "mailbox_receipts":return type;
                 default:return type!=null&&type.StartsWith("cache_",StringComparison.Ordinal)?"cache_other":"ordinary";
             }}
-            internal string Record(string phase,string operation,string id,long started,long finished){
+            internal string Record(string phase,string operation,string id,long started,long finished,long[] cacheComponents=null){
                 long ticks=Math.Max(0,finished-started),frequency=System.Diagnostics.Stopwatch.Frequency;
-                string safePhase=phase=="worker_queue"||phase=="rpc_processing"||phase=="rpc_response_write"?phase:"other";
+                string safePhase=phase=="worker_queue"||phase=="rpc_processing"||phase=="rpc_response_write"||phase=="cache_append_components"?phase:"other";
                 string safeId=MailboxProtocol.Id(id,32)?id:"none";
                 lock(gate){
                     Count++;MaximumTicks=Math.Max(MaximumTicks,ticks);
                     string row="server_timing phase="+safePhase+" operation="+Operation(operation)+" request_id="+safeId+
                         " start_tick="+started+" end_tick="+finished+" elapsed_ms="+(ticks*1000.0/frequency).ToString("F3",CultureInfo.InvariantCulture);
+                    bool appendComponents=safePhase=="cache_append_components"&&(operation=="cache_append"||operation=="cache_dm_append")&&
+                       cacheComponents!=null&&cacheComponents.Length==6&&cacheComponents.All(x=>x>=0);
+                    if(appendComponents){
+                        // Transaction time includes hex encoding and the FULL
+                        // durable commit; these are nested, not additive stages.
+                        row+=" storage_observe_count="+cacheComponents[0]+" storage_observe_ms="+(cacheComponents[1]*1000.0/frequency).ToString("F3",CultureInfo.InvariantCulture)+
+                            " blob_encode_count="+cacheComponents[2]+" blob_encode_ms="+(cacheComponents[3]*1000.0/frequency).ToString("F3",CultureInfo.InvariantCulture)+
+                            " append_transaction_count="+cacheComponents[4]+" append_transaction_ms="+(cacheComponents[5]*1000.0/frequency).ToString("F3",CultureInfo.InvariantCulture);
+                    }
                     samples.Enqueue(row);if(samples.Count>64)samples.Dequeue();
-                    if(ticks<frequency/4)return null;
-                    Slow++;
+                    // Representative append component samples must also reach
+                    // Pi logs below 250 ms; share the existing one/sec limit.
+                    if(ticks<frequency/4&&!appendComponents)return null;
+                    if(ticks>=frequency/4)Slow++;
                     lock(logGate){if(finished<nextLog){Suppressed++;return null;}nextLog=finished+frequency;}
                     return row+" total="+Count+" slow="+Slow+" suppressed="+Suppressed;
                 }
@@ -755,8 +774,8 @@ namespace PeerChat.Server {
         }
         sealed partial class DiscoveryServer {
         readonly ServerTimingDiagnostics timing=new ServerTimingDiagnostics();
-        void RecordTiming(string phase,string operation,string id,long started){
-            try{string line=timing.Record(phase,operation,id,started,System.Diagnostics.Stopwatch.GetTimestamp());
+        void RecordTiming(string phase,string operation,string id,long started,long[] cacheComponents=null){
+            try{string line=timing.Record(phase,operation,id,started,System.Diagnostics.Stopwatch.GetTimestamp(),cacheComponents);
                 if(line!=null)Log("DEBUG",line);
             }catch(Exception error){if(error is OutOfMemoryException)throw;} // Diagnostics never change request authority or results.
         }
@@ -928,7 +947,23 @@ namespace PeerChat.Server {
                 var ready=Encoding.UTF8.GetBytes(groupJson.Serialize(Ok(new Dictionary<string,object>{{"type","events_ready"},{"serverEpoch",accounts.Live.Epoch},{"presenceRevision",accounts.Live.Revision},{"presenceSnapshot",accounts.FriendState(subscription.AccountId)["friends"]}})));
                 if(ready.Length>100000)throw new InvalidDataException("Presence snapshot exceeds bounded event frame");
                 lock(subscription.Gate)WriteFrame(subscription.Tls,ready);
-            }}catch{EndEventSubscription(subscription);throw;}
+            }
+                ReplayWaitingFriendRelays(subscription);
+            }catch{EndEventSubscription(subscription);throw;}
+        }
+        // A push may wake a process after the original relay_demand event was
+        // emitted. Replay only still-waiting exact-device friend routes after
+        // events_ready, never archived/cancelled requests or call metadata.
+        void ReplayWaitingFriendRelays(EventClient subscription){
+            RelayEndpoint[] pending;
+            lock(relayGate)pending=waitingRelays.Where(value=>value.Scope=="friend"&&value.TargetAccountId==subscription.AccountId&&value.TargetDeviceId==subscription.PublicIdentity).Take(32).ToArray();
+            foreach(var endpoint in pending){
+                if(!accounts.CurrentFriendRelayAuthorized(endpoint.AccountId,endpoint.DeviceId,endpoint.SessionTokenHash,
+                    subscription.AccountId,subscription.PublicIdentity,subscription.SessionTokenHash))continue;
+                lock(relayGate){if(!waitingRelays.Contains(endpoint))continue;}
+                var fields=new Dictionary<string,object>{{"ok",true},{"version",ProtocolVersion},{"type","friend_event"},{"event","relay_demand"},{"accountId",endpoint.AccountId},{"publicIdentity",endpoint.DeviceId},{"targetPublicIdentity",subscription.PublicIdentity},{"purpose","friend"},{"groupId",""},{"rosterGeneration",0}};
+                lock(subscription.Gate)WriteFrame(subscription.Tls,Encoding.UTF8.GetBytes(groupJson.Serialize(fields)));
+            }
         }
         void RetireEventSession(string tokenHash){List<EventClient> removed;lock(eventGate){removed=eventClients.Where(value=>value.SessionTokenHash==tokenHash).ToList();foreach(var value in removed)eventClients.Remove(value);}foreach(var value in removed){accounts.ClearPresence(value.AccountId,value.PublicIdentity,value.Binding);EndEventSubscription(value);BroadcastPresence(value.AccountId,value.PublicIdentity,"",0,"",0,false);}}
         void PresenceMonitor(){while(!stopping){Thread.Sleep(1000);if(stopping)break;MaintainAttachmentCache();foreach(var device in accounts.Live.Expire((account,identity)=>{var current=accounts.Live.Get(identity);return accounts.OwnsDevice(account,identity)&&(current==null||accounts.Authenticate(current.Session)==account);}))BroadcastPresence(device.Account,device.Identity,"",0,"",0,false);}}
@@ -1172,12 +1207,33 @@ namespace PeerChat.Server {
         // Poll/Available observes encrypted socket bytes, not plaintext already
         // buffered inside SslStream. One outstanding framed read also consumes
         // buffered TLS data while the owner checks its lease/shutdown deadline.
-        static async Task<byte[]> ReadFrameAsync(Stream stream,int maximum){
+        sealed class FrameReadTiming {
+            internal long HeaderTicks,BodyTicks;
+            internal int HeaderReads,BodyReads,HeaderAsyncWaits,BodyAsyncWaits,ThreadHops;
+        }
+        static Task<byte[]> ReadFrameAsync(Stream stream,int maximum){return ReadFrameAsync(stream,maximum,null);}
+        static async Task<byte[]> ReadFrameAsync(Stream stream,int maximum,FrameReadTiming timing){
+            long headerStarted=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
             var header=new byte[4];int offset=0;
-            while(offset<4){int n=await stream.ReadAsync(header,offset,4-offset).ConfigureAwait(false);if(n==0)return null;offset+=n;}
+            while(offset<4){
+                var read=stream.ReadAsync(header,offset,4-offset);bool pending=timing!=null&&!read.IsCompleted;
+                int thread=timing==null?0:Thread.CurrentThread.ManagedThreadId;
+                int n=await read.ConfigureAwait(false);
+                if(timing!=null){timing.HeaderReads++;if(pending)timing.HeaderAsyncWaits++;if(thread!=Thread.CurrentThread.ManagedThreadId)timing.ThreadHops++;}
+                if(n==0)return null;offset+=n;
+            }
+            if(timing!=null)timing.HeaderTicks+=Math.Max(0,System.Diagnostics.Stopwatch.GetTimestamp()-headerStarted);
             int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];if(length<1||length>maximum)return null;
+            long bodyStarted=timing==null?0:System.Diagnostics.Stopwatch.GetTimestamp();
             var frame=new byte[length];offset=0;
-            while(offset<length){int n=await stream.ReadAsync(frame,offset,length-offset).ConfigureAwait(false);if(n==0)return null;offset+=n;}
+            while(offset<length){
+                var read=stream.ReadAsync(frame,offset,length-offset);bool pending=timing!=null&&!read.IsCompleted;
+                int thread=timing==null?0:Thread.CurrentThread.ManagedThreadId;
+                int n=await read.ConfigureAwait(false);
+                if(timing!=null){timing.BodyReads++;if(pending)timing.BodyAsyncWaits++;if(thread!=Thread.CurrentThread.ManagedThreadId)timing.ThreadHops++;}
+                if(n==0)return null;offset+=n;
+            }
+            if(timing!=null)timing.BodyTicks+=Math.Max(0,System.Diagnostics.Stopwatch.GetTimestamp()-bodyStarted);
             return frame;
         }
         static void WriteFrame(Stream stream,byte[] bytes){var header=new[]{(byte)(bytes.Length>>24),(byte)(bytes.Length>>16),(byte)(bytes.Length>>8),(byte)bytes.Length};stream.Write(header,0,header.Length);stream.Write(bytes,0,bytes.Length);}

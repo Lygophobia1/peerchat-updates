@@ -107,7 +107,7 @@ public partial class DesktopApplication {
         }
         var execution=dmAttachmentExecution;string device=dmAttachmentPeer,token=dmAttachmentToken,pin=dmAttachmentPin;long account=dmAttachmentAccount;ulong profile=dmAttachmentProfile,session=dmAttachmentSession;
         dmAttachmentNext=DateTime.UtcNow.AddSeconds(1);
-        dmAttachmentNetworkTask=Task.Run(()=>execution.Service(payload=>client.AttachmentCache(device,payload,account,token,pin))).ContinueWith(task=>{
+        dmAttachmentNetworkTask=Task.Run(()=>execution.ServiceBurst(payload=>client.AttachmentCache(device,payload,account,token,pin))).ContinueWith(task=>{
             window.Dispatcher.BeginInvoke((Action)(()=>{if(closing||dmAttachmentExecution!=execution||discovery!=owner||profileSessionGeneration!=profile||discoverySessionGeneration!=session)return;dmAttachmentNext=DateTime.UtcNow.AddMilliseconds(!task.IsFaulted&&task.Result?0:1000);if(!task.IsFaulted&&task.Result)PumpDmAttachmentNetwork();}));if(task.IsFaulted){var ignored=task.Exception;}
         });
     }

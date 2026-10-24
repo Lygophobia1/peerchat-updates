@@ -3,7 +3,7 @@ package com.peerchat.android.application
 import com.peerchat.android.VoiceBridge
 import java.util.UUID
 
-data class VoiceSnapshot(val accepted:Boolean=true,val available:Boolean=false,val diagnostic:String="Voice capability not loaded",
+data class VoiceSnapshot(val accepted:Boolean=true,val available:Boolean=false,val diagnostic:String="Voice is getting ready. Wait for the connection to finish, then try again.",
     val active:Boolean=false,val id:String="",val peer:String="",val lifetime:Long=0,val state:Long=0,val direction:Long=0,
     val muted:Boolean=false,val deafened:Boolean=false,val mediaState:Long=0,val mediaGeneration:Long=0,val mediaRoute:Long=0,val controlAvailable:Boolean=false,
     val owner:String="",val platformDiagnostic:String="",val speaker:Boolean=false,
@@ -22,6 +22,16 @@ internal data class CallTarget(val peer:String,val id:String,val lifetime:Long) 
     init {require(peer.matches(Regex("[0-9a-f]{64}"))&&id.matches(Regex("[0-9a-f]{32}"))&&lifetime>0)}
 }
 
+/** Roll back only the call this gesture could have started. Never end a
+ * replacement call or a newer lifetime of an incoming call. Caller owns the
+ * exact authenticated backend scope before invoking this helper. */
+internal fun rollbackVoiceStart(consent:VoiceConsent,answer:VoiceCallTarget?,snapshot:()->VoiceSnapshot,end:(CallTarget)->Unit) {
+    val current=snapshot()
+    if(!current.active||current.peer!=consent.peer||current.id!=consent.id)return
+    if(answer!=null&&current.lifetime!=answer.lifetime)return
+    end(CallTarget(current.peer,current.id,current.lifetime))
+}
+
 /** Opaque JNI execution only. It does not own call state, signaling or retries.
  * AndroidVoice/v1 is a private, unshipped Java/native record domain; both ends
  * change together. It is not the peer signaling protocol.
@@ -35,7 +45,11 @@ internal class VoiceExecution(private val native:(Long,Int,ByteArray)->ByteArray
         "receive_mixed_10ms_blocks","receive_busy_or_silence_10ms_blocks","neteq_packets_inserted","neteq_insert_failures",
         "neteq_pulled_10ms_blocks","neteq_pull_failures","neteq_current_delay_ms","neteq_target_delay_ms",
         "neteq_concealment_events","neteq_concealed_samples","neteq_fec_packets_received","neteq_fec_packets_discarded",
-        "neteq_secondary_decoded_rate_q14","neteq_packets_discarded","neteq_buffer_flushes","media_anomaly_skipped_contention")
+        "neteq_secondary_decoded_rate_q14","neteq_packets_discarded","neteq_buffer_flushes","media_anomaly_skipped_contention",
+        // Keep in step with VoiceApplication::safeMediaDiagnostics. These are
+        // bounded numeric observations only, never audio or identifying data.
+        "automatic_noise_level","rnnoise_vad","noise_gate_open","noise_gate_background","noise_gate_gain","noise_gate_target",
+        "noise_gate_attenuation_db","noise_floor_dbfs","rnnoise_input_dbfs","rnnoise_output_dbfs","rnnoise_dry_mix","noise_control_outgoing_dbfs")
     private val timedKeys=setOf("capture_interval","playback_interval","capture_work","apm_capture","apm_render","opus_encode",
         "receive_pull","rtp_arrival_interval","screen_capture_wait").mapTo(mutableSetOf()){ "perf_$it" }
     private fun command(handle:Long,op:Int,account:Long,generation:Long,write:(NativeRecordWriter)->Unit={}):VoiceSnapshot {

@@ -16,6 +16,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AttachmentReadinessTest {
+    @Test fun acceptedEnrollmentProgressSurvivesThirtySecondColdStart()=runBlocking {
+        var now=0L;var progress=0L
+        val result=awaitAttachmentReadiness(probe={
+            progress=when{now>=37->3;now>=20->2;now>=5->1;else->0}
+            if(now>=45)"registered" else null
+        },clock={now},wait={now++},timeoutNanos=30,progress={progress},maximumNanos=120)
+        assertEquals("registered",result);assertEquals(45L,now)
+    }
+    @Test fun progressCannotRemoveAbsoluteLimitAndStallsStillTimeout()=runBlocking {
+        for(advancing in listOf(false,true)){
+            var now=0L
+            assertThrows(AttachmentReadinessUnavailable::class.java){runBlocking{
+                awaitAttachmentReadiness<String>(probe={null},clock={now},wait={now++},timeoutNanos=30,
+                    progress={if(advancing)now else 0},maximumNanos=120)
+            }}
+            assertEquals(if(advancing)120L else 30L,now)
+        }
+    }
     @Test fun directOnlyRequiresAuthenticatedScopeWhileCachedChecksServerCapability(){
         var cacheChecks=0
         val unsupported:(String)->Boolean={cacheChecks++;throw AttachmentModeUnavailable("cached_unsupported")}

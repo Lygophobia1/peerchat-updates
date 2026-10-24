@@ -24,6 +24,14 @@ class DirectAttachmentApplicationHost {
 partial class AttachmentCacheRuntimeTest {
  internal static void NativeReplyFailureProof(){
   const string id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  foreach(var audience in new[]{new byte[0],new byte[]{0xfb,0xff,0x00}}){
+   byte[] preparation=HostRecord("PeerChat/DMCacheCommand/v1",w=>{w.Write(7UL);Text(w,id);Text(w,"cache_dm_prepare");w.Write(2UL);Text(w,"");Text(w,"");w.Write(0UL);w.Write(0UL);w.Write(0UL);Field(w,new byte[0]);Field(w,audience);Field(w,new byte[0]);});
+   DmAttachmentExecution.Execute(preparation,payload=>{
+    Check(Convert.ToUInt64(payload["recipientAccountId"])==2UL&&payload.ContainsKey("audience")== (audience.Length>0),"DM preparation optional audience forwarding");
+    if(audience.Length>0)Check((string)payload["audience"]=="-_8A","DM preparation preserves frozen audience bytes in base64url");
+    return new Dictionary<string,object>{{"state","cache_dm_audience_changed"}};
+   });
+  }
   byte[] command=HostRecord("PeerChat/DMCacheCommand/v1",w=>{w.Write(7UL);Text(w,id);Text(w,"cache_dm_capability");w.Write(0UL);Text(w,"");Text(w,"");w.Write(0UL);w.Write(0UL);w.Write(0UL);for(int i=0;i<3;i++)Field(w,new byte[0]);});
   int rejected=0,failed=0;string failure="";
   var execution=new DmAttachmentExecution((operation,input)=>{
@@ -38,6 +46,13 @@ partial class AttachmentCacheRuntimeTest {
    Func<string> readText=()=>{ulong count=reader.ReadUInt64();Check(count<=100000,"DM failure text bound");return new UTF8Encoding(false,true).GetString(reader.ReadBytes((int)count));};
    Check(reader.ReadBytes(4).SequenceEqual(new byte[]{80,84,1,30})&&readText()=="PeerChat/DMCacheFailure/v1"&&reader.ReadUInt64()==7&&readText()==id&&readText()=="network_unavailable"&&stream.Position==stream.Length,"DM native failure correlation");
   }
+  int ready=40,commits=0,requests=0;
+  var burst=new DmAttachmentExecution((operation,input)=>{if(operation==25)return ready-->0?Convert.ToBase64String(command):"";if(operation==26){commits++;return "ok";}if(operation==27)return "ok";throw new InvalidDataException();},7);
+  Func<Dictionary<string,object>,Dictionary<string,object>> reply=payload=>{requests++;return new Dictionary<string,object>{{"type","cache_result"},{"operation",payload["type"]},{"requestId",payload["requestId"]},{"state","accepted"}};};
+  burst.ServiceBurst(reply);Check(commits>0&&commits<=16&&requests==commits,"DM ready burst must be bounded");
+  while(ready>0)burst.ServiceBurst(reply);Check(commits==40,"DM bounded bursts lost work");
+  int failures=0;var offline=new DmAttachmentExecution((operation,input)=>operation==25?Convert.ToBase64String(command):"ok",7);
+  offline.ServiceBurst(payload=>{failures++;throw new IOException("fixture offline");});Check(failures==1,"DM burst retried a failed RPC");
   Console.Error.WriteLine("PASS DM managed transport releases rejected native reply with exact generation/request correlation");
  }
  internal static void DirectApplicationHost(string root){

@@ -209,7 +209,7 @@ int main(int argc,char** argv){try{
  need(sourceComplete,"Android source did not verify both recipients' signed file receipts");
  stage="Windows cached reverse upload";auto original=root/L"windows-original-日本-📷.bin";writeFile(original,payload);
  auto reverse=first.app->start(androidId,1,std::make_unique<io::FileSource>(original.wstring()));deadline=GetTickCount64()+90000;
- while(GetTickCount64()<deadline&&!first.snapshot(reverse).noticesStored){first.step(host,2);auto row=first.snapshot(reverse);need(row.state!="failed"&&row.state!="paused","Windows reverse upload failed: "+row.error);Sleep(1);}
+ while(GetTickCount64()<deadline&&!(first.snapshot(reverse).noticesStored&&first.snapshot(reverse).uploadComplete)){first.step(host,2);auto row=first.snapshot(reverse);need(row.state!="failed"&&row.state!="paused","Windows reverse upload failed: "+row.error);Sleep(1);}
  need(first.snapshot(reverse).noticesStored,"Windows reverse cached notice timeout");
  stage="Android reverse notice/ACK/verified import";auto fetched=managed(host,"fetch",1);need(fetched.string("state")=="ready"&&fetched.at("envelopes").array.size()==1,"Android reverse notice missing");
  auto notice=rpc::unbase64(fetched.at("envelopes").array.front().string("envelope"),70000,false);Blob accepted;deadline=GetTickCount64()+30000;

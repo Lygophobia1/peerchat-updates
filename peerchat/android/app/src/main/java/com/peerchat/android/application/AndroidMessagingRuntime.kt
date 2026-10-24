@@ -8,12 +8,14 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 internal data class BackendLeasePolicy(val deadline:Long,val peerWork:Boolean,val archiveWork:Boolean=peerWork)
-internal fun backendLeasePolicy(active:List<Pair<Long?,Boolean>>,archiveDeadlines:List<Long> = emptyList()):BackendLeasePolicy {
+internal fun backendRefreshRequired(wasActive:Boolean,active:Boolean,wasPeer:Boolean,peer:Boolean,wasArchive:Boolean,archive:Boolean)=
+    active&&(!wasActive||peer&&!wasPeer||archive&&!wasArchive)
+internal fun backendLeasePolicy(active:List<Pair<Long?,Boolean>>,archiveDeadlines:List<Long> = emptyList(),peerWakeDeadlines:List<Long> = emptyList()):BackendLeasePolicy {
     val foreground=active.any{it.first==null}
     val deadline=if(foreground)Long.MAX_VALUE else active.filter{it.second}.mapNotNull{it.first}.maxOrNull()
         ?: active.mapNotNull{it.first}.minOrNull() ?: Long.MAX_VALUE
-    val peerWork=foreground||active.any{it.second}
-    return BackendLeasePolicy(if(foreground)deadline else maxOf(deadline,archiveDeadlines.maxOrNull()?:deadline),peerWork,peerWork||archiveDeadlines.isNotEmpty())
+    val peerWork=foreground||active.any{it.second}||peerWakeDeadlines.isNotEmpty()
+    return BackendLeasePolicy(if(foreground)deadline else maxOf(deadline,archiveDeadlines.maxOrNull()?:deadline,peerWakeDeadlines.maxOrNull()?:deadline),peerWork,peerWork||archiveDeadlines.isNotEmpty())
 }
 
 /** Process-local application lifetime coordination, not session/delivery policy.
@@ -43,25 +45,28 @@ object AndroidMessagingRuntime {
         val now=System.nanoTime()
         scheduleGraceExpiry(grace.begin(now),60_000_000_000L)
     }
-    @Synchronized fun acquire(context:Context,wakeDeadlineNanos:Long?=null,transferLease:Boolean=false,archiveLease:Boolean=false):MessagingApplication {
+    @Synchronized fun acquire(context:Context,wakeDeadlineNanos:Long?=null,transferLease:Boolean=false,archiveLease:Boolean=false,peerWakeLease:Boolean=false):MessagingApplication {
         val owner=backend ?: MessagingBackend(context.applicationContext).also{backend=it}
-        require(!(transferLease||archiveLease)||wakeDeadlineNanos!=null)
+        require(!(transferLease||archiveLease||peerWakeLease)||wakeDeadlineNanos!=null)
         if(wakeDeadlineNanos==null)cancelGrace()
-        return Lease(owner,wakeDeadlineNanos,transferLease,archiveLease,context.applicationContext).also{leases.add(it);update()}
+        return Lease(owner,wakeDeadlineNanos,transferLease,archiveLease,context.applicationContext,peerWakeLease).also{leases.add(it);update()}
     }
     /** Only a live, explicit consent can lease network continuity for a call.
      * This is not a foreground UI lease and does not revive a process/session. */
     @Synchronized internal fun acquireVoice(context:Context,token:String):MessagingApplication {
         val owner=checkNotNull(backend){"Call owner no longer exists"}
         check(owner.canLeaseVoice(token)){"Call action expired"}
-        return Lease(owner,Long.MAX_VALUE,true,false,context.applicationContext).also{leases.add(it);update()}
+        // Foreground already grants the same work policy. Re-applying it resets
+        // metadata refresh timers and competes with this time-critical Answer.
+        val foreground=leases.any{it.active&&it.wakeDeadline==null}
+        return Lease(owner,Long.MAX_VALUE,true,false,context.applicationContext).also{leases.add(it);if(!foreground)update()}
     }
     private fun update(){
         val active=leases.filter{it.active}
-        val policy=backendLeasePolicy(active.map{it.wakeDeadline to it.transferLease},active.filter{it.archiveLease}.mapNotNull{it.wakeDeadline})
+        val policy=backendLeasePolicy(active.map{it.wakeDeadline to it.transferLease},active.filter{it.archiveLease}.mapNotNull{it.wakeDeadline},active.filter{it.peerWakeLease}.mapNotNull{it.wakeDeadline})
         backend?.setInUse(active.isNotEmpty(),policy.deadline,policy.peerWork,policy.archiveWork,grace.deadline(System.nanoTime()))
     }
-    private class Lease(val owner:MessagingBackend,val wakeDeadline:Long?,val transferLease:Boolean,val archiveLease:Boolean,val context:Context):MessagingApplication by owner {
+    private class Lease(val owner:MessagingBackend,val wakeDeadline:Long?,val transferLease:Boolean,val archiveLease:Boolean,val context:Context,val peerWakeLease:Boolean=false):MessagingApplication by owner, AttachmentAdmissionObserver {
         @Volatile var active=true
         @Volatile var closed=false
         private fun endGraceForScopeChange()=synchronized(AndroidMessagingRuntime){
@@ -87,20 +92,34 @@ object AndroidMessagingRuntime {
             endGraceForScopeChange()
             owner.resetNetworkSession()
         }
-        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:com.peerchat.android.platform.AttachmentSendMode):String {
-            val id=owner.sendAttachment(peerId,uri,mode)
-            if(wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
-            return id
+        private suspend fun <T> prepareAttachment(command:suspend((String)->Unit)->T):T {
+            val account=owner.state.value.accountId;val device=owner.state.value.localPeerId
+            return explicitAttachmentPreparation(
+            begin={cancel->if(wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.beginPreparation(context,cancel)else null},
+            finish={token,id->
+                if(token!=null)com.peerchat.android.platform.PeerChatTransferService.finishPreparation(context,token,id)
+                else if(id!=null&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
+            },cancelQueued={id->try{if(owner.state.value.accountId==account&&owner.state.value.localPeerId==device)owner.attachmentAction(id,false)}catch(_:Exception){android.util.Log.w("PeerChatTransfer","cancel_after_admission_unavailable; journal retained")}},
+            command=command)
         }
+        override suspend fun sendAttachmentObserved(peerId:String,uri:android.net.Uri,mode:com.peerchat.android.platform.AttachmentSendMode,onQueued:(String)->Unit):String=
+            prepareAttachment {queued->owner.sendAttachmentObserved(peerId,uri,mode){id->queued(id);onQueued(id)}}
+        override suspend fun sendGroupAttachmentObserved(groupId:String,uri:android.net.Uri,onQueued:(String)->Unit):String=
+            prepareAttachment {queued->owner.sendGroupAttachmentObserved(groupId,uri){id->queued(id);onQueued(id)}}
+        override suspend fun resolveAttachmentCompatibilityObserved(token:String,mode:com.peerchat.android.platform.AttachmentSendMode?,onQueued:(String)->Unit):String?=
+            if(mode==null)owner.resolveAttachmentCompatibility(token,null)
+            else prepareAttachment {queued->owner.resolveAttachmentCompatibilityObserved(token,mode){id->queued(id);onQueued(id)}}
+        override suspend fun sendAttachment(peerId:String,uri:android.net.Uri,mode:com.peerchat.android.platform.AttachmentSendMode):String=
+            prepareAttachment {queued->owner.sendAttachmentObserved(peerId,uri,mode,queued)}
+        override suspend fun sendGroupAttachment(groupId:String,uri:android.net.Uri):String=
+            prepareAttachment {queued->owner.sendGroupAttachmentObserved(groupId,uri,queued)}
         override suspend fun attachmentAction(id:String,accept:Boolean) {
             owner.attachmentAction(id,accept)
             if(accept&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
         }
-        override suspend fun resolveAttachmentCompatibility(token:String,mode:com.peerchat.android.platform.AttachmentSendMode?):String? {
-            val id=owner.resolveAttachmentCompatibility(token,mode)
-            if(id!=null&&wakeDeadline==null&&active&&!closed)com.peerchat.android.platform.PeerChatTransferService.start(context,id)
-            return id
-        }
+        override suspend fun resolveAttachmentCompatibility(token:String,mode:com.peerchat.android.platform.AttachmentSendMode?):String?=
+            if(mode==null)owner.resolveAttachmentCompatibility(token,null)
+            else prepareAttachment {queued->owner.resolveAttachmentCompatibilityObserved(token,mode,queued)}
         override fun setForeground(active:Boolean)=synchronized(AndroidMessagingRuntime){
             if(!closed){
                 val leavingForeground=this.active&&!active&&wakeDeadline==null

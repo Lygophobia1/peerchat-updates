@@ -2,6 +2,7 @@ package com.peerchat.android.ui
 
 import android.app.Application
 import android.content.Context
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -28,6 +29,7 @@ import kotlin.coroutines.coroutineContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import com.peerchat.android.platform.tls.ServerChannel
 
 /** Immutable presentation only. Native Profile/Storage and session/delivery owners
@@ -40,14 +42,41 @@ internal fun voiceConsentMatchesCurrent(consent:VoiceConsent,preparedTarget:Voic
         consent.peer==preparedTarget.peer&&consent.id==preparedTarget.id
     else preparedTarget==null&&!voice.active
 
+// Incoming ringing already has an active native target, before Answer starts
+// the service. It must not release the UI's pending-accept guard.
+internal fun voiceActivationPublished(voice:VoiceSnapshot):Boolean =
+    voice.platformDiagnostic.isNotEmpty()||(voice.active&&!(voice.direction==1L&&voice.state==2L))
+
+// Allowlisted failure metadata only: never retain exception messages or picker paths.
+internal fun attachmentPreparationFailureReason(failure:Exception):String=when(failure){
+    is AttachmentRecipientVerificationRequired->"recipient_verification"
+    is AttachmentCachePreflightRejected->"cache_rejected"
+    is AttachmentModeUnavailable->"mode_unavailable"
+    is com.peerchat.android.application.AttachmentReadinessUnavailable->"readiness_timeout"
+    is ServerRejected->"server_rejected"
+    is javax.net.ssl.SSLException->"tls_failure"
+    is java.net.SocketTimeoutException->"transport_timeout"
+    is java.io.EOFException,is java.net.SocketException->"connection_closed"
+    is java.io.FileNotFoundException->"source_unavailable"
+    is SecurityException->"source_permission"
+    is java.io.IOException->"io_failure"
+    else->"preparation_failed"
+}
+
 internal fun attachmentSendFailureText(mode:AttachmentSendMode,failure:Exception):String {
+    if(failure is AttachmentRecipientVerificationRequired)return "Verify the recipient's devices before sending a cached file. Open device verification for this contact and compare fingerprints. No file was uploaded."
+
+    if(failure is java.io.EOFException||failure is java.net.SocketException||failure is java.net.SocketTimeoutException)
+        return "The connection closed or timed out before the file was queued. Reconnect and retry this photo."
+    if(failure is java.io.FileNotFoundException||failure is SecurityException)
+        return "The selected photo could not be read. Choose it again from your gallery. No attachment was queued."
     val retained=" No attachment was sent; the private source is retained."
     if(failure is AttachmentModeUnavailable)return when(failure.reason){
-        "direct_device_offline; cached_recipient_upgrade_required"->"Direct needs the recipient's verified device online. Cached delivery is unavailable because a recipient device needs an update."+retained
+        "direct_device_offline; cached_recipient_upgrade_required"->"Direct needs the recipient's verified device online. Cached delivery is unavailable because no recipient device supports cached delivery."+retained
         "direct_device_offline; cached_preflight_unavailable"->"Direct needs the recipient's verified device online. Cached delivery could not be confirmed with the server; retry when connected."+retained
         "direct_device_offline; cached_unsupported"->"Direct needs the recipient's verified device online. Cached delivery is not supported by this server or device."+retained
         "direct_device_offline; cached_readiness_timeout"->"Direct needs the recipient's verified device online. Cached delivery is not ready; reconnect and retry."+retained
-        "cached_recipient_upgrade_required"->"Cached delivery is no longer available because a recipient device needs an update."+retained
+        "cached_recipient_upgrade_required"->"Cached delivery is no longer available because no recipient device supports cached delivery."+retained
         "cached_unsupported"->"Cached delivery is not supported by this server or device."+retained
         "cached_readiness_lost"->"Cached delivery is no longer ready for this authenticated session. Reconnect and retry."+retained
         else->"The selected delivery mode is unavailable."+retained
@@ -61,7 +90,7 @@ internal fun attachmentSendFailureText(mode:AttachmentSendMode,failure:Exception
         "cache_access_denied"->"the server denied cached access"
         "cache_storage_unavailable"->"the server's encrypted cache storage is unavailable"
         "cache_dm_source_upgrade_required"->"this app needs an update for cached delivery"
-        "cache_dm_recipient_upgrade_required"->"a recipient device needs an update for cached delivery"
+        "cache_dm_recipient_upgrade_required"->"no recipient device currently supports cached delivery"
         "cache_expired"->"the cached offer expired"
         "cache_malformed_request"->"the server rejected the cached request"
         else->if(code!=null)"the server rejected it (${code.take(80).filter{it.isLetterOrDigit()||it=='_'}})" else null
@@ -71,7 +100,8 @@ internal fun attachmentSendFailureText(mode:AttachmentSendMode,failure:Exception
         else "Cached transfer could not be offered. Check connection, file access and available storage."+retained
 }
 
-internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState): PeerChatUiState {
+internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiState, groupCache:GroupUiProjectionCache?=null, generation:Long=0): PeerChatUiState {
+    groupCache?.prepare(snapshot,generation)
     fun accountName(account:Long)=if(account==snapshot.accountId)snapshot.username else snapshot.conversations.firstOrNull{it.friend.accountId==account}?.friend?.username?:"Account $account"
     val conversations=snapshot.conversations.map { c ->
         val id="account:${c.friend.accountId}"
@@ -92,6 +122,8 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         ConversationUi(id,c.friend.username,ChatKind.Direct,c.friend.online,messages.lastOrNull()?.text ?: "",
             messages.lastOrNull()?.time ?: "",messages=messages,hasOlder=c.messages.size==8||c.attachmentsHaveOlder,attachments=c.attachments)
     }+snapshot.groups.map {g->
+        val roomState=snapshot.voiceRooms.singleOrNull{it.group==g.id&&g.ready&&it.roster==g.epoch}
+        val build={
         val messages=g.messages.sortedWith(groupMessageOrder).map{m->val outgoing=m.device==snapshot.localPeerId
             MessageUi(m.id,m.device,if(outgoing)snapshot.username else accountName(m.account),m.text,outgoing,
                 if(m.status=="attachment_reference")"Time unavailable" else SimpleDateFormat("HH:mm",Locale.getDefault()).format(Date(m.timestamp)),
@@ -99,15 +131,16 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
                 if(!outgoing||m.status=="attachment_reference")MessageStatus.Received else if(m.status.startsWith("Recipients:")||m.status.startsWith("Server accepted"))MessageStatus.Sent else if(m.status.startsWith("Not submitted")||m.status.contains("unknown")||m.status.contains("rejected"))MessageStatus.Failed else MessageStatus.Queued,
                 m.timestamp,m.order,retryAvailable=outgoing&&m.status!="attachment_reference"&&!m.status.startsWith("Recipients:"),deliveryDetail=if(m.status=="attachment_reference")"Authenticated public reference; no download authorization" else if(outgoing)m.status else "")
         }
-        val roomState=snapshot.voiceRooms.singleOrNull{it.group==g.id&&g.ready&&it.roster==g.epoch}
         ConversationUi("group:${g.id}",g.name,ChatKind.Group,g.ready,messages.lastOrNull()?.text?:if(g.ready)"Encrypted group text" else "Waiting for signed membership and current group key",
-            messages.lastOrNull()?.time?:"",unread=g.unread,messages=messages,hasOlder=g.hasOlder,
+            messages.lastOrNull()?.time?:"",unread=g.unread,messages=messages,hasOlder=g.hasOlder,attachments=g.attachments,
             members=g.memberRows.map{MemberUi(it.device,accountName(it.account),false,if(it.invited)"Invited" else when(it.role){3L->"Owner";2L->"Admin";else->"Member"})},
             voiceRooms=roomState?.let{live->live.rooms.map{room->
                 val joined=snapshot.voice.active&&snapshot.voice.group==g.id&&snapshot.voice.room==room.id&&snapshot.voice.epoch==live.epoch
                 VoiceRoomUi(room.id,room.name,room.members.map{it.name.ifBlank{accountName(it.account)}},joined,
                     muted=joined&&snapshot.voice.muted,deafened=joined&&snapshot.voice.deafened)
             }}.orEmpty())
+        }
+        groupCache?.project(g,roomState,snapshot.voice,build) ?: build()
     }
     // Diagnostics are safe owner metadata, never messages, credentials or keys.
     val diagnostics=buildString {
@@ -164,7 +197,12 @@ internal fun projectMessaging(snapshot: MessagingSnapshot, previous: PeerChatUiS
         mailboxReenrollment=if(snapshot.authenticated)snapshot.mailboxReenrollment else null,
         mailboxRecoveryError=if(snapshot.authenticated)snapshot.mailboxRecoveryError else null,
         diagnostics=diagnostics,voiceAvailable=snapshot.voice.available,voiceDiagnostic=snapshot.voice.diagnostic,
-        voice=snapshot.voice,voicePeerName=snapshot.conversations.firstOrNull{it.friend.peerId==snapshot.voice.peer||snapshot.voice.peer in it.friend.knownPeerIds}?.friend?.username.orEmpty(),
+        voice=snapshot.voice,voicePeerName=if(snapshot.voice.group.isNotEmpty())conversations.firstOrNull{it.id=="group:${snapshot.voice.group}"}?.name.orEmpty() else snapshot.conversations.firstOrNull{it.friend.peerId==snapshot.voice.peer||snapshot.voice.peer in it.friend.knownPeerIds}?.friend?.username
+            ?: if(snapshot.voice.peer.isEmpty()&&(previous.voiceBusy||previous.voiceError!=null))previous.voicePeerName else "",
+        voiceConversationId=if(snapshot.voice.group.isNotEmpty())"group:${snapshot.voice.group}" else snapshot.conversations.firstOrNull{it.friend.peerId==snapshot.voice.peer||snapshot.voice.peer in it.friend.knownPeerIds}
+            ?.let{"account:${it.friend.accountId}"} ?: if(snapshot.voice.peer.isEmpty()&&(previous.voiceBusy||previous.voiceError!=null))previous.voicePendingConversationId else "",
+        voiceUiIdentity=if(snapshot.voice.active)previous.voiceUiIdentity.ifBlank{"${snapshot.voice.owner}|${snapshot.voice.peer}|${snapshot.voice.id}|${snapshot.voice.lifetime}"}
+            else if(previous.voiceBusy||previous.voiceError!=null)previous.voiceUiIdentity else "",
         incomingRequests=snapshot.incomingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         outgoingRequests=snapshot.outgoingRequests.map {MemberUi("account:${it.accountId}",it.username,false)},
         account=if(snapshot.authenticated||snapshot.localHistoryReady)AccountUi("account:${snapshot.accountId}",snapshot.username) else null,
@@ -181,7 +219,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private val qol:AndroidQolRepository=AndroidQolStore(application),
     private val groupQol:AndroidQolRepository=AndroidGroupQolStore(application),
     private val navigationState:SavedStateHandle=SavedStateHandle(),
-    private val inspectServer:(ServerEndpoint)->String={ServerChannel.inspectCertificate(it.host,it.port)}
+    private val inspectServer:(ServerEndpoint)->String={ServerChannel.inspectCertificate(it.host,it.port,it.certificatePin)}
 ):AndroidViewModel(application),PeerChatPresenter {
     // Preserve the original explicit six-argument constructor as well as
     // trailing-lambda call sites when injecting the separate group repository.
@@ -200,17 +238,31 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
     private var voiceStartExpected:Triple<String,String,String>?=null
     private var voiceControlRevision=0L
     private var voicePreparationRevision=0L
-    private fun releasePreparedVoice() {
-        val tokens=listOfNotNull(mutable.value.voiceConsent?.token,voicePermissionInFlight?.token).distinct()
+    private fun releasePreparedVoice(includeService:Boolean=true) {
+        val serviceToken=voiceStartPendingToken
+        val keepService=!includeService&&serviceToken!=null
+        val tokens=listOfNotNull(mutable.value.voiceConsent?.token,voicePermissionInFlight?.token,
+            serviceToken.takeIf{includeService}).distinct()
         voicePermissionInFlight=null;voicePermissionTarget=null;voicePermissionRoomEpoch=""
-        if(tokens.isNotEmpty())mutable.value=mutable.value.copy(voiceConsent=null,voiceBusy=false)
-        tokens.forEach{token->viewModelScope.launch{try{backend.releaseVoice(token)}catch(_:Exception){}}}
+        if(includeService){voiceStartPendingToken=null;voiceStartExpected=null}
+        voicePreparationRevision++
+        if(tokens.isNotEmpty())mutable.value=mutable.value.copy(voiceConsent=null,
+            voicePreparationToken=if(keepService)serviceToken else null,
+            voiceBusy=if(keepService)mutable.value.voiceBusy else false,
+            voicePendingConversationId=if(keepService)mutable.value.voicePendingConversationId else "",
+            voiceConversationId=if(keepService)mutable.value.voiceConversationId else "",
+            voicePeerName=if(keepService)mutable.value.voicePeerName else "",
+            voiceUiIdentity=if(keepService)mutable.value.voiceUiIdentity else "")
+        tokens.forEach{token->viewModelScope.launch{
+            try{com.peerchat.android.platform.PeerChatVoiceService.cancel(getApplication(),token)}catch(_:Exception){}
+            try{backend.releaseVoice(token)}catch(_:Exception){}
+        }}
     }
     override fun claimVoicePermission(token:String):Boolean {
         val consent=mutable.value.voiceConsent ?: return false
         if(consent.token!=token||voicePermissionInFlight!=null)return false
         voicePermissionInFlight=consent
-        mutable.value=mutable.value.copy(voiceConsent=null)
+        mutable.value=mutable.value.copy(voiceConsent=null,voicePreparationToken=token)
         return true
     }
     override fun resolveVoicePermission(context:Context,token:String,granted:Boolean,resumed:Boolean) {
@@ -221,18 +273,48 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         voicePermissionInFlight=null;voicePermissionTarget=null;voicePermissionRoomEpoch=""
         val stillCurrent=voiceConsentMatchesCurrent(consent,preparedTarget,current.voice,current.voiceRooms,preparedEpoch,current.localPeerId)
         if(!granted||!resumed||!foreground||!current.authenticated||!current.voice.available||!stillCurrent){
-            mutable.value=mutable.value.copy(voiceBusy=false,voiceError=if(!granted)"Microphone permission was denied. No voice started." else "Voice request expired. Try again.")
+            mutable.value=mutable.value.copy(voiceBusy=false,voicePreparationToken=null,voiceError=if(!granted)"Microphone permission was denied. No voice started." else "Voice request expired. Try again.")
             viewModelScope.launch{try{backend.releaseVoice(consent.token)}catch(_:Exception){}}
             return
         }
         val started=try{com.peerchat.android.platform.PeerChatVoiceService.start(context,consent.token)}catch(_:Exception){false}
         voiceStartPendingToken=if(started)token else null
         voiceStartExpected=if(started)Triple(consent.peer,consent.id,consent.group) else null
-        mutable.value=mutable.value.copy(voiceBusy=started,voiceError=if(started)null else "Voice could not start. Try again.")
+        mutable.value=mutable.value.copy(voiceBusy=started,voicePreparationToken=if(started)token else null,voiceError=if(started)null else "Voice could not start. Try again.")
         if(!started)viewModelScope.launch{try{backend.releaseVoice(consent.token)}catch(_:Exception){}}
-        else viewModelScope.launch{delay(35_000);if(voiceStartPendingToken==token){voiceStartPendingToken=null;voiceStartExpected=null;mutable.value=mutable.value.copy(voiceBusy=false,voiceError="Call setup timed out. Review the current call before retrying.")}}
+        else viewModelScope.launch{delay(35_000);if(voiceStartPendingToken==token){voiceStartPendingToken=null;voiceStartExpected=null;mutable.value=mutable.value.copy(voiceBusy=false,voicePreparationToken=null,voiceError="Call setup timed out. Review the current call before retrying.")}}
     }
     private val localSends=linkedMapOf<String,LocalSendPresentation>()
+    private val localAttachments=linkedMapOf<String,LocalAttachmentPresentation>()
+    private val localAttachmentJobs=mutableMapOf<String,Job>()
+    private val localAttachmentStableIds=linkedMapOf<String,String>()
+    private val observedAttachmentIds=java.util.concurrent.ConcurrentHashMap<String,Triple<Long,Long,String>>()
+    private val locallyHiddenIds=mutableMapOf<String,MutableSet<String>>()
+    private val pendingLocalDeletion=mutableMapOf<String,Pair<String,Boolean>>()
+    private val locallyClearingConversations=mutableSetOf<String>()
+    private var attachmentCompatibilityLocalToken:String?=null
+    private fun hideLocally(conversation:String,id:String){locallyHiddenIds.getOrPut(conversation){mutableSetOf()}.add(id)}
+    private fun unhideLocally(conversation:String,id:String){locallyHiddenIds[conversation]?.remove(id)}
+    private fun evictDeletedHistory(conversation:String){conversation.removePrefix("account:").toLongOrNull()?.takeIf{conversation.startsWith("account:")}?.let{
+        older.evict(it);exhausted.remove(it)
+    }}
+    private fun persistLocalMessageDeletion(conversation:String,id:String,attachment:Boolean,token:String?=null){
+        val epoch=uiGeneration;val account=current.accountId
+        viewModelScope.launch{
+            try{backend.deleteLocalMessage(account,conversation,id,if(attachment)id else null)}
+            catch(cancelled:CancellationException){throw cancelled}
+            catch(_:Exception){if(epoch==uiGeneration&&account==current.accountId){
+                unhideLocally(conversation,id);token?.let{unhideLocally(conversation,it)}
+                project();mutable.value=mutable.value.copy(notice="Could not delete this local copy. It is visible again; retry when local storage is available.")
+            }}
+        }
+    }
+    private fun admittedLocalDeletion(token:String,id:String){
+        val pending=pendingLocalDeletion.remove(token)?:return
+        val (conversation,attachment)=pending
+        hideLocally(conversation,id)
+        persistLocalMessageDeletion(conversation,id,attachment,token)
+    }
     private var navigationRestored=false
     private val uiTimings=OwnerStageTimings()
     private val uiCreatedAt=System.nanoTime()
@@ -345,6 +427,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         retainDiagnostic("Network recovery","reason=$reason destination=$destination authenticated=${current.authenticated}")
         android.util.Log.i("PeerChatNetwork","event=login_navigation reason=$reason ui_generation=$uiGeneration authenticated=${current.authenticated}")
         recovering=true;automaticResumeSuppressed=true;uiGeneration++;localSends.clear();localSendStarted.clear()
+        localAttachments.clear();localAttachmentJobs.values.forEach{it.cancel()};localAttachmentJobs.clear();localAttachmentStableIds.clear();observedAttachmentIds.clear();attachmentCompatibilityLocalToken=null
         voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null
         peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
         startupJob?.cancel();loginJob?.cancel();startupWatchdog?.cancel();loginAfterTrust=null
@@ -413,13 +496,25 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         return true
     }
     // View-only older pages, always fetched from native Storage. Never an outbox.
-    private val older=mutableMapOf<Long,List<MessageSnapshot>>()
+    private val groupUiProjection=GroupUiProjectionCache()
+    private val older=ConversationHistoryCache<Long,MessageSnapshot>(512,8L*1024*1024,::messageHistoryBytes)
     private val exhausted=mutableSetOf<Long>()
     private var attachmentCompatibilityScope:Pair<Long,Long>?=null
     private var attachmentCompatibilityConversation:String?=null
     private fun project() {
+        observedAttachmentIds.entries.forEach{(token,observed)->
+            if(observed.first==uiGeneration&&observed.second==current.accountId){
+                localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=observed.third);localAttachmentStableIds[observed.third]=token}
+                admittedLocalDeletion(token,observed.third)
+            }
+            observedAttachmentIds.remove(token,observed)
+        }
+        val visible=mutable.value.selectedId?.takeIf{mutable.value.route in setOf(Route.Conversation,Route.Details)&&it.startsWith("account:")}?.removePrefix("account:")?.toLongOrNull()
+        exhausted.removeAll(older.select(visible))
         if(attachmentCompatibilityScope?.let{it.first!=current.accountId||it.second!=uiGeneration||!current.authenticated||mutable.value.route!=Route.Conversation||attachmentCompatibilityConversation!=mutable.value.selectedId}==true){
             val choice=mutable.value.attachmentCompatibility
+            attachmentCompatibilityLocalToken?.let{localAttachments.remove(it)}
+            attachmentCompatibilityLocalToken=null
             attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)
             if(choice!=null)viewModelScope.launch{try{backend.resolveAttachmentCompatibility(choice.token,null)}catch(_:Exception){}}
         }
@@ -427,12 +522,28 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             c.copy(messages=chronologicalMessages((older[c.friend.accountId] ?: emptyList())+c.messages))
         })
         // projectMessaging's paging hint is overridden by the actual native page result.
-        mutable.value=projectMessaging(combined,mutable.value).let {s->s.copy(attachmentContextGeneration=uiGeneration,conversations=s.conversations.map {c->
+        mutable.value=projectMessaging(combined,mutable.value,groupUiProjection,uiGeneration).let {s->s.copy(attachmentContextGeneration=uiGeneration,conversations=s.conversations.map {c->
             if(c.kind==ChatKind.Group)c else c.copy(hasOlder=c.id.removePrefix("account:").toLongOrNull() !in exhausted||current.conversations.any{original->"account:${original.friend.accountId}"==c.id&&original.attachmentsHaveOlder})
         })}
         val nativeIds=mutable.value.conversations.flatMap{c->c.messages.map{it.id}+c.attachments.map{it.id}}.toSet()
         localSends.entries.removeAll{it.value.nativeId in nativeIds}
         mutable.value=mutable.value.copy(localSendCount=localSends.size,conversations=presentLocalSends(mutable.value.conversations,localSends.values.toList(),current.localPeerId,current.username))
+        val nativeAttachments=mutable.value.conversations.flatMap{it.attachments}.associateBy{it.id}
+        localAttachments.entries.removeAll{entry->entry.value.nativeId?.let{nativeAttachments[it]?.let{row->row.complete&&row.localPath.isNotEmpty()}}==true}
+        while(localAttachmentStableIds.size>64)localAttachmentStableIds.remove(localAttachmentStableIds.keys.first())
+        mutable.value=mutable.value.copy(
+            conversations=presentLocalAttachments(mutable.value.conversations,localAttachments.values.toList()),
+            localAttachmentPreviews=localAttachments.values.associate{(it.nativeId?:it.token) to it.uri},
+            localAttachmentIdentityKeys=localAttachmentStableIds.mapValues{"attachment-${it.value}"})
+        mutable.value=mutable.value.copy(conversations=mutable.value.conversations.map{c->
+            val hidden=locallyHiddenIds[c.id].orEmpty()
+            if(hidden.isEmpty()&&c.id !in locallyClearingConversations)c else {
+                val messages=c.messages.filter{it.id !in hidden}
+                val visibleMessages=if(c.id in locallyClearingConversations)emptyList() else messages
+                c.copy(messages=visibleMessages,attachments=if(c.id in locallyClearingConversations)emptyList() else c.attachments.filter{it.id !in hidden},
+                    preview=visibleMessages.lastOrNull()?.text.orEmpty(),time=visibleMessages.lastOrNull()?.time.orEmpty())
+            }
+        })
         if(retainedDiagnostics.isNotEmpty())mutable.value=mutable.value.copy(diagnostics=mutable.value.diagnostics+"\nRetained application diagnostics:\n"+retainedDiagnostics.joinToString("\n"))
         val accountKey=preferenceAccountKey() ?: return
         if(!navigationRestored&&(current.localHistoryReady||current.authenticated)){
@@ -505,11 +616,11 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null
             mutable.value=mutable.value.copy(voiceBusy=false)
         }
-        if(voiceStartPendingToken!=null&&(snapshot.voice.active||snapshot.voice.platformDiagnostic.isNotEmpty())){
+        if(voiceStartPendingToken!=null&&voiceActivationPublished(snapshot.voice)){
             val expected=voiceStartExpected
             voiceStartPendingToken=null;voiceStartExpected=null
             val matched=snapshot.voice.active&&expected==Triple(snapshot.voice.peer,snapshot.voice.id,snapshot.voice.group)
-            mutable.value=mutable.value.copy(voiceBusy=false,voiceError=if(matched)null else snapshot.voice.platformDiagnostic.take(160).ifEmpty{"Call request changed. Review the current call before retrying."})
+            mutable.value=mutable.value.copy(voiceBusy=false,voicePreparationToken=null,voiceError=if(matched)null else snapshot.voice.platformDiagnostic.take(160).ifEmpty{"Call request changed. Review the current call before retrying."})
         }
         if(snapshot.accountId!=current.accountId||!snapshot.authenticated||!snapshot.serverPresenceLive){
             peopleRevision++;peopleSearch?.cancel();peopleWatchdog?.cancel()
@@ -519,9 +630,11 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         }
         if(snapshot.accountId!=current.accountId)mutable.value=mutable.value.copy(transferSettings=null,transferSettingsBusy=false,transferSettingsError=null)
         if(snapshot.accountId!=current.accountId){older.clear();exhausted.clear();largeDrafts.clear();localSends.clear();localSendStarted.clear();chatOpenedAt=0
+            localAttachments.clear();localAttachmentJobs.values.forEach{it.cancel()};localAttachmentJobs.clear();localAttachmentStableIds.clear();observedAttachmentIds.clear();attachmentCompatibilityLocalToken=null
+            locallyHiddenIds.clear();pendingLocalDeletion.clear();locallyClearingConversations.clear()
             mutable.value=mutable.value.copy(sendBusy=false,sendAccepted=false,localSendCount=0)
             if(current.accountId>0){navigationState.remove<String>("conversation");navigationState.remove<String>("owner");mutable.value=mutable.value.copy(selectedId=null,route=if(mutable.value.route in setOf(Route.Conversation,Route.Details))Route.Home else mutable.value.route)}
-            mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),drafts=emptyMap())}
+            mutable.value=mutable.value.copy(attachmentPreviews=emptyMap(),localAttachmentPreviews=emptyMap(),localAttachmentIdentityKeys=emptyMap(),drafts=emptyMap())}
         current=snapshot
         if(foreground&&mutable.value.route==Route.Conversation){
             val group=snapshot.groups.find{"group:${it.id}"==mutable.value.selectedId&&it.unread>0}
@@ -642,7 +755,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
         foreground=active
         if(!active){
             voicePreparationRevision++
-            releasePreparedVoice()
+            releasePreparedVoice(includeService=false)
             if(voiceStartPendingToken==null)mutable.value=mutable.value.copy(voiceBusy=false)
         }
         backend.setForeground(active)
@@ -688,6 +801,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 localSendStarted[token]?.let{localSendStarted[token]=it.first to id}
                 uiTimings.record(OwnerStage.UiDurableReturn,System.nanoTime()-started);mutable.value=mutable.value.copy(presentationDiagnostics=uiTimings.summary())
                 accepted=true;localSends[token]=row.copy(nativeId=id)
+                admittedLocalDeletion(token,id)
                 localSends.replaceAll{other,pending->if(other!=token&&pending.conversation==conversation)pending.copy(baseline=pending.baseline+id)else pending}
                 val nextDraft=mutable.value.drafts[conversation].orEmpty()
                 if(localSends.values.none{it.conversation==conversation&&it.nativeId==null}){
@@ -701,8 +815,104 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             }
         }
     }
+    private fun beginLocalAttachment(conversation:String,uri:android.net.Uri,mode:AttachmentSendMode,command:suspend((String)->Unit)->String){
+        if(localAttachments.size>=16){mutable.value=mutable.value.copy(notice="Wait for attachment preparation to settle before sending another file.");return}
+        val epoch=uiGeneration;val account=current.accountId
+        val token="local-attachment-${UUID.randomUUID()}"
+        val row=LocalAttachmentPresentation(token,conversation,uri,System.currentTimeMillis(),
+            mutable.value.conversations.find{it.id==conversation}?.attachments?.map{it.id}?.toSet()?:emptySet(),mode)
+        localAttachments[token]=row
+        project() // The provisional bubble is published before metadata access or the suspend command.
+        viewModelScope.launch {
+            try {
+                val metadata=withContext(Dispatchers.IO){try{
+                    getApplication<Application>().contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME,OpenableColumns.SIZE),null,null,null)?.use{cursor->
+                        if(cursor.moveToFirst()){
+                            val nameIndex=cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            val sizeIndex=cursor.getColumnIndex(OpenableColumns.SIZE)
+                            val name=if(nameIndex>=0)cursor.getString(nameIndex).orEmpty().take(120).ifBlank{"Attachment"}else "Attachment"
+                            val size=if(sizeIndex>=0&&!cursor.isNull(sizeIndex))cursor.getLong(sizeIndex).coerceIn(0,5L*1024*1024*1024)else 0L
+                            name to size
+                        }else null
+                    }
+                }catch(_:Exception){null}}
+                if(epoch==uiGeneration&&account==current.accountId&&metadata!=null){
+                    localAttachments[token]?.let{localAttachments[token]=it.copy(name=metadata.first,size=metadata.second);project()}
+                }
+            }catch(cancelled:CancellationException){throw cancelled}
+        }
+        localAttachmentJobs[token]=viewModelScope.launch {
+            try{
+                val id=command{queued->
+                    if(queued.matches(Regex("[0-9a-f]{32}"))){
+                        observedAttachmentIds[token]=Triple(epoch,account,queued)
+                        viewModelScope.launch{if(epoch==uiGeneration&&account==current.accountId)project()}
+                    }
+                };require(id.matches(Regex("[0-9a-f]{32}")))
+                if(epoch!=uiGeneration||account!=current.accountId)return@launch
+                localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=id,phase=LocalAttachmentPhase.Preparing);localAttachmentStableIds[id]=token}
+                admittedLocalDeletion(token,id)
+                localAttachments.replaceAll{other,pending->if(other!=token&&pending.conversation==conversation)pending.copy(baseline=pending.baseline+id)else pending}
+                project()
+            }catch(required:AttachmentCompatibilityRequired){
+                if(epoch==uiGeneration&&account==current.accountId&&current.authenticated&&mutable.value.route==Route.Conversation&&mutable.value.selectedId==conversation){
+                    attachmentCompatibilityScope=account to epoch;attachmentCompatibilityConversation=conversation;attachmentCompatibilityLocalToken=token
+                    localAttachments[token]?.let{localAttachments[token]=it.copy(phase=LocalAttachmentPhase.ChoosingMode)}
+                    project();mutable.value=mutable.value.copy(attachmentCompatibility=required.choice,attachmentCompatibilityBusy=false)
+                }else{
+                    try{backend.resolveAttachmentCompatibility(required.choice.token,null)}catch(_:Exception){}
+                    if(epoch==uiGeneration&&account==current.accountId){localAttachments.remove(token);project()}
+                }
+            }catch(admitted:QueuedAttachmentFailure){
+                if(epoch==uiGeneration&&account==current.accountId){
+                    localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=admitted.transferId,phase=LocalAttachmentPhase.Failed);localAttachmentStableIds[admitted.transferId]=token}
+                    admittedLocalDeletion(token,admitted.transferId)
+                    project();mutable.value=mutable.value.copy(notice="The attachment entered the transfer queue, but preparation reported an error. Check this transfer before retrying.")
+                }
+            }catch(admitted:QueuedAttachmentCancellation){
+                if(epoch==uiGeneration&&account==current.accountId){
+                    localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=admitted.transferId,phase=LocalAttachmentPhase.Cancelled);localAttachmentStableIds[admitted.transferId]=token}
+                    admittedLocalDeletion(token,admitted.transferId)
+                    project()
+                }
+                throw admitted
+            }catch(cancelled:CancellationException){
+                if(epoch==uiGeneration&&account==current.accountId){
+                    localAttachments[token]?.let{if(it.nativeId==null)localAttachments[token]=it.copy(phase=LocalAttachmentPhase.Cancelled)}
+                    project()
+                }
+                throw cancelled
+            }catch(failure:Exception){
+                if(epoch==uiGeneration&&account==current.accountId){
+                    val failureText=attachmentSendFailureText(mode,failure)
+                    retainDiagnostic("Attachment preparation","stage=before_admission reason=${attachmentPreparationFailureReason(failure)} mode=${mode.name}")
+                    localAttachments[token]?.let{localAttachments[token]=it.copy(phase=LocalAttachmentPhase.Failed,failureText=failureText)}
+                    project();mutable.value=mutable.value.copy(notice=failureText)
+                }
+            }finally{localAttachmentJobs.remove(token)}
+        }
+    }
     override fun dispatch(action:UiAction) {
         when(action) {
+            is UiAction.CancelVoicePreparation -> {
+                val consent=mutable.value.voiceConsent
+                val inFlight=voicePermissionInFlight
+                val pending=voiceStartPendingToken
+                if(action.uiIdentity.isBlank()||action.uiIdentity!=mutable.value.voiceUiIdentity||!mutable.value.voiceBusy)return
+                if(action.token!=null&&action.token !in listOfNotNull(consent?.token,inFlight?.token,pending))return
+                ++voicePreparationRevision
+                if(inFlight?.token==action.token){voicePermissionInFlight=null;voicePermissionTarget=null;voicePermissionRoomEpoch=""}
+                if(consent?.token==action.token)mutable.value=mutable.value.copy(voiceConsent=null)
+                if(pending==action.token){voiceStartPendingToken=null;voiceStartExpected=null}
+                mutable.value=mutable.value.copy(voiceBusy=false,voicePreparationToken=null,voicePendingConversationId="",
+                    voiceConversationId="",voicePeerName="",voiceUiIdentity="",voiceError=null,voicePendingRoomId="")
+                viewModelScope.launch {
+                    action.token?.let{token->
+                        try{com.peerchat.android.platform.PeerChatVoiceService.cancel(getApplication(),token)}catch(_:Exception){}
+                        try{backend.releaseVoice(token)}catch(_:Exception){}
+                    }
+                }
+            }
             is UiAction.StartDmVoice,is UiAction.AnswerDmVoice -> {
                 if(mutable.value.demo||!current.authenticated||!current.voice.available||mutable.value.voiceBusy||mutable.value.voiceConsent!=null||voicePermissionInFlight!=null)return
                 val peer=when(action){
@@ -713,7 +923,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(action is UiAction.StartDmVoice&&current.voice.active)return
                 val answer=(action as? UiAction.AnswerDmVoice)?.target
                 val epoch=uiGeneration;val account=current.accountId;val revision=++voicePreparationRevision
-                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null)
+                val pendingConversation=(action as? UiAction.StartDmVoice)?.conversationId.orEmpty()
+                val pendingName=if(pendingConversation.isNotEmpty())current.conversations.firstOrNull{"account:${it.friend.accountId}"==pendingConversation}?.friend?.username.orEmpty() else mutable.value.voicePeerName
+                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null,voicePendingRoomId="",
+                    voicePendingConversationId=pendingConversation.ifEmpty{mutable.value.voicePendingConversationId},
+                    voicePeerName=pendingName.ifEmpty{mutable.value.voicePeerName},
+                    voiceUiIdentity=if(action is UiAction.StartDmVoice)"dm:${UUID.randomUUID()}" else mutable.value.voiceUiIdentity.ifEmpty{"incoming:${(action as UiAction.AnswerDmVoice).target.id}"})
                 viewModelScope.launch {
                     try {
                         val consent=backend.prepareVoice(peer,answer)
@@ -721,11 +936,12 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                             (answer==null||current.voice.target==answer)){
                             voicePermissionTarget=answer
                             voicePermissionRoomEpoch=""
-                            mutable.value=mutable.value.copy(voiceConsent=consent)
+                            mutable.value=mutable.value.copy(voiceConsent=consent,voicePreparationToken=consent.token)
                         }
                         else backend.releaseVoice(consent.token)
                     }catch(error:Exception){
                         if(error is CancellationException)throw error
+                        android.util.Log.w("PeerChatVoice","stage=consent_prepare result="+error.javaClass.simpleName)
                         if(revision==voicePreparationRevision&&epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(voiceError="Call preparation failed. Check the current connection and retry.")
                     }finally{if(revision==voicePreparationRevision&&epoch==uiGeneration&&account==current.accountId&&mutable.value.voiceConsent==null)mutable.value=mutable.value.copy(voiceBusy=false)}
                 }
@@ -737,7 +953,10 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                     mutable.value.demo||!current.authenticated||!current.voice.available||current.voice.active||
                     mutable.value.voiceBusy||mutable.value.voiceConsent!=null||voicePermissionInFlight!=null)return
                 val generation=uiGeneration;val account=current.accountId;val revision=++voicePreparationRevision
-                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null)
+                mutable.value=mutable.value.copy(voiceBusy=true,voiceError=null,voicePendingRoomId=action.roomId,
+                    voicePendingConversationId="group:$group",voiceConversationId="group:$group",
+                    voicePeerName=mutable.value.conversations.firstOrNull{it.id=="group:$group"}?.name.orEmpty(),
+                    voiceUiIdentity="group:${UUID.randomUUID()}")
                 viewModelScope.launch {
                     try {
                         val consent=backend.prepareGroupVoice(group,action.roomId)
@@ -748,7 +967,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                             consent.group==group&&consent.id==action.roomId&&consent.peer==current.localPeerId&&!consent.answer){
                             voicePermissionTarget=null
                             voicePermissionRoomEpoch=roomState.epoch
-                            mutable.value=mutable.value.copy(voiceConsent=consent)
+                            mutable.value=mutable.value.copy(voiceConsent=consent,voicePreparationToken=consent.token)
                         }else backend.releaseVoice(consent.token)
                     }catch(error:Exception){
                         if(error is CancellationException)throw error
@@ -773,9 +992,15 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val changed=try{com.peerchat.android.platform.PeerChatVoiceService.route(getApplication(),action.target,action.enabled)}catch(_:Exception){false}
                 if(!changed)mutable.value=mutable.value.copy(voiceError="Speaker route could not change for this call.")
             }
+            is UiAction.AudioRouteDmVoice -> {
+                if(action.target!=current.voice.target||mutable.value.voiceBusy)return
+                val changed=try{com.peerchat.android.platform.PeerChatVoiceService.route(getApplication(),action.target,action.deviceId)}catch(_:Exception){false}
+                if(!changed)mutable.value=mutable.value.copy(voiceError="Audio route could not change. Choose a device that is still connected.")
+            }
             UiAction.Back -> {
                 if(mutable.value.route==Route.Conversation)navigationState.remove<String>("conversation")
                 mutable.value=reduceUi(mutable.value,action)
+                project()
             }
             is UiAction.Select -> {
                 mutable.value=reduceUi(mutable.value,action)
@@ -794,7 +1019,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 viewModelScope.launch {
                     try{
                         val page=backend.older(conversation.friend.peerId,Long.MAX_VALUE)
-                        if(epoch==uiGeneration&&account==current.accountId){older[conversation.friend.accountId]=chronologicalMessages((older[conversation.friend.accountId]?:emptyList())+page);if(page.size<8)exhausted.add(conversation.friend.accountId);project()}
+                        if(epoch==uiGeneration&&account==current.accountId){if(page.size<8)exhausted.add(conversation.friend.accountId);exhausted.removeAll(older.put(conversation.friend.accountId,chronologicalMessages((older[conversation.friend.accountId]?:emptyList())+page)));project()}
                     }catch(_:Exception){if(epoch==uiGeneration&&account==current.accountId)mutable.value=mutable.value.copy(notice="Local history could not be read. Existing data is retained; retry opening this conversation.")}
                     finally{if(epoch==uiGeneration&&account==current.accountId&&mutable.value.selectedId==action.id)mutable.value=mutable.value.copy(olderLoading=false)}
                 }
@@ -965,7 +1190,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             is UiAction.AttachmentPreview -> {
                 if(action.id in mutable.value.attachmentPreviews||!previewLoading.add(action.id))return
                 val account=current.accountId;val requestGeneration=uiGeneration
-                if(current.conversations.none{c->c.attachments.any{it.id==action.id}}){previewLoading.remove(action.id);return}
+                if(current.conversations.none{c->c.attachments.any{it.id==action.id}}&&current.groups.none{g->g.attachments.any{it.id==action.id}}){previewLoading.remove(action.id);return}
                 viewModelScope.launch{try{
                     val text=backend.attachmentText(action.id)
                     if(account==current.accountId&&requestGeneration==uiGeneration){
@@ -980,32 +1205,132 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 if(action.contextGeneration!=null&&action.contextGeneration!=uiGeneration)return
                 if(action.accountId!=null&&action.accountId!="account:${current.accountId}")return
                 if(action.conversationId!=null&&action.conversationId!=mutable.value.selectedId)return
+                val group=current.groups.find{"group:${it.id}"==mutable.value.selectedId}
+                if(group!=null){
+                    beginLocalAttachment("group:${group.id}",action.uri,AttachmentSendMode.Cached){onQueued->
+                        (backend as? AttachmentAdmissionObserver)?.sendGroupAttachmentObserved(group.id,action.uri,onQueued)
+                            ?:backend.sendGroupAttachment(group.id,action.uri)}
+                    return
+                }
                 val c=current.conversations.find{"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
-                val account=current.accountId;val requestGeneration=uiGeneration
-                val preparing="Preparing ${if(action.mode==AttachmentSendMode.Direct)"direct" else "cached"} encrypted file delivery…"
-                mutable.value=mutable.value.copy(notice=preparing)
-                viewModelScope.launch{try{backend.sendAttachment(c.friend.peerId,action.uri,action.mode)
-                        if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice==preparing)mutable.value=mutable.value.copy(notice=null)}
-                    catch(required:AttachmentCompatibilityRequired){
-                        if(account==current.accountId&&requestGeneration==uiGeneration&&current.authenticated&&mutable.value.route==Route.Conversation&&mutable.value.selectedId=="account:${c.friend.accountId}"){attachmentCompatibilityScope=account to requestGeneration;attachmentCompatibilityConversation=mutable.value.selectedId
-                            mutable.value=mutable.value.copy(attachmentCompatibility=required.choice,attachmentCompatibilityBusy=false,notice=null)}
-                        else {try{backend.resolveAttachmentCompatibility(required.choice.token,null)}catch(_:Exception){}
-                            if(account==current.accountId&&requestGeneration==uiGeneration&&mutable.value.notice==preparing)mutable.value=mutable.value.copy(notice=null)}
-                    }
-                    catch(_:com.peerchat.android.application.AttachmentReadinessUnavailable){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice="Attachment connection is not ready. Return to PeerChat, wait for authenticated connection readiness, then retry. No attachment was sent.")}
-                    catch(cancelled:kotlinx.coroutines.CancellationException){throw cancelled}
-                    catch(failure:Exception){if(account==current.accountId&&requestGeneration==uiGeneration)mutable.value=mutable.value.copy(notice=attachmentSendFailureText(action.mode,failure))}}
+                beginLocalAttachment("account:${c.friend.accountId}",action.uri,action.mode){onQueued->
+                    (backend as? AttachmentAdmissionObserver)?.sendAttachmentObserved(c.friend.peerId,action.uri,action.mode,onQueued)
+                        ?:backend.sendAttachment(c.friend.peerId,action.uri,action.mode)}
+            }
+            is UiAction.CancelLocalAttachment -> {
+                val row=localAttachments[action.token] ?: return
+                if(row.nativeId!=null||row.phase!=LocalAttachmentPhase.Preparing)return
+                localAttachments[action.token]=row.copy(phase=LocalAttachmentPhase.Cancelled)
+                project();localAttachmentJobs[action.token]?.cancel()
+            }
+            is UiAction.DismissLocalAttachment -> {
+                val row=localAttachments[action.token] ?: return
+                if(row.phase !in setOf(LocalAttachmentPhase.Cancelled,LocalAttachmentPhase.Failed))return
+                localAttachments.remove(action.token);project()
+            }
+            is UiAction.RetryLocalAttachment -> {
+                val row=localAttachments[action.token] ?: return
+                if(row.phase!=LocalAttachmentPhase.Failed||row.nativeId!=null||mutable.value.attachmentCompatibility!=null||
+                    mutable.value.selectedId!=row.conversation||!current.authenticated)return
+                val group=current.groups.find{"group:${it.id}"==row.conversation}
+                val direct=current.conversations.find{"account:${it.friend.accountId}"==row.conversation}
+                if(group==null&&direct==null)return
+                localAttachments.remove(action.token);project()
+                if(group!=null)beginLocalAttachment(row.conversation,row.uri,AttachmentSendMode.Cached){onQueued->
+                    (backend as? AttachmentAdmissionObserver)?.sendGroupAttachmentObserved(group.id,row.uri,onQueued)
+                        ?:backend.sendGroupAttachment(group.id,row.uri)}
+                else if(direct!=null)beginLocalAttachment(row.conversation,row.uri,row.mode){onQueued->
+                    (backend as? AttachmentAdmissionObserver)?.sendAttachmentObserved(direct.friend.peerId,row.uri,row.mode,onQueued)
+                        ?:backend.sendAttachment(direct.friend.peerId,row.uri,row.mode)}
+            }
+            is UiAction.DeleteLocalMessage -> {
+                val conversation=action.conversationId
+                if(current.accountId<=0||mutable.value.conversations.none{it.id==conversation})return
+                val attachment=if(action.attachment)localAttachments.values.firstOrNull{it.conversation==conversation&&(it.token==action.id||it.nativeId==action.id)}else null
+                val text=if(!action.attachment)localSends.values.firstOrNull{it.conversation==conversation&&(it.token==action.id||it.nativeId==action.id)}else null
+                val token=attachment?.token?:text?.token
+                val nativeId=attachment?.nativeId?:text?.nativeId?:action.id.takeIf{
+                    it.matches(Regex("[0-9a-f]{32}"))||(conversation.startsWith("group:")&&it.matches(Regex("[0-9a-f]{64}")))
+                }
+                hideLocally(conversation,action.id)
+                if(token!=null)hideLocally(conversation,token)
+                if(nativeId==null&&token!=null)pendingLocalDeletion[token]=conversation to action.attachment
+                else if(nativeId!=null){hideLocally(conversation,nativeId);persistLocalMessageDeletion(conversation,nativeId,action.attachment,token)}
+                evictDeletedHistory(conversation)
+                project()
+            }
+            is UiAction.DeleteLocalConversation -> {
+                val conversation=action.conversationId
+                if(current.accountId<=0||action.localAccount?.let{it!=current.accountId}==true||mutable.value.conversations.none{it.id==conversation})return
+                val epoch=uiGeneration;val account=current.accountId
+                val prior=locallyHiddenIds[conversation]?.toSet().orEmpty()
+                val priorPending=pendingLocalDeletion.filterValues{it.first==conversation}
+                locallyClearingConversations.add(conversation)
+                mutable.value.conversations.find{it.id==conversation}?.let{row->
+                    (row.messages.map{it.id}+row.attachments.map{it.id}).forEach{hideLocally(conversation,it)}
+                }
+                localSends.values.filter{it.conversation==conversation}.forEach{row->
+                    hideLocally(conversation,row.token)
+                    row.nativeId?.let{hideLocally(conversation,it)}?:run{pendingLocalDeletion[row.token]=conversation to false}
+                }
+                localAttachments.values.filter{it.conversation==conversation}.forEach{row->
+                    hideLocally(conversation,row.token)
+                    row.nativeId?.let{hideLocally(conversation,it)}?:run{pendingLocalDeletion[row.token]=conversation to true}
+                }
+                evictDeletedHistory(conversation);project()
+                viewModelScope.launch{
+                    try{backend.deleteLocalConversation(account,conversation)
+                        if(epoch==uiGeneration&&account==current.accountId){locallyClearingConversations.remove(conversation);project()}}
+                    catch(cancelled:CancellationException){throw cancelled}
+                    catch(_:Exception){if(epoch==uiGeneration&&account==current.accountId){
+                        locallyHiddenIds[conversation]=prior.toMutableSet()
+                        pendingLocalDeletion.entries.removeAll{it.value.first==conversation}
+                        pendingLocalDeletion.putAll(priorPending)
+                        locallyClearingConversations.remove(conversation)
+                        project();mutable.value=mutable.value.copy(notice="Could not delete this device's conversation history. It is visible again; retry when local storage is available.")
+                    }}
+                }
             }
             is UiAction.ResolveAttachmentCompatibility -> {
                 val choice=mutable.value.attachmentCompatibility ?: return
                 if(choice.token!=action.token||attachmentCompatibilityConversation!=mutable.value.selectedId||mutable.value.attachmentCompatibilityBusy||
                     action.mode==AttachmentSendMode.Direct&&!choice.directReady||action.mode==AttachmentSendMode.Cached&&!choice.cachedReady)return
                 val scope=attachmentCompatibilityScope
+                val localToken=attachmentCompatibilityLocalToken
                 mutable.value=mutable.value.copy(attachmentCompatibilityBusy=true)
-                viewModelScope.launch{try{backend.resolveAttachmentCompatibility(action.token,action.mode)
-                    if(scope==attachmentCompatibilityScope){attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)}}
-                    catch(failure:Exception){if(scope==attachmentCompatibilityScope)mutable.value=mutable.value.copy(attachmentCompatibility=choice.copy(directReady=false,cachedReady=false),attachmentCompatibilityBusy=false,
-                        notice=attachmentSendFailureText(action.mode?:AttachmentSendMode.Direct,failure))}}
+                viewModelScope.launch{try{
+                    val onQueued:(String)->Unit={id->if(localToken!=null&&scope!=null&&id.matches(Regex("[0-9a-f]{32}"))){
+                        observedAttachmentIds[localToken]=Triple(scope.second,scope.first,id)
+                        viewModelScope.launch{if(scope==attachmentCompatibilityScope)project()}
+                    }}
+                    val id=if(backend is AttachmentAdmissionObserver)
+                        backend.resolveAttachmentCompatibilityObserved(action.token,action.mode,onQueued)
+                        else backend.resolveAttachmentCompatibility(action.token,action.mode)
+                    if(scope==attachmentCompatibilityScope){
+                        attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;attachmentCompatibilityLocalToken=null
+                        localToken?.let{token->localAttachments[token]?.let{row->
+                            if(id!=null&&id.matches(Regex("[0-9a-f]{32}"))){localAttachments[token]=row.copy(nativeId=id,phase=LocalAttachmentPhase.Preparing);localAttachmentStableIds[id]=token}
+                            else localAttachments.remove(token)
+                        }}
+                        if(id!=null&&localToken!=null)admittedLocalDeletion(localToken,id)
+                        project();mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)
+                    }
+                }catch(admitted:QueuedAttachmentFailure){if(scope==attachmentCompatibilityScope){
+                    localToken?.let{token->localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=admitted.transferId,phase=LocalAttachmentPhase.Failed);localAttachmentStableIds[admitted.transferId]=token};admittedLocalDeletion(token,admitted.transferId)}
+                    attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;attachmentCompatibilityLocalToken=null
+                    project();mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false,
+                        notice="The attachment entered the transfer queue, but preparation reported an error. Check this transfer before retrying.")
+                }}catch(admitted:QueuedAttachmentCancellation){if(scope==attachmentCompatibilityScope){
+                    localToken?.let{token->localAttachments[token]?.let{localAttachments[token]=it.copy(nativeId=admitted.transferId,phase=LocalAttachmentPhase.Cancelled);localAttachmentStableIds[admitted.transferId]=token};admittedLocalDeletion(token,admitted.transferId)}
+                    attachmentCompatibilityScope=null;attachmentCompatibilityConversation=null;attachmentCompatibilityLocalToken=null
+                    project();mutable.value=mutable.value.copy(attachmentCompatibility=null,attachmentCompatibilityBusy=false)
+                };throw admitted
+                }catch(cancelled:CancellationException){throw cancelled
+                }catch(failure:Exception){if(scope==attachmentCompatibilityScope){
+                    localToken?.let{token->localAttachments[token]?.let{localAttachments[token]=it.copy(phase=LocalAttachmentPhase.Failed)}}
+                    project();mutable.value=mutable.value.copy(attachmentCompatibility=choice.copy(directReady=false,cachedReady=false),attachmentCompatibilityBusy=false,
+                        notice=attachmentSendFailureText(action.mode?:AttachmentSendMode.Direct,failure))
+                }}}
             }
             is UiAction.AttachmentAction -> viewModelScope.launch{try{backend.attachmentAction(action.id,action.accept)}
                 catch(_:Exception){mutable.value=mutable.value.copy(notice="File action could not complete. The protected transfer state is retained.")}}
@@ -1040,7 +1365,7 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                 val group=mutable.value.selectedId?.removePrefix("group:")?.let{id->current.groups.find{it.id==id}}
                 if(group!=null){viewModelScope.launch{try{backend.groupHistory(group.id,groupHistoryBefore(group.messages))}catch(_:Exception){mutable.value=mutable.value.copy(notice="Group history page unavailable.")}};return}
                 val c=current.conversations.find {"account:${it.friend.accountId}"==mutable.value.selectedId} ?: return
-                val account=current.accountId
+                val account=current.accountId;val epoch=uiGeneration
                 if(mutable.value.olderLoading)return
                 mutable.value=mutable.value.copy(olderLoading=true)
                 viewModelScope.launch {
@@ -1048,13 +1373,13 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
                         val existing=(older[c.friend.accountId] ?: emptyList())+c.messages
                         val before=chronologicalMessages(existing).firstOrNull()?.sequence ?: Long.MAX_VALUE
                         val page=backend.older(c.friend.peerId,before)
-                        if(current.accountId==account&&current.conversations.any {it.friend.accountId==c.friend.accountId}) {
-                            older[c.friend.accountId]=((older[c.friend.accountId] ?: emptyList())+page).distinctBy {it.id}
+                        if(epoch==uiGeneration&&current.accountId==account&&current.conversations.any {it.friend.accountId==c.friend.accountId}) {
                             if(page.size<8)exhausted.add(c.friend.accountId)
+                            exhausted.removeAll(older.put(c.friend.accountId,((older[c.friend.accountId] ?: emptyList())+page).distinctBy {it.id}))
                             project()
                         }
-                    }catch(_:Exception){mutable.value=mutable.value.copy(notice="Native history could not be read.")}
-                    finally {mutable.value=mutable.value.copy(olderLoading=false)}
+                    }catch(_:Exception){if(epoch==uiGeneration&&current.accountId==account)mutable.value=mutable.value.copy(notice="Native history could not be read.")}
+                    finally {if(epoch==uiGeneration&&current.accountId==account&&mutable.value.selectedId=="account:${c.friend.accountId}")mutable.value=mutable.value.copy(olderLoading=false)}
                 }
             }
             UiAction.SignOut -> {voicePreparationRevision++;releasePreparedVoice();voiceStartPendingToken=null;voiceStartExpected=null;mutable.value=mutable.value.copy(voiceBusy=false);viewModelScope.launch {try {backend.signOut();mutable.value=mutable.value.copy(route=Route.Welcome,startupStatus=null,rememberMe=false)}
@@ -1146,5 +1471,5 @@ class NativePresenter(application: Application,private val backend:MessagingAppl
             else -> mutable.value=reduceUi(mutable.value,action)
         }
     }
-    override fun onCleared() {loginAfterTrust=null;releasePreparedVoice();backend.close();super.onCleared()}
+    override fun onCleared() {loginAfterTrust=null;releasePreparedVoice(includeService=false);backend.close();super.onCleared()}
 }

@@ -31,17 +31,21 @@ UI_API int ui_mailbox_supported(){
 }
 UI_API const wchar_t* ui_group_attachment(void* handle,unsigned operation,const wchar_t* group,const wchar_t* id,const wchar_t* path){try{if(!handle)return nullptr;auto& bridge=*static_cast<UiBridge*>(handle);bridge.transferOutput=bridge.node.groupAttachment(operation,identity(group),identity(id),path?path:L"");return bridge.transferOutput.c_str();}catch(...){return nullptr;}}
 UI_API int ui_group_attachment_network(void* handle,unsigned operation,const unsigned char* input,unsigned length,unsigned char* output,unsigned capacity){try{if(!handle||length>100000||(!input&&length)||!output||capacity>100000)return -1;peerchat::Blob bytes;if(length)bytes.assign(input,input+length);auto result=static_cast<UiBridge*>(handle)->node.groupAttachmentNetwork(operation,bytes);if(result.size()>capacity)return -1;if(!result.empty())memcpy(output,result.data(),result.size());return static_cast<int>(result.size());}catch(...){return -1;}}
-UI_API const wchar_t* ui_microphone_test(void* handle,int operation,int input,int output,int volume,int enabled,int ns,int agc,unsigned noise,unsigned gain){
+UI_API const wchar_t* ui_microphone_test_v3(void* handle,int operation,int input,int output,int volume,int enabled,int ns,int agc,unsigned noise,unsigned gain,int automatic,unsigned level){
     if(!handle)return L"{\"error\":\"Local backend closed\"}";
     auto& bridge=*static_cast<UiBridge*>(handle);
     try{
-        if(operation==1){if(bridge.node.voiceTelemetry().active)throw std::runtime_error("Leave voice before local microphone testing");bridge.microphone.start(input,output,volume,enabled!=0,ns!=0,agc!=0,noise,gain);}
+        if(operation==1){if(bridge.node.voiceTelemetry().active)throw std::runtime_error("Leave voice before local microphone testing");bridge.microphone.start(input,output,volume,enabled!=0,ns!=0,agc!=0,noise,gain,automatic!=0,level);}
         else if(operation==2)bridge.microphone.stopRecording();else if(operation==3||operation==4)bridge.microphone.listen(operation-2);else if(operation==5)bridge.microphone.clear();else if(operation!=0)throw std::runtime_error("Invalid local test operation");
         const auto state=bridge.microphone.state();std::wostringstream out;out.imbue(std::locale::classic());
         out<<L"{\"recording\":"<<(state.recording?L"true":L"false")<<L",\"available\":"<<(state.available?L"true":L"false")<<L",\"processing\":"<<(state.processing?L"true":L"false")<<L",\"frames\":"<<state.frames<<L",\"played\":"<<state.played<<L",\"playing\":"<<state.playing<<L",\"rawRms\":"<<state.rawRms<<L",\"processedRms\":"<<state.processedRms<<L",\"rawFullScale\":"<<state.rawFullScale<<L",\"processedFullScale\":"<<state.processedFullScale<<L",\"error\":"<<quote(state.error)<<L'}';bridge.microphoneOutput=out.str();
     }catch(...){bridge.microphone.clear();bridge.microphoneOutput=L"{\"error\":\"Local microphone operation failed; preview cleared\"}";}
     return bridge.microphoneOutput.c_str();
 }
+UI_API const wchar_t* ui_microphone_test_v2(void* h,int op,int in,int out,int vol,int en,int ns,int agc,unsigned noise,unsigned gain,int automatic){return ui_microphone_test_v3(h,op,in,out,vol,en,ns,agc,noise,gain,automatic,1);}
+
+UI_API const wchar_t* ui_microphone_test(void* h,int op,int in,int out,int vol,int en,int ns,int agc,unsigned noise,unsigned gain){return ui_microphone_test_v2(h,op,in,out,vol,en,ns,agc,noise,gain,1);}
+
 UI_API int ui_archive(void* handle,unsigned operation,const unsigned char* bytes,unsigned length,unsigned char* output,unsigned capacity){try{
     if(!handle||length>262144||(!bytes&&length)||!output||capacity<1||capacity>262144)return -1;
     peerchat::Blob input;if(length)input.assign(bytes,bytes+length);
@@ -108,6 +112,7 @@ UI_API const wchar_t* ui_file_transfer(void* handle,unsigned operation,const wch
 UI_API int ui_send(void* handle,const wchar_t* peer,const wchar_t* text){try{return !static_cast<UiBridge*>(handle)->node.send(identity(peer),text).empty();}catch(...){return 0;}}
 UI_API int ui_remove(void* handle,const wchar_t* peer){try{auto& bridge=*static_cast<UiBridge*>(handle);std::string id=identity(peer);bridge.node.removeContact(id);bridge.contacts.erase(id);return 1;}catch(...){return 0;}}
 UI_API int ui_history(void* handle,const wchar_t* peer,long long before){try{static_cast<UiBridge*>(handle)->node.loadHistory(identity(peer),before);return 1;}catch(...){return 0;}}
+UI_API int ui_delete_local(void* handle,const wchar_t* conversation,const wchar_t* id,int group){try{return static_cast<UiBridge*>(handle)->node.deleteLocalHistory(identity(conversation),id?identity(id):std::string{},group!=0)?1:0;}catch(...){return 0;}}
 UI_API int ui_erase_history(void* handle,const wchar_t* peer){try{return static_cast<UiBridge*>(handle)->node.eraseHistory(identity(peer))?1:0;}catch(...){return 0;}}
 UI_API int ui_group_account(void* handle,unsigned long long account,const wchar_t* name){try{static_cast<UiBridge*>(handle)->node.setGroupAccount(account,name?name:L"");return account&&name&&*name;}catch(...){return 0;}}
 static int authenticatedGroupRoster(void* handle,unsigned long long account,unsigned long long discoveryGeneration,const wchar_t* group,const wchar_t* legacy,unsigned long long rosterGeneration,const wchar_t* distributor,const wchar_t* encodedMembers,const peerchat::Blob& proof,const std::vector<peerchat::group_keys::PublicDeviceApproval>& approvals={}){try{
@@ -168,6 +173,8 @@ UI_API int ui_voice_mute(void* handle,int muted){try{return static_cast<UiBridge
 UI_API int ui_voice_deafen(void* handle,int deafened){try{return static_cast<UiBridge*>(handle)->node.setVoiceDeafened(deafened!=0);}catch(...){return 0;}}
 UI_API int ui_voice_devices_select(void* handle,int input,int output){try{return static_cast<UiBridge*>(handle)->node.setVoiceDevices(input,output);}catch(...){return 0;}}
 UI_API int ui_voice_levels(void* handle,int input,int output){try{return static_cast<UiBridge*>(handle)->node.setVoiceVolumes(input,output);}catch(...){return 0;}}
+UI_API int ui_voice_processing_v4(void* handle,int enabled,int ns,int agc,std::uint32_t noise,std::uint32_t gain,int aec,int automatic,unsigned level){try{return handle&&static_cast<UiBridge*>(handle)->node.setVoiceProcessing(enabled!=0,ns!=0,agc!=0,noise,gain,aec!=0,automatic!=0,level);}catch(...){return 0;}}
+UI_API int ui_voice_processing_v3(void* handle,int enabled,int ns,int agc,std::uint32_t noise,std::uint32_t gain,int aec,int automatic){try{return handle&&static_cast<UiBridge*>(handle)->node.setVoiceProcessing(enabled!=0,ns!=0,agc!=0,noise,gain,aec!=0,automatic!=0);}catch(...){return 0;}}
 UI_API int ui_voice_processing_v2(void* handle,int enabled,int ns,int agc,std::uint32_t noise,std::uint32_t gain,int aec){try{return handle&&static_cast<UiBridge*>(handle)->node.setVoiceProcessing(enabled!=0,ns!=0,agc!=0,noise,gain,aec!=0);}catch(...){return 0;}}
 UI_API int ui_voice_processing(void* handle,int enabled,int noiseSuppression,int automaticGain,std::uint32_t noiseStrength,std::uint32_t gainStrength){try{return static_cast<UiBridge*>(handle)->node.setVoiceProcessing(enabled!=0,noiseSuppression!=0,automaticGain!=0,noiseStrength,gainStrength);}catch(...){return 0;}}
 UI_API const wchar_t* ui_voice_diagnostics(void* handle){auto& bridge=*static_cast<UiBridge*>(handle);try{bridge.output=bridge.node.voiceDiagnostics();}catch(...){bridge.output=L"media_state=unavailable\nlatest_audio_error=could not read native diagnostics";}return bridge.output.c_str();}

@@ -31,6 +31,18 @@ class VoiceExecutionTest {
             assertThrows(IllegalArgumentException::class.java){parse(withTail(marker,details))}
         assertThrows(IllegalArgumentException::class.java){parse(withTail("wrong",measured))}
     }
+    @Test fun nativeNoiseDiagnosticsCannotTurnSuccessfulCallStartIntoPreparationFailure(){
+        val details="automatic_noise_level=1\nrnnoise_vad=0.003\nnoise_gate_open=0\nnoise_gate_background=1\nnoise_gate_gain=0.02\nnoise_gate_target=0.02\nnoise_gate_attenuation_db=-33.98\nnoise_floor_dbfs=-48.5\nrnnoise_input_dbfs=-35.5\nrnnoise_output_dbfs=-62.3\nrnnoise_dry_mix=0.05\nnoise_control_outgoing_dbfs=-72.1\n"
+        val execution=VoiceExecution{_,op,_->
+            val base=response(op=op,available=1,active=1)
+            val tail=NativeRecordWriter(7).apply{text("PeerChat/AndroidVoiceMediaDiagnostics/v1");text(details)}.bytes()
+            base+tail.copyOfRange(4,tail.size)
+        }
+        val started=execution.start(17,71,4,peer,id)
+        assertTrue(started.accepted);assertTrue(started.active)
+        assertEquals(details,started.mediaDiagnostics)
+        assertEquals(details,execution.snapshot(17,71,4).mediaDiagnostics)
+    }
     @Test fun unavailableSnapshotNeverInventsAnActiveCall(){
         val result=parse(response());assertFalse(result.available);assertFalse(result.active);assertTrue(result.accepted)
         assertEquals("Pinned media unavailable",result.diagnostic);assertEquals("",result.id);assertEquals(0L,result.mediaGeneration)

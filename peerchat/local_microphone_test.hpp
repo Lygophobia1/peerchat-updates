@@ -34,11 +34,11 @@ class LocalMicrophoneTest {
 public:
     struct State {bool recording=false,available=false,processing=false;int frames=0,played=0,playing=0;float rawRms=0,processedRms=0;std::uint64_t rawFullScale=0,processedFullScale=0;std::wstring error;};
     ~LocalMicrophoneTest(){clear();}
-    bool start(int input,int output,int volume,bool enabled,bool ns,bool agc,unsigned noise,unsigned gain){
+    bool start(int input,int output,int volume,bool enabled,bool ns,bool agc,unsigned noise,unsigned gain,bool automatic=true,unsigned level=1){
         clear();
         if(volume<0||volume>200||noise>2||gain>2){std::lock_guard<std::mutex> lock(mutex_);error_=L"Invalid local microphone settings.";return false;}
         raw_.resize(Limit);processed_.resize(Limit);processing_=enabled;
-        if(enabled&&!apm_.open(ns,agc,static_cast<NoiseSuppressionStrength>(noise),static_cast<AutomaticGainStrength>(gain),false)){clear();std::lock_guard<std::mutex> lock(mutex_);error_=L"Existing audio processor could not initialize.";return false;}
+        if(enabled&&!apm_.open(ns,agc,static_cast<NoiseSuppressionStrength>(noise),static_cast<AutomaticGainStrength>(gain),false,automatic,level)){clear();std::lock_guard<std::mutex> lock(mutex_);error_=L"Existing audio processor could not initialize.";return false;}
         audio_=std::make_unique<Audio>();audio_->setDevices(input,output);audio_->setVolumes(volume/100.0f,0.5f);
         audio_->setCaptureHandler([this](const auto& frame){capture(frame);});audio_->setPlayoutHandler([this](auto* pcm,std::size_t n){return pull(pcm,n);});
         recording_=true;std::wstring error;

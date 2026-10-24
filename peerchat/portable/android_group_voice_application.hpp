@@ -83,7 +83,7 @@ public:
            !sourcesValid(*roster,value,sources))return false;
         if(ice.generation<=lastCredentialGeneration_)return false;
         audioFailed_=false;lastGeneration_=value.generation;lastCredentialGeneration_=ice.generation;
-        VoiceMedia::ProcessingOptions processing{};processing.enabled=false;processing.noiseSuppression=false;
+        VoiceMedia::ProcessingOptions processing{};processing.enabled=true;processing.noiseSuppression=true;
         processing.automaticGain=false;processing.echoCancellation=false;
         std::wstring error;
         if(!session_.start(value,std::move(ice),receiveDll_,processing,-1,-1,1.f,1.f,error)){audioFailed_=true;stop();return false;}

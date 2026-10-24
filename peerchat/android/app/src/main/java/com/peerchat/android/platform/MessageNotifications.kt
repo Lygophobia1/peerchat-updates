@@ -5,6 +5,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.media.AudioAttributes
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Build
 import com.peerchat.android.MainActivity
@@ -19,12 +21,16 @@ internal fun showMessageNotification(context:android.content.Context,accountKey:
         val manager=context.getSystemService(NotificationManager::class.java);if(!manager.areNotificationsEnabled()){
             android.util.Log.i("PeerChatWake","stage=notification_unavailable reason=app_disabled");return false
         }
-        manager.createNotificationChannel(NotificationChannel("messages","Messages",NotificationManager.IMPORTANCE_DEFAULT))
+        val previousMessageChannel=manager.getNotificationChannel("messages")
+        val messageChannel=NotificationChannel("messages_xbox_v1","Messages",previousMessageChannel?.importance?:NotificationManager.IMPORTANCE_DEFAULT)
+        previousMessageChannel?.let{messageChannel.enableVibration(it.shouldVibrate())}
+        messageChannel.setSound(Uri.parse("android.resource://${context.packageName}/${R.raw.xbox}"),AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+        manager.createNotificationChannel(messageChannel)
         val id=(accountKey+value.conversationId).hashCode()
         val intent=Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             .putExtra("peerchat_account_key",accountKey).putExtra("peerchat_conversation",value.conversationId)
         val pending=PendingIntent.getActivity(context,id,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification=Notification.Builder(context,"messages").setSmallIcon(R.drawable.peerchat_icon)
+        val notification=Notification.Builder(context,"messages_xbox_v1").setSmallIcon(R.drawable.peerchat_icon)
             .setContentTitle(value.title).setContentText(value.body).setContentIntent(pending).setAutoCancel(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE).setNumber(value.count).setGroup("peerchat_messages").build()
         manager.notify(id,notification)

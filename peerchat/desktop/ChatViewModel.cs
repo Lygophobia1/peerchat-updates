@@ -12,7 +12,12 @@ using System.Windows.Media;
 
 namespace PeerChatDesktop {
 public sealed class MessageBubble : Border {
-    public MessageBubble(){AddHandler(Mouse.MouseUpEvent,new MouseButtonEventHandler(OnMessageClick),true);}
+    public static readonly RoutedEvent LocalDeleteEvent=EventManager.RegisterRoutedEvent("LocalDelete",RoutingStrategy.Bubble,typeof(RoutedEventHandler),typeof(MessageBubble));
+    public MessageBubble(){
+        var menu=new ContextMenu();var remove=new MenuItem{Header="Delete message from this device’s history"};menu.Items.Add(remove);Action commit=null;
+        ContextMenu=menu;Stylus.SetIsPressAndHoldEnabled(this,true);
+        ContextMenuOpening+=(s,e)=>{var message=DataContext as MessageModel;var request=new LocalDeleteMessageEventArgs(LocalDeleteEvent,message);RaiseEvent(request);commit=request.Commit;remove.IsEnabled=commit!=null;};remove.Click+=(s,e)=>{if(commit!=null)commit();};
+        AddHandler(Mouse.MouseUpEvent,new MouseButtonEventHandler(OnMessageClick),true);SizeChanged+=(s,e)=>{var message=DataContext as MessageModel;Clip=message!=null&&message.IsPhotoAttachment?new RectangleGeometry(new Rect(0,0,ActualWidth,ActualHeight),15,15):null;};}
     static DependencyObject ParentOf(DependencyObject value){
         if(value is ContentElement){var content=(ContentElement)value;return ContentOperations.GetParent(content)??LogicalTreeHelper.GetParent(content);}
         if(value is Visual||value is System.Windows.Media.Media3D.Visual3D)return VisualTreeHelper.GetParent(value);
@@ -20,6 +25,7 @@ public sealed class MessageBubble : Border {
     }
     void OnMessageClick(object sender,MouseButtonEventArgs args){
         if(args.ChangedButton!=MouseButton.Left)return;
+        var photoMessage=DataContext as MessageModel;if(args.Handled&&photoMessage!=null&&photoMessage.IsPhotoAttachment)return;
         for(DependencyObject current=args.OriginalSource as DependencyObject;current!=null&&current!=this;current=ParentOf(current))
             if(current is ButtonBase||current is TextBoxBase||current is PasswordBox||current is ScrollBar||current is ScrollViewer||current is Selector||current is Hyperlink||current is Image)return;
         var message=DataContext as MessageModel;if(message==null)return;
@@ -57,6 +63,7 @@ public class ConversationModel : ObservableModel {
            (earliest.sender==prior.sender&&StringComparer.Ordinal.Compare(earliest.id,prior.id)<0))))
             historyAnchors[peer]=earliest;
     }
+    public readonly LocalDeletionState LocalDeletions=new LocalDeletionState();
     public readonly ObservableCollection<MessageModel> Messages=new ObservableCollection<MessageModel>();
     public string Draft="";
     public bool Online,RequestedHistory,HistoryLoading,HistoryExhausted;
@@ -70,20 +77,23 @@ public class ConversationModel : ObservableModel {
     // Presentation state mirrors the core's connection lifecycle. It is deliberately
     // separate from account/friend state so a direct P2P chat can work offline.
     public string ConnectionState="Offline";
-    public int Unread;
+    int unread;
+    public int Unread {get{return unread;}set{if(unread==value)return;unread=value;Changed("Unread");Changed("UnreadLabel");}}
     public string Name {get{return !String.IsNullOrEmpty(AccountName)?AccountName:Contact.name;}}
     public string Initial {get{return String.IsNullOrEmpty(Name)?"?":System.Globalization.StringInfo.GetNextTextElement(Name).ToUpperInvariant();}}
     public Brush Presence {get{return new SolidColorBrush((IsFriend?ServerOnline==true:Online)?Color.FromRgb(54,216,115):Color.FromRgb(107,121,135));}}
     public string Preview {get{return Messages.Count>0?Messages.Last().Preview:(Contact.verified?"Start a conversation":"Awaiting verification");}}
     public string When {get{return Messages.Count>0?Messages.Last().ShortTime:"";}}
     public string UnreadLabel {get{return Unread>0?Unread+" unread":"";}}
-    public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","UnreadLabel","ConnectionState"})Changed(name);}
+    public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","Unread","UnreadLabel","ConnectionState"})Changed(name);}
 }
 public class GroupModel : ObservableModel {
     public GroupData Data;
+    public readonly LocalDeletionState LocalDeletions=new LocalDeletionState();
     public readonly ObservableCollection<MessageModel> Messages=new ObservableCollection<MessageModel>();
     public string Draft="";
-    public int Unread;
+    int unread;
+    public int Unread {get{return unread;}set{if(unread==value)return;unread=value;Changed("Unread");Changed("UnreadLabel");}}
     public bool RequestedHistory,HistoryLoading,HistoryExhausted;
     public bool Invited;
     public string Id {get{return Data.id;}}
@@ -95,7 +105,7 @@ public class GroupModel : ObservableModel {
     public string UnreadLabel {get{return Unread>0?Unread+" unread":"";}}
     public int MemberCount {get{return Data.members==null?0:Data.members.Length;}}
     public int PendingInviteCount {get{return Data.invites==null?0:Data.invites.Length;}}
-    public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","UnreadLabel","MemberCount","PendingInviteCount"})Changed(name);}
+    public void Refresh(){foreach(string name in new[]{"Name","Initial","Presence","Preview","When","Unread","UnreadLabel","MemberCount","PendingInviteCount"})Changed(name);}
 }
 public class MessageModel : ObservableModel {
     public sealed class DeliveryDeviceRow {
@@ -106,13 +116,20 @@ public class MessageModel : ObservableModel {
     public CoreAdapter.FileTransferData Attachment {get;private set;}
     public CoreAdapter.GroupAttachmentData GroupAttachment {get;private set;}
     public string GroupAttachmentRevision {get;private set;}
+    public PendingOutgoingAttachment PendingAttachment;
+    public LocalAttachmentSource LocalAttachment;
+    public bool IsPhotoAttachment {get{return LocalAttachment!=null&&LocalAttachment.IsPhoto||Attachment!=null&&(LocalAttachmentSource.PhotoName(Attachment.name)||!String.IsNullOrEmpty(Attachment.thumbnail))||GroupAttachment!=null&&(LocalAttachmentSource.PhotoName(GroupAttachment.name)||!String.IsNullOrEmpty(GroupAttachment.thumbnail));}}
+    public Thickness BubblePadding {get{return IsPhotoAttachment?new Thickness(0):new Thickness(12,8,12,8);}}
+    public Visibility GenericAttachmentFooter {get{return IsPhotoAttachment?Visibility.Collapsed:Visibility.Visible;}}
+    public Visibility GenericExpandedVisibility {get{return IsPhotoAttachment?Visibility.Collapsed:ExpandedVisibility;}}
+    public void RefreshAttachmentPresentation(){Changed("Attachment");Changed("GroupAttachment");Changed("CompactStatus");Changed("IsPhotoAttachment");Changed("BubblePadding");Changed("GenericAttachmentFooter");Changed("GenericExpandedVisibility");}
     bool expanded;
-    public bool IsExpanded {get{return expanded;}set{if(expanded==value)return;expanded=value;Changed("IsExpanded");Changed("DetailsLabel");Changed("ExpandedVisibility");}}
+    public bool IsExpanded {get{return expanded;}set{if(expanded==value)return;expanded=value;Changed("IsExpanded");Changed("DetailsLabel");Changed("ExpandedVisibility");Changed("GenericExpandedVisibility");RefreshAttachmentPresentation();}}
     public string DetailsLabel {get{return IsExpanded?"Hide details  ▴":"Show details  ▾";}}
     public Visibility ExpandedVisibility {get{return IsExpanded?Visibility.Visible:Visibility.Collapsed;}}
-    public void SetGroupAttachment(CoreAdapter.GroupAttachmentData value,string revision){GroupAttachment=value;GroupAttachmentRevision=revision;Changed("GroupAttachment");Changed("TextVisibility");Changed("Text");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
+    public void SetGroupAttachment(CoreAdapter.GroupAttachmentData value,string revision){GroupAttachment=value;GroupAttachmentRevision=revision;RefreshAttachmentPresentation();Changed("GroupAttachment");Changed("TextVisibility");Changed("Text");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     public Visibility TextVisibility {get{return Attachment==null&&GroupAttachment==null?Visibility.Visible:Visibility.Collapsed;}}
-    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
+    public void SetAttachment(CoreAdapter.FileTransferData value){Attachment=value;RefreshAttachmentPresentation();Changed("Attachment");Changed("TextVisibility");Changed("Preview");Changed("Stamp");Changed("CompactStatus");Changed("DetailedStatus");}
     public MessageData Data;
     // Null means that this row has no authoritative recipient manifest (legacy
     // history and imported messages retain their original aggregate stamp).
@@ -140,6 +157,7 @@ public class MessageModel : ObservableModel {
         return summary;
     }}
     public string CompactStatus {get{
+        if(PendingAttachment!=null)return PendingAttachment.Status;
         if(Attachment!=null)return ChatAttachmentProjection.CompactStatus(Attachment);
         if(GroupAttachment!=null)return GroupAttachmentProjection.CompactStatus(GroupAttachment);
         if(!Outgoing)return "";
@@ -235,6 +253,14 @@ public class ChatViewModel {
         return !Groups&&Listening&&!busy&&selected!=null&&selected.Contact!=null&&
             !String.IsNullOrEmpty(selected.Contact.peer)&&(selected.AccountId==0?selected.Contact.verified:(accountAuthorized&&selected.IsFriend));
     }
+    // Preparation may wake an idle established friend. This is not permission
+    // to transmit call signaling: the native authenticated route still gates it.
+    public bool CanPrepareDirectCall(bool accountAuthorized,bool busy){
+        var selected=Selected;
+        return !Groups&&Listening&&!busy&&VoiceStateCode==0&&selected!=null&&selected.Contact!=null&&
+            !String.IsNullOrEmpty(selected.Contact.peer)&&(selected.AccountId>0?
+                accountAuthorized&&selected.IsFriend:selected.Contact.verified&&selected.Online);
+    }
     public string VoiceState="Idle",VoiceCallId="",VoicePeerId="";
     public int VoiceStateCode,VoiceCallType;
     public long VoiceCallLifetime;
@@ -251,7 +277,7 @@ public class ChatViewModel {
         ConversationModel peerConversation=null;if(!String.IsNullOrEmpty(currentPeer))conversationsByPeer.TryGetValue(currentPeer,out peerConversation);
         if(!reused&&peerConversation!=null){conversation=peerConversation;Conversations.Remove(conversation.ConversationId);reused=true;}
         if(!reused){conversation=new ConversationModel{Contact=new ContactData{peer=currentPeer,name=username,host=""}};}
-        if(peerConversation!=null&&peerConversation!=conversation){foreach(var message in peerConversation.Messages)if(!conversation.Messages.Any(existing=>(existing.Attachment==null)==(message.Attachment==null)&&existing.Data.id==message.Data.id))conversation.Messages.Add(message);foreach(var peer in peerConversation.KnownPeerIds){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}if(String.IsNullOrEmpty(conversation.Draft))conversation.Draft=peerConversation.Draft;conversation.Unread+=peerConversation.Unread;Conversations.Remove(peerConversation.ConversationId);}
+        if(peerConversation!=null&&peerConversation!=conversation){conversation.LocalDeletions.Merge(peerConversation.LocalDeletions);foreach(var message in peerConversation.Messages)if(!conversation.Messages.Any(existing=>(existing.Attachment==null)==(message.Attachment==null)&&existing.Data.id==message.Data.id))conversation.Messages.Add(message);foreach(var peer in peerConversation.KnownPeerIds){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}if(String.IsNullOrEmpty(conversation.Draft))conversation.Draft=peerConversation.Draft;conversation.Unread+=peerConversation.Unread;Conversations.Remove(peerConversation.ConversationId);}
         conversation.ConversationId=key;conversation.AccountId=accountId;conversation.AccountName=username??"";conversation.IsFriend=true;Conversations[key]=conversation;
         if(knownPeers!=null)foreach(var peer in knownPeers)if(!String.IsNullOrEmpty(peer)){conversation.KnownPeerIds.Add(peer);conversationsByPeer[peer]=conversation;}
         if(conversation.Contact==null)conversation.Contact=new ContactData{peer=currentPeer,name=username,host=""};
@@ -276,7 +302,14 @@ public class ChatViewModel {
         }
         for(int index=0;index<ordered.Count;index++){int current=messages.IndexOf(ordered[index]);if(current!=index)messages.Move(current,index);}
     }
+    public void FilterLocallyDeleted(CoreEvent e){
+        if((e.kind==5||e.kind==6)&&e.messages!=null){var conversation=FindByPeer(e.peer);if(conversation!=null)e.messages=e.messages.Where(message=>!conversation.LocalDeletions.Hidden(message.id)).ToArray();}
+        if((e.kind==10||e.kind==11)&&e.groupEvents!=null){GroupModel group;if(GroupChats.TryGetValue(e.peer,out group))e.groupEvents=e.groupEvents.Where(message=>!group.LocalDeletions.Hidden(message.id)).ToArray();}
+    }
     public void Apply(CoreEvent e){
+        if(e.kind==6&&e.text=="history_cleared"){var conversation=FindByPeer(e.peer);if(conversation!=null&&conversation.LocalDeletions.AcceptRefresh()){conversation.Refresh();return;}}
+        if(e.kind==11&&e.text=="history_cleared"){GroupModel group;if(GroupChats.TryGetValue(e.peer,out group)&&group.LocalDeletions.AcceptRefresh()){group.Refresh();return;}}
+        FilterLocallyDeleted(e);
         if((e.kind==5||e.kind==6)&&e.messages!=null)foreach(var conversation in Conversations.Values)foreach(var value in e.messages){var existing=conversation.Messages.FirstOrDefault(m=>m.Attachment==null&&m.Data.id==value.id&&m.Data.sender==value.sender);if(existing!=null)existing.ProjectNativeDelivery(value.delivery,value.deliveryTargets);}
         // Media-device failures do not change the authenticated text session.
         if(e.kind==8&&(e.text??"").StartsWith("Voice audio device error:",StringComparison.Ordinal)){Status=e.text;return;}
