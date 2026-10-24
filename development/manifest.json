@@ -1,13 +1,1 @@
-{
-  "SchemaVersion": 1,
-  "Product": "PeerChat",
-  "Channel": "development",
-  "Version": "4.0.1-dev.1",
-  "MinimumCurrentVersion": "0.3.0-beta",
-  "PackageUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/download/v4.0.1-dev.1/PeerChat-4.0.1-dev.1.zip",
-  "PackageSha256": "1298baaa009e5bad267e9395b1a42dcfb8616b28612b66ba94d1c0865ad97ca6",
-  "PackageSize": 3147619,
-  "EntryExecutable": "PeerChat.Desktop.exe",
-  "ReleaseNotesUrl": "https://github.com/Lygophobia1/peerchat-updates/releases/tag/v4.0.1-dev.1",
-  "PublishedUtc": "2026-09-24T01:07:00.5561602Z"
-}
+{"SchemaVersion":1,"Product":"PeerChat","Channel":"development","Version":"4.0.2-dev.251","MinimumCurrentVersion":"4.0.0","PackageUrl":"https://github.com/Lygophobia1/peerchat-updates/releases/download/release-android250-windows251/PeerChat-Windows-4.0.2-dev.251-full.zip","PackageSha256":"731201a6dd11e5573cf1f138010ccc8dfadedfc8511fe3abb55526e28c1643c2","PackageSize":13279992,"EntryExecutable":"PeerChat.Desktop.exe","ReleaseNotesUrl":"https://github.com/Lygophobia1/peerchat-updates/releases/tag/release-android250-windows251","PublishedUtc":"2026-10-24T03:46:02.0114819Z","Signature":{"Algorithm":"rsa-sha256-pkcs1-v1_5","KeyId":"peerchat-release-2026-01","Value":"F+7nPbFCIaUDNv7IObJX7iqioozVgU6yph5XOcd3E6iM0I80OADqLIaRZG9sJz7eHAYCrN/BOJdZL+JoVa1+VYZxPP9jJN4o4OAqw0F7q2WZ3+366O7ziaiemvxkbrb9KirKZSMFks4rdg4hyRPrwdDvbDebWjk7gyXUptR8TUiSuYe/uSt1S6YjZ5eN2LQP7UCFytvqw6Vfecf/xyFPd2df7GuZ/eZNlL5WEX67vHd+KcqJUUcbcO7YKlEJNWGRuGIsFWbyoRMj0+vbvf6gdctTg7AR/3gdyPMlx0QdzmGjIvT2o8sjWfLfNt6wSz05MrWgDqYEAc+tSMBinZMC5rr1doixq+Eg+75XqUQw355+fu84oPb591pSJfgoIBFf9hYdMW0O+SLwqLlVuGcMxhNzIQMv3E6h7UEURXNj+LXar/xqJHgFKwWqniS7ASqmBkTQ+61iwouwEioPlmIapY0A5PhvXw5z+N7K5QNbqWkpeJnplXaHRjLT+4ZW89Qm"}}

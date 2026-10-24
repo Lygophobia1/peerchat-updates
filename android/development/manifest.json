@@ -1,0 +1,21 @@
+{
+    "SchemaVersion":  1,
+    "Product":  "PeerChat",
+    "Platform":  "android",
+    "Channel":  "development",
+    "Version":  "4.0.2-dev.250",
+    "VersionCode":  2,
+    "PackageName":  "com.peerchat.android",
+    "MinimumAndroidApi":  26,
+    "SupportedAbis":  [
+                          "arm64-v8a"
+                      ],
+    "PackageUrl":  "https://github.com/Lygophobia1/peerchat-updates/releases/download/release-android250-windows251/PeerChat-Android-4.0.2-dev.250-full.apk",
+    "PackageSha256":  "1eab18023777e12a66d0409d81722706193fdd0367bceeb12f5baeb61ec11705",
+    "PackageSize":  30460764,
+    "SigningCertificateSha256":  "db65bb23a9dc96e7504ff1156bbee6108af9131dbe43164dc39d11bf802d4141",
+    "ReleaseNotesUrl":  "https://github.com/Lygophobia1/peerchat-updates/releases/tag/release-android250-windows251",
+    "PublishedUtc":  "2026-10-24T03:46:02.0114819Z",
+    "Installation":  "manual-apk",
+    "InAppUpdaterAvailable":  false
+}
